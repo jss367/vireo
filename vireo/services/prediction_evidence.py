@@ -127,6 +127,7 @@ def attach_prediction_evidence(db: Database, predictions: list[JsonDict], config
             'background': match_confidence.assess_background(
                 context.get('score_kind'), context.get('max_match_score'),
                 context.get('background_score'), context.get('background_prompt'),
+                detector_confidence=prediction.get('detector_confidence'),
             ),
             'geography': geographic_context(context, prediction),
         }

@@ -40,6 +40,6 @@ interface ReviewPredictionEvidence {
   subject:{decision:string;revision:number;detector_model:string;detector_score:number|null;category:string|null;explanation:string};
   disagreement:boolean;model_candidates:{model:string;species:string;relative_score:number}[];
   match:{state:string;explanation:string};
-  background?:{state:string;background_score?:number|null;background_prompt?:string|null;explanation:string};
+  background?:{state:string;background_score?:number|null;background_prompt?:string|null;detector_confidence?:number|null;explanation:string};
   geography:{state:string;latitude?:number;longitude?:number;source?:string;observations_url?:string;explanation:string};reasons:string[];
 }

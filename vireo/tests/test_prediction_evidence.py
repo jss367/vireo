@@ -253,11 +253,18 @@ def test_background_like_region_is_named_in_the_evidence(app_and_db):
     photo_id = db.photos.list_page()[0]['id']
     # Three boxes in one save: a detection's id hashes its box, and a save
     # replaces the photo's rows for the detector.
-    trunk, hawk, old = db.detections.save(photo_id, [
+    trunk, hawk, old, kinglet = db.detections.save(photo_id, [
         {'box': {'x': 0.0, 'y': 0.0, 'w': 0.4, 'h': 1.0}, 'confidence': .34, 'category': 'animal'},
         {'box': {'x': 0.4, 'y': 0.3, 'w': 0.3, 'h': 0.7}, 'confidence': .49, 'category': 'animal'},
         {'box': {'x': 0.7, 'y': 0.3, 'w': 0.2, 'h': 0.2}, 'confidence': .6, 'category': 'animal'},
+        {'box': {'x': 0.7, 'y': 0.6, 'w': 0.3, 'h': 0.4}, 'confidence': .87, 'category': 'animal'},
     ], detector_model='test-detector')
+    # A small bird in tamarisk: the prompt gap is inside the margin, but the
+    # detector was confident, so the verdict trusts the box.
+    add(db, kinglet, 'Ruby-crowned Kinglet', .9, match_score=.49)
+    db.model_runs.record_classifier_match_score(
+        kinglet, 'BioCLIP-2.5', 'legacy', .49, score_kind='cosine',
+        background_score=.35, background_prompt='tamarisk')
     add(db, trunk, 'Elf Owl', .88, match_score=.41)
     db.model_runs.record_classifier_match_score(
         trunk, 'BioCLIP-2.5', 'legacy', .41, score_kind='cosine',
@@ -277,6 +284,11 @@ def test_background_like_region_is_named_in_the_evidence(app_and_db):
     assert by_species['Red-shouldered Hawk']['background']['state'] == 'subject'
     assert not any('background' in reason for reason in by_species['Red-shouldered Hawk']['reasons'])
     assert by_species['Verdin']['background']['state'] == 'unavailable'
+    bird = by_species['Ruby-crowned Kinglet']
+    assert bird['background']['state'] == 'subject'
+    assert bird['background']['detector_confidence'] == pytest.approx(.87)
+    assert 'detector was 0.87 sure' in bird['background']['explanation']
+    assert not any('background' in reason for reason in bird['reasons'])
 
 
 @pytest.mark.parametrize('starting_version', [32, 33])
