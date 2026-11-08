@@ -34,11 +34,13 @@ function harness(outcome, navigate = false) {
   return {run: () => context.analyze(3422044149613778), requests, warnings, loaded, refreshed, events};
 }
 
-test('retry rebuilds full analysis for exactly the current photo and captured workspace', async () => {
+test('retry rebuilds full analysis for exactly the current photo, workspace, and clicked subject', async () => {
   const h = harness({status: 'complete'});
   await h.run();
   assert.equal(h.requests[0].url, '/api/photos/analysis-retry');
-  assert.deepEqual(JSON.parse(h.requests[0].options.body), {photo_ids: [230871], expected_workspace_id: 5});
+  assert.deepEqual(JSON.parse(h.requests[0].options.body), {
+    photo_ids: [230871], expected_workspace_id: 5, expected_primary_detection_id: 3422044149613778,
+  });
   assert.deepEqual(h.loaded, [230871]);
   assert.deepEqual(h.refreshed, ['mask', 230871]);
   assert.deepEqual(h.events, ['vireo:primary-subject-changed']);

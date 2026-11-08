@@ -222,7 +222,11 @@ and their undo/redo with 409.
 
 After correction, use `POST /api/photos/analysis-retry` with exactly this
 `photo_ids: [id]` and its `expected_workspace_id`, then check the per-photo
-result and readiness. The lightbox's **Retry subject mask and quality** button
+result and readiness. Pass `expected_primary_detection_id` to require that the
+retry still runs on the detection the caller chose: the job fails with
+`Primary subject changed before analysis started` when the primary moved
+between the click and lock acquisition, so measurements never publish for a
+different subject. The lightbox's **Retry subject mask and quality** button
 uses this path. The older `subjects/analyze` endpoint measures detection boxes
 for crop/exposure suggestions; it does not rebuild the selected animal's mask,
 quality or available eye evidence used for ranking. Missing eye identification

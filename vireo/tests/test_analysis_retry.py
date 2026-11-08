@@ -217,6 +217,41 @@ def test_api_job_failure_persists_explanation_and_workspace_guard(retry_library,
     assert after["last_attempt"]["status"] == "failed" and "No subject mask" in after["explanation"]
 
 
+def test_expected_primary_detection_id_pins_retry_to_the_clicked_subject(retry_library, tmp_path):
+    """A primary subject change between click and lock acquisition must not publish measurements for a different box."""
+    from services.analysis_retry import run_retry
+    from subjects import payload as subjects_payload
+
+    _, db, ids, _ = retry_library
+    pid = ids[0]
+    execute(db, [pid], tmp_path)  # populate detection, mask and quality on the current primary
+    detection_id = subjects_payload(db, pid)["primary_detection_id"]
+    assert detection_id is not None
+    db.conn.execute("UPDATE photos SET subject_clip_low=NULL WHERE id=?", (pid,))  # force only retry_features to re-run
+    db.commit()
+    effective = db.get_effective_config({"pipeline": {"sam2_variant": "sam2-small", "eye_detect_enabled": False}})
+    mismatched = run_retry(Context(db), {"id": "scratch-mismatch", "progress": {}, "errors": []},
+                           [pid], effective, str(tmp_path), results_dir=str(tmp_path),
+                           expected_primary_detection_id=detection_id + 777)
+    outcomes = {photo["photo_id"]: photo for photo in mismatched["photos"]}
+    assert outcomes[pid]["status"] == "failed"
+    assert "Primary subject changed before analysis started" in outcomes[pid]["error"]
+    matched = run_retry(Context(db), {"id": "scratch-ok", "progress": {}, "errors": []},
+                        [pid], effective, str(tmp_path), results_dir=str(tmp_path),
+                        expected_primary_detection_id=detection_id)
+    assert matched["ok"]
+    assert matched["photos"][0]["status"] == "complete"
+
+
+def test_analysis_retry_route_rejects_invalid_expected_primary_detection_id(retry_library):
+    app, _db, ids, _ = retry_library
+    client = app.test_client()
+    assert client.post("/api/photos/analysis-retry", json={
+        "photo_ids": [ids[0]], "expected_primary_detection_id": "not-an-int"}).status_code == 400
+    assert client.post("/api/photos/analysis-retry", json={
+        "photo_ids": [ids[0]], "expected_primary_detection_id": 0}).status_code == 400
+
+
 def test_source_changed_during_inference_never_publishes_active_mask(retry_library, tmp_path, monkeypatch):
     _, db, ids, _ = retry_library
     original = __import__("masking").generate_mask

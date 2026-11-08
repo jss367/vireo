@@ -1521,9 +1521,15 @@ def create_photos_blueprint(
         expected = body.get("expected_workspace_id")
         if expected is not None and (type(expected) is not int or expected != db.active_workspace_id):
             return json_error("Active workspace changed; preview the selection again", 409)
+        expected_primary = body.get("expected_primary_detection_id")
+        if expected_primary is not None and (type(expected_primary) is not int or expected_primary <= 0):
+            return json_error("expected_primary_detection_id must be a positive integer", 400)
         effective = db.get_effective_config(cfg.load())
         cache_dir = media_root(config["THUMB_CACHE_DIR"])
-        return ctx.start("analysis-retry", lambda job: run_retry(ctx, job, ids, effective, cache_dir, results_dir=os.path.dirname(db_path)),
+        return ctx.start("analysis-retry",
+                         lambda job: run_retry(ctx, job, ids, effective, cache_dir,
+                                               results_dir=os.path.dirname(db_path),
+                                               expected_primary_detection_id=expected_primary),
                          config={"photo_ids": ids, "workspace_id": db.require_workspace_id()},
                          extra={"photo_ids": ids, "workspace_id": db.require_workspace_id()})
 

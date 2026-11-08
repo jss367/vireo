@@ -341,7 +341,9 @@ import { safeFetch, showToast } from './navbar-shared-helpers.js';
     status.textContent = detectionId ? 'Retrying the selected subject mask and quality measurements…' : 'Analyzing retained subjects…';
     try {
       const route = detectionId ? '/api/photos/analysis-retry' : '/api/photos/' + photoId + '/subjects/analyze';
-      const body = detectionId ? {photo_ids: [photoId], expected_workspace_id: data.workspace_id} : {detection_id: null};
+      const body = detectionId
+        ? {photo_ids: [photoId], expected_workspace_id: data.workspace_id, expected_primary_detection_id: detectionId}
+        : {detection_id: null};
       /** @type {{job_id: string}} */ const job = await safeFetch(route, {
         method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
       }, {toast: false});
