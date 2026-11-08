@@ -96,11 +96,11 @@ def durable_fixture():
     conn, ws, history_repo = history()
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript("""CREATE TABLE workspaces(id INTEGER PRIMARY KEY);
-        CREATE TABLE photos(id INTEGER PRIMARY KEY, flag TEXT);
+        CREATE TABLE photos(id INTEGER PRIMARY KEY, flag TEXT, filename TEXT);
         CREATE TABLE photo_workspace_visibility(photo_id INTEGER, workspace_id INTEGER);
         CREATE TABLE invented_queue(photo_id INTEGER, flag TEXT);
         INSERT INTO workspaces VALUES(1),(2);
-        INSERT INTO photos VALUES(7,'none');
+        INSERT INTO photos VALUES(7,'none','p7.jpg');
         INSERT INTO photo_workspace_visibility VALUES(7,1),(7,2);""")
     tree = ast.parse((ROOT / "canonical_schema.py").read_text(encoding="utf-8"))
     ddl = ast.literal_eval(next(n.value for n in tree.body if isinstance(n, ast.Assign)
@@ -141,7 +141,7 @@ def durable_fixture():
         def prune_edit_history(self):
             self.prunes += 1
     db = FakeDB()
-    service_ns = load("services/photo_review.py", {"flag_description", "flag_note"}, {"PhotoReviewService"})
+    service_ns = load("services/photo_review.py", {"flag_description", "flag_note", "keeper_status", "_keeper_id"}, {"PhotoReviewService"})
     conn.commit()
     return conn, ws, db, service_ns["PhotoReviewService"](db), service_ns["flag_note"]
 

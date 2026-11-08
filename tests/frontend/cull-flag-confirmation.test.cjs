@@ -42,7 +42,10 @@ test('source synchronization copies confirmation and discards a stale confirmati
 });
 test('manual Apply persists Review on a clear flag and retains confirmed UI state', async () => {
   const ctx = page();
-  vm.runInContext(fs.readFileSync(path.join(root, 'vireo/static/cull/actions.js'), 'utf8'), ctx);
+  for (const file of ['keepers', 'actions']) {
+    vm.runInContext(fs.readFileSync(path.join(root, `vireo/static/cull/${file}.js`), 'utf8'), ctx);
+  }
+  ctx.cullRejectKeepers = {};
   let payload;
   Object.assign(ctx, {
     cullData: {species_groups: [{scene_groups: [{photos: [
@@ -58,7 +61,7 @@ test('manual Apply persists Review on a clear flag and retains confirmed UI stat
   ctx.cullManualDecisions[1] = 'keep';
   ctx.cullManualDecisions[2] = 'review';
   await ctx.applyCulling();
-  assert.deepEqual(payload, {keepers: [1], rejects: [], unflag: [2]});
+  assert.deepEqual(payload, {keepers: [1], rejects: [], unflag: [2], rejections: []});
   assert.equal(ctx.resolveCullDecision(ctx.pipelineResults.photos[0]).action, 'keep');
   assert.equal(ctx.pipelineResults.photos[0].flag_confirmation_status, 'confirmed');
   assert.equal(ctx.cullAppliedDecisions[2], 'review');
@@ -66,7 +69,10 @@ test('manual Apply persists Review on a clear flag and retains confirmed UI stat
 
 test('Apply status distinguishes photos actually cleared from already-none Reviews', async () => {
   const ctx = page();
-  vm.runInContext(fs.readFileSync(path.join(root, 'vireo/static/cull/actions.js'), 'utf8'), ctx);
+  for (const file of ['keepers', 'actions']) {
+    vm.runInContext(fs.readFileSync(path.join(root, `vireo/static/cull/${file}.js`), 'utf8'), ctx);
+  }
+  ctx.cullRejectKeepers = {};
   const prompts = [];
   const statusEl = {textContent: '', style: {}};
   const applyBtn = {disabled: false};
@@ -106,9 +112,10 @@ test('confirmed clear reloads as saved Review, unlike an unattributed raw none',
 
 test('Undo releases Review attribution pins and later Apply does not clear a newer flag', async () => {
   const ctx = page();
-  for (const file of ['history', 'actions']) {
+  for (const file of ['history', 'keepers', 'actions']) {
     vm.runInContext(fs.readFileSync(path.join(root, `vireo/static/cull/${file}.js`), 'utf8'), ctx);
   }
+  ctx.cullRejectKeepers = {};
   let payload;
   let saved = {flag: 'none', flag_confirmation_status: 'unverified'};
   Object.assign(ctx, {
@@ -143,7 +150,7 @@ test('Undo releases Review attribution pins and later Apply does not clear a new
   ]}]}]};
   ctx.cullManualDecisions[2] = 'keep';
   await ctx.applyCulling();
-  assert.deepEqual(payload, {keepers: [2], rejects: [], unflag: []});
+  assert.deepEqual(payload, {keepers: [2], rejects: [], unflag: [], rejections: []});
   // Redo's restored attribution renders as saved Review even without a pin.
   saved = {flag: 'none', flag_confirmation_status: 'confirmed'};
   await ctx.cullAfterHistoryChange({redone: 'Apply'});

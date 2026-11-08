@@ -234,7 +234,12 @@ def _retain_global_flag_attribution(conn):
     conn.execute("DROP TRIGGER IF EXISTS invalidate_current_flag_attribution")
     conn.execute("ALTER TABLE current_flag_attribution RENAME TO old_current_flag_attribution")
     conn.execute(CURRENT_FLAG_ATTRIBUTION_OBJECTS[0])
-    conn.execute("INSERT INTO current_flag_attribution SELECT * FROM old_current_flag_attribution")
+    conn.execute(
+        "INSERT INTO current_flag_attribution"
+        " (photo_id, workspace_id, flag, source, reason, description, created_at)"
+        " SELECT photo_id, workspace_id, flag, source, reason, description, created_at"
+        " FROM old_current_flag_attribution"
+    )
     conn.execute("DROP TABLE old_current_flag_attribution")
     conn.execute(CURRENT_FLAG_ATTRIBUTION_OBJECTS[1])
 
@@ -295,6 +300,20 @@ def _validate_detection_subject_verdict(conn):
         raise RuntimeError("detections is missing subject_verdict")
 
 
+def _add_flag_attribution_keeper(conn):
+    """Record the photo a cull reject was rejected in favor of, and the comparison."""
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(current_flag_attribution)")}
+    for name, definition in (("keeper_photo_id", "INTEGER"), ("comparison", "TEXT")):
+        if name not in columns:
+            conn.execute(f"ALTER TABLE current_flag_attribution ADD COLUMN {name} {definition}")
+
+
+def _validate_flag_attribution_keeper(conn):
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(current_flag_attribution)")}
+    if not {"keeper_photo_id", "comparison"} <= columns:
+        raise RuntimeError("current_flag_attribution is missing keeper_photo_id or comparison")
+
+
 MIGRATIONS = (
     Migration(
         13, "companion_identities_file_mtime",
@@ -336,6 +355,10 @@ MIGRATIONS = (
     Migration(
         32, "detection_subject_verdict",
         _add_detection_subject_verdict, _validate_detection_subject_verdict,
+    ),
+    Migration(
+        33, "flag_attribution_keeper",
+        _add_flag_attribution_keeper, _validate_flag_attribution_keeper,
     ),
 )
 

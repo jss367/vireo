@@ -9,6 +9,7 @@
     "../vireo/static/cull/analysis.js",
     "../vireo/static/cull/history.js",
     "../vireo/static/cull/decisions.js",
+    "../vireo/static/cull/keepers.js",
     "../vireo/static/cull/data.js",
     "../vireo/static/cull/render.js",
     "../vireo/static/cull/focus.js",

@@ -12,6 +12,7 @@ page globals, as the inline script and the older `cull-favorites.js` did.
 | `settings.js` | The scoring and grouping sliders: request configs, defaults, resets, Save grouping defaults, and the debounced recompute |
 | `analysis.js` | Storing results, the request body for the current scope, the pending state behind Apply, reflow and regroup, and loading the cached results |
 | `history.js` | The undo/redo page hooks (`beforeHistoryChange`, `afterHistoryChange`) |
+| `keepers.js` | Relational rejects: the kept photo a reject loses to (`resolveCullKeeper`: the Compare reference, else the scene group's best kept photo, else the species' reference favorite), the measurement both share (`cullComparison`), the `rejections` Apply records, and the orphan banner and dialog (saved rejects whose keeper was deleted or rejected since) |
 | `decisions.js` | Species names (`speciesListForPhoto` / `speciesListForEncounter`: every species a photo counts under), flag and label to action, pin counts, `resolveCullDecision`, encounter labels |
 | `data.js` | `pipelineToCullData`: species groups, scene groups, each photo's decision, and the summary totals (`cullPhotoTallies`, once per photo) |
 | `render.js` | The summary's decision stats and actions, and `renderCulling` |
@@ -31,6 +32,13 @@ inline handlers that call these globals; moving them to delegated listeners
 comes with converting the page to modules.
 
 ## Guards
+
+- A reject is recorded in favor of a photo that is kept. The keeper chosen
+  in Compare (`cullRejectKeepers`) is remembered only while the decision is
+  a reject; changing or releasing the decision drops it, and Apply moves the
+  record onto the source photo as `reject_keeper`. `cullComparison` records a
+  measurement only when both photos share its basis; the composite quality is
+  a rank within one encounter and is never compared across two.
 
 - Your pins (`cullManualDecisions`) outrank saved flags and fresh suggestions,
   so a slider tweak never silently undoes a decision. Review pins stay pinned

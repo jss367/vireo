@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from db import Database
     from services.service_types import JsonDict
@@ -38,11 +38,43 @@ def flag_description(
     return text
 
 
+def keeper_status(note: Mapping[str, object]) -> str | None:
+    """Whether a relational reject's keeper still justifies it.
+
+    ``kept`` while the keeper is in the catalog and not rejected,
+    ``rejected`` once it is, ``deleted`` when it has left the catalog; None
+    for a note that names no keeper.
+    """
+    if note.get("keeper_photo_id") is None:
+        return None
+    if note.get("keeper_filename") is None:
+        return "deleted"
+    if note.get("keeper_flag") == "rejected":
+        return "rejected"
+    return "kept"
+
+
+def _keeper_id(rejection: Mapping[str, object]) -> int:
+    """The keeper of one rejection record, which the route has already validated as an int."""
+    keeper = rejection["keeper_photo_id"]
+    if isinstance(keeper, bool) or not isinstance(keeper, int):
+        raise ValueError("keeper_photo_id must be an integer photo id")
+    return keeper
+
+
 def flag_note(db: Database, photo_id: int, current_flag: str | None) -> JsonDict | None:
-    """Only durable current attribution, never a guess from retained undo history."""
+    """Only durable current attribution, never a guess from retained undo history.
+
+    A reject recorded in favor of another photo carries ``keeper_photo_id``,
+    ``keeper_filename``, ``comparison`` and ``keeper_status`` (see
+    ``keeper_status``) so the detail panel can show what it lost to and
+    whether that reason still holds.
+    """
     note = db.photo_review.current_flag_note(photo_id)
     if note is None or (note["flag"] or "none") != (current_flag or "none"):
         return None
+    note["keeper_status"] = keeper_status(note)
+    note.pop("keeper_flag", None)
     return note
 
 
@@ -110,6 +142,7 @@ class PhotoReviewService:
 
     def apply_culling_flags(
         self, keepers: Sequence[int], rejects: Sequence[int], unflag: Sequence[int],
+        rejections: Mapping[int, Mapping[str, object]] | None = None,
     ) -> dict[str, int]:
         """Save explicit Cull choices and their attribution as one reversible edit.
 
@@ -118,13 +151,24 @@ class PhotoReviewService:
         ranking job cannot replace it and an unflag-only Apply still produces
         an edit to Undo. ``cleared`` names the subset whose raw flag actually
         changed, used only for the user-visible count.
+
+        ``rejections`` maps a rejected photo to ``{"keeper_photo_id",
+        "comparison"}``: the photo kept instead of it and the measurement that
+        decided (``comparison`` may be None when none was shared). The keeper
+        must be a photo of the active workspace; the attribution then names it
+        so the reject stays explainable and the orphan check can find it if
+        the keeper is later deleted or rejected.
         """
+        rejections = dict(rejections or {})
         ids = list(keepers) + list(rejects) + list(unflag)
+        keeper_ids = [_keeper_id(r) for r in rejections.values()]
         with self.db.transaction(immediate=True, join=True):
-            photos = self.db.photos.get_by_ids(ids)
+            photos = self.db.photos.get_by_ids(ids + keeper_ids)
             if any(pid not in photos for pid in ids):
                 raise ValueError("Photo not in active workspace")
-            for pid in ids:
+            if any(pid not in photos for pid in keeper_ids):
+                raise ValueError("Keeper photo not in active workspace")
+            for pid in ids + keeper_ids:
                 self.db._verify_photo_in_workspace(pid)
             old = {pid: photos[pid]["flag"] or "none" for pid in ids}
             cleared = [pid for pid in unflag if old[pid] != "none"]
@@ -141,8 +185,12 @@ class PhotoReviewService:
                     self.db.photo_review.set_flag(pid, flag)
                     self.db.queue_flag_change_if_enabled(pid, flag)
                     items.append({"photo_id": pid, "old_value": old[pid], "new_value": flag})
-                if photo_ids:
-                    self.db.photo_review.set_current_flag_note(photo_ids, flag, summary)
+                plain_ids = [pid for pid in photo_ids if pid not in rejections]
+                if plain_ids:
+                    self.db.photo_review.set_current_flag_note(plain_ids, flag, summary)
+                for pid in photo_ids:
+                    if pid in rejections:
+                        self._note_relational_reject(pid, rejections[pid], photos, summary)
             if items:
                 edit_id = self.db.record_edit(
                     "flag", summary, "culling_apply", items, is_batch=True,
@@ -152,6 +200,20 @@ class PhotoReviewService:
                     self.db.photo_review.flag_attributions(effective_ids),
                 )
         return {"keepers": len(keepers), "rejects": len(rejects), "cleared": len(cleared)}
+
+    def _note_relational_reject(
+        self, photo_id: int, rejection: Mapping[str, object],
+        photos: Mapping[int, Mapping[str, object]], summary: str,
+    ) -> None:
+        """Attribute one reject to the photo kept instead of it."""
+        keeper_id = _keeper_id(rejection)
+        comparison = rejection.get("comparison")
+        description = f"{summary} — kept {photos[keeper_id]['filename']} instead"
+        self.db.photo_review.set_current_flag_note(
+            [photo_id], "rejected", description,
+            keeper_photo_id=keeper_id,
+            comparison=comparison if isinstance(comparison, dict) else None,
+        )
 
     def _write_flags(
         self, photo_ids: Sequence[int], flag: str, *, source: str | None, reason: str | None, is_batch: bool,

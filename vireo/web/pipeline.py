@@ -1436,6 +1436,15 @@ def create_pipeline_blueprint(
                 "flag_confirmation_status": (
                     "confirmed" if flag_state.get("confirmed_flag") == flag else "unverified"
                 ),
+                "reject_keeper": (
+                    {
+                        "photo_id": flag_state["keeper_photo_id"],
+                        "filename": flag_state.get("keeper_filename"),
+                        "comparison": flag_state.get("comparison"),
+                    }
+                    if flag == "rejected" and flag_state.get("keeper_photo_id") is not None
+                    else None
+                ),
                 "has_species_keyword": has_kw,
                 "has_species_keywords": has_kws,
                 "is_species_representative": bool(
