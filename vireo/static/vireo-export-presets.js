@@ -731,8 +731,10 @@ var VireoExportPresets = (function() {
         value.quality < 1 || value.quality > 100) return false;
     if (value.max_size !== null && (typeof value.max_size !== 'number' ||
         !Number.isInteger(value.max_size) || value.max_size <= 0)) return false;
+    // Match export.py's EXPORT_METADATA_FIELDS before changing any controls.
+    var metadataFields = ['species', 'capture_date', 'capture_time', 'rating', 'location', 'camera'];
     return Array.isArray(value.metadata_fields) && value.metadata_fields.every(function(field) {
-      return typeof field === 'string';
+      return typeof field === 'string' && metadataFields.indexOf(field) !== -1;
     });
   }
 

@@ -83,11 +83,11 @@ def test_custom_export_without_valid_snapshot_still_opens(live_server, page, sto
         "reveal_after_export": False, "format": "jpg", "max_size": None,
         "quality": 92, "naming_template": "{original}", "metadata_fields": [],
     }),
-    json.dumps({
+    *[json.dumps({
         "destination": "", "export_to_subfolder": False, "subfolder_name": "exported",
         "reveal_after_export": False, "format": "jpg", "max_size": None,
-        "quality": 92, "naming_template": "{original}", "metadata_fields": [42],
-    }),
+        "quality": 92, "naming_template": "{original}", "metadata_fields": fields,
+    }) for fields in ([42], ["invented"], ["location", "invented"])],
 ])
 def test_legacy_custom_preferences_migrate_across_pages(live_server, page, source, stored):
     page.goto(f"{live_server['url']}/browse")
