@@ -1355,3 +1355,36 @@ def test_toolbar_history_refreshes_highlight_species_buckets(live_server, page):
     page.locator('#historyRedoBtn').click()
     expect(page.locator('#historyUndoBtn')).to_be_enabled()
     expect(page.locator('.bucket-title').filter(has_text='Northern Cardinal')).to_have_count(1)
+
+
+@pytest.mark.parametrize("scope", ["folder", "workspace"])
+def test_highlights_folder_persists_after_edit(live_server, page, scope):
+    """Returning from the editor restores both the dropdown and its photos."""
+    data = live_server["data"]
+    _seed_quality_scores_and_species(live_server["db"], data)
+    url = live_server["url"]
+    _goto_highlights(page, url)
+    select = page.locator("#folderSelect")
+    expect(page.locator(".highlights-card").first).to_be_visible()
+    select.select_option(str(data["folders"][0]))
+    expect(page.locator(".highlights-card")).to_have_count(3)
+    if scope == "workspace":
+        select.select_option("__workspace__")
+        expect(page.locator(".highlights-card")).to_have_count(5)
+    page.goto(f"{url}/edit/{data['photos'][0]}")
+    _goto_highlights(page, url)
+    expected = str(data["folders"][0]) if scope == "folder" else "__workspace__"
+    expect(select).to_have_value(expected)
+    expect(page.locator(".highlights-card")).to_have_count(3 if scope == "folder" else 5)
+    page.reload()
+    expect(select).to_have_value(expected)
+    expect(page.locator(".highlights-card")).to_have_count(3 if scope == "folder" else 5)
+
+
+def test_highlights_unavailable_saved_folder_uses_workspace(live_server, page):
+    """A removed folder or another workspace's folder cannot hide the grid."""
+    _seed_quality_scores_and_species(live_server["db"], live_server["data"])
+    page.add_init_script("localStorage.setItem('vireo.highlights.folder', '999999');")
+    _goto_highlights(page, live_server["url"])
+    expect(page.locator("#folderSelect")).to_have_value("__workspace__")
+    expect(page.locator(".highlights-card")).to_have_count(5)

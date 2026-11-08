@@ -106,7 +106,10 @@ function bindHighlightsControls() {
   window.addEventListener('devmodechange', updateAdvancedHighlightsOptions);
   // Reset per-row expand state when the user picks a different folder
   // so the new folder's rows don't inherit the previous folder's state.
-  highlightsEl('folderSelect').addEventListener('change', resetExpansionAndReload);
+  highlightsEl('folderSelect').addEventListener('change', function(event) {
+    VireoViewPreferences.write('vireo.highlights.folder', controlValue(event));
+    resetExpansionAndReload();
+  });
 }
 
 bindHighlightsMarkup();

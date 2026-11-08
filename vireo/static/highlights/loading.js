@@ -2,7 +2,7 @@
 // and the advanced-mode sort options.
 // ES module.
 
-import { isAdvancedMode, safeFetch } from './shared.js';
+import { VireoViewPreferences, isAdvancedMode, safeFetch } from './shared.js';
 import { hideHighlightUndo, updateHighlightsLightboxControls } from './lightbox.js';
 import { removeRejectedPhotoFromModel } from './rejects.js';
 import { render } from './render.js';
@@ -46,6 +46,13 @@ export async function loadHighlights() {
       opt.textContent = f.name + ' (' + f.photo_count + ')';
       folderSelect.appendChild(opt);
     });
+    // Restore only folders available in this workspace, and fetch their data
+    // before rendering so the selected scope always matches the visible photos.
+    var savedFolder = VireoViewPreferences.read('vireo.highlights.folder');
+    if (savedFolder && data.folders.some(function(f) { return String(f.id) === savedFolder; })) {
+      folderSelect.value = savedFolder;
+      return loadHighlights();
+    }
   }
   var selectedOption = folderSelect.options[folderSelect.selectedIndex];
   state.currentFolderName = selectedOption
