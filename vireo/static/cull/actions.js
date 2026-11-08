@@ -167,6 +167,24 @@ function recordAppliedRejectKeepers(rejections) {
   });
 }
 
+/**
+ * How the rejects break down for the confirm prompt: decided now with a
+ * keeper, decided now with nothing kept to compare against, and already
+ * saved (sent as a flag alone; their saved record stays as it is).
+ *
+ * @param {number[]} rejects @param {CullRejection[]} rejections
+ */
+function describeRejections(rejects, rejections) {
+  var withKeeper = rejections.filter(function(r) { return r.keeper_photo_id != null; }).length;
+  var withoutKeeper = rejections.length - withKeeper;
+  var unchanged = rejects.length - rejections.length;
+  var parts = [];
+  if (withKeeper) parts.push(withKeeper + ' recorded with the photo kept instead');
+  if (withoutKeeper) parts.push(withoutKeeper + ' with nothing kept to compare');
+  if (unchanged) parts.push(unchanged + ' already saved, unchanged');
+  return parts.join('; ');
+}
+
 async function applyCulling() {
   if (!cullData || cullOperationPending()) return;
 
@@ -181,10 +199,7 @@ async function applyCulling() {
   var confirmMsg = 'Apply culling decisions?\n\n' +
     keepers.length + ' photos flagged as keepers\n' +
     rejects.length + ' photos flagged as rejected';
-  if (rejects.length) {
-    confirmMsg += ' (' + rejections.length + ' recorded with the photo kept instead' +
-      (rejections.length < rejects.length ? '; ' + (rejects.length - rejections.length) + ' with nothing kept to compare' : '') + ')';
-  }
+  if (rejects.length) confirmMsg += ' (' + describeRejections(rejects, rejections) + ')';
   if (split.clearing) {
     confirmMsg += '\n' + split.clearing + ' photos cleared back to no flag (moved to Review)';
   }

@@ -283,3 +283,31 @@ def test_merging_the_keeper_into_the_reject_itself_clears_the_relation(app_and_d
     assert client.post("/api/undo").status_code == 200
     assert client.post("/api/redo").status_code == 200
     assert flag_note(db, loser, "rejected") is None
+
+
+def test_a_merge_of_the_id_reusing_newcomer_keeps_the_deleted_keeper_stamp(app_and_db):
+    from repositories.photo_review import remap_flag_attribution_keepers
+    from services import photo_ingest
+
+    app, db = app_and_db
+    client = app.test_client()
+    photos = db.photos.list_page()
+    keeper = max(p["id"] for p in photos)
+    loser = min(p["id"] for p in photos)
+    folder_id = db.photos.get(keeper)["folder_id"]
+    _apply(client, keeper, [loser])
+    catalog_deletion.delete_photos(db, [keeper])
+    newcomer = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="newcomer.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
+    )
+    assert newcomer == keeper
+    # The newcomer merging into the reject itself must not touch the stamped relation.
+    with db.transaction():
+        remap_flag_attribution_keepers(db.conn, {newcomer: loser})
+    note = flag_note(db, loser, "rejected")
+    assert note["keeper_status"] == "deleted"
+    assert note["comparison"] == COMPARISON
+    assert client.get("/api/culling/orphans").get_json()["count"] == 1
+    assert client.post("/api/undo").status_code == 200
+    assert client.post("/api/redo").status_code == 200
+    assert flag_note(db, loser, "rejected")["keeper_status"] == "deleted"

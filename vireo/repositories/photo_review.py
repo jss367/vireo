@@ -50,32 +50,35 @@ def remap_flag_attribution_keepers(conn: sqlite3.Connection, mapping: dict[int, 
                     (source,),
                 )
             continue
+        # Only live references follow the merge: a stamped one names a
+        # keeper already deleted, whose id the merging photo merely reused.
         # A keeper absorbed by the very photo it justified rejecting cannot
-        # keep justifying it: the relation is cleared, the reject stays.
+        # keep justifying it: that relation is cleared, the reject stays.
         conn.execute(
-            """UPDATE current_flag_attribution
-               SET keeper_photo_id = NULL, comparison = NULL, keeper_deleted_at = NULL
-               WHERE photo_id = ? AND keeper_photo_id = ?""",
+            """UPDATE current_flag_attribution SET keeper_photo_id = NULL, comparison = NULL
+               WHERE photo_id = ? AND keeper_photo_id = ? AND keeper_deleted_at IS NULL""",
             (target, source),
         )
         conn.execute(
-            "UPDATE current_flag_attribution SET keeper_photo_id = ? WHERE keeper_photo_id = ?",
+            """UPDATE current_flag_attribution SET keeper_photo_id = ?
+               WHERE keeper_photo_id = ? AND keeper_deleted_at IS NULL""",
             (target, source),
         )
         for column in ("old_state", "new_state"):
             conn.execute(
                 f"""UPDATE flag_attribution_history
                     SET {column} = json_set({column}, '$.keeper_photo_id', json('null'),
-                                            '$.comparison', json('null'),
-                                            '$.keeper_deleted_at', json('null'))
+                                            '$.comparison', json('null'))
                     WHERE json_extract({column}, '$.photo_id') = ?
-                      AND json_extract({column}, '$.keeper_photo_id') = ?""",
+                      AND json_extract({column}, '$.keeper_photo_id') = ?
+                      AND json_extract({column}, '$.keeper_deleted_at') IS NULL""",
                 (target, source),
             )
             conn.execute(
                 f"""UPDATE flag_attribution_history
                     SET {column} = json_set({column}, '$.keeper_photo_id', ?)
-                    WHERE json_extract({column}, '$.keeper_photo_id') = ?""",
+                    WHERE json_extract({column}, '$.keeper_photo_id') = ?
+                      AND json_extract({column}, '$.keeper_deleted_at') IS NULL""",
                 (target, source),
             )
 

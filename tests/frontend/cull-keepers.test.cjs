@@ -140,6 +140,14 @@ test('a reject with nothing kept anywhere is sent with an explicit null keeper',
   assert.deepEqual(payload.rejections, [{photo_id: 2, keeper_photo_id: null, comparison: null}]);
 });
 
+test('the confirm prompt counts keepers, no-keeper rejects and unchanged saved rejects apart', () => {
+  const {ctx} = page();
+  assert.equal(ctx.describeRejections([2], [{photo_id: 2, keeper_photo_id: null, comparison: null}]),
+    '1 with nothing kept to compare');
+  assert.equal(ctx.describeRejections([2, 4, 5], [{photo_id: 2, keeper_photo_id: 1, comparison: null}]),
+    '1 recorded with the photo kept instead; 2 already saved, unchanged');
+});
+
 test('rejecting in Compare records the reference on screen, until the decision changes', () => {
   const {ctx} = page();
   ctx.setPipelineResults(results());
