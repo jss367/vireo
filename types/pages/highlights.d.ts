@@ -7,6 +7,10 @@ interface HighlightsPhoto {
   has_accepted_species?: boolean; is_confirmable_prediction?: boolean;
   is_species_representative?: boolean; is_highlighted?: boolean; highlight_rank?: number | null;
   timestamp?: string | null; is_analyzed?: boolean;
+  /** The prediction came from the whole frame: the detector found no animal. */
+  whole_frame?: boolean;
+  /** The prediction's region matched background about as well as any listed species. */
+  background_like?: boolean; predicted_detector_confidence?: number | null;
   /** The bucket this entry belongs to; a two-species photo has one entry per bucket. */
   bucket_species?: string | null;
   /** Every species the photo carries as a keyword, whichever bucket this entry is in. */
@@ -23,6 +27,8 @@ interface HighlightsSection {
 }
 interface HighlightsBucket extends HighlightsSection {
   species: string; highlight_count?: number; is_accepted?: boolean; avg_confidence?: number | null; certainty?: string;
+  /** Photos in the bucket whose prediction is a whole-frame guess; `certainty` is `whole_frame` when that is all of them. */
+  whole_frame_count?: number;
 }
 /** A page of one bucket from /api/highlights/bucket. */
 interface HighlightsBucketPage extends HighlightsSection {loaded_count: number; has_more: boolean}

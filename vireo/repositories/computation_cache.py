@@ -51,7 +51,7 @@ class ComputationCacheRepository:
         """The ``classifier_match_scores`` row of one run, or None."""
         return self.conn.execute(
             """SELECT max_match_score, match_margin, top_species,
-                  label_count, score_kind
+                  label_count, score_kind, background_score, background_prompt
            FROM classifier_match_scores
            WHERE detection_id = ? AND classifier_model = ?
              AND labels_fingerprint = ?""",
@@ -415,13 +415,15 @@ class ComputationCacheRepository:
             """INSERT INTO classifier_match_scores
                      (detection_id, classifier_model, labels_fingerprint,
                       max_match_score, match_margin, top_species,
-                      label_count, score_kind)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                      label_count, score_kind, background_score,
+                      background_prompt)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 detection_id, classifier_model, labels_short_fingerprint,
                 match["max_match_score"], match.get("match_margin"),
                 match.get("top_species"), match.get("label_count"),
-                match.get("score_kind"),
+                match.get("score_kind"), match.get("background_score"),
+                match.get("background_prompt"),
             ),
         )
 

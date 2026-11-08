@@ -150,6 +150,25 @@ OPENAI_IMAGENET_TEMPLATE = [
 ]
 
 
+# Scene and plant prompts scored next to the species list on every
+# classification. The softmax only ranks the loaded labels, so a detector
+# box on a trunk or a whole frame of twigs still gets a confident species
+# winner; the cosine to the best of these prompts is the evidence that
+# nothing on the list fit as well as "bark" did. They go through the same
+# templates as the labels so ``background_match`` can compare the two
+# cosines on one scale. Plant names are here because the catalog's
+# backgrounds are trees and shrubs, and BioCLIP scores a named plant higher
+# than a generic "foliage".
+BACKGROUND_PROMPTS = (
+    "tree bark", "tree trunk", "bare branches", "twigs", "leaves", "foliage",
+    "grass", "rocks", "water", "sky", "dirt", "sand",
+    "blurry out-of-focus background", "empty scene with no animal",
+    "tree", "bush", "shrub", "branch", "plant", "wood", "lichen", "moss",
+    "eucalyptus tree", "tamarisk", "willow tree", "pine needles", "reeds",
+    "mud", "gravel", "pond", "splashing water", "sunlit leaves", "dead leaves",
+)
+
+
 def _prompt_template_identity():
     """Content identity for the prompts that produce cached embeddings."""
     from embedding_cache import identity_digest
@@ -655,6 +674,16 @@ def precompute_label_embeddings(
         cancel_check=cancel_check,
         pause_check=pause_check,
     )
+    # The background prompts load with every classifier, so a precomputed
+    # label set is only complete once they are cached too.
+    _load_or_compute_label_embeddings(
+        list(BACKGROUND_PROMPTS),
+        model_str,
+        model_dir,
+        redownload=redownload,
+        cancel_check=cancel_check,
+        pause_check=pause_check,
+    )
     return len(classes)
 
 
@@ -877,6 +906,46 @@ class Classifier:
                 "image encoder and preprocessing from the healed snapshot."
             )
             self._rebuild_image_side(image_encoder_path, config_path)
+        self._load_background_embeddings(
+            model_str, text_redownload, cancel_check, pause_check,
+            self._txt_embeddings.shape[0],
+        )
+
+    def _load_background_embeddings(
+        self, model_str, redownload, cancel_check, pause_check, embedding_dim,
+    ):
+        """Set ``self._background_prompts`` / ``self._background_embeddings``.
+
+        The prompts go through the label-embedding cache like any label set,
+        so after the first run they load from disk, and a label that happens
+        to share a prompt's text (a species list naming "water") shares its
+        cached column. They are encoded after the labels so a self-heal
+        during the label load has already settled the model directory.
+        """
+        prompts, embeddings, _before, _after = _load_or_compute_label_embeddings(
+            list(BACKGROUND_PROMPTS),
+            model_str,
+            self._model_dir,
+            redownload=redownload,
+            cancel_check=cancel_check,
+            embedding_dim=embedding_dim,
+            pause_check=pause_check,
+        )
+        self._background_prompts = prompts
+        self._background_embeddings = embeddings
+
+    def _background_match(self, img_features):
+        """``(score, prompt)``: the best background prompt for an embedding.
+
+        ``(None, None)`` when no background prompts are loaded (Tree of Life
+        mode, where plants are labels in their own right).
+        """
+        embeddings = getattr(self, "_background_embeddings", None)
+        if embeddings is None:
+            return None, None
+        scores = (img_features @ embeddings).flatten()
+        index = int(np.argmax(scores))
+        return float(scores[index]), self._background_prompts[index]
 
     def _load_tol_embeddings(self):
         """Tree of Life mode: load pre-computed embeddings."""
@@ -1075,6 +1144,10 @@ class Classifier:
                 embedding: numpy float32 array (the normalized image embedding vector)
         """
         img_features = self._get_image_embedding(image)  # (1, embedding_dim)
+        return self._classify_features(img_features, threshold)
+
+    def _classify_features(self, img_features, threshold):
+        """``(predictions, embedding)`` for one normalized image embedding."""
         embedding = img_features.flatten()
 
         # Cosine similarity: img_features @ txt_embeddings
@@ -1088,13 +1161,17 @@ class Classifier:
         raw_scores = logits.flatten() / 100.0
 
         if self._mode == "custom":
-            return self._build_custom_results(
-                probs, threshold, raw_scores
-            ), embedding
+            results = self._build_custom_results(probs, threshold, raw_scores)
         else:
-            return self._build_tol_results(
-                probs, threshold, raw_scores
-            ), embedding
+            results = self._build_tol_results(probs, threshold, raw_scores)
+        background_score, background_prompt = self._background_match(img_features)
+        if background_score is not None:
+            # The same two values on every result: the match is a property
+            # of the region, and ``raw_score`` already rides along per row.
+            for result in results:
+                result["background_score"] = background_score
+                result["background_prompt"] = background_prompt
+        return results, embedding
 
     def classify_batch_with_embedding(self, images, threshold=0.4):
         """Classify multiple PIL images.
@@ -1113,15 +1190,5 @@ class Classifier:
         results = []
         for img in images:
             img_features = self._get_image_embedding(img)  # (1, D)
-            embedding = img_features.flatten()
-
-            logits = 100.0 * (img_features @ self._txt_embeddings)
-            probs = onnx_runtime.softmax(logits, axis=-1).flatten()
-            raw_scores = logits.flatten() / 100.0
-
-            if self._mode == "custom":
-                preds = self._build_custom_results(probs, threshold, raw_scores)
-            else:
-                preds = self._build_tol_results(probs, threshold, raw_scores)
-            results.append((preds, embedding))
+            results.append(self._classify_features(img_features, threshold))
         return results

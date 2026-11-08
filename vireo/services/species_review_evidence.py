@@ -125,7 +125,12 @@ def _subject(
 
 
 def _candidates(photos: list[JsonDict]) -> list[JsonDict]:
-    """Index top predictions per subject/model; never extend to group siblings."""
+    """Index top predictions per subject/model; never extend to group siblings.
+
+    A region the classifier scored like background (``evidence.background``)
+    names no candidate: its top label is the species nearest to bark or
+    twigs, which is not an identification to inspect.
+    """
     candidates: dict[str, JsonDict] = {}
     for photo in photos:
         for subject in photo["subjects"]:
@@ -135,6 +140,7 @@ def _candidates(photos: list[JsonDict]) -> list[JsonDict]:
             for prediction in subject["predictions"]:
                 if (prediction["current_review_row"] and prediction["status"] != "rejected"
                         and prediction["matches_current_label_selection"] is not False
+                        and prediction["evidence"]["background"]["state"] != "background"
                         and prediction["evidence"]["subject"]["decision"] not in {
                             "not_enough_evidence", "invalid_subject"}):
                     by_model[prediction["classifier_model"]].append(prediction)

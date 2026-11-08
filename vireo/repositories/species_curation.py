@@ -54,9 +54,13 @@ from repositories.effective_config import active_effective_config
 from repositories.folder_subtrees import folder_subtree_ids
 from repositories.keyword_taxa import KeywordTaxonRepository
 from repositories.photo_sql import LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE
-from repositories.prediction_review import prediction_review_join, prediction_review_status
+from repositories.prediction_review import (
+    CLASSIFIER_MATCH_SCORE_JOIN,
+    prediction_review_join,
+    prediction_review_status,
+)
 from settings_source import config_value
-from species_memberships import photo_species_memberships
+from species_memberships import photo_species_memberships, subject_evidence_order
 
 # ``get_highlights(eligible_only=True)``: the joins and filter that keep only
 # highlights whose photo is reachable, not rejected and still in the bucket.
@@ -447,15 +451,19 @@ class SpeciesCurationRepository:
 
     def _highlight_subject_predictions(self, ws, scope_sql, scope_params):
         """``{photo_id: [subject, ...]}``: each scoped photo's detections'
-        top non-rejected prediction, highest confidence first."""
+        top non-rejected prediction with the region evidence
+        ``species_memberships`` ranks by, in ``subject_evidence_order``
+        (strongest detector box first, whole-frame rows last)."""
         subjects = {}
-        for row in self.conn.execute(
+        rows = self.conn.execute(
             f"""WITH scope AS ({scope_sql})
                SELECT photo_id, detection_id, id AS prediction_id, species,
-                      confidence
+                      confidence, detector_confidence, detector_model,
+                      max_match_score, background_score, score_kind
                FROM (
                    SELECT d.photo_id, d.id AS detection_id, pr.id, pr.species,
-                          pr.confidence,
+                          pr.confidence, d.detector_confidence, d.detector_model,
+                          cms.max_match_score, cms.background_score, cms.score_kind,
                           ROW_NUMBER() OVER (
                               PARTITION BY d.id
                               ORDER BY pr.confidence DESC, pr.id DESC
@@ -463,6 +471,7 @@ class SpeciesCurationRepository:
                    FROM detections d
                    JOIN predictions pr ON pr.detection_id = d.id
                    {prediction_review_join('pr')}
+                   {CLASSIFIER_MATCH_SCORE_JOIN}
                    WHERE d.photo_id IN (SELECT id FROM scope)
                      AND (d.detector_model = 'full-image' OR d.detector_confidence >= ? AND d.subject_verdict IS NULL)
                      AND pr.species IS NOT NULL
@@ -477,12 +486,18 @@ class SpeciesCurationRepository:
                ) WHERE rn = 1
                ORDER BY photo_id, confidence DESC, id DESC""",
             (*scope_params, ws, self._detector_floor()),
-        ):
+        ).fetchall()
+        for row in sorted(rows, key=subject_evidence_order):
             subjects.setdefault(row["photo_id"], []).append({
                 "detection_id": row["detection_id"],
                 "prediction_id": row["prediction_id"],
                 "species": row["species"],
                 "confidence": row["confidence"],
+                "detector_confidence": row["detector_confidence"],
+                "detector_model": row["detector_model"],
+                "max_match_score": row["max_match_score"],
+                "background_score": row["background_score"],
+                "score_kind": row["score_kind"],
             })
         return subjects
 

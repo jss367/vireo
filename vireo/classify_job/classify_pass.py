@@ -186,12 +186,18 @@ def _match_stats(all_preds: list[Prediction], model_type: str) -> dict[str, Any]
     # recorded here in the un-normalized form and miss both sides of the join,
     # dropping the confirmed-correct row into the ``incorrect`` bucket and
     # biasing the fitted floor.
+    # The region's best background-prompt match rides on every prediction
+    # (``Classifier._classify_features``); a classifier without background
+    # prompts leaves it None, which storage records as "not measured".
+    background_score = all_preds[0].get("background_score")
     return {
         "max_match_score": float(top_raw),
         "match_margin": margin,
         "top_species": _folded_species_key(all_preds[0].get("species")),
         "label_count": len(all_preds),
         "score_kind": score_kind,
+        "background_score": None if background_score is None else float(background_score),
+        "background_prompt": all_preds[0].get("background_prompt"),
     }
 
 

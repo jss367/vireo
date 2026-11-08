@@ -525,7 +525,8 @@ def _match_summary_row(db, detection_id, classifier_model, labels_fingerprint):
     if row is None or row["max_match_score"] is None:
         return None
     match = {"max_match_score": row["max_match_score"]}
-    for field in ("match_margin", "top_species", "label_count", "score_kind"):
+    for field in ("match_margin", "top_species", "label_count", "score_kind",
+                  "background_score", "background_prompt"):
         if row[field] is not None:
             match[field] = row[field]
     return match
@@ -780,7 +781,7 @@ def _validate_candidate_taxonomy(taxonomy):
             )
 
 
-_MATCH_SCALAR_FIELDS = ("max_match_score", "match_margin")
+_MATCH_SCALAR_FIELDS = ("max_match_score", "match_margin", "background_score")
 
 
 def _validate_match_number(value, label):
@@ -815,11 +816,10 @@ def _validate_subject_match(match):
         raise CacheFormatError("subject match must be an object")
     for field in _MATCH_SCALAR_FIELDS:
         _validate_match_number(match.get(field), f"match.{field}")
-    top_species = match.get("top_species")
-    if top_species is not None and (
-        not isinstance(top_species, str) or len(top_species) > 500
-    ):
-        raise CacheFormatError("match.top_species must be a string")
+    for field in ("top_species", "background_prompt"):
+        text = match.get(field)
+        if text is not None and (not isinstance(text, str) or len(text) > 500):
+            raise CacheFormatError(f"match.{field} must be a string")
     score_kind = match.get("score_kind")
     if score_kind is not None and (
         not isinstance(score_kind, str) or len(score_kind) > 32

@@ -20,7 +20,7 @@ This module must not import ``db``: ``schema.py`` imports ``db``, and
 # database it creates from nothing. It is the newest registry migration in
 # ``schema.MIGRATIONS``: ``create_tables`` builds every migration's end state,
 # so a fresh database has nothing to migrate.
-SCHEMA_VERSION = 32
+SCHEMA_VERSION = 33
 
 # Promoted EXIF summary columns in the ``photos`` table — the canonical
 # list the scanner uses to clear absent fields on rescan (a metadata write
@@ -751,6 +751,13 @@ class CanonicalSchema:
             -- score_kind names its scale ('cosine' for BioCLIP, 'logit' for a
             -- supervised model) because the two are not comparable and a
             -- threshold calibrated on one is meaningless on the other.
+            --
+            -- background_score is the same run's best score over the
+            -- classifier's background prompts (bark, twigs, water, ...), on
+            -- the same scale, and background_prompt names the winner. The
+            -- verdict (``background_match.is_background_like``) is derived at
+            -- read time, so the margin can change without re-running models.
+            -- NULL means the model had no background prompts, never "no match".
             CREATE TABLE IF NOT EXISTS classifier_match_scores (
                 detection_id         INTEGER NOT NULL REFERENCES detections(id) ON DELETE CASCADE,
                 classifier_model     TEXT NOT NULL,
@@ -761,6 +768,8 @@ class CanonicalSchema:
                 label_count          INTEGER,
                 score_kind           TEXT,
                 run_at               TEXT DEFAULT (datetime('now')),
+                background_score     REAL,
+                background_prompt    TEXT,
                 PRIMARY KEY (detection_id, classifier_model, labels_fingerprint)
             );
 

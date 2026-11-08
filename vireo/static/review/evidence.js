@@ -61,6 +61,7 @@ function reviewEvidenceHtml(pred) {
     '<p>' + escapeHtml(e.score.model) + ': ' + escapeHtml(e.score.explanation) +
     (e.score.label_count == null ? ' Candidate count unavailable.' : ' Candidates: ' + e.score.label_count + '.') +
     ' ' + raw + '</p><p>' + escapeHtml(e.match.explanation) + ' A raw match threshold is not a correctness probability.</p>' +
+    (e.background ? '<p>Background: ' + escapeHtml(e.background.explanation) + '</p>' : '') +
     '<p>Subject: ' + escapeHtml(subject.detector_model || 'detector unknown') +
     ' · detector score ' + (subject.detector_score == null ? 'unavailable' : subject.detector_score.toFixed(4)) +
     ' · category ' + escapeHtml(subject.category || 'unknown') + '. ' + escapeHtml(subject.explanation) + '</p>' +

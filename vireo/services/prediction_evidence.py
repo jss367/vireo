@@ -77,6 +77,9 @@ def _review_reasons(prediction: JsonDict, evidence: JsonDict) -> list[str]:
             reasons.append('Detector did not label this region as an animal')
     if evidence['match']['state'] == match_confidence.UNLISTED:
         reasons.append('Best raw match is below this model’s configured match threshold')
+    if evidence['background']['state'] == match_confidence.BACKGROUND:
+        prompt = evidence['background'].get('background_prompt') or 'background'
+        reasons.append(f'Region matches background (“{prompt}”) about as well as any listed species')
     if prediction.get('status') == 'pending' and (prediction.get('confidence') or 0) >= 0.95:
         reasons.append('High relative score — audit for a possible high-score error')
     return reasons
@@ -120,6 +123,10 @@ def attach_prediction_evidence(db: Database, predictions: list[JsonDict], config
             'match': match_confidence.assess(
                 prediction['model'], context.get('score_kind'),
                 context.get('max_match_score'), context.get('match_margin'), config,
+            ),
+            'background': match_confidence.assess_background(
+                context.get('score_kind'), context.get('max_match_score'),
+                context.get('background_score'), context.get('background_prompt'),
             ),
             'geography': geographic_context(context, prediction),
         }

@@ -36,6 +36,15 @@ The response contains:
   Current Review rows reuse Review's score explanations, raw match assessment,
   subject assessment and disagreement between models on the **same detection**.
   Separate animals are not evidence of disagreement between classifiers.
+- `evidence.background`: how the region scored against the classifier's
+  background prompts (bark, twigs, water, sky, ...) beside its best species
+  label. `state` is `background` when the best prompt came within
+  `background_match.BACKGROUND_MARGIN` of the best label: the region is
+  scenery, and its top species is the label nearest to scenery, not an
+  identification. Such a region adds a review reason, opens no Highlights
+  bucket and names no `candidate_selections` entry. `subject` means the
+  species clearly outscored every prompt; `unavailable` means the run never
+  scored them (a run from before the prompts existed, or a model without them).
 - `current_label_selection`: the workspace or global default lists, source,
   availability, usable count and content fingerprint. These describe current
   defaults, not an individual job's possibly different request settings.

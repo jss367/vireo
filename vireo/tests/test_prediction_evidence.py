@@ -243,3 +243,52 @@ def test_group_apply_cannot_tag_or_flag_deferred_subject(app_and_db):
     assert db.photos.get(photo['id'])['flag'] == photo['flag']
     assert [tuple(row) for row in db.conn.execute('SELECT * FROM photo_keywords')] == before
     assert db.predictions.get_rows()[0]['status'] == 'pending'
+
+
+def test_background_like_region_is_named_in_the_evidence(app_and_db):
+    """A box the classifier scored like bark carries a background verdict
+    and a review reason; a clean subject carries the opposite verdict; a
+    run that never scored the prompts is marked unmeasured."""
+    app, db = app_and_db
+    photo_id = db.photos.list_page()[0]['id']
+    # Three boxes in one save: a detection's id hashes its box, and a save
+    # replaces the photo's rows for the detector.
+    trunk, hawk, old = db.detections.save(photo_id, [
+        {'box': {'x': 0.0, 'y': 0.0, 'w': 0.4, 'h': 1.0}, 'confidence': .34, 'category': 'animal'},
+        {'box': {'x': 0.4, 'y': 0.3, 'w': 0.3, 'h': 0.7}, 'confidence': .49, 'category': 'animal'},
+        {'box': {'x': 0.7, 'y': 0.3, 'w': 0.2, 'h': 0.2}, 'confidence': .6, 'category': 'animal'},
+    ], detector_model='test-detector')
+    add(db, trunk, 'Elf Owl', .88, match_score=.41)
+    db.model_runs.record_classifier_match_score(
+        trunk, 'BioCLIP-2.5', 'legacy', .41, score_kind='cosine',
+        background_score=.27, background_prompt='leaves')
+    add(db, hawk, 'Red-shouldered Hawk', .52, match_score=.49)
+    db.model_runs.record_classifier_match_score(
+        hawk, 'BioCLIP-2.5', 'legacy', .49, score_kind='cosine',
+        background_score=.09, background_prompt='twigs')
+    add(db, old, 'Verdin', .7, match_score=.4)
+    db.model_runs.record_classifier_match_score(old, 'BioCLIP-2.5', 'legacy', .4, score_kind='cosine')
+    db.commit()
+    by_species = {row['species']: row['evidence'] for row in evidence_rows(app)}
+    owl = by_species['Elf Owl']
+    assert owl['background']['state'] == 'background'
+    assert owl['background']['background_prompt'] == 'leaves'
+    assert any('background' in reason and 'leaves' in reason for reason in owl['reasons'])
+    assert by_species['Red-shouldered Hawk']['background']['state'] == 'subject'
+    assert not any('background' in reason for reason in by_species['Red-shouldered Hawk']['reasons'])
+    assert by_species['Verdin']['background']['state'] == 'unavailable'
+
+
+def test_version_33_migration_adds_background_columns_idempotently(tmp_path):
+    path = str(tmp_path / 'previous.db')
+    with Database(path):
+        pass
+    with sqlite3.connect(path) as conn:
+        conn.execute('ALTER TABLE classifier_match_scores DROP COLUMN background_score')
+        conn.execute('ALTER TABLE classifier_match_scores DROP COLUMN background_prompt')
+        conn.execute('PRAGMA user_version=32')
+        schema._apply_pending(conn)
+        schema._apply_pending(conn)
+        assert conn.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION
+        columns = {row[1] for row in conn.execute('PRAGMA table_info(classifier_match_scores)')}
+        assert {'background_score', 'background_prompt'} <= columns

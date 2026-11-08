@@ -340,7 +340,7 @@
    "table",
    "classifier_match_scores",
    "classifier_match_scores",
-   "CREATE TABLE classifier_match_scores (\n                detection_id         INTEGER NOT NULL REFERENCES detections(id) ON DELETE CASCADE,\n                classifier_model     TEXT NOT NULL,\n                labels_fingerprint   TEXT NOT NULL,\n                max_match_score      REAL,\n                match_margin         REAL,\n                top_species          TEXT,\n                label_count          INTEGER,\n                score_kind           TEXT,\n                run_at               TEXT DEFAULT (datetime('now')),\n                PRIMARY KEY (detection_id, classifier_model, labels_fingerprint)\n            )"
+   "CREATE TABLE classifier_match_scores (\n                detection_id         INTEGER NOT NULL REFERENCES detections(id) ON DELETE CASCADE,\n                classifier_model     TEXT NOT NULL,\n                labels_fingerprint   TEXT NOT NULL,\n                max_match_score      REAL,\n                match_margin         REAL,\n                top_species          TEXT,\n                label_count          INTEGER,\n                score_kind           TEXT,\n                run_at               TEXT DEFAULT (datetime('now')),\n                background_score     REAL,\n                background_prompt    TEXT,\n                PRIMARY KEY (detection_id, classifier_model, labels_fingerprint)\n            )"
   ],
   [
    "index",

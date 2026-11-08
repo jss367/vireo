@@ -18,6 +18,7 @@ from species_memberships import (
     HighlightMembership,
     candidate_subjects,
     photo_species_memberships,
+    subject_is_background_like,
 )
 
 
@@ -396,14 +397,40 @@ def photo_highlight_entries(db, photo_id):
     return entries
 
 
-def _highlight_confidence_label(confidence, is_accepted):
+def _highlight_confidence_label(confidence, is_accepted, whole_frame_only=False):
+    """The bucket badge. ``whole_frame_only`` means every unconfirmed photo in
+    it was classified from its whole frame with no detected animal, so the
+    bucket is a guess about scenery and never "likely", whatever the
+    softmax says."""
     if is_accepted:
         return "confirmed"
+    if whole_frame_only:
+        return "whole_frame"
     if confidence is None:
         return "unknown"
     if confidence >= 0.85:
         return "likely"
     return "candidate"
+
+
+def _bucket_confidence(photos):
+    """``(avg_confidence, whole_frame_count)`` over a bucket's photos.
+
+    The average covers only predictions from a detected region: a
+    whole-frame guess has no animal behind its softmax, so it neither raises
+    nor lowers how sure the bucket looks.
+    """
+    localized = [p for p in photos if not p.get("whole_frame")]
+    confidences = [
+        p["predicted_confidence"]
+        for p in localized
+        if p.get("predicted_confidence") is not None
+    ]
+    avg_confidence = (
+        round(sum(confidences) / len(confidences), 4)
+        if confidences else None
+    )
+    return avg_confidence, len(photos) - len(localized)
 
 
 def normalize_highlight_confirmation_filter(value):
@@ -489,8 +516,11 @@ def collect_highlight_buckets(
         buckets.append(_highlight_bucket_entry(species, entry))
 
     _highlight_score_bucket(unidentified_photos, picked_first=True)
+    # Buckets made only of whole-frame guesses sort after every bucket with
+    # a detected animal behind it, whatever their scores.
     buckets.sort(
         key=lambda b: (
+            b.get("certainty") != "whole_frame",
             b.get("best_score") or 0,
             b.get("avg_confidence") or 0,
             b.get("photo_count") or 0,
@@ -544,6 +574,12 @@ def _highlight_candidate_photo(r, membership, confirmed_species, bucket_species)
         "prediction_id": prediction.get("prediction_id"),
         "predicted_species": prediction.get("species"),
         "predicted_confidence": prediction.get("confidence"),
+        "predicted_detector_confidence": prediction.get("detector_confidence"),
+        # The prediction came from the whole frame (the detector found no
+        # animal) or from a region the classifier scored like background;
+        # either way the page says so instead of showing a bare "ID 96%".
+        "whole_frame": membership.whole_frame,
+        "background_like": bool(prediction) and subject_is_background_like(prediction),
         "has_accepted_species": accepted is not None,
         "is_unidentified": species is None,
         "is_confirmable_prediction": (
@@ -558,23 +594,17 @@ def _highlight_bucket_entry(species, entry):
     """Score one species bucket and summarize it for the page."""
     photos = entry["photos"]
     _highlight_score_bucket(photos, picked_first=True)
-    confidences = [
-        p["predicted_confidence"]
-        for p in photos
-        if p.get("predicted_confidence") is not None
-    ]
-    avg_confidence = (
-        round(sum(confidences) / len(confidences), 4)
-        if confidences else None
-    )
+    avg_confidence, whole_frame_count = _bucket_confidence(photos)
     top = photos[0] if photos else {}
     return {
         "species": species,
         "is_accepted": entry["is_accepted"],
         "certainty": _highlight_confidence_label(
-            avg_confidence, entry["is_accepted"]
+            avg_confidence, entry["is_accepted"],
+            whole_frame_only=bool(photos) and whole_frame_count == len(photos),
         ),
         "avg_confidence": avg_confidence,
+        "whole_frame_count": whole_frame_count,
         "photo_count": len(photos),
         "best_quality": top.get("quality_score"),
         "best_score": bucket_best_score(photos),
@@ -620,15 +650,7 @@ def _highlight_photo_matches_query(
 
 def _refresh_highlight_bucket_metadata(bucket):
     photos = bucket.get("photos") or []
-    confidences = [
-        p.get("predicted_confidence")
-        for p in photos
-        if p.get("predicted_confidence") is not None
-    ]
-    avg_confidence = (
-        round(sum(confidences) / len(confidences), 4)
-        if confidences else None
-    )
+    avg_confidence, whole_frame_count = _bucket_confidence(photos)
     top = photos[0] if photos else {}
     # Filtering can drop the unconfirmed photos from a mixed bucket, leaving
     # only confirmed ones — recompute so the "candidate" badge and the
@@ -637,8 +659,10 @@ def _refresh_highlight_bucket_metadata(bucket):
         p.get("has_accepted_species") for p in photos
     )
     bucket["avg_confidence"] = avg_confidence
+    bucket["whole_frame_count"] = whole_frame_count
     bucket["certainty"] = _highlight_confidence_label(
-        avg_confidence, bucket.get("is_accepted")
+        avg_confidence, bucket.get("is_accepted"),
+        whole_frame_only=bool(photos) and whole_frame_count == len(photos),
     )
     bucket["photo_count"] = len(photos)
     bucket["best_quality"] = top.get("quality_score")

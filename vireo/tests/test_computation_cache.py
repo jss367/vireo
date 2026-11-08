@@ -1442,6 +1442,32 @@ def test_classification_artifact_carries_match_strength(tmp_path):
     assert row["top_species"] == "Robin"
     assert row["label_count"] == 1255
     assert row["score_kind"] == "cosine"
+    # Not carried by this artifact: unmeasured, never zero.
+    assert (row["background_score"], row["background_prompt"]) == (None, None)
+
+
+def test_classification_artifact_carries_background_match(tmp_path):
+    """The run's background-prompt match travels with its match summary, so
+    a cache-materialized trunk box is still known to be background-like."""
+    destination, _photo_id = _materialized_classification(
+        tmp_path, "with-background.db",
+        candidates=[{"species": "Elf Owl", "confidence": 0.88,
+                     "match_score": 0.41}],
+        match={"max_match_score": 0.41, "score_kind": "cosine",
+               "background_score": 0.27, "background_prompt": "leaves"},
+    )
+    row = destination.conn.execute(
+        "SELECT * FROM classifier_match_scores",
+    ).fetchone()
+    assert (row["background_score"], row["background_prompt"]) == (0.27, "leaves")
+    with pytest.raises(CacheFormatError, match="match.background_prompt must be a string"):
+        validate_artifact(classification_artifact(
+            match={"max_match_score": 0.3, "background_prompt": 7},
+        ))
+    with pytest.raises(CacheFormatError, match="match.background_score"):
+        validate_artifact(classification_artifact(
+            match={"max_match_score": 0.3, "background_score": "high"},
+        ))
 
 
 def test_artifact_without_match_strength_materializes_as_not_recorded(tmp_path):

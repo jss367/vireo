@@ -30,6 +30,8 @@ from confirmed identifications in the catalog.
 
 import math
 
+import background_match
+
 COSINE = "cosine"
 LOGIT = "logit"
 SCORE_KINDS = (COSINE, LOGIT)
@@ -141,6 +143,53 @@ def assess(model, score_kind, max_match_score, margin=None, config=None):
         result["explanation"] = (
             f"Best label matches at {score_text}, above the {floor_text} floor "
             f"calibrated for {model}."
+        )
+    return result
+
+
+#: Background assessment states.
+BACKGROUND = "background"
+SUBJECT = "subject"
+
+
+def assess_background(score_kind, max_match_score, background_score, background_prompt=None):
+    """Judge whether a run's region matched background better than its list.
+
+    Compares the best species cosine with the best background-prompt cosine
+    from the same run (``background_match`` holds the rule and its margin).
+    Unlike :func:`assess`, this needs no per-model calibration: both scores
+    come from one model on one scale. A run without a background score
+    (an older run, or a supervised model with no prompts) is
+    ``unavailable``, never a verdict either way.
+    """
+    result = {
+        "state": UNAVAILABLE,
+        "score_kind": score_kind,
+        "max_match_score": max_match_score,
+        "background_score": background_score,
+        "background_prompt": background_prompt,
+        "gap": background_match.background_gap(max_match_score, background_score),
+        "margin": background_match.BACKGROUND_MARGIN,
+        "explanation": "Background match was not recorded for this run.",
+    }
+    if result["gap"] is None or score_kind != background_match.COSINE:
+        return result
+    label_text = _format_score(max_match_score, score_kind)
+    background_text = _format_score(background_score, score_kind)
+    prompt = background_prompt or "background"
+    if background_match.is_background_like(max_match_score, background_score, score_kind):
+        result["state"] = BACKGROUND
+        result["explanation"] = (
+            f"This region matches “{prompt}” at {background_text}, within "
+            f"{result['margin']:.2f} of its best species label at {label_text}. "
+            "It looks like background rather than an animal, so the species "
+            "shown is the closest label to scenery, not an identification."
+        )
+    else:
+        result["state"] = SUBJECT
+        result["explanation"] = (
+            f"Best species label matches at {label_text}; the closest "
+            f"background prompt (“{prompt}”) reaches only {background_text}."
         )
     return result
 

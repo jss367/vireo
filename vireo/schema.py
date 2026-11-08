@@ -239,6 +239,36 @@ def _retain_global_flag_attribution(conn):
     conn.execute(CURRENT_FLAG_ATTRIBUTION_OBJECTS[1])
 
 
+CLASSIFIER_BACKGROUND_COLUMNS = (
+    ("background_score", "REAL"),
+    ("background_prompt", "TEXT"),
+)
+
+
+def _classifier_match_score_columns(conn):
+    return {row[1] for row in conn.execute("PRAGMA table_info(classifier_match_scores)")}
+
+
+def _add_classifier_background_match(conn):
+    """Record each classifier run's best background-prompt match.
+
+    Rows written before this stay NULL: the prompts were not scored, so the
+    verdict for those runs is "not measured", not "not background". A
+    re-classification fills them in.
+    """
+    present = _classifier_match_score_columns(conn)
+    for column, definition in CLASSIFIER_BACKGROUND_COLUMNS:
+        if column not in present:
+            conn.execute(f"ALTER TABLE classifier_match_scores ADD COLUMN {column} {definition}")
+
+
+def _validate_classifier_background_match(conn):
+    columns = _classifier_match_score_columns(conn)
+    missing = [column for column, _ in CLASSIFIER_BACKGROUND_COLUMNS if column not in columns]
+    if missing:
+        raise RuntimeError(f"classifier_match_scores is missing {', '.join(missing)}")
+
+
 # Job types only Vireo itself started before ``origin`` was recorded: the
 # hourly storage maintenance and the two recurring discovery checks.
 _HISTORICAL_SYSTEM_JOB_TYPES = (
@@ -336,6 +366,10 @@ MIGRATIONS = (
     Migration(
         32, "detection_subject_verdict",
         _add_detection_subject_verdict, _validate_detection_subject_verdict,
+    ),
+    Migration(
+        33, "classifier_background_match",
+        _add_classifier_background_match, _validate_classifier_background_match,
     ),
 )
 

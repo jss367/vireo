@@ -62,6 +62,8 @@ def _record_match_scores(db: Database, raw_results: list[RawResult], model_name:
                     top_species=match.get("top_species"),
                     label_count=match.get("label_count"),
                     score_kind=match.get("score_kind"),
+                    background_score=match.get("background_score"),
+                    background_prompt=match.get("background_prompt"),
                 )
         except Exception:
             # broad: diagnostic data must never fail a classification run.
