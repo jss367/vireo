@@ -129,3 +129,30 @@ def test_snapshot_write_failure_does_not_change_last_preset(live_server, page, s
     assert page.evaluate("localStorage.getItem('vireo.export.lastPreset')") == "custom"
     open_export(page, live_server, "editor")
     expect(page.locator("#exportTemplate")).to_have_value("recovered_{original}")
+
+
+@pytest.mark.parametrize("legacy_date,legacy_time,combined,expected", [
+    ("1", "0", None, True),
+    ("0", "1", None, True),
+    ("0", "0", None, False),
+    ("1", "1", "0", False),
+])
+def test_editor_migrates_old_capture_keys_before_snapshot(
+    live_server, page, legacy_date, legacy_time, combined, expected,
+):
+    page.goto(f"{live_server['url']}/browse")
+    page.evaluate("""([date, time, combined]) => {
+        localStorage.setItem('vireo.export.lastPreset', 'custom');
+        localStorage.setItem('vireo.browse.export.metadata.captureDate', date);
+        localStorage.setItem('vireo.browse.export.metadata.captureTime', time);
+        if (combined !== null) {
+            localStorage.setItem('vireo.browse.export.metadata.captureDateTime', combined);
+        }
+    }""", [legacy_date, legacy_time, combined])
+    open_export(page, live_server, "editor")
+    expect(page.locator("#exportMetadataCaptureDate")).to_be_checked(checked=expected)
+    expect(page.locator("#exportMetadataCaptureTime")).to_be_checked(checked=expected)
+    snapshot = page.evaluate("JSON.parse(localStorage.getItem('vireo.export.customSettings'))")
+    assert snapshot["metadata_fields"] == (["capture_date", "capture_time"] if expected else [])
+    open_export(page, live_server, "browse")
+    expect(page.locator("#exportMetadataCaptureDateTime")).to_be_checked(checked=expected)

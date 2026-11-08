@@ -33,20 +33,6 @@ function setExportDismissible(/** @type {boolean} */ dismissible) {
   });
 }
 
-function migrateExportCaptureDateTimePreference() {
-  var combinedKey = 'vireo.browse.export.metadata.captureDateTime';
-  if (VireoViewPreferences.read(combinedKey) !== null) return;
-
-  var legacyDate = VireoViewPreferences.read('vireo.browse.export.metadata.captureDate');
-  var legacyTime = VireoViewPreferences.read('vireo.browse.export.metadata.captureTime');
-  if (legacyDate === null && legacyTime === null) return;
-
-  VireoViewPreferences.write(
-    combinedKey,
-    legacyDate === '1' || legacyTime === '1' ? '1' : '0'
-  );
-}
-
 export function openExportModal(/** @type {number[] | undefined} */ photoIds = undefined) {
   var activeIds = Array.isArray(photoIds) ? photoIds.slice() : getActiveSelection();
   if (activeIds.length === 0) return;
@@ -79,7 +65,7 @@ export function openExportModal(/** @type {number[] | undefined} */ photoIds = u
   /** @type {HTMLInputElement} */ (document.getElementById('exportDest')).value = '';
   /** @type {HTMLInputElement} */ (document.getElementById('exportSubfolder')).checked = false;
   /** @type {HTMLInputElement} */ (document.getElementById('exportSubfolderName')).value = 'exported';
-  migrateExportCaptureDateTimePreference();
+  VireoExportPresets.migrateExportCaptureDateTimePreference();
   VireoViewPreferences.restoreAll(/** @type {HTMLElement} */ (document.getElementById('exportOverlay')));
   /** @type {HTMLElement} */ (document.getElementById('exportOverlay')).classList.add('open');
   // Re-applies the last-used preset (saved or built-in) over the defaults

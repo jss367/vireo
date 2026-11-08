@@ -666,7 +666,22 @@ var VireoExportPresets = (function() {
     customStorageWarningShown = !saved;
   }
 
+  function migrateExportCaptureDateTimePreference() {
+    var combinedKey = 'vireo.browse.export.metadata.captureDateTime';
+    if (VireoViewPreferences.read(combinedKey) !== null) return;
+
+    var legacyDate = VireoViewPreferences.read('vireo.browse.export.metadata.captureDate');
+    var legacyTime = VireoViewPreferences.read('vireo.browse.export.metadata.captureTime');
+    if (legacyDate === null && legacyTime === null) return;
+
+    VireoViewPreferences.write(
+      combinedKey,
+      legacyDate === '1' || legacyTime === '1' ? '1' : '0'
+    );
+  }
+
   function migrateLegacyCustomSettings() {
+    migrateExportCaptureDateTimePreference();
     // The editor has no data-view-preference attributes. Read the legacy
     // Browse preferences explicitly so migration works from either page.
     [
@@ -872,6 +887,7 @@ var VireoExportPresets = (function() {
 
   return {
     modalOpened: modalOpened,
+    migrateExportCaptureDateTimePreference: migrateExportCaptureDateTimePreference,
     subfolderName: subfolderName,
     markCustom: markCustom,
   };
