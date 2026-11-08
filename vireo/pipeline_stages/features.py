@@ -1454,6 +1454,14 @@ class _MaskPass:
         "Cancelled" summary on the final step update so the job tree
         doesn't report a half-done stage as if it ran to term, as the
         classify-cancel path does.
+
+        A cache invalidation or an unmeasured detail recorded before the
+        cancel reached this branch is kept on the stage result and in
+        the step's ``error_count``, matching ``finalize``. Without that,
+        a cancel that arrives after ``_measure_cached_detail`` has
+        dropped a mask leaves the Jobs row zero-warning next to photos
+        that now have no mask on disk, and the next run has no rebuild
+        warning to show.
         """
         run = self.run
         run.stages["extract_masks"]["status"] = "completed"
@@ -1468,16 +1476,30 @@ class _MaskPass:
             summary=em_summary,
             # Warnings on the Jobs page render off the step's
             # ``error_count`` — the mid-loop updates and the
-            # normal finalizer both include unreadable counts,
-            # so the cancel branch has to as well or a cancel
-            # that arrives after a source dropped shows a
+            # normal finalizer both include unreadable counts and
+            # the cache/detail counters, so the cancel branch has
+            # to as well or a cancel that arrives after a source
+            # dropped (or a cached mask was invalidated) shows a
             # zero-warning row alongside a result that records
-            # positive ``unreadable``.
+            # positive ``unreadable`` / ``mask_cache_invalidated``.
             error_count=(
                 self.em_failed + self.em_unreadable
                 + self.em_preflight_unreadable
+                + self.detail_unreadable
+                + self.mask_cache_invalidated
             ),
         )
+        if self.mask_cache_invalidated > 0:
+            # The cache rows AND files for these photos were dropped
+            # before the cancel reached this branch, so the next
+            # Process run will rebuild them. Surface that the same way
+            # ``finalize`` does — ``_build_rollups`` is the shared text
+            # — so the user sees why those photos lost their mask.
+            run.errors.append(
+                f"[extract_masks] "
+                f"{_invalidated_cache(self.mask_cache_invalidated)} "
+                f"and will be rebuilt on the next Process run."
+            )
         run.result["stages"]["extract_masks"] = {
             "masked": self.masked + self.em_preflight_masked,
             "skipped": self.skipped, "failed": self.em_failed,
@@ -1489,6 +1511,9 @@ class _MaskPass:
                 self.total + self.em_preflight_unreadable
                 + self.em_preflight_masked
             ),
+            "detail_measured": self.detail_measured,
+            "detail_unreadable": self.detail_unreadable,
+            "mask_cache_invalidated": self.mask_cache_invalidated,
             "cancelled": True,
             "phase_seconds": self._phase_seconds_result(),
         }

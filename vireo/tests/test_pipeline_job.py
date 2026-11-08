@@ -19821,6 +19821,114 @@ def test_mask_cache_invalidation_drops_the_row_when_the_unlink_is_refused(
     assert os.path.isfile(mask_path)
 
 
+def test_cancel_after_cached_mask_invalidation_preserves_rebuild_accounting(
+    tmp_path, monkeypatch,
+):
+    """A cancel that arrives after ``_measure_cached_detail`` dropped a
+    mask row must keep ``mask_cache_invalidated`` on the stage result,
+    fold it into the step's ``error_count`` so the Jobs row warns, and
+    emit the "will be rebuilt on the next Process run" rollup. Before
+    the fix, the cancel branch dropped these counters and the warning
+    even though the photo now had no mask on disk, so the user saw a
+    zero-warning cancelled row next to a quietly broken cache.
+    """
+    import config as cfg
+    import dino_embed
+    import masking
+    import numpy as np
+    import pipeline_job as pj
+    import quality
+
+    specs = [
+        {"filename": "a.jpg", "box": (10, 20, 100, 200), "model": "MegaDetector"},
+        {"filename": "b.jpg", "box": (30, 40, 120, 220), "model": "MegaDetector"},
+    ]
+    db, _, _, (pid_a, pid_b) = _run_extract_masks_for_test(
+        tmp_path, monkeypatch, "sam2-small", specs,
+    )
+    _null_subject_detail(db, pid_a)
+    _null_subject_detail(db, pid_b)
+
+    # Second run uses the cache for both photos. The first call to
+    # measure_cached_subject_detail invalidates photo A's cache AND
+    # cancels the job so the top-of-loop abort check short-circuits
+    # photo B into ``finish_cancelled``.
+    def no_sam(*a, **k):
+        raise AssertionError("a cache hit must not run SAM")
+
+    monkeypatch.setattr(masking, "render_proxy", lambda *a, **k: np.zeros((4, 4, 3), dtype=np.uint8))
+    monkeypatch.setattr(masking, "generate_mask", no_sam)
+    monkeypatch.setattr(masking, "crop_completeness", lambda m: 0.9)
+    monkeypatch.setattr(masking, "crop_subject", lambda p, m, margin=0.15: None)
+    monkeypatch.setattr(masking, "ensure_sam2_weights", lambda **k: None)
+    monkeypatch.setattr(dino_embed, "embed", lambda p, variant=None: np.zeros(384, dtype=np.float32))
+    monkeypatch.setattr(dino_embed, "embed_batch", lambda imgs, variant=None: np.zeros((len(imgs), 384), dtype=np.float32))
+    monkeypatch.setattr(dino_embed, "embedding_to_blob", lambda e: b"")
+    monkeypatch.setattr(dino_embed, "ensure_dinov2_weights", lambda **k: None)
+    cfg.save({"pipeline": {"sam2_variant": "sam2-small", "dinov2_variant": "vit-b14"}})
+
+    col_id = db.conn.execute(
+        "SELECT id FROM collections ORDER BY id LIMIT 1",
+    ).fetchone()[0]
+    params = PipelineParams(
+        collection_id=col_id,
+        skip_classify=True,
+        skip_extract_masks=False,
+        skip_regroup=True,
+    )
+    runner = FakeRunner()
+    job = _make_job()
+
+    def invalidate_then_cancel(path, source_path, frame_size=None):
+        runner.cancelled_ids.add(job["id"])
+        return quality.MASK_CACHE_INVALID
+
+    monkeypatch.setattr(
+        quality, "measure_cached_subject_detail", invalidate_then_cancel,
+    )
+
+    result = run_pipeline_job(
+        job, runner, str(tmp_path / "test.db"), db._active_workspace_id, params,
+    )
+    em = result["stages"]["extract_masks"]
+    assert em.get("cancelled") is True, f"Expected a cancelled stage; got {em!r}"
+    # The cancel branch must still report the dropped cache so the
+    # photo's missing mask is not silently absorbed by "Cancelled".
+    assert em["mask_cache_invalidated"] == 1, (
+        f"Cancelled stage must preserve mask_cache_invalidated; got {em!r}"
+    )
+    # The Jobs row renders warnings off ``error_count`` — a cancel after
+    # an invalidation must count the dropped mask the same way the
+    # mid-loop updates and ``finalize`` do.
+    final = _extract_masks_final_update(runner)
+    assert final.get("error_count", 0) >= 1, (
+        f"error_count must at least cover the dropped mask; got "
+        f"final={final!r}, em={em!r}"
+    )
+    # And the rebuild rollup is appended so the user sees why the
+    # photo will be re-masked on the next Process run.
+    rebuild = [
+        e for e in result.get("errors", [])
+        if "will be rebuilt on the next Process run" in e
+    ]
+    assert rebuild, (
+        f"Expected a rebuild rollup after a cancelled invalidation; got "
+        f"{result.get('errors')!r}"
+    )
+    # The data layer bookkeeping that Codex flagged stays consistent:
+    # the row was dropped, and the file was removed (or at least the
+    # row drop broke the cache-hit loop for the next run).
+    assert db.masks_features.get_mask(pid_a, "sam2-small") is None
+    # Also make sure we did not touch photo B's row — it was cancelled
+    # before its iteration ran, so its mask stays intact for the next
+    # Process run.
+    assert db.masks_features.get_mask(pid_b, "sam2-small") is not None
+    # pj is imported just to exercise the stage module path used
+    # throughout this file; keep the import visible so a future
+    # module split doesn't silently detach this test from it.
+    assert hasattr(pj, "run_pipeline_job")
+
+
 def test_detail_reread_outage_records_the_reason_for_the_fatal_message(tmp_path, monkeypatch):
     # When the detail re-read of a freshly made mask detects that the
     # source is offline, the folder is latched so later photos in the
