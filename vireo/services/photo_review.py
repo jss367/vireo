@@ -155,9 +155,11 @@ class PhotoReviewService:
         ``rejections`` maps a rejected photo to ``{"keeper_photo_id",
         "comparison"}``: the photo kept instead of it and the measurement that
         decided (``comparison`` may be None when none was shared). The keeper
-        must be a photo of the active workspace; the attribution then names it
-        so the reject stays explainable and the orphan check can find it if
-        the keeper is later deleted or rejected.
+        must be a photo of the active workspace that is kept: flagged by this
+        Apply or not currently rejected, so a reject is never recorded against
+        a photo that cannot justify it. The attribution then names it so the
+        reject stays explainable and the orphan check can find it if the
+        keeper is later deleted or rejected.
         """
         rejections = dict(rejections or {})
         ids = list(keepers) + list(rejects) + list(unflag)
@@ -168,6 +170,9 @@ class PhotoReviewService:
                 raise ValueError("Photo not in active workspace")
             if any(pid not in photos for pid in keeper_ids):
                 raise ValueError("Keeper photo not in active workspace")
+            for pid in keeper_ids:
+                if pid not in keepers and photos[pid]["flag"] == "rejected":
+                    raise ValueError(f"Keeper photo {pid} is itself rejected")
             for pid in ids + keeper_ids:
                 self.db._verify_photo_in_workspace(pid)
             old = {pid: photos[pid]["flag"] or "none" for pid in ids}

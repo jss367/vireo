@@ -9,20 +9,27 @@ function cullSourcePhoto(id) {
   return photos.find(function(p) { return p.id === id; }) || null;
 }
 
+/** Every photo on screen under every species, so a keeper is found whichever species lists it. */
+function cullAllDisplayPhotos() {
+  return (cullData ? cullData.species_groups : []).flatMap(function(sg) {
+    return cullGroupsForSpecies(sg).flatMap(function(g) { return g.photos; });
+  });
+}
+
 /**
  * The photo a reject loses to: the reference it was compared against in
- * Compare, else the best kept photo of its scene group (the same
- * encounter), else the species' reference favorite. Null when nothing in
- * the species is kept, so the reject is recorded without a keeper.
+ * Compare (under whichever species the comparison was made), else the best
+ * kept photo of its scene group (the same encounter), else the species'
+ * reference favorite. Null when nothing in the species is kept, so the
+ * reject is recorded without a keeper.
  *
  * @param {CullDisplayPhoto} photo @param {CullSceneGroup} group @param {CullSpeciesGroup} sg
  * @returns {CullKeeperChoice | null}
  */
 function resolveCullKeeper(photo, group, sg) {
-  var all = cullGroupsForSpecies(sg).flatMap(function(g) { return g.photos; });
   var chosen = cullRejectKeepers[photo.photo_id];
   if (chosen) {
-    var ref = all.find(function(p) { return p.photo_id === chosen && p.action === 'keep'; });
+    var ref = cullAllDisplayPhotos().find(function(p) { return p.photo_id === chosen && p.action === 'keep'; });
     if (ref) return {keeper: ref, scope: 'compared'};
   }
   var best = group.photos.filter(function(p) { return p.action === 'keep' && p.photo_id !== photo.photo_id; })
@@ -35,11 +42,24 @@ function resolveCullKeeper(photo, group, sg) {
 }
 
 /**
- * The measurement a reject and its keeper share. Focus evidence (eye or
- * subject Tenengrad) when both were measured on the same basis; the
- * composite quality only inside one encounter, since it is a rank among
- * that encounter's frames and means nothing across two. Null when the two
- * share no measurement, so the record never implies one.
+ * Whether the scorer put both photos in one encounter.
+ *
+ * @param {number} photoId @param {number} keeperId
+ */
+function cullSameEncounter(photoId, keeperId) {
+  return (pipelineResults ? pipelineResults.encounters : []).some(function(enc) {
+    var ids = enc.photo_ids || [];
+    return ids.indexOf(photoId) >= 0 && ids.indexOf(keeperId) >= 0;
+  });
+}
+
+/**
+ * The measurement a reject and its keeper share, only inside one encounter:
+ * the focus evidence (eye or subject Tenengrad) when both were measured on
+ * the same basis, else the composite quality. Both are relative to the
+ * encounter's frames (raw Tenengrad varies with region, texture, exposure
+ * and scale; the quality is a rank), so a keeper from another encounter
+ * gets null rather than a comparison the record would imply was decisive.
  *
  * @param {number} photoId @param {number} keeperId @param {string} scope
  * @returns {CullComparison | null}
@@ -47,7 +67,7 @@ function resolveCullKeeper(photo, group, sg) {
 function cullComparison(photoId, keeperId, scope) {
   var a = cullSourcePhoto(photoId);
   var b = cullSourcePhoto(keeperId);
-  if (!a || !b) return null;
+  if (!a || !b || !cullSameEncounter(photoId, keeperId)) return null;
   var fa = a.focus_evidence;
   var fb = b.focus_evidence;
   if (fa && fb && fa.basis === fb.basis && typeof fa.measurement === 'number' && typeof fb.measurement === 'number') {
@@ -56,7 +76,7 @@ function cullComparison(photoId, keeperId, scope) {
       photo: Math.round(fa.measurement), keeper: Math.round(fb.measurement), scope: scope,
     };
   }
-  if (scope === 'encounter' && typeof a.quality_composite === 'number' && typeof b.quality_composite === 'number') {
+  if (typeof a.quality_composite === 'number' && typeof b.quality_composite === 'number') {
     return {basis: 'quality', measurement_name: 'quality rank in encounter',
       photo: a.quality_composite, keeper: b.quality_composite, scope: scope};
   }
@@ -71,7 +91,7 @@ function cullComparison(photoId, keeperId, scope) {
 function cullKeeperText(keeperName, comparison) {
   var text = 'Instead of ' + keeperName;
   if (!comparison) return text + ' (no shared measurement)';
-  var where = comparison.scope === 'encounter' ? 'same encounter' : comparison.scope === 'compared' ? 'compared side by side' : 'other encounter';
+  var where = comparison.scope === 'compared' ? 'compared side by side' : 'same encounter';
   var basis = comparison.basis === 'quality' ? comparison.measurement_name
     : comparison.basis + ' ' + comparison.measurement_name;
   return text + ' · ' + basis + ' ' + comparison.photo + ' vs ' + comparison.keeper + ' (' + where + ')';

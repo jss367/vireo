@@ -37,8 +37,9 @@ comes with converting the page to modules.
   in Compare (`cullRejectKeepers`) is remembered only while the decision is
   a reject; changing or releasing the decision drops it, and Apply moves the
   record onto the source photo as `reject_keeper`. `cullComparison` records a
-  measurement only when both photos share its basis; the composite quality is
-  a rank within one encounter and is never compared across two.
+  measurement only when both photos are in one encounter (the focus evidence
+  when they share its basis, else the composite quality); both are relative to
+  that encounter's frames and are never compared across two.
 
 - Your pins (`cullManualDecisions`) outrank saved flags and fresh suggestions,
   so a slider tweak never silently undoes a decision. Review pins stay pinned

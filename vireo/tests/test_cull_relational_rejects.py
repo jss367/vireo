@@ -158,3 +158,44 @@ def test_apply_rejects_bad_rejections(app_and_db):
     assert (db.photos.get(loser)["flag"] or "none") == "none"
     assert post([{"photo_id": loser, "keeper_photo_id": keeper, "comparison": None}]).status_code == 200
     assert flag_note(db, loser, "rejected")["comparison"] is None
+
+
+def test_apply_refuses_a_keeper_that_is_currently_rejected(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    keeper, loser, other = _three(db)
+    PhotoReviewService(db).set_flag(other, "rejected")
+    resp = client.post("/api/culling/apply", json={
+        "keepers": [keeper], "rejects": [loser], "unflag": [],
+        "rejections": [{"photo_id": loser, "keeper_photo_id": other, "comparison": None}],
+    })
+    assert resp.status_code == 403
+    assert "rejected" in resp.get_json()["error"]
+    assert (db.photos.get(loser)["flag"] or "none") == "none"
+    # Naming it among this Apply's keepers makes it kept again, so it may justify the reject.
+    resp = client.post("/api/culling/apply", json={
+        "keepers": [other], "rejects": [loser], "unflag": [],
+        "rejections": [{"photo_id": loser, "keeper_photo_id": other, "comparison": None}],
+    })
+    assert resp.status_code == 200
+    assert flag_note(db, loser, "rejected")["keeper_status"] == "kept"
+
+
+def test_merging_the_keeper_into_a_survivor_retargets_the_reject(app_and_db):
+    """The remap every photo-row merge runs (``PhotoRowDeletion.delete``) follows the keeper."""
+    from repositories.photo_review import remap_flag_attribution_keepers
+
+    app, db = app_and_db
+    client = app.test_client()
+    keeper, loser, survivor = _three(db)
+    _apply(client, keeper, [loser])
+    with db.transaction():
+        remap_flag_attribution_keepers(db.conn, {keeper: survivor, loser: None})
+    note = flag_note(db, loser, "rejected")
+    assert note["keeper_photo_id"] == survivor
+    assert note["keeper_status"] == "kept"
+    assert client.get("/api/culling/orphans").get_json()["count"] == 0
+    # The replay snapshots follow too, so undo and redo never restore the merged id.
+    assert client.post("/api/undo").status_code == 200
+    assert client.post("/api/redo").status_code == 200
+    assert flag_note(db, loser, "rejected")["keeper_photo_id"] == survivor

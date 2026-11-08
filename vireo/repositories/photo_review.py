@@ -23,6 +23,29 @@ import sqlite3
 from collections.abc import Collection, Iterable, Iterator
 
 
+def remap_flag_attribution_keepers(conn: sqlite3.Connection, mapping: dict[int, int | None]) -> None:
+    """Point rejects at the photo that absorbed their keeper when catalog photos merge.
+
+    A plain delete (target None) leaves the dangling id for the orphan check
+    to find. The replay snapshots in ``flag_attribution_history`` are
+    rewritten too, so an undo or redo cannot restore the stale id.
+    """
+    for source, target in mapping.items():
+        if target is None or source == target:
+            continue
+        conn.execute(
+            "UPDATE current_flag_attribution SET keeper_photo_id = ? WHERE keeper_photo_id = ?",
+            (target, source),
+        )
+        for column in ("old_state", "new_state"):
+            conn.execute(
+                f"""UPDATE flag_attribution_history
+                    SET {column} = json_set({column}, '$.keeper_photo_id', ?)
+                    WHERE json_extract({column}, '$.keeper_photo_id') = ?""",
+                (target, source),
+            )
+
+
 class PhotoReviewRepository:
     def __init__(
         self, conn: sqlite3.Connection, workspace_id: int | None, *, chunk_size: int = 800,

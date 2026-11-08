@@ -52,7 +52,7 @@ function results() {
   const photos = [
     photo(1, {quality_composite: 0.9, focus_evidence: {basis: 'eye', measurement: 1840.4, measurement_name: 'Tenengrad'}}),
     photo(2, {quality_composite: 0.4, focus_evidence: {basis: 'eye', measurement: 610.2, measurement_name: 'Tenengrad'}}),
-    photo(3, {quality_composite: 0.8, focus_evidence: {basis: 'subject', measurement: 300, measurement_name: 'Tenengrad'}}),
+    photo(3, {quality_composite: 0.8, focus_evidence: {basis: 'eye', measurement: 300, measurement_name: 'Tenengrad'}}),
     photo(4, {quality_composite: 0.3, focus_evidence: null}),
   ];
   return {photos, encounters: [
@@ -93,13 +93,29 @@ test('a reject with nothing kept in its encounter loses to the species reference
 test('composite quality compares only inside one encounter', () => {
   const {ctx} = page();
   ctx.setPipelineResults(results());
-  // Same encounter, bases differ (subject vs none): the quality rank still applies.
+  // Same encounter, one photo unmeasured: the quality rank still applies.
   assert.deepEqual(plain(ctx.cullComparison(4, 3, 'encounter')),
     {basis: 'quality', measurement_name: 'quality rank in encounter', photo: 0.3, keeper: 0.8, scope: 'encounter'});
-  // Different encounters and different bases: nothing honest to record.
-  assert.equal(ctx.cullComparison(3, 1, 'species'), null);
-  // Different encounters, same basis: the raw measurements are recorded as such.
-  assert.equal(plain(ctx.cullComparison(2, 1, 'species')).scope, 'species');
+  // Different encounters: nothing honest to record, even on a shared basis.
+  assert.equal(ctx.cullComparison(2, 3, 'species'), null);
+  assert.equal(ctx.cullComparison(2, 3, 'compared'), null);
+  // Compared side by side inside one encounter: the focus evidence still applies.
+  assert.equal(plain(ctx.cullComparison(2, 1, 'compared')).basis, 'eye');
+});
+
+test('a Compare reject keeps its reference when the photo is listed under another species first', () => {
+  const {ctx} = page();
+  const data = results();
+  // Photo 2 shows two species; its keeper 3 is kept only under the second one.
+  data.photos[1].confirmed_species_list = ['Black Phoebe', "Say's Phoebe"];
+  data.photos[2].species_top5 = [["Say's Phoebe", 0.9]];
+  ctx.setPipelineResults(data);
+  ctx.setCullAction(3, 'keep');
+  ctx.cullRejectKeepers[2] = 3;
+  ctx.setCullAction(2, 'reject');
+  assert.equal(ctx.cullData.species_groups[0].species, 'Black Phoebe');
+  const [rejection] = plain(ctx.collectCullingApplyPayload(ctx.cullData).rejections);
+  assert.equal(rejection.keeper_photo_id, 3);
 });
 
 test('a reject with nothing kept anywhere is sent without a keeper', () => {

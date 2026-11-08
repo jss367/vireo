@@ -371,7 +371,8 @@ def create_caches_blueprint(
         ``rejections`` (optional) says what each reject lost to:
         ``[{"photo_id", "keeper_photo_id", "comparison"}]``, every
         ``photo_id`` one of ``rejects`` and every keeper a photo that is not
-        itself being rejected or cleared here.
+        itself being rejected or cleared here (the service also refuses a
+        keeper whose current flag is rejected).
         """
         db = get_db()
         body = request.get_json(silent=True) or {}
