@@ -182,7 +182,7 @@ def test_status_never_reads_a_default_instance_or_exposes_its_path():
     ns = namespace()
     registry = ns["build_server"](Catalog())  # Inert registrar, not an SDK server.
     result = registry.tools["vireo_status"]()
-    assert result == {"running": True, "version": "invented",
+    assert result == {"running": True, "version": "invented", "build_commit": None,
                       "active_workspace": {"id": 7, "name": "invented"}, "photo_count": 1}
     assert "db_path" not in result and "token" not in result
 
