@@ -9,7 +9,7 @@ interface CullSourcePhoto {
   flag?: string; rating?: number; width?: number; height?: number;
   quality_composite?: number | null; subject_sharpness?: number | null; label?: string;
   /** The scorer's focus measurement: eye or subject Tenengrad and which it was. */
-  focus_evidence?: {basis: string; measurement?: number | null; measurement_name?: string} | null;
+  focus_evidence?: {basis: string; measurement?: number | null; measurement_name?: string; scale_px?: number | null} | null;
   /** The quality comparable across encounters, null until the subject detail is measured. */
   comparable_quality?: CullComparableQuality | null;
   /** The saved record of what this reject lost to (``filename`` null once that photo is deleted). */

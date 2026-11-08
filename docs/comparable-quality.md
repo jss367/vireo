@@ -73,9 +73,10 @@ calibrated sharpness scale.
   no validated absolute focus threshold exists, and no automatic rejection
   reads this value.
 * Not a replacement for the encounter rank. Inside one encounter the
-  scorer's own evidence (eye or subject Tenengrad at proxy scale among the
-  encounter's frames) remains the comparison Cull records; the detail is
-  used across encounters, or inside one when that evidence is missing.
+  scorer's own evidence remains the comparison Cull records; since the
+  detail became the scorer's preferred basis (below), that evidence is
+  usually the detail ranked among the encounter's frames, and the fixed
+  scale is what lets the same number serve across encounters too.
 
 ## Sample used to choose the constants
 
@@ -99,6 +100,32 @@ for flagged), which the proxy-scale value reads as soft. Medians: flagged
 detail 15,870, rejected 7,030; the midpoint of their spread is the mapping's
 anchor. Measuring took 0.04 s per photo from a working copy.
 
+## As the encounter's focus basis
+
+The scorer (`scoring.score_encounter`) ranks each photo's focus on the
+detail when it has been measured, in preference to the proxy-scale
+`subject_tenengrad` and after the eye window when the user has turned eye
+detection on (`docs/relative-focus-evidence.md`). That order follows the
+photographer's own decisions on this catalog: in the 43 bursts (192 frame
+pairs, November 2026) where one frame was flagged and others rejected, the
+chance that a measure ranks the flagged frame above a rejected one, and how
+often its top frame is the flagged one:
+
+| measure, within the burst | AUC flagged > rejected | top frame flagged |
+| --- | ---: | ---: |
+| `subject_detail` at 512 px | 0.927 | 40 of 43 |
+| stored `subject_tenengrad` (proxy scale) | 0.875 | 36 of 43 |
+| `eye_tenengrad` (110 pairs with an eye on both frames) | 0.855 | |
+
+Flagged against unflagged frames in the same burst is near chance for every
+measure (0.58 to 0.65): an unflagged frame is usually as sharp as the chosen
+one and lost on pose or framing, so that label says nothing about sharpness.
+A head-region Tenengrad (SuperAnimal keypoints boxing bill, crown, eyes and
+nape) was measured on the same bursts and ranked the flagged frame above a
+rejected one 0.925 of the time with its top frame flagged in 28 of 33, no
+better than the whole subject on the same frames, so no head measurement is
+stored.
+
 ## Where it flows
 
 * The mask stage (`pipeline_stages/features.py`) and the standalone Extract
@@ -108,7 +135,8 @@ anchor. Measuring took 0.04 s per photo from a working copy.
   Process plan counts those as work ("Will measure subject detail for N
   cached masks"); a source that cannot be read leaves the measurement
   pending and fails the stage with a message saying so.
-* Scoring attaches `comparable_quality` next to `quality_composite`. Cached
+* Scoring ranks encounter focus on it (above) and attaches
+  `comparable_quality` next to `quality_composite`. Cached
   results are re-scored from the live feature columns whenever they are
   loaded (`services.saved_review.refresh_saved_suggestions`), so a
   measurement made after the last regroup reaches the pages without one.

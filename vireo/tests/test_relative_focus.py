@@ -2,6 +2,7 @@
 
 import copy
 import json
+import math
 from pathlib import Path
 
 import numpy as np
@@ -147,3 +148,69 @@ def test_unclipped_exposure_gain_changes_gradients_and_rank_without_changing_edg
 
 def test_legacy_composite_without_components_cannot_establish_rejection():
     assert hard_reject_reasons(_make_base_photo(), .01) == []
+
+
+# -- The fixed-scale subject detail as the focus basis ------------------------
+
+
+def test_detail_basis_ranks_measured_photos_among_themselves():
+    """Photos with subject_detail rank on it; a peer without it ranks on the proxy Tenengrad alone."""
+    sharp = _make_base_photo(id=1, subject_tenengrad=5000., subject_detail=16000.)
+    soft = _make_base_photo(id=2, subject_tenengrad=50000., subject_detail=4000.)
+    unmeasured = _make_base_photo(id=3, subject_tenengrad=9000.)
+    enc = {"photos": [sharp, soft, unmeasured]}
+    score_encounter(enc, {"eye_detect_enabled": False})
+    # The proxy-scale value would put ``soft`` first; the detail puts ``sharp`` first.
+    assert sharp["focus_score"] > soft["focus_score"]
+    assert enc["focus_cohorts"]["detail"]["photo_ids"] == [1, 2]
+    assert enc["focus_cohorts"]["subject"]["photo_ids"] == [3]
+    assert enc["focus_cohorts"]["eye"]["size"] == 0
+    evidence = sharp["focus_evidence"]
+    assert evidence["basis"] == evidence["cohort_key"] == "detail"
+    assert evidence["measurement"] == 16000.
+    assert evidence["measurement_name"] == "Tenengrad at 512 px subject scale"
+    assert evidence["scale_px"] == 512
+    assert evidence["separation_measurement"] == 5000.
+    assert evidence["background_measurement"] == 50
+    assert evidence["percentile"] == .75
+    assert evidence["method"] == "detail_percentile_background_ratio"
+    assert evidence["cohort_size"] == 2
+    assert evidence["absolute_status"] == "not_validated"
+    assert unmeasured["focus_evidence"]["basis"] == "subject"
+    assert unmeasured["focus_evidence"]["percentile"] == .5
+    assert unmeasured["focus_evidence"]["scale_px"] is None
+    assert "eye_focus_score" not in sharp
+
+
+def test_detail_focus_keeps_the_proxy_scale_separation_term():
+    from scoring import _sigmoid, detail_focus_score
+    assert detail_focus_score(0., 500., 50., [0., 8000.]) == 0.
+    assert detail_focus_score(None, 500., 50., [8000.]) == 0.
+    expected = .70 * .75 + .30 * _sigmoid(math.log(500.5 / 50.5))
+    assert detail_focus_score(8000., 500., 50., [8000., 4000.]) == pytest.approx(expected, abs=1e-3)
+
+
+def test_eye_basis_still_wins_when_the_user_turned_eye_detection_on():
+    photo = _make_base_photo(id=1, eye_tenengrad=3., subject_detail=9000.)
+    score_encounter({"photos": [photo]}, {"eye_detect_enabled": True})
+    assert photo["focus_evidence"]["basis"] == "eye"
+    score_encounter({"photos": [photo]}, {"eye_detect_enabled": False})
+    assert photo["focus_evidence"]["basis"] == "detail"
+    assert photo["focus_evidence"]["measurement"] == 9000.
+
+
+@pytest.mark.parametrize("invalid", [None, float("nan"), float("inf"), -1., True])
+def test_invalid_detail_falls_back_to_the_proxy_subject_basis(invalid):
+    photo = _make_base_photo(id=1, subject_detail=invalid)
+    score_encounter({"photos": [photo]}, {"eye_detect_enabled": False})
+    assert photo["focus_evidence"]["basis"] == "subject"
+    assert photo["focus_evidence"]["measurement"] == photo["subject_tenengrad"]
+
+
+def test_scored_focus_basis_reads_the_evidence_and_the_legacy_eye_score():
+    from scoring import scored_focus_basis
+    assert scored_focus_basis({"focus_evidence": {"basis": "detail"}}) == "detail"
+    assert scored_focus_basis({"focus_evidence": {"basis": "eye"}, "eye_focus_score": None}) == "eye"
+    assert scored_focus_basis({"eye_focus_score": .4}) == "eye"
+    assert scored_focus_basis({"focus_evidence": {"basis": "bogus"}}) == "subject"
+    assert scored_focus_basis({}) == "subject"

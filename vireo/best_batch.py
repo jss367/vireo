@@ -12,6 +12,7 @@ import re
 from datetime import datetime
 
 from keep_safety import review_ranked_response
+from scoring import scored_focus_basis
 
 DEFAULT_BEST_BATCH_MAX_PHOTOS = 120
 
@@ -307,9 +308,10 @@ def _best_batch_card(photo, photos, best_id, alternate_ids, rank):
             if photo.get("quality_composite") is not None else None
         ),
         "focus": photo.get("eye_focus_score", photo.get("focus_score")),
-        "focus_basis": "eye" if photo.get("eye_focus_score") is not None else "subject",
+        "focus_basis": scored_focus_basis(photo),
         "focus_evidence": photo.get("focus_evidence"),
         "sharpness": photo.get("subject_tenengrad"),
+        "subject_detail": photo.get("subject_detail"),
         "eye_x": photo.get("eye_x"),
         "eye_y": photo.get("eye_y"),
         "eye_conf": photo.get("eye_conf"),

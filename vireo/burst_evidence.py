@@ -197,12 +197,15 @@ def coverage_counts(evidence_rows):
 def _focus_measurements(first, second):
     """``(basis, s1, s2)``: the raw sharpness the two frames were ranked on.
 
-    Both scored on an eye window compare eye Tenengrad; otherwise the whole
-    subject's Tenengrad (``sharpness`` on a card), which is what the scorer
-    fell back to for at least one of them.
+    Both scored on an eye window compare eye Tenengrad; both scored on the
+    fixed-scale subject detail compare that (``subject_detail`` on a card);
+    otherwise the whole subject's proxy-scale Tenengrad (``sharpness``),
+    which is what the scorer fell back to for at least one of them.
     """
     if first.get("focus_basis") == "eye" and second.get("focus_basis") == "eye":
         return "eye", first.get("eye_tenengrad"), second.get("eye_tenengrad")
+    if first.get("focus_basis") == "detail" and second.get("focus_basis") == "detail":
+        return "detail", first.get("subject_detail"), second.get("subject_detail")
     return "subject", first.get("sharpness"), second.get("sharpness")
 
 

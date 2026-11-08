@@ -26,6 +26,21 @@ combines 70% subject percentile with 30% subject/background gradient separation
 Measured zero subject gradients retain a relative score of zero. Ties receive
 their midpoint rank; a singleton receives a 50% percentile.
 
+The scorer ranks each photo on one of three bases, in this order of preference
+(`scoring.FOCUS_BASES`): the eye window when the workspace has eye detection
+on and an eye was located (`eye`); the fixed-scale subject detail when it has
+been measured (`detail`, `photos.subject_detail`, the subject resampled to 512
+px as described in `docs/comparable-quality.md`); otherwise the proxy-scale
+subject Tenengrad (`subject`). Each basis ranks only among the encounter's
+photos measured on the same basis. Detail focus has the subject formula's
+shape: 70% detail percentile plus 30% of the same proxy-scale separation term,
+recorded as `separation_measurement` and `background_measurement` beside the
+detail so the inspector shows both scales. The detail basis exists because,
+on this catalog's bursts, it put the photographer's flagged frame first more
+often than the proxy-scale rank or the eye window (the numbers are in
+`docs/comparable-quality.md`); it is still a rank among peers, not an absolute
+sharpness.
+
 Relative focus no longer triggers `out_of_focus` or `eye_soft` rejection. The
 composite still uses relative focus for ordering. Its rejection-floor check
 replaces that contribution with the neutral midpoint, so low focus rank cannot
@@ -97,8 +112,9 @@ decisions. Provenance: issue #2245 and the read-only local review artifacts
 
 ## Data contract
 
-Each scored photo's `focus_evidence` records its basis, raw measurement and
-background measurement where relevant, unrounded percentile, rounded relative
+Each scored photo's `focus_evidence` records its basis, raw measurement (with
+`measurement_name` and, on the detail basis, `scale_px`), the separation and
+background measurements where relevant, unrounded percentile, rounded relative
 score, method, encounter scope, cohort size and key, and absolute status.
 `encounter.focus_cohorts[key]` records basis, scope, size, exact photo identifiers
 and a count of measurements lacking identifiers. Membership is stored once per

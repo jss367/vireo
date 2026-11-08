@@ -191,7 +191,7 @@ def comparison_frames(db, photos, comparison, effective_cfg):
         state = selection["selection"] if not detection else ("ready" if analysis else "subject_analysis_missing")
         card = {"id": photo["id"], "filename": photo["filename"], "rank": None, "role": "review", "label": "REVIEW",
                 "quality": None, "quality_pct": None, "focus": None, "focus_basis": None,
-                "sharpness": None, "eye_x": None, "eye_y": None, "eye_conf": None, "eye_tenengrad": None,
+                "sharpness": None, "subject_detail": None, "eye_x": None, "eye_y": None, "eye_conf": None, "eye_tenengrad": None,
                 "flag": photo.get("flag") or "none", "rating": photo.get("rating"), "reject_reasons": [],
                 "flag_confirmation_status": photo.get("flag_confirmation_status", "unverified"),
                 "subject": selection, "evidence_status": state, "detection_count": len(selection["candidates"]),
@@ -209,7 +209,8 @@ def comparison_frames(db, photos, comparison, effective_cfg):
             frame["analysis_provenance"] = {"detection": {"status": "complete", "current": True, "no_qualifying_subject": False},
                                             "segmentation": {"status": "complete", "current": True}}
             card.update(sharpness=features["subject_tenengrad"], has_eye=features.get("eye_tenengrad") is not None)
-            for k in ("eye_x", "eye_y", "eye_conf", "eye_tenengrad", "crop_complete", "subject_size", "analysis", "eye_status"):
+            for k in ("eye_x", "eye_y", "eye_conf", "eye_tenengrad", "crop_complete", "subject_size", "analysis", "eye_status",
+                      "subject_detail"):
                 card[k] = features.get(k)
             eligible.append(frame)
         frames.append(card)
@@ -233,7 +234,7 @@ def _mark_unavailable_comparison_cards(cards, photos):
 
 def build_subject_comparison(db, seed_photo_id, photos, comparison, effective_cfg):
     from best_batch import _best_batch_reasons
-    from scoring import score_encounter
+    from scoring import score_encounter, scored_focus_basis
     cards, eligible = comparison_frames(db, photos, comparison, effective_cfg)
     by_id = {c["id"]: c for c in cards}
     encounter = {"photos": eligible}
@@ -250,7 +251,7 @@ def build_subject_comparison(db, seed_photo_id, photos, comparison, effective_cf
         role = "best" if photo is best else ("reject" if photo.get("label") == "REJECT" else "alternate")
         card.update(rank=rank, role=role, label=photo.get("label") or "REVIEW", quality=photo["quality_composite"],
                     quality_pct=round(photo["quality_composite"] * 100), focus=photo["focus_score"],
-                    focus_basis="eye" if photo.get("eye_focus_score") is not None else "subject",
+                    focus_basis=scored_focus_basis(photo),
                     focus_evidence=photo.get("focus_evidence"),
                     comparable_quality=photo.get("comparable_quality"),
                     reject_reasons=photo.get("reject_reasons", []),

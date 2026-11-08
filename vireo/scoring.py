@@ -90,6 +90,27 @@ def subject_focus_score(subject_tenengrad, bg_tenengrad, encounter_tenegrads):
     return 0.70 * rank + 0.30 * bg_term
 
 
+def detail_focus_score(subject_detail, subject_tenengrad, bg_tenengrad, encounter_details):
+    """Subject focus ranked on the fixed-scale subject detail.
+
+    The same shape as ``subject_focus_score``: 70% percentile rank within
+    the encounter's detail cohort plus 30% subject/background gradient
+    separation. The rank reads ``subject_detail`` (the subject resampled
+    to DETAIL_SCALE_PX, ``quality.compute_subject_detail``) instead of the
+    proxy-scale ``subject_tenengrad``, which at a fixed frame scale reads a
+    small subject as sharper than a large one. On this catalog's bursts the
+    detail rank put the photographer's pick first more often than the
+    proxy-scale rank or the eye window (docs/comparable-quality.md). The
+    separation term stays on the proxy-scale pair, since it compares the
+    subject with its own background at one scale.
+    """
+    if subject_detail is None or subject_detail == 0:
+        return 0.0
+    rank = _percentile_rank(subject_detail, encounter_details)
+    ratio = math.log(((subject_tenengrad or 0.0) + EPS) / ((bg_tenengrad or 0.0) + EPS))
+    return 0.70 * rank + 0.30 * _sigmoid(ratio)
+
+
 def exposure_score(clip_high, clip_low, y_median):
     """Compute exposure score E_i (Section 4.2).
 
@@ -374,48 +395,86 @@ def score_encounter(encounter, config=None):
     enc_bg_seps = [p.get("bg_separation", 0) or 0 for p in photos]
     enc_noise = [p.get("noise_estimate") for p in photos]
     eye_enabled = cfg.get("eye_detect_enabled", False)
-    cohorts = {"eye": [], "subject": []}
+    cohorts = {basis: [] for basis in FOCUS_BASES}
     for photo in photos:
-        basis = "eye" if eye_enabled and _eye_measurement(photo) is not None else "subject"
-        cohorts[basis].append(photo)
+        cohorts[focus_basis(photo, eye_enabled)].append(photo)
     encounter["focus_cohorts"] = {
         basis: {"scope": "encounter", "basis": basis, "size": len(peers),
                 "photo_ids": [p["id"] for p in peers if p.get("id") is not None],
                 "unidentified_count": sum(p.get("id") is None for p in peers)}
         for basis, peers in cohorts.items()
     }
-    enc_eye_tenegrads = [_eye_measurement(p) for p in cohorts["eye"]]
-    enc_body_tenegrads = [p["subject_tenengrad"] for p in cohorts["subject"]]
+    cohort_values = {basis: [_focus_measurement(p, basis) for p in peers] for basis, peers in cohorts.items()}
 
     for photo in photos:
-        _score_photo(
-            photo, cfg, eye_enabled, enc_eye_tenegrads, enc_body_tenegrads,
-            enc_bg_seps, enc_bg_tenegrads, enc_noise,
-        )
-        basis = "eye" if eye_enabled and _eye_measurement(photo) is not None else "subject"
-        values = enc_eye_tenegrads if basis == "eye" else enc_body_tenegrads
-        _record_focus_evidence(photo, basis, values)
+        basis = focus_basis(photo, eye_enabled)
+        _score_photo(photo, cfg, basis, cohort_values[basis], enc_bg_seps, enc_bg_tenegrads, enc_noise)
+        _record_focus_evidence(photo, basis, cohort_values[basis])
 
     return encounter
 
 
-def _score_photo(photo, cfg, eye_enabled, enc_eye_tenegrads, enc_body_tenegrads,
-                 enc_bg_seps, enc_bg_tenegrads, enc_noise):
-    """Score one encounter photo against its peers and record its reject reasons."""
+# The measurement a photo's focus is ranked on within its encounter, in the
+# order the scorer prefers them: the eye window when the user has turned
+# eye detection on and an eye was located, else the fixed-scale subject
+# detail when it has been measured, else the proxy-scale subject Tenengrad.
+# Each basis ranks only among peers measured on the same basis.
+FOCUS_BASES = ("eye", "detail", "subject")
+
+
+def focus_basis(photo, eye_enabled):
+    """Which of FOCUS_BASES the scorer ranks ``photo`` on."""
+    if eye_enabled and _eye_measurement(photo) is not None:
+        return "eye"
+    if _detail_measurement(photo) is not None:
+        return "detail"
+    return "subject"
+
+
+def scored_focus_basis(photo):
+    """The basis a scored photo was ranked on, read from its focus evidence.
+
+    A result saved before the evidence record existed carries only the
+    eye score, so it is read the way those results were written.
+    """
+    evidence = photo.get("focus_evidence")
+    if isinstance(evidence, dict) and evidence.get("basis") in FOCUS_BASES:
+        return evidence["basis"]
+    return "eye" if photo.get("eye_focus_score") is not None else "subject"
+
+
+def _focus_measurement(photo, basis):
+    """The raw value ranked for ``basis``: eye window, subject detail or subject Tenengrad."""
+    if basis == "eye":
+        return _eye_measurement(photo)
+    if basis == "detail":
+        return _detail_measurement(photo)
+    return photo["subject_tenengrad"]
+
+
+def _score_photo(photo, cfg, basis, cohort_values, enc_bg_seps, enc_bg_tenegrads, enc_noise):
+    """Score one encounter photo against its peers and record its reject reasons.
+
+    ``cohort_values`` are the ``basis`` measurements of every peer ranked on
+    the same basis, this photo's included.
+    """
     photo.pop("eye_focus_score", None)
-    eye_t = _eye_measurement(photo) if eye_enabled else None
-    if eye_t is not None and enc_eye_tenegrads:
+    if basis == "eye":
         # Eye-based focus: pure percentile rank within the eye cohort.
         # The subject-vs-bg ratio term from subject_focus_score does not
         # translate to a small eye window, so the normalization is just
         # the peer comparison — sharper eye relative to peers = higher.
-        f = _percentile_rank(eye_t, enc_eye_tenegrads)
+        f = _percentile_rank(_eye_measurement(photo), cohort_values)
         photo["eye_focus_score"] = round(f, 4)
+    elif basis == "detail":
+        f = detail_focus_score(
+            photo["subject_detail"], photo.get("subject_tenengrad"), photo.get("bg_tenengrad"), cohort_values,
+        )
     else:
         f = subject_focus_score(
             photo.get("subject_tenengrad"),
             photo.get("bg_tenengrad"),
-            enc_body_tenegrads,
+            cohort_values,
         )
     e = exposure_score(
         photo.get("subject_clip_high"),
@@ -461,10 +520,17 @@ def _score_photo(photo, cfg, eye_enabled, enc_eye_tenegrads, enc_body_tenegrads,
 
 def _eye_measurement(photo):
     """An invalid optional eye measurement falls back to subject scoring."""
-    value = photo.get("eye_tenengrad")
-    if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0:
-        return value
-    return None
+    return _nonnegative_measurement(photo.get("eye_tenengrad"))
+
+
+def _detail_measurement(photo):
+    """The subject detail when measured; an unmeasured or invalid value falls back to subject scoring."""
+    return _nonnegative_measurement(photo.get("subject_detail"))
+
+
+def _nonnegative_measurement(value):
+    """``value`` when it is a finite number of zero or more, else None."""
+    return value if _measured(value) and value >= 0 else None
 
 
 def _record_focus_evidence(photo, basis, values):
@@ -474,14 +540,21 @@ def _record_focus_evidence(photo, basis, values):
     cohort_key refers to that map. Peers have eligible current subject analysis
     and the same measurement basis, including this photo. Flags never exclude
     a measured peer. The scope is the encounter, not the visible review burst.
+    On the detail basis the separation term reads the proxy-scale subject
+    and background pair, recorded as ``separation_measurement`` and
+    ``background_measurement`` so the inspector can show both scales.
     """
-    raw = photo["eye_tenengrad"] if basis == "eye" else photo["subject_tenengrad"]
+    raw = _focus_measurement(photo, basis)
     photo["focus_evidence"] = {
-        "basis": basis, "measurement": raw, "measurement_name": "Tenengrad",
-        "background_measurement": photo["bg_tenengrad"] if basis == "subject" else None,
+        "basis": basis, "measurement": raw,
+        "measurement_name": MEASUREMENT_NAME if basis == "detail" else "Tenengrad",
+        "scale_px": DETAIL_SCALE_PX if basis == "detail" else None,
+        "separation_measurement": photo["subject_tenengrad"] if basis == "detail" else None,
+        "background_measurement": photo["bg_tenengrad"] if basis != "eye" else None,
         "percentile": _percentile_rank(raw, values),
         "relative_score": photo["focus_score"],
-        "method": "eye_percentile" if basis == "eye" else "subject_percentile_background_ratio",
+        "method": {"eye": "eye_percentile", "detail": "detail_percentile_background_ratio",
+                   "subject": "subject_percentile_background_ratio"}[basis],
         "cohort_key": basis, "cohort_size": len(values), "cohort_scope": "encounter",
         "absolute_status": "not_validated",
     }

@@ -4,7 +4,7 @@ interface BestBatchCard {
   id: number; filename?: string; rank: number | null; role?: string;
   flag?: string; label?: string;
   quality_pct?: number | null; focus?: number | null; focus_basis?: string;
-  focus_evidence?: {measurement: number; cohort_size: number; absolute_status: string} | null;
+  focus_evidence?: {measurement: number; measurement_name?: string; cohort_size: number; absolute_status: string} | null;
   /** The cross-encounter quality: fixed-scale subject detail and the composite of absolute terms. */
   comparable_quality?: {detail: number; scale_px: number; score: number} | null;
   sharpness?: number | null; eye_x?: number | null; eye_y?: number | null;

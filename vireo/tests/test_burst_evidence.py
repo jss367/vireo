@@ -104,10 +104,10 @@ def test_coverage_counts_each_feature_separately():
 
 
 def _card(pid, sharpness, *, label=None, focus_basis="subject", crop_complete=1.0, dets=1,
-          eye_tenengrad=None):
+          eye_tenengrad=None, subject_detail=None):
     return {
         "id": pid, "filename": f"DSC_{pid:04d}.NEF", "sharpness": sharpness, "label": label,
-        "eye_tenengrad": eye_tenengrad, "focus_basis": focus_basis,
+        "eye_tenengrad": eye_tenengrad, "subject_detail": subject_detail, "focus_basis": focus_basis,
         "crop_complete": crop_complete, "detection_count": dets,
     }
 
@@ -150,6 +150,19 @@ def test_assess_ambiguity_close_call_uses_eye_sharpness_when_both_frames_have_it
     cards = [_card(1, 90, focus_basis="eye", eye_tenengrad=40), _card(2, 60, eye_tenengrad=39)]
     verdict = assess_ambiguity(cards, _full_coverage(2), eye_detect_enabled=False)
     assert verdict["needs_review"] is False
+
+
+def test_assess_ambiguity_close_call_uses_subject_detail_when_both_frames_were_ranked_on_it():
+    cards = [
+        _card(1, 90, focus_basis="detail", subject_detail=16100),
+        _card(2, 20, focus_basis="detail", subject_detail=15200),
+    ]
+    verdict = assess_ambiguity(cards, _full_coverage(2), eye_detect_enabled=False)
+    assert [r["code"] for r in verdict["reasons"]] == ["close_call"]
+    assert "6% apart in detail sharpness (16100 vs 15200" in verdict["reasons"][0]["detail"]
+    # A detail frame beside a proxy-scale frame falls back to the proxy-scale pair.
+    cards = [_card(1, 90, focus_basis="detail", subject_detail=16100), _card(2, 60)]
+    assert assess_ambiguity(cards, _full_coverage(2), eye_detect_enabled=False)["needs_review"] is False
 
 
 def test_assess_ambiguity_reports_unanalyzed_frames():

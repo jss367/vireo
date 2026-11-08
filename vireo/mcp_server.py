@@ -100,7 +100,7 @@ _PHOTO_DETAIL_KEYS = _PHOTO_SUMMARY_KEYS + (
 _EXPOSURE_TAGS = ("ExposureTime", "ShutterSpeed", "FNumber", "Aperture",
                   "FocalLength", "LensModel", "LensID", "ExposureCompensation")
 _BURST_QUALITY_KEYS = (
-    "quality_pct", "quality", "focus", "focus_basis", "sharpness", "exposure",
+    "quality_pct", "quality", "focus", "focus_basis", "sharpness", "subject_detail", "exposure",
 )
 _BURST_CARD_KEYS = (
     "id", "filename", "rank", "role", "label", *_BURST_QUALITY_KEYS,

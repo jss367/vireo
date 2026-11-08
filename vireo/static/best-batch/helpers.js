@@ -42,13 +42,19 @@ export function rankLabel(card) {
   return (card.rank == null ? '' : '#' + card.rank + ' ') + roleLabel(card.role);
 }
 
+/** The scorer's basis as the card names it. @param {string | undefined} basis */
+export function focusBasisLabel(basis) {
+  return basis === 'eye' ? 'eye' : basis === 'detail' ? 'subject detail' : 'subject';
+}
+
 /** @param {BestBatchCard} card */
 export function scoreText(card) {
   var parts = [];
   if (card.quality_pct != null) parts.push('Quality ranking ' + card.quality_pct);
-  if (card.focus != null) parts.push('Relative ' + (card.focus_basis === 'eye' ? 'eye' : 'subject') + ' focus ' + Math.round(card.focus * 100) + '/100');
+  if (card.focus != null) parts.push('Relative ' + focusBasisLabel(card.focus_basis) + ' focus ' + Math.round(card.focus * 100) + '/100');
   if (card.focus_evidence) {
-    parts.push('Raw Tenengrad ' + card.focus_evidence.measurement.toFixed(2) + ' among ' + card.focus_evidence.cohort_size + ' same-basis batch photos');
+    parts.push('Raw ' + (card.focus_evidence.measurement_name || 'Tenengrad') + ' ' + card.focus_evidence.measurement.toFixed(2) +
+      ' among ' + card.focus_evidence.cohort_size + ' same-basis batch photos');
     parts.push('Absolute focus unvalidated');
   } else if (card.sharpness != null) parts.push('Subject Tenengrad ' + Math.round(card.sharpness) + '; comparison group unavailable');
   // The one measurement that compares across batches: the subject resampled to a fixed scale.
