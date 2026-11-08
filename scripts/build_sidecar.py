@@ -80,6 +80,27 @@ def get_target_triple():
     return result.stdout.strip()
 
 
+def write_build_commit(repo_root):
+    """Stamp the sidecar once; the desktop shell consumes the same build stamp."""
+    root = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"], cwd=repo_root,
+        check=True, capture_output=True, text=True,
+    )
+    if Path(root.stdout.strip()).resolve() != Path(repo_root).resolve():
+        raise ValueError("Build sources must be the root of their own Git checkout")
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo_root,
+        check=True, capture_output=True, text=True,
+    )
+    commit = result.stdout.strip()
+    if len(commit) != 40 or any(c not in "0123456789abcdef" for c in commit):
+        raise ValueError("Git did not return a full build commit")
+    destination = Path(repo_root) / "build" / "build-commit.txt"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(commit + "\n")
+    return destination
+
+
 def main():
     """Bundle and sign the server with the synchronized release manifest."""
     parser = argparse.ArgumentParser(description="Build sidecar binary")
@@ -102,6 +123,8 @@ def main():
     sep = ";" if platform.system() == "Windows" else ":"
     vireo_dir = os.path.join(repo_root, "vireo")
 
+    build_commit = write_build_commit(repo_root)
+
     pyinstaller_args = [
         sys.executable, "-m", "PyInstaller",
         "--onefile",
@@ -116,6 +139,7 @@ def main():
         # Release metadata is synchronized with the desktop manifests before
         # building. Frozen servers cannot rely on installed Python metadata.
         "--add-data", f"{os.path.join(repo_root, 'pyproject.toml')}{sep}.",
+        "--add-data", f"{build_commit}{sep}.",
         # Bundle Flask templates and static assets — destinations are
         # relative to _MEIPASS, and Flask resolves them relative to
         # os.path.dirname(__file__) which is _MEIPASS for the entry script.

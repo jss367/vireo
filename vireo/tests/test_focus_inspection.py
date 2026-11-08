@@ -196,3 +196,36 @@ def test_frame_basis_normalization_never_revalidates_unused_subjects(app_and_db,
     assert response.headers['X-Vireo-Focus-Center'] == '0.5000,0.5000'
     subject = client.get(f'/photos/{pid}/focus-crop', query_string={'basis': ' Subject '})
     assert subject.status_code == (404 if stale_mask else 200)
+
+
+def _box(x, y, w, h):
+    return dict(box_x=x, box_y=y, box_w=w, box_h=h)
+
+
+def test_window_clips_subject_compares_the_box_with_the_window_in_raster_pixels():
+    from focus_crop import window_clips_subject
+    assert window_clips_subject((0, 0, 512, 512), (5000, 3000), _box(.01, .01, .05, .05)) is False
+    # A 0.4-wide box centered in a 512 window on a 5000px raster spans 2000px.
+    assert window_clips_subject((2244, 1244, 2756, 1756), (5000, 3000), _box(.3, .3, .4, .4)) is True
+    assert window_clips_subject((0, 0, 512, 512), (5000, 3000), _box(0, 0, 0, .1)) is None
+
+
+def test_focus_crop_reports_when_the_window_cuts_off_part_of_the_subject(app_and_db):
+    app, db = app_and_db
+    pid = db.photos.list_page()[0]['id']
+    _working_copy(app, db, pid)
+    db.detections.save(pid, [{'box': {'x': .2, 'y': .1, 'w': .6, 'h': .8}, 'confidence': .9, 'category': 'animal'}],
+                       detector_model='test')
+    db.commit()
+    client = app.test_client()
+    clipped = client.get(f'/photos/{pid}/focus-crop?size=512')
+    assert clipped.headers['X-Vireo-Focus-Basis'] == 'subject'
+    assert clipped.headers['X-Vireo-Focus-Subject-Clipped'] == '1'
+    db.conn.execute('DELETE FROM detections WHERE photo_id=?', (pid,))
+    db.detections.save(pid, [{'box': {'x': .45, 'y': .45, 'w': .1, 'h': .1}, 'confidence': .9, 'category': 'animal'}],
+                       detector_model='test')
+    db.commit()
+    assert client.get(f'/photos/{pid}/focus-crop?size=512').headers['X-Vireo-Focus-Subject-Clipped'] == '0'
+    db.conn.execute('DELETE FROM detections WHERE photo_id=?', (pid,))
+    db.commit()
+    assert client.get(f'/photos/{pid}/focus-crop?size=512').headers['X-Vireo-Focus-Subject-Clipped'] == 'unknown'

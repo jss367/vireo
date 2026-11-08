@@ -1975,10 +1975,18 @@ def _classification_enrichment_rank(artifact):
     one" tiebreaker and fall back to the digest sort.
     """
     subjects = artifact.get("subjects", ())
-    no_match = sum(1 for subject in subjects if "match" not in subject)
+    # A ``match`` key with a non-dict value (e.g. ``null``, which
+    # ``_validate_subject_match`` accepts as "not recorded") counts the
+    # same as a missing key: the background-score check below would index
+    # into ``None`` otherwise. A dict with no ``background_score`` is
+    # still a pre-enrichment block and counts under ``no_background``.
+    no_match = sum(
+        1 for subject in subjects if not isinstance(subject.get("match"), dict)
+    )
     no_background = sum(
         1 for subject in subjects
-        if "match" in subject and "background_score" not in subject["match"]
+        if isinstance(subject.get("match"), dict)
+        and "background_score" not in subject["match"]
     )
     return (no_match, no_background)
 

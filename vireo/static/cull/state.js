@@ -21,6 +21,15 @@ var cullManualDecisions = {};
 // the moment you saved it) — it just no longer counts as unsaved work.
 /** @type {Record<string, CullAction>} */
 var cullAppliedDecisions = {};
+// The reference a photo was compared against when you rejected it in
+// Compare, photo_id -> keeper photo_id. Apply records the reject in favor
+// of that photo; a reject made any other way falls back to its scene
+// group's best kept photo (keepers.js).
+/** @type {Record<string, number>} */
+var cullRejectKeepers = {};
+// Saved rejects whose keeper has since been deleted or rejected.
+/** @type {CullOrphan[]} */
+var cullOrphans = [];
 // Saved photo flags always outrank suggestions.
 /** @type {CullSourceResults | null} */
 var pipelineResults = null;

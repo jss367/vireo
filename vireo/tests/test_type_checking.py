@@ -306,8 +306,22 @@ def test_no_repository_declares_methods_bound_from_the_facade():
     for path in sorted(REPOSITORIES.glob("*.py")):
         module = importlib.import_module(f"repositories.{path.stem}")
         assert not hasattr(module, "FACADE_METHODS"), path.stem
-        offenders += _callable_facade_offenders(path.read_text(), path.stem)
+        offenders += _callable_facade_offenders(path.read_text(encoding="utf-8"), path.stem)
     assert not offenders, offenders
+
+
+
+def test_repository_facade_scan_uses_utf8_with_windows_default(monkeypatch):
+    """Source inspection must not depend on the Windows locale encoding."""
+    original_read_text = Path.read_text
+
+    def read_text(path, encoding=None, errors=None):
+        if path.parent == REPOSITORIES and encoding is None:
+            encoding = "cp1252"
+        return original_read_text(path, encoding=encoding, errors=errors)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    test_no_repository_declares_methods_bound_from_the_facade()
 
 
 def test_callable_facade_matcher_catches_every_quoting_form():

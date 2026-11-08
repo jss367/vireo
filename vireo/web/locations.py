@@ -550,6 +550,7 @@ def create_locations_blueprint(
                 return jsonify({
                     "place_id": cached["place_id"],
                     "summary": summarize_details(details),
+                    "warning": details.get("warning"),
                 })
 
         # Cache miss.
@@ -582,6 +583,7 @@ def create_locations_blueprint(
         return jsonify({
             "place_id": cache_place_id,
             "summary": summarize_details(details),
+            "warning": details.get("warning"),
         })
 
     @blueprint.route("/api/keywords/<int:keyword_id>/link-place", methods=["POST"])

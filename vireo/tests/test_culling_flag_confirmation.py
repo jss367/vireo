@@ -47,7 +47,7 @@ class Catalog:
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.executescript("""
             CREATE TABLE workspaces(id INTEGER PRIMARY KEY);
-            CREATE TABLE photos(id INTEGER PRIMARY KEY, flag TEXT);
+            CREATE TABLE photos(id INTEGER PRIMARY KEY, flag TEXT, filename TEXT);
             CREATE TABLE photo_workspace_visibility(photo_id INTEGER, workspace_id INTEGER);
             CREATE TABLE edit_history(id INTEGER PRIMARY KEY, workspace_id INTEGER,
                 action_type TEXT, description TEXT, new_value TEXT, source TEXT, reason TEXT,
@@ -58,7 +58,7 @@ class Catalog:
                 species_provenance TEXT);
             CREATE TABLE queued_flags(photo_id INTEGER, flag TEXT);
             INSERT INTO workspaces VALUES(1),(2);
-            INSERT INTO photos VALUES(7,'none'),(8,'none');
+            INSERT INTO photos VALUES(7,'none','p7.jpg'),(8,'none','p8.jpg');
             INSERT INTO photo_workspace_visibility VALUES(7,1),(7,2),(8,1);
         """)
         create_current_flag_attribution(self.conn)

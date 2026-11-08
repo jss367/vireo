@@ -119,7 +119,13 @@ def test_species_dates_scope_analysis_and_apply_without_touching_other_photos(li
     page.on('dialog', lambda dialog: dialog.accept())
     page.locator('#applyBtn').click()
     expect(page.locator('#cullStatus')).to_contain_text('Applied!')
-    assert posted == [{'keepers': [11, 12], 'rejects': [10], 'unflag': []}]
+    # The reject is recorded against the kept photo of its encounter, by the
+    # measurement the two share (both are in one encounter: the quality rank).
+    assert posted == [{'keepers': [11, 12], 'rejects': [10], 'unflag': [], 'rejections': [{
+        'photo_id': 10, 'keeper_photo_id': 11,
+        'comparison': {'basis': 'quality', 'measurement_name': 'quality rank in encounter',
+                       'photo': 0.99, 'keeper': 0.98, 'scope': 'encounter'},
+    }]}]
     page.get_by_role('button', name='Clear filters', exact=True).click()
     expect(page.locator('.cull-card')).to_have_count(15)
     expect(_card(page, 1)).to_contain_text('Picked by you')

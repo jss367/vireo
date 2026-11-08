@@ -208,7 +208,7 @@ def test_google_names_new_spots_and_the_answer_is_cached(db, monkeypatch):
     def fake_reverse_geocode(lat, lng, api_key, *, language="en"):
         calls.append((lat, lng))
         return {"place_id": "robb-field", "name": "Robb Field", "types": ["park"],
-                "lat": 32.7549, "lng": -117.2404, "source": "park",
+                "lat": 32.7549, "lng": -117.2404, "source": "park", "warning": "Verify the capture site.",
                 "address_components": [{"name": "San Diego", "types": ["locality"]}]}
 
     monkeypatch.setattr(places, "reverse_geocode", fake_reverse_geocode)
@@ -221,6 +221,7 @@ def test_google_names_new_spots_and_the_answer_is_cached(db, monkeypatch):
     assert group["suggestion"] == {
         "kind": "google", "place_id": "robb-field", "name": "Robb Field",
         "summary": "Robb Field · San Diego", "source": "google_park",
+        "warning": "Verify the capture site.",
     }
     assert second["groups"] == first["groups"]
     assert len(calls) == 2  # one per cell, and none the second time
@@ -1372,3 +1373,16 @@ def test_picker_labels_are_globally_unique_stable_and_reserve_literal_names():
     assert "20" in first[20] and "22" in first[22]
     rows.reverse()
     assert {o["id"]: o["label"] for o in location_options(db)} == first
+
+
+def test_nearby_park_cache_from_before_country_checks_is_stale():
+    import json
+
+    from services.gps_locations import decode_cached_reverse_geocode
+
+    cached = {'response': json.dumps({
+        'place_id': 'mirador', 'source': 'park',
+        '_vireo_result_language': 'en', '_vireo_place_resolver': 'named-place-1',
+    })}
+    usable, _ = decode_cached_reverse_geocode(cached, 'en')
+    assert not usable

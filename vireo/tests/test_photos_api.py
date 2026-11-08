@@ -10328,8 +10328,9 @@ def test_reverse_geocode_cache_hit_returns_summary(app_and_db, monkeypatch):
 
     lat, lng = 40.7828, -73.9654
     cached_details = _central_park_geocode_response()
+    cached_details["warning"] = "Verify the capture site."
     cached_details["_vireo_result_language"] = "en"
-    cached_details["_vireo_place_resolver"] = "named-place-1"
+    cached_details["_vireo_place_resolver"] = gps_locations.REVERSE_GEOCODE_CACHE_RESOLVER
     gps_locations.reverse_geocode_cache_put(
         db, lat, lng,
         place_id="ChIJ4zGFAZpYwokRGUGph3Mf37k",
@@ -10354,6 +10355,7 @@ def test_reverse_geocode_cache_hit_returns_summary(app_and_db, monkeypatch):
     assert "Central Park" in data["summary"]
     assert "United States" in data["summary"]
     assert calls["n"] == 0
+    assert data["warning"] == "Verify the capture site."
 
 
 def test_reverse_geocode_cache_negative_hit_returns_null(app_and_db, monkeypatch):
@@ -10803,7 +10805,8 @@ def test_batch_location_from_exif_preview_groups_without_linking(
 
     def fake_reverse_geocode(lat, lng, key):
         if lat > 39:
-            return _central_park_geocode_response()
+            return {**_central_park_geocode_response(), "source": "park",
+                    "warning": "Nearby park, not a verified capture site."}
         return _yosemite_geocode_response()
 
     monkeypatch.setattr(places, "reverse_geocode", fake_reverse_geocode)
@@ -10822,6 +10825,9 @@ def test_batch_location_from_exif_preview_groups_without_linking(
     assert body["unresolved"] == [
         {"filename": "bird3.jpg", "photo_id": p3, "reason": "missing_gps"}
     ]
+    park = next(g for g in body["groups"] if g["name"] == "Central Park")
+    assert park["source"] == "park"
+    assert park["warning"] == "Nearby park, not a verified capture site."
     assert "_details_by_place_id" not in body
     # The fixture starts with two taxonomy keyword links. Preview may cache
     # reverse-geocode results, but it must not create location links.
@@ -10906,6 +10912,9 @@ def test_batch_location_from_exif_apply_assigns_per_photo_places(
 
     assert resp.status_code == 200, resp.get_json()
     body = resp.get_json()
+    assert tuple(db.conn.execute(
+        "SELECT latitude, longitude FROM photos WHERE id = ?", (p1,),
+    ).fetchone()) == (40.7828, -73.9654)
     assert body["updated"] == 2
     assert body["resolvable"] == 2
     assert body["group_errors"] == []

@@ -41,6 +41,7 @@ GET          /api/computation-cache
 GET          /api/computation-cache/export
 GET          /api/config
 GET          /api/coverage
+GET          /api/culling/orphans
 GET          /api/culling/results
 GET          /api/darktable/install/available
 GET          /api/darktable/status

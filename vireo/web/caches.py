@@ -14,6 +14,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import math
 import os
 import tempfile
 from collections.abc import Callable
@@ -345,6 +346,18 @@ def create_caches_blueprint(
 
         return jsonify(results)
 
+    @blueprint.route("/api/culling/orphans")
+    def api_culling_orphans() -> ResponseReturnValue:
+        """Rejects whose keeper was since deleted or rejected itself.
+
+        A photo rejected in favor of another is only as rejected as that
+        photo is kept; when the keeper goes, the reject must come back for
+        review instead of staying silently rejected.
+        """
+        db = get_db()
+        orphans = db.photo_review.orphaned_rejections()
+        return jsonify({"orphans": orphans, "count": len(orphans)})
+
     @blueprint.route("/api/culling/apply", methods=["POST"])
     def api_culling_apply() -> ResponseReturnValue:
         """Apply culling decisions — flag keepers and reject others.
@@ -355,6 +368,14 @@ def create_caches_blueprint(
         would show that old flag back on the card the moment the decision
         stopped being a session override — a silently reverted decision.
         Only ids the client sends are touched, never every REVIEW photo.
+
+        ``rejections`` (optional) says what each reject lost to:
+        ``[{"photo_id", "keeper_photo_id", "comparison"}]``, every
+        ``photo_id`` one of ``rejects`` and every keeper a photo that is not
+        itself being rejected or cleared here (the service also refuses a
+        keeper whose current flag is rejected). A null ``keeper_photo_id``
+        is a reject decided now with nothing kept to compare against; a
+        reject sent with no entry at all keeps whatever record it has.
         """
         db = get_db()
         body = request.get_json(silent=True) or {}
@@ -366,15 +387,15 @@ def create_caches_blueprint(
                             ("unflag", unflag)):
             if not isinstance(value, list):
                 return json_error(f"{name} must be a list")
-            if any(
-                isinstance(pid, bool) or not isinstance(pid, int) or not 0 < pid < 2**63
-                for pid in value
-            ):
+            if not all(_valid_photo_id(pid) for pid in value):
                 return json_error(f"{name} must contain valid integer photo ids")
 
         keepers = list(dict.fromkeys(keepers))
         rejects = list(dict.fromkeys(rejects))
         unflag = list(dict.fromkeys(unflag))
+        rejections = _parse_rejections(body.get("rejections", []), rejects, unflag)
+        if isinstance(rejections, str):
+            return json_error(rejections)
 
         # A photo listed in more than one action would otherwise land on
         # whichever mutation ran last (or whichever kept its old flag), so
@@ -395,10 +416,80 @@ def create_caches_blueprint(
         from services.photo_review import PhotoReviewService
 
         try:
-            counts = PhotoReviewService(db).apply_culling_flags(keepers, rejects, unflag)
+            counts = PhotoReviewService(db).apply_culling_flags(
+                keepers, rejects, unflag, rejections=rejections,
+            )
         except ValueError as e:
             return json_error(str(e), 403)
         log.info("Culling applied: %s", counts)
-        return jsonify({"ok": True, **counts})
+        return jsonify({"ok": True, **counts, "rejections": len(rejections)})
 
     return blueprint
+
+
+def _valid_photo_id(value: object) -> bool:
+    return not isinstance(value, bool) and isinstance(value, int) and 0 < value < 2**63
+
+
+#: A comparison is a few named numbers and short strings; anything larger is
+#: not a measurement but a payload, and the column is not for that.
+COMPARISON_MAX_KEYS = 12
+COMPARISON_MAX_JSON_CHARS = 1000
+COMPARISON_MAX_ABS_INT = 2**53
+
+
+def _valid_comparison(value: object) -> bool:
+    if value is None:
+        return True
+    if not isinstance(value, dict) or len(value) > COMPARISON_MAX_KEYS:
+        return False
+    if not all(isinstance(key, str) and _valid_comparison_value(item) for key, item in value.items()):
+        return False
+    return len(json.dumps(value)) <= COMPARISON_MAX_JSON_CHARS
+
+
+def _valid_comparison_value(item: object) -> bool:
+    """A string, a finite number or None: NaN and Infinity are not JSON and would poison every later read."""
+    if item is None or isinstance(item, str):
+        return True
+    if isinstance(item, bool) or not isinstance(item, (int, float)):
+        return False
+    if isinstance(item, int):
+        # A measurement fits a double; an int past that range would overflow isfinite.
+        return abs(item) <= COMPARISON_MAX_ABS_INT
+    return math.isfinite(item)
+
+
+def _parse_rejections(
+    raw: object, rejects: list[int], unflag: list[int],
+) -> dict[int, JsonDict] | str:
+    """The relational rejects of an Apply payload, or the error text.
+
+    Each entry rejects one of ``rejects`` in favor of a keeper that this
+    Apply is not rejecting or clearing; a photo appears at most once.
+    """
+    if not isinstance(raw, list):
+        return "rejections must be a list"
+    rejected = set(rejects)
+    excluded = rejected | set(unflag)
+    parsed: dict[int, JsonDict] = {}
+    for entry in raw:
+        if not isinstance(entry, dict):
+            return "rejections must contain objects"
+        photo_id = entry.get("photo_id")
+        keeper_id = entry.get("keeper_photo_id")
+        comparison = entry.get("comparison")
+        if not _valid_photo_id(photo_id) or not (keeper_id is None or _valid_photo_id(keeper_id)):
+            return "rejections must carry integer photo_id and an integer or null keeper_photo_id"
+        if photo_id not in rejected:
+            return f"Rejection of photo {photo_id} is not among rejects"
+        if keeper_id is None and comparison is not None:
+            return "A rejection without a keeper carries no comparison"
+        if keeper_id is not None and (keeper_id in excluded or keeper_id == photo_id):
+            return f"Keeper {keeper_id} cannot itself be rejected or cleared"
+        if photo_id in parsed:
+            return f"Photo {photo_id} has more than one rejection"
+        if not _valid_comparison(comparison):
+            return "rejections comparison must be a small object of numbers and strings"
+        parsed[photo_id] = {"keeper_photo_id": keeper_id, "comparison": comparison}
+    return parsed

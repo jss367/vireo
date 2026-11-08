@@ -163,6 +163,42 @@ body { padding-bottom: 36px; }
   border: 1px solid var(--border-primary);
 }
 .cull-quality { color: var(--text-muted); }
+.cull-keeper {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  color: var(--text-secondary);
+  font-size: 10px;
+  line-height: 1.3;
+}
+.cull-keeper img {
+  width: 36px;
+  aspect-ratio: 3/2;
+  object-fit: cover;
+  border-radius: 3px;
+  flex: none;
+}
+.cull-keeper.none { color: var(--text-ghost); }
+.cull-orphans {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding: 10px 14px;
+  border: 1px solid var(--warning);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  font-size: 13px;
+}
+.cull-orphans[hidden] { display: none; }
+#cullOrphanPhotos {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 12px;
+  margin: 12px 0;
+}
+#cullOrphanPhotos img { width: 100%; aspect-ratio: 3/2; object-fit: cover; border-radius: 4px; }
 .cull-filename {
   color: var(--text-ghost);
   overflow: hidden;
@@ -300,6 +336,11 @@ body { padding-bottom: 36px; }
     <button class="btn btn-primary" id="applyBtn" style="display:none;margin-left:auto;" data-cull-on="click:applyCulling">
       Apply Culling Decisions
     </button>
+  </div>
+
+  <div id="cullOrphans" class="cull-orphans" hidden>
+    <span id="cullOrphansText"></span>
+    <button class="btn btn-secondary" data-cull-on="click:reviewCullOrphans">Review them</button>
   </div>
 
   <div id="cullSettings" style="display:none;background:var(--bg-secondary);border:1px solid var(--border-primary);border-radius:8px;padding:16px;margin-bottom:16px;">
@@ -460,6 +501,14 @@ body { padding-bottom: 36px; }
   </div>
 </div>
 
+<dialog id="cullOrphansDialog">
+  <h3>Rejects that lost their reason</h3>
+  <p class="cull-hint">Each of these was rejected in favor of another photo that has since been deleted or rejected itself. Decide again, or keep them undecided.</p>
+  <div id="cullOrphanPhotos"></div>
+  <div class="cull-dialog-actions">
+    <button class="btn btn-secondary" data-cull-on="click:closeCullOrphans">Back to culling</button>
+  </div>
+</dialog>
 <dialog id="cullRejectedDialog">
   <h3>Review rejected photos</h3>
   <p id="cullRejectedCount" class="cull-hint"></p>
@@ -477,6 +526,7 @@ body { padding-bottom: 36px; }
 <script defer src="/static/cull/analysis.js"></script>
 <script defer src="/static/cull/history.js"></script>
 <script defer src="/static/cull/decisions.js"></script>
+<script defer src="/static/cull/keepers.js"></script>
 <script defer src="/static/cull/data.js"></script>
 <script defer src="/static/cull/render.js"></script>
 <script defer src="/static/cull/focus.js"></script>

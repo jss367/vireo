@@ -18,6 +18,8 @@
 var VireoExportPresets = (function() {
   var SAVED_PREFIX = 'saved:';
   var LAST_USED_KEY = 'vireo.export.lastPreset';
+  var CUSTOM_SETTINGS_KEY = 'vireo.export.customSettings';
+  var customStorageWarningShown = false;
   var CAPTURE_SPLIT_KEY =
     'vireo.browse.export.metadata.captureDateTime.presetFields';
   var DEFAULT_SUBFOLDER = 'exported';
@@ -337,7 +339,8 @@ var VireoExportPresets = (function() {
       var applyPreset = Vireo.pageHook('applyExportPreset');
       if (applyPreset) applyPreset(value);
     }
-    VireoViewPreferences.write(LAST_USED_KEY, value);
+    if (value === 'custom') rememberCustomSettings();
+    else VireoViewPreferences.write(LAST_USED_KEY, value);
     updateButtons();
   }
 
@@ -572,7 +575,7 @@ var VireoExportPresets = (function() {
         return;
       }
       if (VireoViewPreferences.read(LAST_USED_KEY) === SAVED_PREFIX + name) {
-        VireoViewPreferences.write(LAST_USED_KEY, 'custom');
+        rememberCustomSettings();
       }
       var refreshResult = await refresh();
       var edited = editGeneration !== modalEditGeneration;
@@ -647,9 +650,111 @@ var VireoExportPresets = (function() {
     return {keptCurrent: keptCurrent};
   }
 
+  function rememberCustomSettings() {
+    var snapshot = JSON.stringify(collectSettings());
+    VireoViewPreferences.write(CUSTOM_SETTINGS_KEY, snapshot);
+    // The shared storage helper tolerates quota/security errors. Verify the
+    // snapshot before changing the marker so it cannot point at stale data.
+    var saved = VireoViewPreferences.read(CUSTOM_SETTINGS_KEY) === snapshot;
+    if (saved) {
+      VireoViewPreferences.write(LAST_USED_KEY, 'custom');
+      saved = VireoViewPreferences.read(LAST_USED_KEY) === 'custom';
+    }
+    if (!saved && !customStorageWarningShown && typeof showToast === 'function') {
+      showToast('Could not remember export settings. You can still export with these settings.', 'warning');
+    }
+    customStorageWarningShown = !saved;
+  }
+
+  function migrateExportCaptureDateTimePreference() {
+    var combinedKey = 'vireo.browse.export.metadata.captureDateTime';
+    if (VireoViewPreferences.read(combinedKey) !== null) return;
+
+    var legacyDate = VireoViewPreferences.read('vireo.browse.export.metadata.captureDate');
+    var legacyTime = VireoViewPreferences.read('vireo.browse.export.metadata.captureTime');
+    if (legacyDate === null && legacyTime === null) return;
+
+    VireoViewPreferences.write(
+      combinedKey,
+      legacyDate === '1' || legacyTime === '1' ? '1' : '0'
+    );
+  }
+
+  function migrateLegacyCustomSettings() {
+    migrateExportCaptureDateTimePreference();
+    // The editor has no data-view-preference attributes. Read the legacy
+    // Browse preferences explicitly so migration works from either page.
+    [
+      ['exportSubfolder', 'subfolder'],
+      ['exportSubfolderName', 'subfolderName'],
+      ['exportRevealAfter', 'revealAfter'],
+      ['exportMetadataSpecies', 'metadata.species'],
+      ['exportMetadataRating', 'metadata.rating'],
+      ['exportMetadataLocation', 'metadata.location'],
+      ['exportMetadataCamera', 'metadata.camera'],
+      ['exportMetadataCaptureDateTime', 'metadata.captureDateTime'],
+      ['exportMetadataCaptureDate', 'metadata.captureDateTime'],
+      ['exportMetadataCaptureTime', 'metadata.captureDateTime'],
+    ].forEach(function(entry) {
+      var control = document.getElementById(entry[0] || '');
+      var value = VireoViewPreferences.read('vireo.browse.export.' + entry[1]);
+      if (!(control instanceof HTMLInputElement) || value === null) return;
+      if (control.type === 'checkbox') {
+        if (value === '0' || value === '1') control.checked = value === '1';
+      } else {
+        control.value = value;
+      }
+    });
+    var split = VireoViewPreferences.read(CAPTURE_SPLIT_KEY);
+    if (split === 'capture_date' || split === 'capture_time') {
+      var other = document.getElementById(split === 'capture_date'
+        ? 'exportMetadataCaptureTime' : 'exportMetadataCaptureDate');
+      if (other instanceof HTMLInputElement) other.checked = false;
+    }
+    restoreCaptureSplitHint();
+    applySettings(collectSettings());
+    rememberCustomSettings();
+  }
+
+  /** @param {unknown} settings @returns {settings is SavedExportSettings} */
+  function isCompleteCustomSettings(settings) {
+    if (!settings || typeof settings !== 'object' || Array.isArray(settings)) return false;
+    var value = /** @type {Record<string, unknown>} */ (settings);
+    if (!['destination', 'subfolder_name', 'format', 'naming_template'].every(function(key) {
+      return typeof value[key] === 'string';
+    })) return false;
+    if (!['export_to_subfolder', 'reveal_after_export'].every(function(key) {
+      return typeof value[key] === 'boolean';
+    })) return false;
+    if (value.format !== 'jpg' && value.format !== 'png' && value.format !== 'tiff') return false;
+    if (typeof value.quality !== 'number' || !Number.isInteger(value.quality) ||
+        value.quality < 1 || value.quality > 100) return false;
+    if (value.max_size !== null && (typeof value.max_size !== 'number' ||
+        !Number.isInteger(value.max_size) || value.max_size <= 0)) return false;
+    // Match export.py's EXPORT_METADATA_FIELDS before changing any controls.
+    var metadataFields = ['species', 'capture_date', 'capture_time', 'rating', 'location', 'camera'];
+    return Array.isArray(value.metadata_fields) && value.metadata_fields.every(function(field) {
+      return typeof field === 'string' && metadataFields.indexOf(field) !== -1;
+    });
+  }
+
+  function restoreCustomSettings() {
+    var stored = VireoViewPreferences.read(CUSTOM_SETTINGS_KEY);
+    try {
+      var settings = stored ? JSON.parse(stored) : null;
+      if (isCompleteCustomSettings(settings)) {
+        applySettings(settings);
+        return;
+      }
+    } catch (error) {
+      // Unreadable snapshots follow the same migration as older installs.
+    }
+    migrateLegacyCustomSettings();
+  }
+
   /* Called by the host page after it resets the modal to defaults and
    * restores its view preferences: fetches the current preset list, then
-   * re-applies whatever the user exported with last time. */
+   * re-applies the last selected preset or custom settings. */
   async function modalOpened() {
     var openGeneration = ++modalOpenGeneration;
     var editGeneration = modalEditGeneration;
@@ -685,7 +790,10 @@ var VireoExportPresets = (function() {
         // fields (subfolder, metadata boxes, reveal-after) that mark the
         // dialog Custom. Snap the dropdown back so it doesn't advertise a
         // built-in preset while the fields below no longer match it.
-        if (last === 'custom') presetSelect().value = 'custom';
+        if (last === 'custom') {
+          restoreCustomSettings();
+          presetSelect().value = 'custom';
+        }
         restorationComplete = true;
         updateButtons();
         return;
@@ -698,7 +806,7 @@ var VireoExportPresets = (function() {
           // to Custom. A failed list cannot prove that, so keep Export gated
           // rather than silently using the host defaults in its place.
           if (refreshResult.ok) {
-            VireoViewPreferences.write(LAST_USED_KEY, 'custom');
+            rememberCustomSettings();
             sel.value = 'custom';
             restoreCaptureSplitHint();
             restorationComplete = true;
@@ -748,7 +856,7 @@ var VireoExportPresets = (function() {
     modalEditGeneration++;
     var markPageCustom = Vireo.pageHook('markExportCustom');
     if (markPageCustom) markPageCustom();
-    VireoViewPreferences.write(LAST_USED_KEY, 'custom');
+    rememberCustomSettings();
     updateButtons();
   }
 
@@ -801,6 +909,7 @@ var VireoExportPresets = (function() {
 
   return {
     modalOpened: modalOpened,
+    migrateExportCaptureDateTimePreference: migrateExportCaptureDateTimePreference,
     subfolderName: subfolderName,
     markCustom: markCustom,
   };

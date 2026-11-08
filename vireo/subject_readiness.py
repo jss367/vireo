@@ -35,7 +35,12 @@ def explicit_decision(photo: Mapping[str, Any]) -> str | None:
 
 
 def attach_flag_confirmations(photos, states):
-    """Replace cached claims with current repository attribution, including clears."""
+    """Replace cached claims with current repository attribution, including clears.
+
+    A reject recorded in favor of another photo also gets ``reject_keeper``
+    (``photo_id``, ``filename`` or None once deleted, ``comparison``) so the
+    card can say what it lost to.
+    """
     for photo in photos:
         state = states.get(photo["id"], {})
         flag = state.get("flag") or "none"
@@ -43,6 +48,15 @@ def attach_flag_confirmations(photos, states):
         photo["flag_confirmation_status"] = (
             "confirmed" if state.get("confirmed_flag") == flag else "unverified"
         )
+        if flag == "rejected" and state.get("keeper_photo_id") is not None:
+            photo["reject_keeper"] = {
+                "photo_id": state["keeper_photo_id"],
+                "filename": state.get("keeper_filename"),
+                "comparison": state.get("comparison"),
+                "visible": bool(state.get("keeper_visible")),
+            }
+        else:
+            photo.pop("reject_keeper", None)
 
 
 def subject_analysis_readiness(photo: Mapping[str, Any]) -> dict[str, Any]:

@@ -135,16 +135,20 @@ def test_frozen_status_and_api_versions_match_release_manifest(mcp, monkeypatch,
     expected = desktop["version"]
     assert manifest["project"]["version"] == expected
     (tmp_path / "pyproject.toml").write_bytes((REPO / "pyproject.toml").read_bytes())
+    commit = "a" * 40
+    (tmp_path / "build-commit.txt").write_text(commit + "\n")
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
     from web import system
 
     monkeypatch.setattr(system, "package_version", lambda _: "0.0.0")
-    assert call(server, "vireo_status")["version"] == expected
+    status = call(server, "vireo_status")
+    assert status["version"] == expected
+    assert status["build_commit"] == commit
     for route in ("/api/version", "/api/v1/version"):
         response = transport._client.get(route, headers={"X-Vireo-Token": TOKEN})
         assert response.status_code == 200
-        assert response.get_json() == {"version": expected}
+        assert response.get_json() == {"version": expected, "build_commit": commit}
 
 
 def test_status_omits_db_path_when_an_override_targets_another_instance(mcp, monkeypatch):

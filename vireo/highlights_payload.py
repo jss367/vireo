@@ -19,6 +19,7 @@ from species_memberships import (
     candidate_subjects,
     photo_species_memberships,
     subject_is_background_like,
+    subject_is_whole_frame,
 )
 
 
@@ -490,9 +491,16 @@ def collect_highlight_buckets(
         if not memberships:
             if confirmation_filter != "confirmed":
                 subjects = candidate_subjects(r)
+                # A whole-frame prediction below the confidence threshold
+                # lands in Unidentified; the chip must still say "Whole
+                # frame" instead of a bare "ID N%" (the exact case
+                # ``whole_frame`` distinguishes), so read it off the
+                # fallback subject here as well as on the bucket path.
+                fallback = subjects[0] if subjects else None
                 unidentified_photos.append(_highlight_candidate_photo(
                     r, HighlightMembership(
-                        None, None, subjects[0] if subjects else None,
+                        None, None, fallback,
+                        whole_frame=bool(fallback) and subject_is_whole_frame(fallback),
                     ),
                     confirmed, all_buckets,
                 ))

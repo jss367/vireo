@@ -22,6 +22,7 @@ import logging
 
 from repositories.collections import remap_collection_photo_ids
 from repositories.identity_alternatives import remap_photo_identities
+from repositories.photo_review import remap_flag_attribution_keepers
 from repositories.photo_versions import remap_photo_versions
 from sql_chunks import chunked
 
@@ -46,6 +47,7 @@ class PhotoRowDeletion:
         """
         remap_photo_identities(self.conn, mapping)
         remap_photo_versions(self.conn, mapping)
+        remap_flag_attribution_keepers(self.conn, mapping)
         ids = list(dict.fromkeys(mapping))
         for chunk in chunked(ids):
             marks = ",".join("?" for _ in chunk)

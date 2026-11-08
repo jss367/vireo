@@ -50,3 +50,47 @@ def test_source_version_falls_back_to_checkout_manifest(monkeypatch):
     monkeypatch.setattr(system, "package_version", missing)
     manifest = Path(__file__).resolve().parents[2] / "pyproject.toml"
     assert system._application_version() == tomllib.loads(manifest.read_text())["project"]["version"]
+
+
+@pytest.mark.parametrize("contents", [None, "", "unknown", "a" * 39, "z" * 40, "A" * 40, b"\xff"])
+def test_frozen_commit_unavailable_is_explicit(monkeypatch, tmp_path, contents):
+    if contents is not None:
+        (tmp_path / "build-commit.txt").write_bytes(
+            contents if isinstance(contents, bytes) else contents.encode()
+        )
+    monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
+    assert system._application_build_commit() is None
+
+
+def test_frozen_commit_uses_only_bundle_stamp(monkeypatch, tmp_path):
+    commit = "abcde01234" * 4
+    (tmp_path / "build-commit.txt").write_text(commit + "\n")
+    monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
+    assert system._application_build_commit() == commit
+
+
+def test_source_commit_identifies_own_checkout(monkeypatch, tmp_path):
+    import subprocess
+
+    monkeypatch.delattr(sys, "_MEIPASS", raising=False)
+    monkeypatch.chdir(tmp_path)
+    root = Path(__file__).resolve().parents[2]
+    expected = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+    assert system._application_build_commit() == expected
+
+
+def test_source_archive_never_reports_parent_repository_commit(monkeypatch, tmp_path):
+    import subprocess
+
+    subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com",
+         "commit", "--allow-empty", "-m", "Unrelated parent"],
+        cwd=tmp_path, check=True, capture_output=True,
+    )
+    archive = tmp_path / "unpacked-vireo"
+    module = archive / "vireo" / "web" / "system.py"
+    module.parent.mkdir(parents=True)
+    monkeypatch.setattr(system, "__file__", str(module))
+    monkeypatch.delattr(sys, "_MEIPASS", raising=False)
+    assert system._application_build_commit() is None
