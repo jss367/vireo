@@ -840,3 +840,73 @@ def test_refresh_only_write_failure_is_explicit_for_another_no_inference_retry(r
     assert result["ok"] and result["review_refresh"]["status"] == "complete"
     assert calls == {"detection": [], "segmentation": []}
     assert load_results_raw(str(tmp_path), db.require_workspace_id())["photos"][0]["selection_eligible"]
+
+
+def test_wrong_trunk_correction_reanalyzes_only_corrected_animal_and_is_undoable(retry_library, tmp_path, monkeypatch):
+    """DSC_5284 regression: a retained trunk must not score a manually located bird."""
+    from services import detection_store
+    from subjects import payload
+
+    app, db, ids, calls = retry_library
+    pid, sibling = ids[:2]
+    trunk_box = dict(x=.00049, y=.35610, w=.36484, h=.64185)
+    bird_box = dict(x=.43, y=.34, w=.09, h=.12)
+    trunk, weak_bird = detection_store.write_detection_batch(db, pid, "megadetector-v6", [
+        {"box": trunk_box, "confidence": .2207, "category": "animal"},
+        {"box": bird_box, "confidence": .05, "category": "animal"},
+    ])
+    assert payload(db, pid)["primary_detection_id"] == trunk
+    execute(db, [pid], tmp_path)
+    original = dict(db.conn.execute('SELECT * FROM photos WHERE id=?', (pid,)).fetchone())
+    assert original['mask_path'] is not None
+    from pipeline import load_results_raw, save_results_raw
+    results_dir = str(Path(db.job_history.catalog_file()).parent)
+    save_results_raw({'photos': [{'id': photo_id, 'flag': 'none', 'rating': 0,
+                                'label': 'REJECT', 'subject_tenengrad': 999} for photo_id in ids],
+                      'encounters': [{'photo_ids': ids, 'bursts': [{'photo_ids': ids}],
+                                      'species_confirmed': True}], 'summary': {}},
+                     results_dir, db.require_workspace_id())
+    client = app.test_client()
+    response = client.put(f'/api/photos/{pid}/subjects/reviewer-box', json={
+        "box": bird_box, "source": "gpt-6.1-sol", "reason": "The retained trunk does not contain the bird",
+    })
+    assert response.status_code == 200
+    saved = load_results_raw(results_dir, db.require_workspace_id())
+    cached = next(photo for photo in saved['photos'] if photo['id'] == pid)
+    assert cached['label'] == 'REVIEW' and cached['subject_tenengrad'] is None
+    assert saved['encounters'][0]['species_confirmed']
+    selected = response.json['primary_detection_id']
+    assert selected not in (trunk, weak_bird)
+    assert response.json['selection'] == 'manual'
+    corrected = db.conn.execute('SELECT * FROM photos WHERE id=?', (pid,)).fetchone()
+    assert corrected['mask_path'] is None and corrected['subject_tenengrad'] is None
+    assert corrected['eye_x'] is None and corrected['quality_score'] is None
+    assert explain_selected(db, [pid], db.get_effective_config({}))['photos'][0]['eligible'] is False
+    prompts = []
+
+    def corrected_mask(image, box, variant):
+        prompts.append(box)
+        pixels = np.zeros((image.height, image.width), bool)
+        pixels[27:37, 43:52] = True
+        return pixels
+
+    monkeypatch.setattr('masking.generate_mask', corrected_mask)
+    result, _ = execute(db, [pid], tmp_path)
+    assert result['photos'][0]['status'] == 'complete'
+    assert result['photos'][0]['stages_run'] == ['segmentation', 'quality']
+    assert prompts == [bird_box] and calls['detection'] == []
+    mask = db.masks_features.get_mask(pid, 'sam2-small')
+    assert mask['detector_model'] == 'reviewer-selected'
+    assert {key: mask['prompt_' + key] for key in 'xywh'} == bird_box
+    assert db.conn.execute('SELECT mask_path FROM photos WHERE id=?', (sibling,)).fetchone()[0] is None
+    assert db.photos.get(pid)['flag'] == original['flag']
+    assert db.photos.get(pid)['rating'] == original['rating']
+    assert client.post('/api/undo').status_code == 200
+    assert payload(db, pid)['primary_detection_id'] == trunk
+    assert db.conn.execute('SELECT mask_path FROM photos WHERE id=?', (pid,)).fetchone()[0] is None  # never project the bird mask onto the trunk
+    assert client.post('/api/redo').status_code == 200
+    assert payload(db, pid)['primary_detection_id'] == selected
+    assert explain_selected(db, [pid], db.get_effective_config({}))['photos'][0]['eligible'] is False
+    result, _ = execute(db, [pid], tmp_path)
+    assert result['photos'][0]['status'] == 'complete'
+    assert prompts == [bird_box, bird_box]

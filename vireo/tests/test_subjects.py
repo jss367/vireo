@@ -660,3 +660,42 @@ def test_cached_only_reviewer_results_reject_redraw(db, subject_photo, monkeypat
     assert result['predictions_stored'] == 0
     assert raw == []
     assert tuple(db.conn.iterdump()) == before
+
+
+def test_subject_selection_and_replaced_box_roundtrip_through_undo(app_and_db):
+    app, db = app_and_db
+    from pipeline_locks import acquire_photo_mask
+
+    pid = db.photos.list_page()[0]['id']
+    ids = detection_store.write_detection_batch(db, pid, 'megadetector-v6', [
+        {'box': dict(x=.1, y=.1, w=.2, h=.2), 'confidence': .9},
+        {'box': dict(x=.6, y=.1, w=.2, h=.2), 'confidence': .7},
+    ])
+    client = app.test_client()
+    choice_url = f'/api/photos/{pid}/primary-subject'
+    box_url = f'/api/photos/{pid}/subjects/reviewer-box'
+    selected = client.put(choice_url, json={'detection_id': ids[1], 'source': 'gpt-6.1-sol'})
+    assert selected.status_code == 200 and selected.json['edit_id']
+    assert client.post('/api/undo').status_code == 200
+    assert payload(db, pid)['selection'] == 'automatic'
+    assert client.post('/api/redo').status_code == 200
+    assert payload(db, pid)['primary_detection_id'] == ids[1]
+    first = client.put(box_url, json={'box': dict(x=.3, y=.4, w=.1, h=.1)}).json
+    second = client.put(box_url, json={'box': dict(x=.4, y=.4, w=.1, h=.1)}).json
+    assert first['primary_detection_id'] != second['primary_detection_id']
+    lock = acquire_photo_mask(pid)
+    assert lock.acquire(blocking=False)
+    try:
+        assert client.post('/api/undo').status_code == 409
+        assert client.put(choice_url, json={'detection_id': None}).status_code == 409
+        assert payload(db, pid)['primary_detection_id'] == second['primary_detection_id']
+    finally:
+        lock.release()
+    assert client.post('/api/undo').status_code == 200
+    assert payload(db, pid)['primary_detection_id'] == first['primary_detection_id']
+    assert client.post('/api/undo').status_code == 200
+    assert payload(db, pid)['primary_detection_id'] == ids[1]
+    assert client.post('/api/redo').status_code == 200
+    assert payload(db, pid)['primary_detection_id'] == first['primary_detection_id']
+    assert client.post('/api/redo').status_code == 200
+    assert payload(db, pid)['primary_detection_id'] == second['primary_detection_id']

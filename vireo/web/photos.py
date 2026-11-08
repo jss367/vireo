@@ -1584,47 +1584,34 @@ def create_photos_blueprint(
 
         return ctx.start("analyze-subjects", work, config={"photo_id": photo_id, "detection_id": detection_id})
 
-    @blueprint.route("/api/photos/<int:photo_id>/subjects/reviewer-box", methods=["PUT"])
-    def api_reviewer_subject_box(photo_id: int) -> ResponseReturnValue:
-        from pipeline_locks import acquire_photo_mask
-        from subjects import payload, select_reviewer_box
+    def _save_subject_selection(photo_id: int, *, reviewer_box: bool = False) -> ResponseReturnValue:
+        from services import subject_selections, subject_verdicts
+        from subjects import payload
         db = get_db()
-        if db.photos.get(photo_id, verify_workspace=True) is None:
-            return json_error("not found", 404)
         body = request.get_json(silent=True)
-        if not isinstance(body, dict):
-            return json_error("box is required")
-        lock = acquire_photo_mask(photo_id)
-        if not lock.acquire(blocking=False):
-            return json_error("Subject analysis is running for this photo. Try again when it finishes.", 409)
+        required = "box" if reviewer_box else "detection_id"
+        if not isinstance(body, dict) or required not in body:
+            return json_error(f"{required} is required")
         try:
-            select_reviewer_box(db, photo_id, body.get("box"))
+            source, reason = subject_verdicts.validate_provenance(body)
+            result = subject_selections.set_selection(
+                db, photo_id, body, reviewer_box=reviewer_box, source=source, reason=reason,
+            )
+        except subject_verdicts.SubjectVerdictError as exc:
+            return json_error(str(exc), exc.status)
         except ValueError as exc:
             return json_error(str(exc))
-        finally:
-            lock.release()
-        return jsonify(payload(db, photo_id))
+        if not subject_verdicts.refresh_pipeline_cache(db, db_path, [photo_id]):
+            result["warning"] = "Subject saved, but Process Review could not be refreshed. Reload it before comparing photos."
+        return jsonify({**payload(db, photo_id), **result})
+
+    @blueprint.route("/api/photos/<int:photo_id>/subjects/reviewer-box", methods=["PUT"])
+    def api_reviewer_subject_box(photo_id: int) -> ResponseReturnValue:
+        return _save_subject_selection(photo_id, reviewer_box=True)
 
     @blueprint.route("/api/photos/<int:photo_id>/primary-subject", methods=["PUT"])
     def api_primary_subject(photo_id: int) -> ResponseReturnValue:
-        from subjects import payload, select_primary
-        db = get_db()
-        if db.photos.get(photo_id, verify_workspace=True) is None:
-            return json_error("not found", 404)
-        body = request.get_json(silent=True)
-        if not isinstance(body, dict) or "detection_id" not in body:
-            return json_error("detection_id is required; use null for automatic selection")
-        from pipeline_locks import acquire_photo_mask
-        lock = acquire_photo_mask(photo_id)
-        if not lock.acquire(blocking=False):
-            return json_error("Subject analysis is running for this photo. Try again when it finishes.", 409)
-        try:
-            select_primary(db, photo_id, body["detection_id"])
-        except ValueError as exc:
-            return json_error(str(exc))
-        finally:
-            lock.release()
-        return jsonify(payload(db, photo_id))
+        return _save_subject_selection(photo_id)
 
     @blueprint.route("/api/detections/<int:detection_id>/subject-verdict", methods=["POST"])
     def api_detection_subject_verdict(detection_id: int) -> ResponseReturnValue:

@@ -211,7 +211,7 @@ def payload(db, photo_id):
         rejected.append(region)
     full_image_ids = {d["id"] for d in detection_store.get_detections(db, photo_id, min_conf=0)
                       if d["detector_model"] == "full-image"}
-    return {"photo_id": photo_id, "subjects": detections,
+    return {"photo_id": photo_id, "workspace_id": db.require_workspace_id(), "subjects": detections,
             "full_image_predictions": [p for did in full_image_ids for p in grouped.get(did, [])],
             "primary_detection_id": primary_id,
             "selection": "manual" if choice else "automatic",

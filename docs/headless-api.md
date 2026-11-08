@@ -202,6 +202,32 @@ Request/response shapes mirror the internal `/api/*` endpoints — see source
 or open `/api/v1/<path>` with the token in your browser's dev tools for
 concrete examples.
 
+### Correcting the selected animal
+
+`PUT /api/photos/<id>/primary-subject` accepts `detection_id` (a retained
+animal from this photo, or null for automatic selection).
+`PUT /api/photos/<id>/subjects/reviewer-box` accepts `box: {x,y,w,h}` in
+normalized upright source coordinates. Draw a reviewer box when the detector
+missed the animal or its usable box falls below the detector threshold.
+Both accept optional `source` and `reason`, save one Undo step per changed
+selection, and return the subject panel with `workspace_id`, `changed` and
+`edit_id` when changed. Undo restores the previous choice and reviewer box;
+replaced measurements are derived data and may need reanalysis.
+
+A correction clears incompatible photo-level mask, eye and quality evidence
+and refreshes affected saved review suggestions without changing flags, ratings,
+confirmed species or grouping. A failed cache refresh returns a `warning` and
+leaves a durable refresh request. Busy subject analysis refuses corrections
+and their undo/redo with 409.
+
+After correction, use `POST /api/photos/analysis-retry` with exactly this
+`photo_ids: [id]` and its `expected_workspace_id`, then check the per-photo
+result and readiness. The lightbox's **Retry subject mask and quality** button
+uses this path. The older `subjects/analyze` endpoint measures detection boxes
+for crop/exposure suggestions; it does not rebuild the selected animal's mask,
+quality or available eye evidence used for ranking. Missing eye identification
+remains explicit; selecting a region does not manufacture a species prediction.
+
 ### Burst adjudication
 
 Numeric query values must be finite and within their documented ranges; malformed

@@ -8,7 +8,7 @@ export function openSubjectBox(photoId, saved) {
   dialog.setAttribute('aria-label', 'Select animal region');
   dialog.innerHTML = '<h2>Select animal region</h2><p>Drag a box around the visible animal on the unedited image. '
     + 'This records your region, without assigning a species.</p>'
-    + '<p>Saving replaces the previous reviewer box. Undo does not restore it.</p>'
+    + '<p>Saving replaces the previous reviewer box. Undo restores your previous selection.</p>'
     + '<canvas aria-label="Drag to select animal region"></canvas>'
     + '<p role="status">Loading source image…</p><button type="button" data-save disabled>Save subject box</button> '
     + '<button type="button" data-cancel>Cancel</button>';
