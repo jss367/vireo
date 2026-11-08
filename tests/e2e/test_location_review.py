@@ -336,10 +336,10 @@ def test_location_review_assigns_a_custom_name_to_coordinate_group(
     page.locator("#locationReviewAssign").click()
 
     success_toast = page.locator("#toastContainer > div").last
-    expect(success_toast).to_have_text(
+    expect(success_toast.locator("span")).to_have_text(
         'Assigned “Anza-Borrego Desert State Park” to 2 photos'
     )
-    assert success_toast.evaluate("el => el.style.background") == "var(--success)"
+    assert success_toast.get_attribute("data-type") == "success"
     expect(page.locator("#locationReviewEmptyTitle")).to_have_text(
         "All locations reviewed"
     )

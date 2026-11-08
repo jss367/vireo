@@ -456,7 +456,7 @@ def test_exif_suggestion_appears_when_photo_has_gps_and_no_location(live_server,
 
     sugg = page.locator("#locationExifSuggestion")
     expect(sugg).to_be_visible()
-    expect(sugg).to_contain_text("EXIF says:")
+    expect(sugg).to_contain_text("GPS suggests:")
     expect(sugg).to_contain_text("Central Park")
     expect(sugg.locator("button.accept-btn")).to_have_text("Accept")
 
