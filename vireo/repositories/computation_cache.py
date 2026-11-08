@@ -51,7 +51,7 @@ class ComputationCacheRepository:
         """The ``classifier_match_scores`` row of one run, or None."""
         return self.conn.execute(
             """SELECT max_match_score, match_margin, top_species,
-                  label_count, score_kind
+                  label_count, score_kind, background_score, background_prompt
            FROM classifier_match_scores
            WHERE detection_id = ? AND classifier_model = ?
              AND labels_fingerprint = ?""",
@@ -415,15 +415,47 @@ class ComputationCacheRepository:
             """INSERT INTO classifier_match_scores
                      (detection_id, classifier_model, labels_fingerprint,
                       max_match_score, match_margin, top_species,
-                      label_count, score_kind)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                      label_count, score_kind, background_score,
+                      background_prompt)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 detection_id, classifier_model, labels_short_fingerprint,
                 match["max_match_score"], match.get("match_margin"),
                 match.get("top_species"), match.get("label_count"),
-                match.get("score_kind"),
+                match.get("score_kind"), match.get("background_score"),
+                match.get("background_prompt"),
             ),
         )
+
+    def fill_missing_background_match(
+        self,
+        detection_id: int,
+        classifier_model: str,
+        labels_short_fingerprint: str,
+        background_score: float,
+        background_prompt: str | None,
+    ) -> int:
+        """Set background fields on a summary row that has none; rows filled.
+
+        Pre-background artifacts wrote a ``classifier_match_scores`` row with
+        NULL background_score, and a later enriched artifact for the same run
+        hits the ``already_materialized`` short-circuit — without this fill-in
+        a background-like region would stay unknown behind the
+        ``classifier_runs`` gate and keep opening Highlights buckets.
+        """
+        cursor = self.conn.execute(
+            """UPDATE classifier_match_scores
+                 SET background_score = ?,
+                     background_prompt = ?
+               WHERE detection_id = ? AND classifier_model = ?
+                 AND labels_fingerprint = ?
+                 AND background_score IS NULL""",
+            (
+                background_score, background_prompt,
+                detection_id, classifier_model, labels_short_fingerprint,
+            ),
+        )
+        return cursor.rowcount
 
     def delete_match_summary(
         self, detection_id: int, classifier_model: str, labels_short_fingerprint: str,

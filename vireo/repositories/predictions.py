@@ -65,6 +65,7 @@ from repositories.effective_config import active_effective_config
 from repositories.photo_sql import TOP_PREDICTION_CONFIDENCE_EXPR
 from repositories.prediction_review import (
     AUTO_MATCH_REVIEW_MARKER,
+    CLASSIFIER_MATCH_SCORE_JOIN,
     prediction_review_join,
     prediction_review_status,
 )
@@ -74,6 +75,7 @@ from repositories.prediction_rules import (
     relax_negated_prediction_leaves,
 )
 from settings_source import config_value
+from species_memberships import subject_evidence_order
 
 
 class DeferredIdentificationError(ValueError):
@@ -955,6 +957,7 @@ class PredictionRepository:
                 f"""SELECT pr.id, d.category AS subject_category,
                            p.latitude, p.longitude, cms.score_kind,
                            cms.max_match_score, cms.match_margin, cms.label_count,
+                           cms.background_score, cms.background_prompt,
                            COALESCE(er.decision, 'unreviewed') AS decision,
                            COALESCE(er.revision, 0) AS revision
                     FROM predictions pr
@@ -1390,9 +1393,14 @@ class PredictionRepository:
         from its latest label set; each photo's list runs highest confidence
         first (ties to the higher id).
 
-        Rows have the shape ``top_unrejected_by_photo`` documents, so a photo
-        with two subjects keeps both species instead of only the most
-        confident one. Same detector floor, visibility and empty-input rules.
+        Rows have the shape ``top_unrejected_by_photo`` documents plus the
+        region evidence ``species_memberships`` ranks subjects by
+        (``detector_confidence``, ``detector_model``, and the run's
+        ``max_match_score`` / ``background_score`` / ``score_kind``), so a
+        photo with two subjects keeps both species instead of only the most
+        confident one. Each photo's list runs in ``subject_evidence_order``:
+        the strongest detector box first, whole-frame rows last. Same
+        detector floor, visibility and empty-input rules.
         """
         if not photo_ids:
             return {}
@@ -1403,13 +1411,18 @@ class PredictionRepository:
             placeholders = ",".join("?" for _ in chunk)
             rows = self.conn.execute(
                 f"""SELECT photo_id, detection_id, id, species, confidence,
-                          classifier_model, group_id, status
+                          classifier_model, group_id, status,
+                          detector_confidence, detector_model,
+                          max_match_score, background_score, score_kind
                    FROM (
                        SELECT d.photo_id, d.id AS detection_id, pr.id,
                               pr.species, pr.confidence,
                               pr.classifier_model,
                               pr_rev.group_id,
                               {prediction_review_status()} AS status,
+                              d.detector_confidence, d.detector_model,
+                              cms.max_match_score, cms.background_score,
+                              cms.score_kind,
                               ROW_NUMBER() OVER (
                                   PARTITION BY d.id
                                   ORDER BY pr.confidence DESC, pr.id DESC
@@ -1417,6 +1430,7 @@ class PredictionRepository:
                        FROM detections d
                        JOIN predictions pr ON pr.detection_id = d.id
                        {prediction_review_join('pr')}
+                       {CLASSIFIER_MATCH_SCORE_JOIN}
                        WHERE d.photo_id IN ({placeholders})
                          AND (d.detector_model = 'full-image' OR d.detector_confidence >= ? AND d.subject_verdict IS NULL)
                          AND pr.species IS NOT NULL
@@ -1432,7 +1446,7 @@ class PredictionRepository:
                    ORDER BY photo_id, confidence DESC, id DESC""",
                 (ws, *chunk, detector_floor),
             ).fetchall()
-            for row in rows:
+            for row in sorted(rows, key=subject_evidence_order):
                 results.setdefault(row["photo_id"], []).append(row)
         return results
 

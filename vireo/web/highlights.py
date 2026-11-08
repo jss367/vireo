@@ -480,11 +480,18 @@ def _parse_optional_species(body: JsonDict, field: str) -> tuple[str | None, str
 
 
 def _subject_prediction(row: Row) -> JsonDict:
+    """A ``top_unrejected_by_detection`` row as ``photo_species_memberships``
+    reads it: the prediction plus the region evidence the rule ranks by."""
     return {
         "detection_id": row["detection_id"],
         "prediction_id": row["id"],
         "species": row["species"],
         "confidence": row["confidence"],
+        "detector_confidence": row["detector_confidence"],
+        "detector_model": row["detector_model"],
+        "max_match_score": row["max_match_score"],
+        "background_score": row["background_score"],
+        "score_kind": row["score_kind"],
     }
 
 

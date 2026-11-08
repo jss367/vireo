@@ -2004,6 +2004,12 @@ def _attach_inspector_match_scores(db: Database, photo_id: int, effective_cfg: J
             row.get("match_margin"),
             effective_cfg,
         )
+        row["background"] = match_confidence.assess_background(
+            row.get("score_kind"),
+            row.get("max_match_score"),
+            row.get("background_score"),
+            row.get("background_prompt"),
+        )
     result["match_scores"] = match_rows
     result["match_summary"] = match_confidence.summarize_photo(
         match_rows,

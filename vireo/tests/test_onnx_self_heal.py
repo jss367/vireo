@@ -491,13 +491,20 @@ def test_text_heal_rebuilds_image_session(tmp_path):
     fake_tokenizer.encode.return_value = FakeEncoding()
     fake_tokenizer.encode_batch.return_value = [FakeEncoding()]
 
+    def fake_compute(text_session, text_input_name, tokenizer, labels, **kwargs):
+        # Shape to the caller's label list: the classifier loads species
+        # labels ([``bird``]) and ``BACKGROUND_PROMPTS`` (33 prompts) through
+        # the same helper, so a fixed (512, 1) return would fail payload
+        # validation for the background set.
+        return np.zeros((512, len(labels)), dtype=np.float32)
+
     with (
         patch("classifier._MODELS_ROOT", str(tmp_path)),
         patch("classifier.onnx_runtime.create_session", side_effect=fake_create),
         patch("classifier._load_tokenizer", return_value=fake_tokenizer),
         patch(
             "classifier._compute_embeddings_with_progress",
-            return_value=np.zeros((512, 1), dtype=np.float32),
+            side_effect=fake_compute,
         ),
         patch(
             "models.build_self_heal_redownloader",
@@ -603,13 +610,21 @@ def test_image_heal_invalidates_stale_text_embedding_cache(tmp_path, monkeypatch
     fake_tokenizer.encode.return_value = FakeEncoding()
     fake_tokenizer.encode_batch.return_value = [FakeEncoding()]
 
+    def fake_compute(text_session, text_input_name, tokenizer, call_labels, **kwargs):
+        # Species labels (the one passed in) get the distinctive fresh
+        # payload for the equality assertion below; ``BACKGROUND_PROMPTS``
+        # just needs an array of the right shape to pass payload validation.
+        if list(call_labels) == labels:
+            return fresh_embeddings
+        return np.zeros((512, len(call_labels)), dtype=np.float32)
+
     with (
         patch("classifier._MODELS_ROOT", str(tmp_path)),
         patch("classifier.onnx_runtime.create_session", side_effect=fake_create),
         patch("classifier._load_tokenizer", return_value=fake_tokenizer),
         patch(
             "classifier._compute_embeddings_with_progress",
-            return_value=fresh_embeddings,
+            side_effect=fake_compute,
         ),
         patch(
             "models.build_self_heal_redownloader",

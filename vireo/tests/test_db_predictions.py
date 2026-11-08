@@ -592,6 +592,10 @@ def test_top_unrejected_predictions_by_photo(db, cat):
         "photo_id": p0, "detection_id": det, "id": jay, "species": "Jay",
         "confidence": 0.7, "classifier_model": "m1", "group_id": "g",
         "status": "reviewed",
+        # The region evidence ``species_memberships`` ranks subjects by; no
+        # match summary was recorded for this run.
+        "detector_confidence": 0.9, "detector_model": "md",
+        "max_match_score": None, "background_score": None, "score_kind": None,
     }
     # Equal confidence: the higher id wins.
     assert got[p1]["id"] == kite

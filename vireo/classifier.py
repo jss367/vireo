@@ -150,6 +150,25 @@ OPENAI_IMAGENET_TEMPLATE = [
 ]
 
 
+# Scene and plant prompts scored next to the species list on every
+# classification. The softmax only ranks the loaded labels, so a detector
+# box on a trunk or a whole frame of twigs still gets a confident species
+# winner; the cosine to the best of these prompts is the evidence that
+# nothing on the list fit as well as "bark" did. They go through the same
+# templates as the labels so ``background_match`` can compare the two
+# cosines on one scale. Plant names are here because the catalog's
+# backgrounds are trees and shrubs, and BioCLIP scores a named plant higher
+# than a generic "foliage".
+BACKGROUND_PROMPTS = (
+    "tree bark", "tree trunk", "bare branches", "twigs", "leaves", "foliage",
+    "grass", "rocks", "water", "sky", "dirt", "sand",
+    "blurry out-of-focus background", "empty scene with no animal",
+    "tree", "bush", "shrub", "branch", "plant", "wood", "lichen", "moss",
+    "eucalyptus tree", "tamarisk", "willow tree", "pine needles", "reeds",
+    "mud", "gravel", "pond", "splashing water", "sunlit leaves", "dead leaves",
+)
+
+
 def _prompt_template_identity():
     """Content identity for the prompts that produce cached embeddings."""
     from embedding_cache import identity_digest
@@ -507,6 +526,22 @@ def _require_text_encoder_files(model_dir):
     return text_encoder_path, tokenizer_path
 
 
+def _wrap_redownload(redownload, heal_state):
+    """Wrap a ``redownload`` hook so it flips ``heal_state["triggered"]``.
+
+    Returns ``None`` when no redownload was supplied — the caller then
+    cannot observe heals and the normal cache flow stays unchanged.
+    """
+    if redownload is None:
+        return None
+
+    def _tracked_redownload():
+        heal_state["triggered"] = True
+        redownload()
+
+    return _tracked_redownload
+
+
 def _load_or_compute_label_embeddings(
     labels,
     model_str,
@@ -652,6 +687,16 @@ def precompute_label_embeddings(
         model_dir,
         redownload=redownload,
         progress_callback=progress_callback,
+        cancel_check=cancel_check,
+        pause_check=pause_check,
+    )
+    # The background prompts load with every classifier, so a precomputed
+    # label set is only complete once they are cached too.
+    _load_or_compute_label_embeddings(
+        list(BACKGROUND_PROMPTS),
+        model_str,
+        model_dir,
+        redownload=redownload,
         cancel_check=cancel_check,
         pause_check=pause_check,
     )
@@ -803,23 +848,23 @@ class Classifier:
         cancel_check,
         pause_check,
     ):
-        """Set ``self._classes`` / ``self._txt_embeddings`` for custom labels."""
+        """Set species classes/embeddings and background prompts/embeddings.
+
+        Species labels and background prompts are both text-encoder outputs
+        that must come from the same model snapshot — mixing pre-heal
+        species embeddings with post-heal background ones would silently
+        compare scores across different weights, and the background gate
+        in ``background_match`` would then reject regions using a
+        geometry the species scores never saw. Both are loaded under one
+        heal tracker and reloaded together after any heal so they stay
+        consistent with the final image-side snapshot.
+        """
         text_heal_state = {"triggered": False}
+        text_redownload = _wrap_redownload(redownload, text_heal_state)
 
-        if redownload is not None:
-            def _tracked_redownload():
-                text_heal_state["triggered"] = True
-                redownload()
-
-            text_redownload = _tracked_redownload
-        else:
-            text_redownload = None
-
-        def _load_embeddings(expected_dim):
+        def _load_species(expected_dim):
             return _load_or_compute_label_embeddings(
-                labels,
-                model_str,
-                self._model_dir,
+                labels, model_str, self._model_dir,
                 redownload=text_redownload,
                 progress_callback=embedding_progress_callback,
                 cancel_check=cancel_check,
@@ -827,16 +872,47 @@ class Classifier:
                 pause_check=pause_check,
             )
 
-        expected_embedding_dim = _image_encoder_embedding_dim(
-            self._image_session
+        def _load_background(expected_dim):
+            return _load_or_compute_label_embeddings(
+                list(BACKGROUND_PROMPTS), model_str, self._model_dir,
+                redownload=text_redownload,
+                cancel_check=cancel_check,
+                embedding_dim=expected_dim,
+                pause_check=pause_check,
+            )
+
+        classes, species_emb, bg_prompts, bg_emb = (
+            self._reconcile_label_and_background_embeddings(
+                _load_species, _load_background,
+                image_encoder_path, config_path, text_heal_state,
+            )
         )
+
+        self._classes = classes
+        self._txt_embeddings = species_emb
+        self._background_prompts = bg_prompts
+        self._background_embeddings = bg_emb
+
+    def _reconcile_label_and_background_embeddings(
+        self, load_species, load_background,
+        image_encoder_path, config_path, heal_state,
+    ):
+        """Load species + background with heal-aware retry/rebuild.
+
+        Returns ``(classes, species_embeddings, bg_prompts, bg_embeddings)``
+        after converging both label sets onto one post-heal model snapshot.
+        """
+        def _try_both():
+            dim = _image_encoder_embedding_dim(self._image_session)
+            classes, s_emb, s_before, s_after = load_species(dim)
+            bg_prompts, bg_emb, b_before, b_after = load_background(dim)
+            return (
+                classes, s_emb, s_before, s_after,
+                bg_prompts, bg_emb, b_before, b_after,
+            )
+
         try:
-            (
-                self._classes,
-                self._txt_embeddings,
-                identity_before,
-                identity_after,
-            ) = _load_embeddings(expected_embedding_dim)
+            loaded = _try_both()
         except ValueError:
             # The expected width came from the image session loaded
             # *before* the text side had a chance to self-heal, and a
@@ -849,34 +925,61 @@ class Classifier:
             # repaired. Rebuild the image side from the healed files
             # and re-validate against it. Only ever one retry: a second
             # failure is a genuinely bad payload.
-            if not text_heal_state["triggered"]:
+            if not heal_state["triggered"]:
                 raise
             log.info(
                 "Text-encoder self-heal replaced the model snapshot; "
                 "rebuilding the image encoder and re-validating label "
-                "embeddings against the healed feature width."
+                "and background embeddings against the healed feature width."
             )
             self._rebuild_image_side(image_encoder_path, config_path)
-            text_heal_state["triggered"] = False
-            expected_embedding_dim = _image_encoder_embedding_dim(
-                self._image_session
-            )
-            (
-                self._classes,
-                self._txt_embeddings,
-                identity_before,
-                identity_after,
-            ) = _load_embeddings(expected_embedding_dim)
+            heal_state["triggered"] = False
+            loaded = _try_both()
+
+        (
+            classes, species_emb, s_before, s_after,
+            bg_prompts, bg_emb, b_before, b_after,
+        ) = loaded
 
         # A producer shared with this caller may self-heal the entire
-        # model directory while we wait. Rebuild the already-loaded image
-        # side whenever the durable embedding identity shows that change.
-        if text_heal_state["triggered"] or identity_before != identity_after:
+        # model directory while we wait, or a background cache miss may
+        # have triggered a heal after the species cache already returned
+        # pre-heal embeddings. Either way the image side is stale, and
+        # species and background embeddings may come from different
+        # model snapshots. Rebuild the image side and reload BOTH label
+        # sets against the healed directory — the shared label cache
+        # resolves each one against its current on-disk identity, so
+        # this converges species and background onto the same weights.
+        if (
+            heal_state["triggered"]
+            or s_before != s_after
+            or b_before != b_after
+        ):
             log.info(
                 "Text-encoder self-heal refreshed model dir; rebuilding "
-                "image encoder and preprocessing from the healed snapshot."
+                "image encoder and reloading label and background "
+                "embeddings from the healed snapshot."
             )
             self._rebuild_image_side(image_encoder_path, config_path)
+            heal_state["triggered"] = False
+            dim = _image_encoder_embedding_dim(self._image_session)
+            classes, species_emb, _s_before, _s_after = load_species(dim)
+            bg_prompts, bg_emb, _b_before, _b_after = load_background(dim)
+
+        return classes, species_emb, bg_prompts, bg_emb
+
+    def _background_match(self, img_features):
+        """``(score, prompt)``: the best background prompt for an embedding.
+
+        ``(None, None)`` when no background prompts are loaded (Tree of Life
+        mode, where plants are labels in their own right).
+        """
+        embeddings = getattr(self, "_background_embeddings", None)
+        if embeddings is None:
+            return None, None
+        scores = (img_features @ embeddings).flatten()
+        index = int(np.argmax(scores))
+        return float(scores[index]), self._background_prompts[index]
 
     def _load_tol_embeddings(self):
         """Tree of Life mode: load pre-computed embeddings."""
@@ -1075,6 +1178,10 @@ class Classifier:
                 embedding: numpy float32 array (the normalized image embedding vector)
         """
         img_features = self._get_image_embedding(image)  # (1, embedding_dim)
+        return self._classify_features(img_features, threshold)
+
+    def _classify_features(self, img_features, threshold):
+        """``(predictions, embedding)`` for one normalized image embedding."""
         embedding = img_features.flatten()
 
         # Cosine similarity: img_features @ txt_embeddings
@@ -1088,13 +1195,17 @@ class Classifier:
         raw_scores = logits.flatten() / 100.0
 
         if self._mode == "custom":
-            return self._build_custom_results(
-                probs, threshold, raw_scores
-            ), embedding
+            results = self._build_custom_results(probs, threshold, raw_scores)
         else:
-            return self._build_tol_results(
-                probs, threshold, raw_scores
-            ), embedding
+            results = self._build_tol_results(probs, threshold, raw_scores)
+        background_score, background_prompt = self._background_match(img_features)
+        if background_score is not None:
+            # The same two values on every result: the match is a property
+            # of the region, and ``raw_score`` already rides along per row.
+            for result in results:
+                result["background_score"] = background_score
+                result["background_prompt"] = background_prompt
+        return results, embedding
 
     def classify_batch_with_embedding(self, images, threshold=0.4):
         """Classify multiple PIL images.
@@ -1113,15 +1224,5 @@ class Classifier:
         results = []
         for img in images:
             img_features = self._get_image_embedding(img)  # (1, D)
-            embedding = img_features.flatten()
-
-            logits = 100.0 * (img_features @ self._txt_embeddings)
-            probs = onnx_runtime.softmax(logits, axis=-1).flatten()
-            raw_scores = logits.flatten() / 100.0
-
-            if self._mode == "custom":
-                preds = self._build_custom_results(probs, threshold, raw_scores)
-            else:
-                preds = self._build_tol_results(probs, threshold, raw_scores)
-            results.append((preds, embedding))
+            results.append(self._classify_features(img_features, threshold))
         return results

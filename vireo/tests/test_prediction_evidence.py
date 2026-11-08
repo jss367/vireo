@@ -243,3 +243,106 @@ def test_group_apply_cannot_tag_or_flag_deferred_subject(app_and_db):
     assert db.photos.get(photo['id'])['flag'] == photo['flag']
     assert [tuple(row) for row in db.conn.execute('SELECT * FROM photo_keywords')] == before
     assert db.predictions.get_rows()[0]['status'] == 'pending'
+
+
+def test_background_like_region_is_named_in_the_evidence(app_and_db):
+    """A box the classifier scored like bark carries a background verdict
+    and a review reason; a clean subject carries the opposite verdict; a
+    run that never scored the prompts is marked unmeasured."""
+    app, db = app_and_db
+    photo_id = db.photos.list_page()[0]['id']
+    # Three boxes in one save: a detection's id hashes its box, and a save
+    # replaces the photo's rows for the detector.
+    trunk, hawk, old = db.detections.save(photo_id, [
+        {'box': {'x': 0.0, 'y': 0.0, 'w': 0.4, 'h': 1.0}, 'confidence': .34, 'category': 'animal'},
+        {'box': {'x': 0.4, 'y': 0.3, 'w': 0.3, 'h': 0.7}, 'confidence': .49, 'category': 'animal'},
+        {'box': {'x': 0.7, 'y': 0.3, 'w': 0.2, 'h': 0.2}, 'confidence': .6, 'category': 'animal'},
+    ], detector_model='test-detector')
+    add(db, trunk, 'Elf Owl', .88, match_score=.41)
+    db.model_runs.record_classifier_match_score(
+        trunk, 'BioCLIP-2.5', 'legacy', .41, score_kind='cosine',
+        background_score=.27, background_prompt='leaves')
+    add(db, hawk, 'Red-shouldered Hawk', .52, match_score=.49)
+    db.model_runs.record_classifier_match_score(
+        hawk, 'BioCLIP-2.5', 'legacy', .49, score_kind='cosine',
+        background_score=.09, background_prompt='twigs')
+    add(db, old, 'Verdin', .7, match_score=.4)
+    db.model_runs.record_classifier_match_score(old, 'BioCLIP-2.5', 'legacy', .4, score_kind='cosine')
+    db.commit()
+    by_species = {row['species']: row['evidence'] for row in evidence_rows(app)}
+    owl = by_species['Elf Owl']
+    assert owl['background']['state'] == 'background'
+    assert owl['background']['background_prompt'] == 'leaves'
+    assert any('background' in reason and 'leaves' in reason for reason in owl['reasons'])
+    assert by_species['Red-shouldered Hawk']['background']['state'] == 'subject'
+    assert not any('background' in reason for reason in by_species['Red-shouldered Hawk']['reasons'])
+    assert by_species['Verdin']['background']['state'] == 'unavailable'
+
+
+@pytest.mark.parametrize('starting_version', [32, 33])
+def test_background_migration_adds_columns_idempotently_from_either_v33_layout(
+    tmp_path, starting_version,
+):
+    """Background columns land whether the catalog was stamped 33 by the sibling
+    migration (missing both column sets) or came up through 32.
+
+    The reverse — a pre-fix catalog stamped 33 by this branch where the
+    background columns already exist — is covered by
+    ``test_background_migration_is_a_noop_when_columns_already_exist``.
+    """
+    path = str(tmp_path / f'previous-v{starting_version}.db')
+    with Database(path):
+        pass
+    with sqlite3.connect(path) as conn:
+        conn.execute('ALTER TABLE classifier_match_scores DROP COLUMN background_score')
+        conn.execute('ALTER TABLE classifier_match_scores DROP COLUMN background_prompt')
+        conn.execute(f'PRAGMA user_version={starting_version}')
+        schema._apply_pending(conn)
+        schema._apply_pending(conn)
+        assert conn.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION
+        columns = {row[1] for row in conn.execute('PRAGMA table_info(classifier_match_scores)')}
+        assert {'background_score', 'background_prompt'} <= columns
+
+
+def test_background_migration_is_a_noop_when_columns_already_exist(tmp_path):
+    path = str(tmp_path / 'pre-fix-v33.db')
+    with Database(path):
+        pass
+    with sqlite3.connect(path) as conn:
+        conn.execute('PRAGMA user_version=33')
+        schema._apply_pending(conn)
+        assert conn.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION
+        columns = {row[1] for row in conn.execute('PRAGMA table_info(classifier_match_scores)')}
+        assert {'background_score', 'background_prompt'} <= columns
+
+
+def test_background_migration_repairs_alternate_v33_missing_keeper_columns(tmp_path):
+    """A dev catalog stamped v33 by this branch before the restack has the
+    background columns but no keeper columns, and ``_apply_pending`` would
+    skip migration 33 on it. Migration 34 must idempotently repair the
+    keeper columns too, preserving any existing rows."""
+    path = str(tmp_path / 'alternate-v33.db')
+    with Database(path):
+        pass
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "INSERT INTO current_flag_attribution "
+            "(workspace_id, photo_id, flag, source, reason, description, created_at) "
+            "VALUES (1, 1, 'rejected', 'cull', 'duplicate', 'kept sibling', '2026-01-01')"
+        )
+        conn.execute('ALTER TABLE current_flag_attribution DROP COLUMN keeper_photo_id')
+        conn.execute('ALTER TABLE current_flag_attribution DROP COLUMN comparison')
+        conn.execute('ALTER TABLE current_flag_attribution DROP COLUMN keeper_deleted_at')
+        conn.execute('PRAGMA user_version=33')
+        conn.commit()
+        schema._apply_pending(conn)
+        schema._apply_pending(conn)
+        assert conn.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION
+        attribution = {row[1] for row in conn.execute('PRAGMA table_info(current_flag_attribution)')}
+        assert {'keeper_photo_id', 'comparison', 'keeper_deleted_at'} <= attribution
+        background = {row[1] for row in conn.execute('PRAGMA table_info(classifier_match_scores)')}
+        assert {'background_score', 'background_prompt'} <= background
+        preserved = conn.execute(
+            "SELECT reason, description FROM current_flag_attribution WHERE photo_id = 1"
+        ).fetchone()
+        assert preserved == ('duplicate', 'kept sibling')

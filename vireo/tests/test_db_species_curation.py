@@ -1645,3 +1645,37 @@ def test_species_curation_signatures_unchanged():
     assert sig["repo.get_highlights"] == (
         "(self, species=None, eligible_only=False)"
     )
+
+
+def test_highlights_subjects_rank_by_detector_evidence_and_carry_it(db, cur):
+    """A photo's first subject is its strongest detector box, whatever the
+    softmax says, and each subject carries the detector and background
+    evidence ``photo_species_memberships`` rules on."""
+    p = cur["p"]
+    det_ids = db.detections.save(
+        p["card2"],
+        [{"box": {"x": 0.0, "y": 0.0, "w": 0.4, "h": 1.0}, "confidence": 0.34, "category": "animal"},
+         {"box": {"x": 0.4, "y": 0.3, "w": 0.3, "h": 0.7}, "confidence": 0.49, "category": "animal"}],
+        "md",
+    )
+    trunk, hawk = det_ids
+    db.predictions.add(trunk, "Elf Owl", 0.88, "m1", labels_fingerprint="fp1")
+    db.predictions.add(hawk, "Red-shouldered Hawk", 0.52, "m1", labels_fingerprint="fp1")
+    db.model_runs.record_classifier_match_score(
+        trunk, "m1", "fp1", 0.41, score_kind="cosine", background_score=0.27, background_prompt="leaves")
+    db.model_runs.record_classifier_match_score(
+        hawk, "m1", "fp1", 0.49, score_kind="cosine", background_score=0.09, background_prompt="twigs")
+    db.commit()
+    row = db.species_curation.get_highlights_candidates(None, photo_id=p["card2"])[0]
+    subjects = row["subject_predictions"]
+    assert [s["species"] for s in subjects] == ["Red-shouldered Hawk", "Elf Owl"]
+    assert subjects[0]["detector_confidence"] == pytest.approx(0.49)
+    assert subjects[0]["detector_model"] == "md"
+    assert (subjects[1]["max_match_score"], subjects[1]["background_score"], subjects[1]["score_kind"]) == (
+        0.41, 0.27, "cosine")
+    # The one-species-per-photo view follows the same order.
+    assert row["predicted_species"] == "Red-shouldered Hawk"
+    # ...and so does the confirm route's per-detection read.
+    rows = db.predictions.top_unrejected_by_detection([p["card2"]])[p["card2"]]
+    assert [r["species"] for r in rows] == ["Red-shouldered Hawk", "Elf Owl"]
+    assert rows[1]["background_score"] == pytest.approx(0.27)

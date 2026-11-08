@@ -161,14 +161,24 @@ def _make_custom_classifier(tmp_path, labels=None):
 
     model_dir = _make_model_dir(tmp_path)
     fake_image_session = _make_fake_image_session()
-    fake_text_session = _make_fake_text_session()
+    fake_species_text_session = _make_fake_text_session()
+    fake_background_text_session = _make_fake_text_session()
     fake_tokenizer = _make_fake_tokenizer()
 
     with (
         patch("classifier._MODELS_ROOT", str(tmp_path)),
         patch(
             "classifier.onnx_runtime.create_session",
-            side_effect=[fake_image_session, fake_text_session],
+            # Classifier loads three ONNX sessions: the image encoder,
+            # then the text encoder once for the species labels and once
+            # for BACKGROUND_PROMPTS. A cached CACHE_DIR could serve one
+            # or both text loads from disk, so the extra fakes are
+            # harmless when they go unused.
+            side_effect=[
+                fake_image_session,
+                fake_species_text_session,
+                fake_background_text_session,
+            ],
         ),
         patch("classifier._load_tokenizer", return_value=fake_tokenizer),
     ):
@@ -527,7 +537,8 @@ class TestCustomLabelsMode:
 
         model_dir = _make_model_dir(tmp_path)
         fake_image_session = _make_fake_image_session()
-        fake_text_session = _make_fake_text_session()
+        fake_species_text_session = _make_fake_text_session()
+        fake_background_text_session = _make_fake_text_session()
         fake_tokenizer = _make_fake_tokenizer()
         cache_dir = tmp_path / "cache"
 
@@ -540,7 +551,13 @@ class TestCustomLabelsMode:
             ),
             patch(
                 "classifier.onnx_runtime.create_session",
-                side_effect=[fake_image_session, fake_text_session],
+                # Image encoder, then one text encoder each for the
+                # species labels and for BACKGROUND_PROMPTS.
+                side_effect=[
+                    fake_image_session,
+                    fake_species_text_session,
+                    fake_background_text_session,
+                ],
             ),
             patch("classifier._load_tokenizer", return_value=fake_tokenizer),
         ):
@@ -548,9 +565,11 @@ class TestCustomLabelsMode:
             clf1 = Classifier(labels=["bird", "cat"], model_str="ViT-B-16")
             emb1 = clf1._txt_embeddings.copy()
 
-        # Cache file should exist
+        # Cache files should exist for both the species labels and the
+        # background prompts; the species payload is the one this test
+        # re-verifies on the second init.
         cache_files = list(cache_dir.glob("*.npy"))
-        assert len(cache_files) == 1
+        assert len(cache_files) == 2
 
         fake_image_session2 = _make_fake_image_session()
         with (
@@ -632,6 +651,79 @@ class TestCustomLabelsMode:
         assert calls["image"] == 2, (
             "the image encoder must be rebuilt from the healed snapshot so "
             "inference matmuls against the new width"
+        )
+
+    def test_background_cache_miss_heal_reloads_species_and_image_side(
+        self, tmp_path
+    ):
+        """A text-encoder self-heal triggered by the background-prompt cache
+        miss (after the species load already returned embeddings from the
+        pre-heal text encoder) must rebuild the image side and reload the
+        species embeddings against the healed snapshot.
+
+        Without that reconciliation, classification silently compares image
+        features and species embeddings computed from one model revision
+        against background embeddings computed from another — and the
+        background gate in ``background_match`` would then reject regions
+        using a geometry the species scores never saw.
+        """
+        from classifier import Classifier
+
+        model_dir = _make_model_dir(tmp_path)
+        fake_tokenizer = _make_fake_tokenizer()
+        cache_dir = tmp_path / "cache"
+        calls = {"image": 0, "text": 0}
+        healed = {"done": False}
+
+        def _redownload():
+            healed["done"] = True
+            (model_dir / "text_encoder.onnx").write_text("healed-bytes")
+
+        def _fake_create_session(path):
+            if path.endswith("image_encoder.onnx"):
+                calls["image"] += 1
+                return _make_fake_image_session()
+            calls["text"] += 1
+            # Text calls: 1 = species (success), 2 = background (corrupt,
+            # trips the self-heal), 3+ = retry after heal / species reload
+            # against the healed identity.
+            if calls["text"] == 2:
+                raise RuntimeError("Protobuf parsing failed")
+            return _make_fake_text_session()
+
+        with (
+            patch("classifier._MODELS_ROOT", str(tmp_path)),
+            patch("classifier.CACHE_DIR", str(cache_dir)),
+            patch(
+                "classifier._MANIFEST_PATH",
+                str(cache_dir / "manifest.json"),
+            ),
+            patch(
+                "classifier.onnx_runtime.create_session",
+                side_effect=_fake_create_session,
+            ),
+            patch(
+                "models.build_self_heal_redownloader",
+                return_value=_redownload,
+            ),
+            patch("classifier._load_tokenizer", return_value=fake_tokenizer),
+        ):
+            clf = Classifier(labels=["bird", "cat"], model_str="ViT-B-16")
+
+        assert healed["done"], "the background cache miss must trigger self-heal"
+        assert calls["image"] == 2, (
+            "the image side must be rebuilt after the background cache "
+            "miss healed the model — otherwise the image session is stale "
+            f"relative to the reloaded embeddings; got {calls['image']} load(s)"
+        )
+        assert clf._txt_embeddings.shape[1] == 2
+        # Both label sets land, and the background embeddings line up with
+        # the species width — the shared model snapshot invariant the fix
+        # restores (same first axis across species and background).
+        assert clf._background_embeddings is not None
+        assert (
+            clf._background_embeddings.shape[0]
+            == clf._txt_embeddings.shape[0]
         )
 
 
@@ -948,7 +1040,10 @@ class TestEmbeddingPrecompute:
             )
 
             assert count == 2
-            assert create_session.call_count == 1
+            # precompute_label_embeddings loads the text encoder once for
+            # the species labels and once for BACKGROUND_PROMPTS, so a
+            # fresh cache produces two loads on the first call.
+            assert create_session.call_count == 2
             assert create_session.call_args.args[0].endswith("text_encoder.onnx")
 
             cache_path = _embedding_cache_path(
@@ -967,7 +1062,7 @@ class TestEmbeddingPrecompute:
             )
 
             assert count_again == 2
-            assert create_session.call_count == 1
+            assert create_session.call_count == 2
 
             tokenizer.encode_batch.reset_mock()
             progress = []
@@ -977,7 +1072,9 @@ class TestEmbeddingPrecompute:
                 progress_callback=lambda current, total: progress.append((current, total)),
             )
             assert count_extended == 3
-            assert create_session.call_count == 2
+            # One additional text-encoder load for the "dog" extension;
+            # background prompts stay cached from the first call.
+            assert create_session.call_count == 3
             # Only the new species goes through the text encoder. Existing
             # labels remain reusable even in a different order.
             assert tokenizer.encode_batch.call_count == 1
@@ -991,7 +1088,7 @@ class TestEmbeddingPrecompute:
             precompute_label_embeddings(
                 ["dog", "cat"], model_str="ViT-B-16", pretrained_str=str(model_dir),
             )
-            assert create_session.call_count == 2, "a cached subset must not load the text encoder"
+            assert create_session.call_count == 3, "a cached subset must not load the text encoder"
 
 
 class TestGpuLockScope:

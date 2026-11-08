@@ -61,3 +61,11 @@ def prediction_review_join(
 def prediction_review_status(review_alias: str = "pr_rev") -> str:
     """Effective status: a missing review row means pending in this workspace."""
     return f"COALESCE({_identifier(review_alias)}.status, 'pending')"
+
+
+#: Join a prediction alias ``pr`` to its own run's match summary, so a
+#: reader can rank the region by its recorded species and background scores.
+CLASSIFIER_MATCH_SCORE_JOIN = """LEFT JOIN classifier_match_scores cms
+                         ON cms.detection_id = pr.detection_id
+                        AND cms.classifier_model = pr.classifier_model
+                        AND cms.labels_fingerprint = pr.labels_fingerprint"""

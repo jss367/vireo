@@ -299,6 +299,8 @@ class ModelRunsRepository:
         top_species: str | None = None,
         label_count: int | None = None,
         score_kind: str | None = None,
+        background_score: float | None = None,
+        background_prompt: str | None = None,
     ) -> None:
         """Record how well the best label in a list actually matched; commit with retry.
 
@@ -310,23 +312,29 @@ class ModelRunsRepository:
 
         ``max_match_score`` must be the best score over the entire label list,
         not merely over the predictions that cleared the confidence threshold.
+        ``background_score`` is the same run's best score over the
+        classifier's background prompts, on the same scale, with
+        ``background_prompt`` naming the winner; None when the model has no
+        background prompts, never a low score.
         """
         self.conn.execute(
             """INSERT INTO classifier_match_scores
                  (detection_id, classifier_model, labels_fingerprint,
                   max_match_score, match_margin, top_species, label_count,
-                  score_kind)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                  score_kind, background_score, background_prompt)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(detection_id, classifier_model, labels_fingerprint)
                DO UPDATE SET max_match_score = excluded.max_match_score,
                              match_margin = excluded.match_margin,
                              top_species = excluded.top_species,
                              label_count = excluded.label_count,
                              score_kind = excluded.score_kind,
+                             background_score = excluded.background_score,
+                             background_prompt = excluded.background_prompt,
                              run_at = datetime('now')""",
             (detection_id, classifier_model, labels_fingerprint,
              max_match_score, match_margin, top_species, label_count,
-             score_kind),
+             score_kind, background_score, background_prompt),
         )
 
     def has_classifier_match_score(

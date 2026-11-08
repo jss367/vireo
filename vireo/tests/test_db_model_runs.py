@@ -1312,3 +1312,23 @@ def test_repository_imports_no_db_code():
         for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
     }
     assert "db" not in imported
+
+
+def test_record_classifier_match_score_keeps_the_background_match(db):
+    """The run's best background-prompt score rides with its match summary
+    and reads back through the per-photo rows; a run without prompts leaves
+    both NULL rather than inventing a low score."""
+    photo_id = _photo(db, "bg.jpg")
+    det = _det(db, photo_id)
+    db.model_runs.record_classifier_match_score(
+        det, MODEL, "fp-a", 0.41, score_kind="cosine",
+        background_score=0.27, background_prompt="leaves",
+    )
+    db.commit()
+    (row,) = db.model_runs.get_match_scores_for_photo(photo_id)
+    assert (row["background_score"], row["background_prompt"]) == (0.27, "leaves")
+
+    db.model_runs.record_classifier_match_score(det, MODEL, "fp-a", 0.5, score_kind="cosine")
+    db.commit()
+    (row,) = db.model_runs.get_match_scores_for_photo(photo_id)
+    assert (row["max_match_score"], row["background_score"], row["background_prompt"]) == (0.5, None, None)

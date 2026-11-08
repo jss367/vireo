@@ -167,6 +167,19 @@ function matchRunVerdict(row) {
   return MATCH_RUN_VERDICTS[state] || /** @type {{color: string; label: string; title: string}} */ (MATCH_RUN_VERDICTS.unavailable);
 }
 
+// The run's best background prompt beside its best label. A region that
+// matched "tree bark" about as well as any species is flagged, since its
+// best label is then the species nearest to scenery, not an identification.
+/** @param {NavMatchRun} r */
+function backgroundCell(r) {
+  var bg = r.background;
+  if (!bg || bg.background_score == null) return '<td style="color:var(--text-dim);">—</td>';
+  var text = escapeHtml(formatMatchScore(bg.background_score, r.score_kind)) +
+    ' <span style="color:var(--text-dim);">' + escapeHtml(String(bg.background_prompt || '')) + '</span>';
+  var color = bg.state === 'background' ? 'var(--warning)' : 'var(--text-primary)';
+  return '<td style="color:' + color + ';" title="' + escapeAttr(String(bg.explanation || '')) + '">' + text + '</td>';
+}
+
 // Every recorded run on this photo, including the ones step 4's table cannot
 // show: full-image classification and detections under the current detector
 // threshold. Those are routinely where the species a user is asking about
@@ -178,7 +191,7 @@ function renderMatchScoreTable(rows) {
   var html = '<div style="margin-top:10px;">';
   html += '<div class="pipeline-stat" style="color:var(--text-muted);">Match strength per run</div>';
   html += '<table class="pipeline-table"><tr><th>Model</th><th>Best label</th><th>Match</th>' +
-    '<th>Margin</th><th>Labels</th><th>Detection</th><th>Verdict</th></tr>';
+    '<th>Margin</th><th>Background</th><th>Labels</th><th>Detection</th><th>Verdict</th></tr>';
   rows.forEach(function(r) {
     var det = r.detector_model === 'full-image'
       ? 'full image'
@@ -190,6 +203,7 @@ function renderMatchScoreTable(rows) {
       '<td>' + escapeHtml(r.top_species || '—') + '</td>' +
       '<td>' + escapeHtml(formatMatchScore(r.max_match_score, r.score_kind)) + '</td>' +
       '<td style="color:var(--text-dim);">' + escapeHtml(formatMatchScore(r.match_margin, r.score_kind)) + '</td>' +
+      backgroundCell(r) +
       '<td style="color:var(--text-dim);">' + (r.label_count == null ? '—' : r.label_count) + '</td>' +
       '<td style="color:var(--text-dim);">' + det + '</td>' +
       '<td style="color:' + verdict.color + ';" title="' + escapeAttr(verdict.title) + '">' +

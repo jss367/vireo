@@ -42,21 +42,37 @@ export function renderStripCards(photos) {
   return html;
 }
 
+// The row badge answers "how far can I trust this name?": confirmed by a
+// keyword; a likely ID (the detected regions' scores average 85% or more);
+// top candidates; or a whole-frame guess, where the detector found no animal
+// and the classifier named the species nearest to the whole scene.
+/** @param {HighlightsBucket} bucket */
+export function bucketBadge(bucket) {
+  if (bucket.is_accepted) return '<span class="bucket-badge accepted">Keyword confirmed</span>';
+  if (bucket.certainty === 'whole_frame') {
+    return '<span class="bucket-badge whole-frame" title="No animal was detected in these photos; '
+      + 'the species is the closest label to the whole frame, not an identification.">Whole-frame guess</span>';
+  }
+  if (bucket.certainty === 'likely') return '<span class="bucket-badge likely">Likely ID</span>';
+  return '<span class="bucket-badge candidate">Top candidates</span>';
+}
+
 /** @param {HighlightsBucket} bucket */
 export function renderBucket(bucket) {
   var perRow = parseInt(/** @type {HTMLInputElement} */ (document.getElementById('perRowSlider')).value);
   var expanded = state.expandedBuckets.has(bucket.species);
   var visible = expanded ? bucket.photos : bucket.photos.slice(0, perRow);
   var remaining = bucket.photo_count - visible.length;
-  var badgeClass = bucket.is_accepted ? 'accepted' : (bucket.certainty === 'likely' ? 'likely' : 'candidate');
-  var badgeText = bucket.is_accepted ? 'Keyword confirmed' : (bucket.certainty === 'likely' ? 'Likely ID' : 'Top candidates');
-  var badge = bucket.is_accepted
-    ? '<span class="bucket-badge accepted">Keyword confirmed</span>'
-    : '<span class="bucket-badge ' + badgeClass + '">' + badgeText + '</span>';
+  var badge = bucketBadge(bucket);
   var meta = bucket.photo_count + ' photo' + (bucket.photo_count === 1 ? '' : 's');
   if (bucket.highlight_count) meta += ' · ' + bucket.highlight_count + ' highlighted';
   if (isHighlightsAdvancedMode()) meta += ' · best ' + formatScore(bucket.best_score);
   if (!bucket.is_accepted && bucket.avg_confidence != null) meta += ' · ID ' + formatPercent(bucket.avg_confidence);
+  // A whole-frame guess has no detected animal behind it, so it is counted
+  // apart from the photos whose score the ID percentage averages.
+  if (!bucket.is_accepted && bucket.whole_frame_count && bucket.certainty !== 'whole_frame') {
+    meta += ' · ' + bucket.whole_frame_count + ' whole-frame guess' + (bucket.whole_frame_count === 1 ? '' : 'es');
+  }
   var expandBtn = '';
   // Show the affordance whenever photos are hidden (more loaded than one row)
   // or unloaded (has_more). Gating on photo_count > perRow alone would strand

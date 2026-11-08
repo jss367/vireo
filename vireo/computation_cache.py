@@ -525,7 +525,8 @@ def _match_summary_row(db, detection_id, classifier_model, labels_fingerprint):
     if row is None or row["max_match_score"] is None:
         return None
     match = {"max_match_score": row["max_match_score"]}
-    for field in ("match_margin", "top_species", "label_count", "score_kind"):
+    for field in ("match_margin", "top_species", "label_count", "score_kind",
+                  "background_score", "background_prompt"):
         if row[field] is not None:
             match[field] = row[field]
     return match
@@ -780,7 +781,7 @@ def _validate_candidate_taxonomy(taxonomy):
             )
 
 
-_MATCH_SCALAR_FIELDS = ("max_match_score", "match_margin")
+_MATCH_SCALAR_FIELDS = ("max_match_score", "match_margin", "background_score")
 
 
 def _validate_match_number(value, label):
@@ -815,11 +816,10 @@ def _validate_subject_match(match):
         raise CacheFormatError("subject match must be an object")
     for field in _MATCH_SCALAR_FIELDS:
         _validate_match_number(match.get(field), f"match.{field}")
-    top_species = match.get("top_species")
-    if top_species is not None and (
-        not isinstance(top_species, str) or len(top_species) > 500
-    ):
-        raise CacheFormatError("match.top_species must be a string")
+    for field in ("top_species", "background_prompt"):
+        text = match.get(field)
+        if text is not None and (not isinstance(text, str) or len(text) > 500):
+            raise CacheFormatError(f"match.{field} must be a string")
     score_kind = match.get("score_kind")
     if score_kind is not None and (
         not isinstance(score_kind, str) or len(score_kind) > 32
@@ -1893,17 +1893,27 @@ def _backfill_classification_enrichment(
         ):
             filled = True
     match = subject.get("match")
-    if (
-        match
-        and match.get("max_match_score") is not None
-        and not db.model_runs.has_classifier_match_score(
+    if match and match.get("max_match_score") is not None:
+        if not db.model_runs.has_classifier_match_score(
             detection_id, classifier_model, labels_short,
-        )
-    ):
-        db.computation_cache.insert_match_summary(
-            detection_id, classifier_model, labels_short, match,
-        )
-        filled = True
+        ):
+            db.computation_cache.insert_match_summary(
+                detection_id, classifier_model, labels_short, match,
+            )
+            filled = True
+        elif match.get("background_score") is not None and (
+            # Summary row exists but predates the background fields; fill
+            # in only the NULL background columns so a background-like
+            # region is no longer unknown behind the already_materialized
+            # short-circuit. The main score columns are never overwritten:
+            # the local measurement remains authoritative (see
+            # test_backfill_never_overwrites_existing_match_scores).
+            db.computation_cache.fill_missing_background_match(
+                detection_id, classifier_model, labels_short,
+                match["background_score"], match.get("background_prompt"),
+            )
+        ):
+            filled = True
     return filled
 
 
@@ -1920,13 +1930,17 @@ def _dedup_by_lookup_identity(items, key_fn, prefer=None):
     because of manifest ordering.  Digest is canonical-bytes-derived so
     the winner is content-defined and identical across installs.
 
-    A caller-supplied ``prefer`` returns a small integer *rank* (lower
-    wins) that jumps ahead of the digest tiebreaker. Classification uses
-    it to prefer artifacts carrying a ``match`` block over pre-feature
-    artifacts for the same lookup identity — adding the block only
-    changes the digest, so without a preference the enriched artifact
-    loses roughly half the time and the "not recorded" state gets
-    permanently locked in behind the ``classifier_runs`` gate.
+    A caller-supplied ``prefer`` returns a *rank* (lower wins) — any
+    orderable value, so classification can hand back a tuple that tiers
+    "missing match block" above "missing background fields within the
+    match block" — that jumps ahead of the digest tiebreaker.
+    Classification uses it to prefer artifacts carrying a ``match``
+    block over pre-feature artifacts for the same lookup identity, and
+    to prefer a match block carrying background fields over one that
+    predates them. Adding either block only changes the digest, so
+    without a preference the enriched artifact loses roughly half the
+    time and the "not recorded" state gets permanently locked in
+    behind the ``classifier_runs`` gate.
     """
     best = {}
     for item in items:
@@ -1940,26 +1954,41 @@ def _dedup_by_lookup_identity(items, key_fn, prefer=None):
 
 
 def _classification_enrichment_rank(artifact):
-    """Rank by the number of subjects missing a ``match`` block (lower wins).
+    """Rank by missing enrichment, strongest first (lower wins).
 
-    0 = every subject enriched; a positive count = partial enrichment;
-    equal to ``len(subjects)`` = pre-feature, no subject enriched at all.
+    A two-step tuple: how many subjects lack a ``match`` block at all,
+    then how many carry one that still predates the background fields.
+    A missing block weighs more than a block missing only its background
+    columns, so a partially-enriched artifact never beats a complete one.
 
-    A boolean "has at least one enriched subject" tiebreaker is not
-    enough for multi-detection artifacts: an interrupted enrichment
-    pass can leave one subject's ``match`` block behind, and a
-    later complete artifact carrying blocks for every subject then
-    ties on rank 0 and falls back to the digest sort. If the
-    partial digest wins, ``materialize_artifacts`` writes the
-    classifier-run marker but the un-enriched detections
-    permanently land with ``match_score`` NULL and no
-    ``classifier_match_scores`` row — the "not recorded" state the
-    enrichment exists to close.
+    Without the second step a pre-background ``match`` and a post-change
+    ``match`` share identical rank 0 (both have ``"match"``), and the
+    digest tiebreaker can hand the win to the older artifact. The
+    ``already_materialized`` short-circuit then skips the enrichment
+    backfill's main-score insert, leaving ``background_score`` NULL and
+    letting background-like regions keep opening Highlights buckets.
+
+    The counts are also what ``materialize_artifacts`` uses to detect
+    interrupted enrichment passes — an older artifact carrying a match
+    block for one subject while a later complete artifact carries blocks
+    for every subject would otherwise tie on a boolean "has at least
+    one" tiebreaker and fall back to the digest sort.
     """
-    return sum(
-        1 for subject in artifact.get("subjects", ())
-        if "match" not in subject
+    subjects = artifact.get("subjects", ())
+    # A ``match`` key with a non-dict value (e.g. ``null``, which
+    # ``_validate_subject_match`` accepts as "not recorded") counts the
+    # same as a missing key: the background-score check below would index
+    # into ``None`` otherwise. A dict with no ``background_score`` is
+    # still a pre-enrichment block and counts under ``no_background``.
+    no_match = sum(
+        1 for subject in subjects if not isinstance(subject.get("match"), dict)
     )
+    no_background = sum(
+        1 for subject in subjects
+        if isinstance(subject.get("match"), dict)
+        and "background_score" not in subject["match"]
+    )
+    return (no_match, no_background)
 
 
 def _dedup_artifacts(normalized):

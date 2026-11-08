@@ -14,13 +14,30 @@ export function photoThumbnailUrl(p) {
   return thumbnailUrl ? thumbnailUrl(p) : '/thumbnails/' + p.id + '.jpg';
 }
 
+// The card's identification chip. "ID 88%" is only shown for a prediction
+// from a detected region the classifier scored as a subject; a whole-frame
+// guess or a region that scored like background says so instead, because
+// the percentage there is the softmax's share for the label nearest to
+// scenery, not evidence of an animal.
+/** @param {HighlightsPhoto} p */
+export function predictionChip(p) {
+  if (p.has_accepted_species) return '<span class="card-chip conf">Tagged</span>';
+  if (p.predicted_confidence == null) return '';
+  var pct = formatPercent(p.predicted_confidence);
+  if (p.whole_frame) {
+    return '<span class="card-chip conf" title="' + escapeAttr('No animal detected; whole-frame guess at ' + pct) + '">Whole frame</span>';
+  }
+  if (p.background_like) {
+    return '<span class="card-chip conf" title="' + escapeAttr('This region matched background about as well as any species; top label at ' + pct) + '">Background-like region</span>';
+  }
+  return '<span class="card-chip conf">ID ' + pct + '</span>';
+}
+
 /** @param {HighlightsPhoto} p @param {number} idx */
 export function renderCard(p, idx) {
   var thumbSrc = photoThumbnailUrl(p);
   var advanced = isHighlightsAdvancedMode();
-  var conf = p.has_accepted_species
-    ? '<span class="card-chip conf">Tagged</span>'
-    : (p.predicted_confidence != null ? '<span class="card-chip conf">ID ' + formatPercent(p.predicted_confidence) + '</span>' : '');
+  var conf = predictionChip(p);
   var reasons = advanced
     ? (p.reasons || []).slice(0, 2).map(function(/** @type {string} */ r) {
         return '<span class="card-chip reason">' + escapeAttr(r) + '</span>';
