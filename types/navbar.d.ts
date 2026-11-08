@@ -11,5 +11,5 @@ interface SafeEventSourceCallbacks<Progress = unknown, Complete = unknown> {
   quietError?: boolean;
 }
 
-declare function showToast(msg: string, type?: string): void;
+declare function showToast(msg: string, type?: string, options?: {details?: string; jobId?: string}): void;
 declare function safeEventSource<Progress = unknown, Complete = unknown>(url: string, callbacks?: SafeEventSourceCallbacks<Progress, Complete>): EventSource;

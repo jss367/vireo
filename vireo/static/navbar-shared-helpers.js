@@ -21,47 +21,8 @@ import { openRescanModal } from './navbar-folder-banners.js';
 // pins the order.
 VireoViewPreferences.restoreAll(document);
 
-/* ---------- Toast Notifications ---------- */
-var container = document.createElement('div');
-container.id = 'toastContainer';
-container.style.cssText = 'position:fixed;top:16px;right:16px;z-index:100000;display:flex;flex-direction:column;gap:8px;pointer-events:none;';
-document.body.appendChild(container);
-
-/** @param {string} msg @param {string} [type] */
-export function showToast(msg, type) {
-  /** @type {Record<string,string>} */ var colors = {
-    success: 'var(--success)',
-    info: 'var(--info)',
-    warning: 'var(--warning)',
-    error: 'var(--danger)'
-  };
-  /** @type {Record<string,string>} */ var textColors = {
-    success: 'var(--success-text)',
-    info: 'var(--info-text)',
-    warning: 'var(--warning-text)',
-    error: 'var(--danger-text)'
-  };
-  // A missing or unknown type is neutral information. Callers that need an
-  // assertive error must opt into it instead of making routine confirmations
-  // look like failures.
-  type = Object.prototype.hasOwnProperty.call(colors, type || '') ? (type || 'info') : 'info';
-  var container = /** @type {HTMLElement} */ (document.getElementById('toastContainer'));
-  if (!container) return;
-  var toast = document.createElement('div');
-  var bg = colors[type];
-  var color = textColors[type];
-  toast.dataset.type = type;
-  toast.setAttribute('role', type === 'error' ? 'alert' : 'status');
-  toast.setAttribute('aria-live', type === 'error' ? 'assertive' : 'polite');
-  toast.style.cssText = 'pointer-events:auto;padding:10px 16px;border-radius:6px;font-size:14px;max-width:400px;word-break:break-word;background:' + bg + ';color:' + color + ';box-shadow:0 2px 8px rgba(0,0,0,0.3);opacity:0;transition:opacity 0.2s;';
-  toast.textContent = msg;
-  container.appendChild(toast);
-  requestAnimationFrame(function() { toast.style.opacity = '1'; });
-  setTimeout(function() {
-    toast.style.opacity = '0';
-    setTimeout(function() { toast.remove(); }, 200);
-  }, 5000);
-}
+import { showToast } from './navbar-notifications.js';
+export { showToast };
 
 /* ---------- External links ---------- */
 // Click handler for external (http/https) links. Inside the desktop webview a

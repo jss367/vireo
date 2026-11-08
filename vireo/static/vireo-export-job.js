@@ -124,6 +124,36 @@ var VireoExportJob = (function() {
     return {message: message, type: type};
   }
 
+  /** @param {ExportJobResult} result */
+  function metadataWarning(result) {
+    /** @type {Record<string, string>} */
+    var labels = {species: 'Species keywords', capture_date: 'Capture date',
+      capture_time: 'Capture time', rating: 'Rating', location: 'GPS location', camera: 'Camera metadata'};
+    var missing = Object.entries(result.metadata?.categories || {}).filter(function(entry) {
+      return entry[1].unavailable || entry[1].failed || entry[1].not_attempted;
+    });
+    if (missing.length !== 1) return 'Some selected metadata could not be written';
+    var field = missing[0];
+    if (!field) return '';
+    var counts = field[1];
+    return (labels[field[0]] || field[0]) + (counts.unavailable && !counts.written && !counts.failed && !counts.not_attempted
+      ? ' unavailable' : ' could not be written for some photos');
+  }
+
+  /** @param {ExportJobDone} done */
+  function summary(done) {
+    var result = done.result;
+    if (!result) return done.status === 'expired' ? 'Export result is no longer available.'
+      : done.status === 'cancelled' ? 'Export stopped.' : 'Export failed.';
+    var count = result.exported || 0;
+    var message = done.status === 'cancelled' ? 'Export stopped after exporting ' + photos(count)
+      : count ? 'Exported ' + photos(count) : 'Nothing was exported';
+    if (result.errors?.length) message += '. ' + photos(result.errors.length) + ' failed';
+    if (missingMetadata(result)) message += '. ' + metadataWarning(result);
+    else if (result.metadata?.metadata_free) message += '. No metadata selected';
+    return message + '.';
+  }
+
   /** @param {string | null | undefined} jobId */
   function watch(jobId) {
     if (!jobId || typeof safeEventSource !== 'function') return;
@@ -131,14 +161,14 @@ var VireoExportJob = (function() {
       /** @param {ExportJobDone} done */
       onComplete: function(done) {
         var toast = outcome(done);
-        showToast(toast.message, toast.type);
+        showToast(summary(done), toast.type, {details: toast.message, jobId: jobId});
       },
       // The stream dropped (or the job was already gone) before the outcome
       // arrived, so say where to find it rather than leaving the user guessing.
       // This replaces the generic "Connection lost" toast, not adds to it.
       quietError: true,
       onError: function() {
-        showToast('Could not follow the export to the end. Its result is in the jobs panel.', 'warning');
+        showToast('Could not follow the export to the end. Check job details.', 'warning', {jobId: jobId});
       },
     });
   }
