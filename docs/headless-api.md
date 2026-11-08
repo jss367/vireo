@@ -223,7 +223,7 @@ the crop's native window, centered where the crop centers (the box middle, or
 a selected subject's bound eye), cuts off part of the box, so the crop cannot
 show the whole animal and may miss the head; `false` when it fits; `null` when
 unknown (no box or catalog size, or the answer depends on an EXIF rotation
-the pack does not read). The crop's `X-Vireo-Focus-Subject-Clipped` header
+the pack does not read, or on whether the crop comes from the original or from a smaller working copy when the original is unreadable). The folder listing does not compute it. The crop's `X-Vireo-Focus-Subject-Clipped` header
 (`1`, `0` or `unknown`) gives the exact answer for the decoded raster. When a
 crop clips the subject, look at the card's `crop_url` (the whole detection)
 to find the head, then request it with `center=x,y`. `center=x,y` refers explicitly to the

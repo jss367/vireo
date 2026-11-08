@@ -821,7 +821,9 @@ def test_burst_evidence_withholds_unbound_eyes_and_flags_a_clipped_subject(app_a
     legacy = cards[pids[0]]
     assert legacy["eye_x"] is None and legacy["eye_y"] is None and legacy["eye_conf"] is None
     assert legacy["eye_status"] == "unbound"
-    # The 0.2 x 0.2 box is 1200 x 800 pixels; the close bird is 3000 x 2400.
+    # The 0.2 x 0.2 box is 1200 x 800 pixels in the original but 819 x 546 in
+    # a 4096 working copy, so both rasters the auto URL can serve clip it; the
+    # close bird is 3000 x 2400.
     assert legacy["focus_crop_clips_subject"] is True
     assert cards[pids[1]]["focus_crop_clips_subject"] is True
     db.conn.execute("UPDATE photos SET width = 600, height = 400 WHERE id = ?", (pids[0],))
@@ -840,3 +842,24 @@ def test_selected_subject_fit_uses_the_bound_eye_center():
     assert _selected_focus_fit(card, evidence, 512, eye_enabled=False) is False
     assert _selected_focus_fit(card, evidence, 512, eye_enabled=True) is True
     assert _selected_focus_fit({**card, "focus_crop_url": None}, evidence, 512, eye_enabled=True) is None
+
+
+def test_focus_fit_is_unknown_when_only_the_original_clips_the_subject():
+    from burst_evidence import _focus_fit
+    box = {"box_x": 0.1, "box_y": 0.1, "box_w": 0.1, "box_h": 0.1}
+    evidence = {"width": 6000, "height": 4000}
+    # 600 x 400 pixels in the original, 160 x 107 in a 1600 working copy.
+    assert _focus_fit(box, evidence, 512) is True
+    assert _focus_fit(box, evidence, 512, working_max=1600) is None
+    assert _focus_fit({**box, "box_w": 0.5, "box_h": 0.5}, evidence, 512, working_max=1600) is True
+    assert _focus_fit({**box, "box_w": 0.02, "box_h": 0.02}, evidence, 512, working_max=1600) is False
+
+
+def test_folder_bursts_skip_the_per_card_subject_box_reads(app_and_db, monkeypatch):
+    import burst_evidence
+    app, db = app_and_db
+    _seed_burst(db, _folder_id(db), 3069, [10, 80])
+    calls = []
+    monkeypatch.setattr(burst_evidence, "_unbound_focus_box", lambda *a: calls.append(a))
+    assert app.test_client().get(f"/api/folders/{_folder_id(db)}/bursts").status_code == 200
+    assert calls == []
