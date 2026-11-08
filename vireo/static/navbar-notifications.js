@@ -117,7 +117,7 @@ export function showToast(msg, type, options = {}) {
   if (entry.details) toast.appendChild(actionButton('View notification details', () => {
     if (panel?.hidden) openHistory();
   }));
-  toast.appendChild(actionButton('Dismiss', () => {
+  if (type === 'warning' || type === 'error') toast.appendChild(actionButton('Dismiss', () => {
     store.markRead([entry.id]); toast.remove(); updateBadge();
     if (panel && !panel.hidden) renderHistory();
   }));
