@@ -131,13 +131,13 @@ test('a reject saved earlier is sent as a flag alone, so its record is kept', ()
   assert.deepEqual(payload.rejections, []);
 });
 
-test('a reject with nothing kept anywhere is sent without a keeper', () => {
+test('a reject with nothing kept anywhere is sent with an explicit null keeper', () => {
   const {ctx} = page();
   ctx.setPipelineResults(results());
   ctx.setCullAction(2, 'reject');
   const payload = plain(ctx.collectCullingApplyPayload(ctx.cullData));
   assert.deepEqual(payload.rejects, [2]);
-  assert.deepEqual(payload.rejections, []);
+  assert.deepEqual(payload.rejections, [{photo_id: 2, keeper_photo_id: null, comparison: null}]);
 });
 
 test('rejecting in Compare records the reference on screen, until the decision changes', () => {
@@ -182,6 +182,7 @@ test('the card text says what a reject lost to and by what measure', () => {
     ctx.cullData.species_groups[0].scene_groups[0].photos.find(p => p.photo_id === 2),
     ctx.cullData.species_groups[0].scene_groups[0], ctx.cullData.species_groups[0]);
   assert.equal(saved.saved, true);
+  assert.equal(saved.photo_id, null);
   assert.equal(saved.text, 'Instead of a photo since deleted (no shared measurement)');
 });
 

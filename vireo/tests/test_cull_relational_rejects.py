@@ -247,3 +247,39 @@ def test_a_reused_photo_id_cannot_impersonate_a_deleted_keeper(app_and_db):
     assert client.post("/api/undo").status_code == 200
     assert client.post("/api/redo").status_code == 200
     assert flag_note(db, loser, "rejected")["keeper_status"] == "deleted"
+
+
+def test_a_deliberate_re_reject_without_a_keeper_replaces_the_saved_record(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    keeper, loser, _ = _three(db)
+    _apply(client, keeper, [loser])
+    resp = client.post("/api/culling/apply", json={
+        "keepers": [], "rejects": [loser], "unflag": [],
+        "rejections": [{"photo_id": loser, "keeper_photo_id": None, "comparison": None}],
+    })
+    assert resp.status_code == 200
+    assert flag_note(db, loser, "rejected") is None
+    assert client.get("/api/culling/orphans").get_json()["count"] == 0
+    # A null keeper carries no comparison.
+    resp = client.post("/api/culling/apply", json={
+        "keepers": [], "rejects": [loser], "unflag": [],
+        "rejections": [{"photo_id": loser, "keeper_photo_id": None, "comparison": COMPARISON}],
+    })
+    assert resp.status_code == 400
+
+
+def test_merging_the_keeper_into_the_reject_itself_clears_the_relation(app_and_db):
+    from repositories.photo_review import remap_flag_attribution_keepers
+
+    app, db = app_and_db
+    client = app.test_client()
+    keeper, loser, _ = _three(db)
+    _apply(client, keeper, [loser])
+    with db.transaction():
+        remap_flag_attribution_keepers(db.conn, {keeper: loser})
+    assert flag_note(db, loser, "rejected") is None
+    assert client.get("/api/culling/orphans").get_json() == {"orphans": [], "count": 0}
+    assert client.post("/api/undo").status_code == 200
+    assert client.post("/api/redo").status_code == 200
+    assert flag_note(db, loser, "rejected") is None

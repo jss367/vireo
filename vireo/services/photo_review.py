@@ -54,9 +54,11 @@ def keeper_status(note: Mapping[str, object]) -> str | None:
     return "kept"
 
 
-def _keeper_id(rejection: Mapping[str, object]) -> int:
-    """The keeper of one rejection record, which the route has already validated as an int."""
-    keeper = rejection["keeper_photo_id"]
+def _keeper_id(rejection: Mapping[str, object]) -> int | None:
+    """The keeper of one rejection record (None: decided with nothing kept to compare against)."""
+    keeper = rejection.get("keeper_photo_id")
+    if keeper is None:
+        return None
     if isinstance(keeper, bool) or not isinstance(keeper, int):
         raise ValueError("keeper_photo_id must be an integer photo id")
     return keeper
@@ -159,12 +161,14 @@ class PhotoReviewService:
         Apply or not currently rejected, so a reject is never recorded against
         a photo that cannot justify it. The attribution then names it so the
         reject stays explainable and the orphan check can find it if the
-        keeper is later deleted or rejected. A reject already saved with a
-        keeper and sent again without a rejection keeps its saved record.
+        keeper is later deleted or rejected. An entry whose keeper is None
+        is a reject decided now with nothing kept to compare against, and
+        gets a plain note; a reject sent with no entry at all keeps whatever
+        record it has (the page sends none for a reject it did not decide).
         """
         rejections = dict(rejections or {})
         ids = list(keepers) + list(rejects) + list(unflag)
-        keeper_ids = [_keeper_id(r) for r in rejections.values()]
+        keeper_ids = [k for k in (_keeper_id(r) for r in rejections.values()) if k is not None]
         with self.db.transaction(immediate=True, join=True):
             photos = self.db.photos.get_by_ids(ids + keeper_ids)
             if any(pid not in photos for pid in ids):
@@ -223,6 +227,9 @@ class PhotoReviewService:
     ) -> None:
         """Attribute one reject to the photo kept instead of it."""
         keeper_id = _keeper_id(rejection)
+        if keeper_id is None:
+            self.db.photo_review.set_current_flag_note([photo_id], "rejected", summary)
+            return
         comparison = rejection.get("comparison")
         description = f"{summary} — kept {photos[keeper_id]['filename']} instead"
         self.db.photo_review.set_current_flag_note(

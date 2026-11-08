@@ -37,8 +37,9 @@ comes with converting the page to modules.
   in Compare (`cullRejectKeepers`) is remembered only while the decision is
   a reject; changing or releasing the decision drops it, and Apply moves the
   record onto the source photo as `reject_keeper`. Only pinned (this
-  session's) rejects get a keeper resolved; an already-saved reject is sent
-  as a flag alone and the server preserves the record it has. `cullComparison` records a
+  session's) rejects get an entry (keeper null when nothing is kept to
+  compare against); an already-saved reject is sent as a flag alone and the
+  server preserves the record it has. `cullComparison` records a
   measurement only when both photos are in one encounter (the focus evidence
   when they share its basis, else the composite quality); both are relative to
   that encounter's frames and are never compared across two.

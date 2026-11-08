@@ -372,7 +372,9 @@ def create_caches_blueprint(
         ``[{"photo_id", "keeper_photo_id", "comparison"}]``, every
         ``photo_id`` one of ``rejects`` and every keeper a photo that is not
         itself being rejected or cleared here (the service also refuses a
-        keeper whose current flag is rejected).
+        keeper whose current flag is rejected). A null ``keeper_photo_id``
+        is a reject decided now with nothing kept to compare against; a
+        reject sent with no entry at all keeps whatever record it has.
         """
         db = get_db()
         body = request.get_json(silent=True) or {}
@@ -466,11 +468,13 @@ def _parse_rejections(
         photo_id = entry.get("photo_id")
         keeper_id = entry.get("keeper_photo_id")
         comparison = entry.get("comparison")
-        if not _valid_photo_id(photo_id) or not _valid_photo_id(keeper_id):
-            return "rejections must carry integer photo_id and keeper_photo_id"
+        if not _valid_photo_id(photo_id) or not (keeper_id is None or _valid_photo_id(keeper_id)):
+            return "rejections must carry integer photo_id and an integer or null keeper_photo_id"
         if photo_id not in rejected:
             return f"Rejection of photo {photo_id} is not among rejects"
-        if keeper_id in excluded or keeper_id == photo_id:
+        if keeper_id is None and comparison is not None:
+            return "A rejection without a keeper carries no comparison"
+        if keeper_id is not None and (keeper_id in excluded or keeper_id == photo_id):
             return f"Keeper {keeper_id} cannot itself be rejected or cleared"
         if photo_id in parsed:
             return f"Photo {photo_id} has more than one rejection"

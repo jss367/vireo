@@ -156,10 +156,14 @@ function recordAppliedRejectKeepers(rejections) {
   (pipelineResults ? pipelineResults.photos : []).forEach(function(photo) {
     var rejection = byId[photo.id];
     if (!rejection) return;
+    delete cullRejectKeepers[photo.id];
+    if (rejection.keeper_photo_id == null) {
+      delete photo.reject_keeper;
+      return;
+    }
     var keeper = cullSourcePhoto(rejection.keeper_photo_id);
     photo.reject_keeper = {photo_id: rejection.keeper_photo_id, filename: keeper ? keeper.filename : null,
       comparison: rejection.comparison};
-    delete cullRejectKeepers[photo.id];
   });
 }
 

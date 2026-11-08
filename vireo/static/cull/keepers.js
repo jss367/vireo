@@ -99,17 +99,22 @@ function cullKeeperText(keeperName, comparison) {
 
 /**
  * The keeper a reject card shows: the saved record for an applied reject,
- * else the keeper Apply would record now.
+ * else the keeper Apply would record now. ``photo_id`` is null for a
+ * keeper deleted since.
  *
  * @param {CullDisplayPhoto} photo @param {CullSceneGroup} group @param {CullSpeciesGroup} sg
- * @returns {{photo_id: number, name: string, text: string, saved: boolean} | null}
+ * @returns {{photo_id: number | null, name: string, text: string, saved: boolean} | null}
  */
 function cullCardKeeper(photo, group, sg) {
   var source = cullSourcePhoto(photo.photo_id);
   if (photo.decision_source !== 'manual' && source && source.reject_keeper) {
     var saved = source.reject_keeper;
-    var name = saved.filename || 'a photo since deleted';
-    return {photo_id: saved.photo_id, name: name, text: cullKeeperText(name, saved.comparison), saved: true};
+    // A deleted keeper's id may belong to a newer photo now, so no thumbnail.
+    if (!saved.filename) {
+      return {photo_id: null, name: 'a photo since deleted',
+        text: cullKeeperText('a photo since deleted', saved.comparison), saved: true};
+    }
+    return {photo_id: saved.photo_id, name: saved.filename, text: cullKeeperText(saved.filename, saved.comparison), saved: true};
   }
   var choice = resolveCullKeeper(photo, group, sg);
   if (!choice) return null;
@@ -120,9 +125,10 @@ function cullCardKeeper(photo, group, sg) {
 
 /**
  * The relational rejects Apply records: every reject you decided this
- * session, with the keeper it loses to, once per photo. A reject already
- * saved is sent again only as a flag; the server keeps the record it has,
- * so a later Apply never rewrites what an earlier one said it lost to.
+ * session, with the keeper it loses to (null when nothing is kept to
+ * compare against), once per photo. A reject already saved is sent again
+ * only as a flag; the server keeps the record it has, so a later Apply
+ * never rewrites what an earlier one said it lost to.
  *
  * @param {CullData} data @returns {CullRejection[]}
  */
@@ -136,9 +142,10 @@ function cullRejectionsPayload(data) {
         if (p.action !== 'reject' || p.decision_source !== 'manual' || seen.has(p.photo_id)) return;
         seen.add(p.photo_id);
         var choice = resolveCullKeeper(p, group, sg);
-        if (!choice) return;
-        out.push({photo_id: p.photo_id, keeper_photo_id: choice.keeper.photo_id,
-          comparison: cullComparison(p.photo_id, choice.keeper.photo_id, choice.scope)});
+        out.push(choice
+          ? {photo_id: p.photo_id, keeper_photo_id: choice.keeper.photo_id,
+            comparison: cullComparison(p.photo_id, choice.keeper.photo_id, choice.scope)}
+          : {photo_id: p.photo_id, keeper_photo_id: null, comparison: null});
       });
     });
   });

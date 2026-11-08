@@ -303,7 +303,8 @@ function cullCardHtml(photo, si, pi, poseKey, favorite) {
     var group = (sg.scene_groups || sg.pose_groups || [])[pi];
     var chosen = group ? cullCardKeeper(photo, group, sg) : null;
     keeper = chosen
-      ? '<div class="cull-keeper" title="' + escapeAttr(chosen.text) + '"><img src="/thumbnails/' + chosen.photo_id + '.jpg" alt="" loading="lazy">' +
+      ? '<div class="cull-keeper" title="' + escapeAttr(chosen.text) + '">' +
+        (chosen.photo_id != null ? '<img src="/thumbnails/' + chosen.photo_id + '.jpg" alt="" loading="lazy">' : '') +
         '<span>' + (chosen.saved ? '' : 'Will be ') + 'rejected instead of ' + escapeHtml(chosen.name) + '</span></div>'
       : '<div class="cull-keeper none">Nothing kept to compare against</div>';
   }
