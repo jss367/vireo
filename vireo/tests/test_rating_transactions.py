@@ -4,6 +4,7 @@ import sqlite3
 from contextlib import closing
 
 import pytest
+from repositories.sync import SyncRepository
 from services import photo_ingest, workspace_folders
 from services.edit_history import redo_last_undo, undo_last_edit
 from services.photo_review import PhotoReviewService
@@ -32,10 +33,12 @@ def _write(service, ids, batch):
 
 
 @pytest.mark.parametrize("batch", [False, True])
-@pytest.mark.parametrize("failure", ["queue_change", "record_edit", "commit"])
+@pytest.mark.parametrize("failure", ["queue", "record_edit", "commit"])
 def test_failed_rating_restores_photos_sync_history_and_redo(db, rated_photos, monkeypatch, batch, failure):
     before = _snapshot(db.conn)
-    target = db.conn if failure == "commit" else db
+    # ``db.pending_changes`` builds a fresh repository on every access, so the
+    # sync-queue write is patched on its class.
+    target = {"commit": db.conn, "queue": SyncRepository}.get(failure, db)
     original = getattr(target, failure)
     calls = 0
 
@@ -44,7 +47,7 @@ def test_failed_rating_restores_photos_sync_history_and_redo(db, rated_photos, m
         calls += 1
         if failure != "commit":
             original(*args, **kwargs)
-            if failure == "queue_change" and batch and calls == 1:
+            if failure == "queue" and batch and calls == 1:
                 return
         raise sqlite3.OperationalError("simulated write failure")
 

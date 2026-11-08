@@ -306,7 +306,7 @@ def test_no_repository_declares_methods_bound_from_the_facade():
     for path in sorted(REPOSITORIES.glob("*.py")):
         module = importlib.import_module(f"repositories.{path.stem}")
         assert not hasattr(module, "FACADE_METHODS"), path.stem
-        offenders += _callable_facade_offenders(path.read_text(), path.stem)
+        offenders += _callable_facade_offenders(path.read_text(encoding="utf-8"), path.stem)
     assert not offenders, offenders
 
 
