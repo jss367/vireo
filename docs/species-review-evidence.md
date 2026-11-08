@@ -42,9 +42,13 @@ The response contains:
   `background_match.BACKGROUND_MARGIN` of the best label: the region is
   scenery, and its top species is the label nearest to scenery, not an
   identification. Such a region adds a review reason, opens no Highlights
-  bucket and names no `candidate_selections` entry. `subject` means the
-  species clearly outscored every prompt; `unavailable` means the run never
-  scored them (a run from before the prompts existed, or a model without them).
+  bucket and names no `candidate_selections` entry. A box the detector scored
+  at or above `background_match.CONFIDENT_DETECTION` is never `background`:
+  a small bird in foliage scores like the foliage, so the detector's
+  confidence is trusted over the prompt gap, and the explanation says so.
+  `subject` means the species outscored every prompt or the detector was
+  trusted; `unavailable` means the run never scored them (a run from before
+  the prompts existed, or a model without them).
 - `current_label_selection`: the workspace or global default lists, source,
   availability, usable count and content fingerprint. These describe current
   defaults, not an individual job's possibly different request settings.

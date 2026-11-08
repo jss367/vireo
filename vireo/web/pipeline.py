@@ -2009,6 +2009,8 @@ def _attach_inspector_match_scores(db: Database, photo_id: int, effective_cfg: J
             row.get("max_match_score"),
             row.get("background_score"),
             row.get("background_prompt"),
+            detector_confidence=row.get("detector_confidence"),
+            whole_frame=row.get("detector_model") == "full-image",
         )
     result["match_scores"] = match_rows
     result["match_summary"] = match_confidence.summarize_photo(

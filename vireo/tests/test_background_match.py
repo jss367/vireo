@@ -14,6 +14,7 @@ from species_memberships import (
     candidate_subjects,
     photo_species_memberships,
     subject_evidence_order,
+    subject_is_background_like,
 )
 
 
@@ -26,6 +27,46 @@ def test_margin_rule_matches_the_calibration():
     assert background_match.is_background_like(0.5, 0.375)
     assert not background_match.is_background_like(0.5, 0.3)
     assert background_match.background_gap(0.41, 0.27) == pytest.approx(-0.14)
+
+
+def test_confident_detector_box_is_never_background():
+    # A kinglet filling a corner of a tamarisk box: the gap says foliage,
+    # the detector at 0.87 says animal, and the detector wins.
+    assert not background_match.is_background_like(0.49, 0.35, detector_confidence=0.87)
+    assert not background_match.is_background_like(0.49, 0.35, detector_confidence=background_match.CONFIDENT_DETECTION)
+    # Below the line, and for the whole-frame row at 0, the gap decides.
+    assert background_match.is_background_like(0.49, 0.35, detector_confidence=0.34)
+    assert background_match.is_background_like(0.49, 0.35, detector_confidence=0.0)
+    # Unknown confidence is not confidence.
+    assert background_match.is_background_like(0.49, 0.35, detector_confidence=None)
+    assert background_match.is_confident_detection(0.5) and not background_match.is_confident_detection(0.49)
+    assert not background_match.is_confident_detection(None)
+
+
+def test_whole_frame_row_is_never_a_confident_detection():
+    # The schema does not constrain the whole-frame row's detector_confidence
+    # (legacy rows and some test fixtures carry 1.0). It is still a no-box
+    # placeholder, so the override that trusts a confident box over the gap
+    # must not fire for it — the gap decides.
+    assert background_match.is_background_like(
+        0.49, 0.35, detector_confidence=1.0, whole_frame=True,
+    )
+    assert background_match.is_background_like(
+        0.49, 0.35, detector_confidence=background_match.CONFIDENT_DETECTION,
+        whole_frame=True,
+    )
+    assert not background_match.is_confident_detection(1.0, whole_frame=True)
+    assert not background_match.is_confident_detection(
+        background_match.CONFIDENT_DETECTION, whole_frame=True,
+    )
+    # A low-confidence whole-frame row still falls to the gap, as before.
+    assert background_match.is_background_like(
+        0.49, 0.35, detector_confidence=0.0, whole_frame=True,
+    )
+    # Outside the margin, a whole-frame row stays a subject.
+    assert not background_match.is_background_like(
+        0.49, 0.09, detector_confidence=1.0, whole_frame=True,
+    )
 
 
 def test_unmeasured_or_foreign_scale_is_never_background():
@@ -46,6 +87,23 @@ def test_assess_background_states_and_sentences():
     verdict = match_confidence.assess_background("cosine", 0.49, 0.09, "twigs")
     assert verdict["state"] == match_confidence.SUBJECT
     assert "twigs" in verdict["explanation"]
+
+    # Inside the margin but on a confident box: a subject, and the sentence
+    # says the detector was trusted over the prompt.
+    verdict = match_confidence.assess_background("cosine", 0.49, 0.35, "tamarisk", detector_confidence=0.87)
+    assert verdict["state"] == match_confidence.SUBJECT
+    assert verdict["detector_confidence"] == 0.87
+    assert "detector was 0.87 sure" in verdict["explanation"]
+    assert "tamarisk" in verdict["explanation"]
+    assert match_confidence.assess_background("cosine", 0.49, 0.35, "tamarisk", detector_confidence=0.34)["state"] == match_confidence.BACKGROUND
+
+    # A whole-frame row with a high stored confidence still goes by the gap:
+    # no detector box means no override, even when the stored value sits at 1.0.
+    whole_frame_verdict = match_confidence.assess_background(
+        "cosine", 0.49, 0.35, "twigs", detector_confidence=1.0, whole_frame=True,
+    )
+    assert whole_frame_verdict["state"] == match_confidence.BACKGROUND
+    assert "detector was" not in whole_frame_verdict["explanation"]
 
     assert match_confidence.assess_background("cosine", 0.49, None)["state"] == match_confidence.UNAVAILABLE
     assert match_confidence.assess_background("logit", 3.0, 2.9)["state"] == match_confidence.UNAVAILABLE
@@ -154,6 +212,36 @@ def test_whole_frame_guess_speaks_only_for_a_photo_without_boxes():
     assert photo_species_memberships({"species_names": [], "subject_predictions": [WHOLE]}) == []
     # ...and neither does a photo whose only box is a trunk.
     assert photo_species_memberships({"species_names": [], "subject_predictions": [TRUNK]}) == []
+
+
+def test_whole_frame_row_opens_no_bucket_even_when_its_stored_confidence_is_high():
+    # The schema does not pin a whole-frame row's detector_confidence at 0,
+    # and legacy anchors may already carry a non-zero value. The gap must
+    # still decide: a photo whose only "subject" is a twig-frame row stays
+    # out of the Highlights bucket however its stored confidence reads.
+    legacy_whole = _subject(
+        "Red-breasted Nuthatch", 0.98, detector=1.0, model="full-image",
+        label=0.47, background=0.36, prediction_id=14,
+    )
+    assert subject_is_background_like(legacy_whole)
+    assert photo_species_memberships(
+        {"species_names": [], "subject_predictions": [legacy_whole]},
+    ) == []
+
+
+def test_small_bird_in_foliage_keeps_its_bucket_on_a_confident_box():
+    kinglet = _subject("Ruby-crowned Kinglet", 0.9, detector=0.87, label=0.49, background=0.35, prediction_id=12)
+    assert not subject_is_background_like(kinglet)
+    memberships = photo_species_memberships({"species_names": [], "subject_predictions": [kinglet]})
+    assert [m.species for m in memberships] == ["Ruby-crowned Kinglet"]
+    # The same scores on a weak box are still a trunk strip.
+    strip = _subject("Ruby-crowned Kinglet", 0.9, detector=0.34, label=0.49, background=0.35, prediction_id=13)
+    assert subject_is_background_like(strip)
+    assert photo_species_memberships({"species_names": [], "subject_predictions": [strip]}) == []
+    buckets, unidentified = collect_highlight_buckets([_row(1, [kinglet]), _row(2, [strip])], confidence_threshold=0.5)
+    assert [b["species"] for b in buckets] == ["Ruby-crowned Kinglet"]
+    assert buckets[0]["photos"][0]["background_like"] is False
+    assert [p["id"] for p in unidentified] == [2] and unidentified[0]["background_like"]
 
 
 def test_runs_without_a_background_score_keep_the_old_behavior():

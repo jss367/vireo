@@ -19,14 +19,15 @@ no longer outranks the hawk box next to it at 0.52.
 
 from dataclasses import dataclass
 
-from background_match import is_background_like
+from background_match import CONFIDENT_DETECTION, is_background_like
 from keyword_normalization import keyword_match_key
 
 #: A subject other than the photo's primary one suggests a second species
 #: only when the detector was at least this sure it boxed an animal. Trunk
 #: strips and foliage next to a bird land between the 0.2 workspace floor
-#: and this line; a second real bird in frame usually clears it.
-SECONDARY_SUBJECT_FLOOR = 0.5
+#: and this line; a second real bird in frame usually clears it. It is the
+#: same line above which the background gate trusts the detector.
+SECONDARY_SUBJECT_FLOOR = CONFIDENT_DETECTION
 
 FULL_IMAGE_DETECTOR = "full-image"
 
@@ -65,10 +66,15 @@ def subject_is_whole_frame(subject):
 
 def subject_is_background_like(subject):
     """True when the subject's classifier run matched background about as
-    well as any listed species (``background_match``)."""
+    well as any listed species and the detector was not confident about
+    the box (``background_match``). A whole-frame row is always judged by
+    the gap: it has no detector box for the override to trust, and its
+    stored confidence is not constrained by the schema."""
     return is_background_like(
         _field(subject, "max_match_score"), _field(subject, "background_score"),
         _field(subject, "score_kind") or "cosine",
+        detector_confidence=_field(subject, "detector_confidence"),
+        whole_frame=subject_is_whole_frame(subject),
     )
 
 

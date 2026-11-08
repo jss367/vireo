@@ -152,7 +152,8 @@ BACKGROUND = "background"
 SUBJECT = "subject"
 
 
-def assess_background(score_kind, max_match_score, background_score, background_prompt=None):
+def assess_background(score_kind, max_match_score, background_score, background_prompt=None,
+                      detector_confidence=None, *, whole_frame=False):
     """Judge whether a run's region matched background better than its list.
 
     Compares the best species cosine with the best background-prompt cosine
@@ -160,7 +161,11 @@ def assess_background(score_kind, max_match_score, background_score, background_
     Unlike :func:`assess`, this needs no per-model calibration: both scores
     come from one model on one scale. A run without a background score
     (an older run, or a supervised model with no prompts) is
-    ``unavailable``, never a verdict either way.
+    ``unavailable``, never a verdict either way. A localized box the
+    detector was confident about stays ``subject`` even inside the margin,
+    and the explanation says the detector was trusted over the prompt.
+    ``whole_frame`` marks a no-box row so the gap decides however its
+    stored detector confidence reads.
     """
     result = {
         "state": UNAVAILABLE,
@@ -168,6 +173,7 @@ def assess_background(score_kind, max_match_score, background_score, background_
         "max_match_score": max_match_score,
         "background_score": background_score,
         "background_prompt": background_prompt,
+        "detector_confidence": detector_confidence,
         "gap": background_match.background_gap(max_match_score, background_score),
         "margin": background_match.BACKGROUND_MARGIN,
         "explanation": "Background match was not recorded for this run.",
@@ -177,7 +183,19 @@ def assess_background(score_kind, max_match_score, background_score, background_
     label_text = _format_score(max_match_score, score_kind)
     background_text = _format_score(background_score, score_kind)
     prompt = background_prompt or "background"
-    if background_match.is_background_like(max_match_score, background_score, score_kind):
+    within_margin = background_match.is_background_like(max_match_score, background_score, score_kind)
+    if within_margin and background_match.is_confident_detection(
+        detector_confidence, whole_frame=whole_frame,
+    ):
+        result["state"] = SUBJECT
+        result["explanation"] = (
+            f"This region matches “{prompt}” at {background_text}, within "
+            f"{result['margin']:.2f} of its best species label at {label_text}, "
+            f"but the detector was {float(detector_confidence):.2f} sure it boxed an "
+            "animal, so the box is kept as a subject: a small animal in foliage "
+            "scores like the foliage around it."
+        )
+    elif within_margin:
         result["state"] = BACKGROUND
         result["explanation"] = (
             f"This region matches “{prompt}” at {background_text}, within "

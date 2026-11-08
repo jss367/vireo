@@ -316,7 +316,7 @@ interface NavMatchRun {
   match_margin?: number;
   label_count?: number;
   score_kind?: string;
-  background?: {state: string; background_score?: number | null; background_prompt?: string | null; explanation?: string};
+  background?: {state: string; background_score?: number | null; background_prompt?: string | null; detector_confidence?: number | null; explanation?: string};
 }
 interface NavMatchSummary {
   state: string;
