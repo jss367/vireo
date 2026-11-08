@@ -419,23 +419,27 @@ def test_same_prediction_instance_remains_undoable_after_metadata_enrichment(app
         assert (row['confidence'], row['source_taxon_id']) == (.8, 987654)
 
 
-def test_reviewer_box_save_preserves_unrelated_undo_and_redo(app_and_db):
-    """Reviewer region changes explicitly remain outside general edit history."""
+def test_reviewer_box_save_preserves_recipe_and_records_undo(app_and_db):
+    """Region edits join history, invalidate redo, and leave unrelated recipes intact."""
     app, db = app_and_db
     client = app.test_client()
     pid = db.photos.list_page()[0]['id']
     recipe = {'adjustments': {'exposure': .5}}
     assert client.put(f'/api/photos/{pid}/edit-recipe', json={'recipe': recipe}).status_code == 200
+    # An abandoned recipe edit must not survive a new subject edit's redo invalidation.
+    assert client.put(f'/api/photos/{pid}/edit-recipe', json={
+        'recipe': {'adjustments': {'exposure': .8}}}).status_code == 200
     assert client.post('/api/undo').status_code == 200
-    before_undo = client.get('/api/undo/status').json
-    before_redo = client.get('/api/redo/status').json
+    assert client.get('/api/redo/status').json['available']
     url = f'/api/photos/{pid}/subjects/reviewer-box'
     for x in (.1, .6):
         result = client.put(url, json={'box': dict(x=x, y=.1, w=.2, h=.2)})
         assert result.status_code == 200
-        assert client.get('/api/undo/status').json == before_undo
-        assert client.get('/api/redo/status').json == before_redo
-    chosen = result.json['primary_detection_id']
+        assert client.get('/api/undo/status').json['description'] == 'Selected animal region'
+        assert not client.get('/api/redo/status').json['available']
+        assert db.get_photo_edit_recipe(pid)['adjustments']['exposure'] == .5
+    assert client.post('/api/undo').status_code == 200
+    assert client.get(f'/api/photos/{pid}/subjects').json['subjects'][0]['box_x'] == .1
     assert client.post('/api/redo').status_code == 200
+    assert client.get(f'/api/photos/{pid}/subjects').json['subjects'][0]['box_x'] == .6
     assert db.get_photo_edit_recipe(pid)['adjustments']['exposure'] == .5
-    assert client.get(f'/api/photos/{pid}/subjects').json['primary_detection_id'] == chosen

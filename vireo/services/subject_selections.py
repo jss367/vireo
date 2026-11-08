@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+from services.detection_store import get_detections
 from services.subject_verdicts import SubjectVerdictError, _photo_free_of_analysis
 from subjects import REVIEWER_MODEL, retained, select_reviewer_box, sync_primary
 
@@ -20,7 +21,7 @@ ACTION_TYPE = "subject_selection"
 def _snapshot(db: Database, photo_id: int) -> str:
     choice = db.subjects.choice(photo_id)
     boxes = [{"box": {k: row["box_" + k] for k in "xywh"}, "verdict": row["subject_verdict"]}
-             for row in db.detections.get(photo_id, 0, REVIEWER_MODEL, include_rejected=True)]
+             for row in get_detections(db, photo_id, 0, REVIEWER_MODEL, include_rejected=True)]
     return json.dumps({"choice": choice["detection_id"] if choice else None, "boxes": boxes}, sort_keys=True)
 
 
