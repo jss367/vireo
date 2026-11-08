@@ -7,7 +7,12 @@ export const notificationKey = 'vireo.notifications.v1';
 export function createNotificationStore(storage) {
   /** @type {NotificationEntry[]} */
   let entries = [];
+  // Once setItem fails, the in-memory list is ahead of storage, so a later
+  // read() that succeeded in getItem would roll that entry back. Keep memory
+  // as the source of truth until a save succeeds and the two reconcile.
+  let memoryAhead = false;
   function read() {
+    if (memoryAhead) return entries;
     try {
       const data = JSON.parse(storage().getItem(notificationKey) || '[]');
       if (Array.isArray(data)) entries = data.filter(entry => entry &&
@@ -19,7 +24,10 @@ export function createNotificationStore(storage) {
     return entries;
   }
   function save() {
-    try { storage().setItem(notificationKey, JSON.stringify(entries)); } catch (_) { /* In-memory fallback. */ }
+    try {
+      storage().setItem(notificationKey, JSON.stringify(entries));
+      memoryAhead = false;
+    } catch (_) { memoryAhead = true; }
   }
   /** @param {NotificationEntry} entry */
   function add(entry) {

@@ -43,6 +43,15 @@ test('invalid storage and denied access do not prevent in-memory notifications',
   assert.equal(denied.read()[0].id, '3');
 });
 
+test('a readable storage whose setItem is blocked keeps the new notification in memory', () => {
+  const readOnly = {getItem: () => '[]', setItem() { throw Error('quota'); }};
+  const store = makeStore(readOnly);
+  store.add(entry(1));
+  // A later read() must not roll back to the empty stored list.
+  assert.equal(store.read().length, 1);
+  assert.equal(store.read()[0].id, '1');
+});
+
 class Element {
   constructor() { this.children = []; this.dataset = {}; this.attributes = {}; this.handlers = {}; this.hidden = true; }
   append(...elements) { elements.forEach(element => this.appendChild(element)); }
@@ -114,14 +123,32 @@ test('job links select the requested job after both snapshots finish', async () 
       HTMLButtonElement: Element, HTMLSelectElement: Element, jobsElement: () => new Element(),
       bindJobListClicks() {}, bindSourceCleanupConfirm() {}, bindStepRetryButtons() {}, bindDetailPaneActions() {},
       retryJobsPolling() {}, applyFilters() {}, applyOriginFilter() {}, setInterval() {},
-      fetchJobs: () => pending, fetchHistory: () => Promise.resolve(),
+      fetchJobs: () => pending, fetchHistory: () => Promise.resolve(true),
       selectJob: (...args) => selected.push(args), showToast: (...args) => warnings.push(args)});
     vm.runInContext(source, context);
     assert.equal(selected.length, 0);
     if (location !== 'missing') state[location === 'active' ? 'activeJobs' : 'historyJobs'].push({id: 'export-1'});
-    resolveJobs();
+    resolveJobs(true);
     await new Promise(resolve => setImmediate(resolve));
     if (location === 'missing') assert.match(warnings[0][0], /not in the recent job history/);
     else assert.deepEqual(selected, [['export-1', location]]);
+  }
+});
+
+test('a failed snapshot suppresses the "not in recent history" warning', async () => {
+  const source = readFileSync('vireo/static/jobs/boot.js', 'utf8').replace(/^import .*;\n/gm, '');
+  for (const failed of ['active', 'history']) {
+    const warnings = [];
+    const state = {activeJobs: [], historyJobs: []};
+    const context = vm.createContext({state, URLSearchParams, window: {location: {search: '?job=export-1'}},
+      HTMLButtonElement: Element, HTMLSelectElement: Element, jobsElement: () => new Element(),
+      bindJobListClicks() {}, bindSourceCleanupConfirm() {}, bindStepRetryButtons() {}, bindDetailPaneActions() {},
+      retryJobsPolling() {}, applyFilters() {}, applyOriginFilter() {}, setInterval() {},
+      fetchJobs: () => Promise.resolve(failed !== 'active'),
+      fetchHistory: () => Promise.resolve(failed !== 'history'),
+      selectJob() {}, showToast: (...args) => warnings.push(args)});
+    vm.runInContext(source, context);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(warnings.length, 0);
   }
 });

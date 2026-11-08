@@ -22,13 +22,14 @@ jobsElement('filterType', HTMLSelectElement).addEventListener('change', applyFil
 jobsElement('filterStatus', HTMLSelectElement).addEventListener('change', applyFilters);
 jobsElement('filterOrigin', HTMLSelectElement).addEventListener('change', applyOriginFilter);
 
-// Initial load
-Promise.all([fetchJobs(), fetchHistory()]).then(() => {
+// Initial load. A failed snapshot leaves its lane empty or stale, so only
+// report the job as missing once both lanes have actually loaded.
+Promise.all([fetchJobs(), fetchHistory()]).then(([activeOk, historyOk]) => {
   const jobId = new URLSearchParams(window.location.search).get('job');
   if (!jobId) return;
   if (state.activeJobs.some(job => job.id === jobId)) selectJob(jobId, 'active');
   else if (state.historyJobs.some(job => job.id === jobId)) selectJob(jobId, 'history');
-  else showToast('This job is not in the recent job history. Its notification details remain in Notifications.', 'warning');
+  else if (activeOk && historyOk) showToast('This job is not in the recent job history. Its notification details remain in Notifications.', 'warning');
 });
 state.pollTimer = setInterval(function() { fetchJobs(true); }, 2000);
 setInterval(function() { fetchHistory(false, true); }, 10000);
