@@ -266,6 +266,7 @@ def test_reverse_geocode_prefers_a_well_known_park_nearby(monkeypatch):
             "user_ratings_total": 1026,
             "geometry": {"location": {"lat": 32.7545, "lng": -117.2500}},
         }]},
+        "geocode": _OCEAN_BEACH_GEOCODE,
         "details": {"status": "OK", "result": {
             "place_id": "dog-beach",
             "name": "Ocean Beach | Dog Beach",
@@ -553,3 +554,50 @@ def test_nearby_named_places_with_every_search_failing_is_a_plain_transient_erro
         places.nearby_named_places(32.87, -116.46, "FAKE_KEY")
 
     assert not isinstance(failure.value, places.PlacesPartialResult)
+
+
+@pytest.mark.parametrize('park_country,point_country,conflict', [
+    ('MX', 'US', True), ('US', 'US', False), (None, 'US', False),
+    ('MX', None, False),
+])
+def test_nearby_park_country_check_and_boundary_warning(
+    monkeypatch, park_country, point_country, conflict,
+):
+    from vireo import places
+
+    def components(country):
+        return [{'name': country, 'short_name': country, 'types': ['country']}] if country else []
+
+    park = {'place_id': 'mirador', 'geometry': {
+        'location': {'lat': 32.534628, 'lng': -117.0908146}}}
+    area = {'place_id': 'gps-area', 'source': 'area',
+            'address_components': components(point_country)}
+    monkeypatch.setattr(places, '_nearest_park', lambda *args: park)
+    monkeypatch.setattr(places, 'place_details', lambda *args, **kwargs: {
+        'place_id': 'mirador', 'address_components': components(park_country)})
+    monkeypatch.setattr(places, '_named_area', lambda *args: area)
+
+    result = places.reverse_geocode(32.5352, -117.088116666667, 'fake')
+    if conflict:
+        assert result['place_id'] == 'gps-area'
+        assert result['country_conflict'] is True
+        assert 'different country' in result['warning']
+    else:
+        assert result['place_id'] == 'mirador'
+        assert result['source'] == 'park'
+        assert result['distance_m'] == 261
+        assert 'not a verified capture site' in result['warning']
+
+
+def test_park_country_check_failure_is_not_silently_ignored(monkeypatch):
+    from vireo import places
+
+    monkeypatch.setattr(places, '_nearest_park', lambda *args: {'place_id': 'park'})
+    monkeypatch.setattr(places, 'place_details', lambda *args, **kwargs: {'place_id': 'park'})
+
+    def fail(*args):
+        raise places.PlacesTransientError('country check unavailable')
+
+    monkeypatch.setattr(places, '_named_area', fail)
+    with pytest.raises(places.PlacesTransientError):
+        places.reverse_geocode(32.5352, -117.088116666667, 'fake')

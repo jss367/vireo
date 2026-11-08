@@ -245,7 +245,7 @@ def reverse_geocode(
     photo location. So the answer is, in order:
 
     1. the nearest park within :data:`PARK_RADIUS_M` (Places Nearby Search,
-       then Place Details for its address components), or
+       then Place Details), unless its country conflicts with the GPS area, or
     2. the most specific named area Geocoding knows: a natural feature,
        park, neighborhood, then city and broader (:data:`AREA_TYPE_PRIORITY`).
 
@@ -265,8 +265,41 @@ def reverse_geocode(
             # is a failed request, not a no-match; don't let a cache store
             # the area fallback in its place.
             raise PlacesTransientError("Place Details failed for nearby park")
-        return {**details, "source": "park"}
+        area = _named_area(lat, lng, api_key, language)
+        point_country = _country_code(area)
+        park_country = _country_code(details)
+        if point_country and park_country and point_country != park_country:
+            return {
+                **area,
+                "warning": (
+                    "A nearby park is in a different country from the GPS area. "
+                    "Showing the GPS area instead. Verify the capture site against your trip stops."
+                ),
+                "country_conflict": True,
+            }
+        point = _result_point(park)
+        distance = round(_distance_m(lat, lng, *point)) if point else None
+        proximity = f"Nearby park (about {distance} m from the lookup point)" if point else "Nearby park"
+        country_note = " Country agreement could not be verified." if not (point_country and park_country) else ""
+        return {
+            **details, "source": "park", "distance_m": distance,
+            "warning": (
+                f"{proximity}, not a verified capture site. "
+                "Proximity does not establish "
+                "which side of a site boundary the photo was taken on. "
+                "Verify against your trip stops or choose a broader place."
+                + country_note
+            ),
+        }
     return _named_area(lat, lng, api_key, language)
+
+
+def _country_code(details: dict | None) -> str | None:
+    """Read the country identity from normalized Google components."""
+    for component in (details or {}).get("address_components") or []:
+        if "country" in (component.get("types") or []):
+            return component.get("short_name") or component.get("name")
+    return None
 
 
 # How close a park must be to name the spot. Large enough to cover a photo

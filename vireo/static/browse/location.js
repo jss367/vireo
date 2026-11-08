@@ -591,7 +591,7 @@ export async function maybeShowExifSuggestion(/** @type {BrowsePhoto | null | un
 
     sugg.innerHTML = '';
     var text = document.createElement('span');
-    text.textContent = '💡 EXIF says: ' + data.summary + '  ';
+    text.textContent = '💡 GPS suggests: ' + data.summary + '. ' + (data.warning || '') + '  ';
     var btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'accept-btn';
