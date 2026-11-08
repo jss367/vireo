@@ -49,22 +49,34 @@ window.VireoBatchEdits = (function() {
       }).map(function(f) { return f.path; }));
       /** @type {HTMLInputElement[]} */
       var inputs = [];
-      /** @type {Record<string, HTMLDivElement>} */
+      /** @type {Record<string, {container: HTMLDivElement, toggle: HTMLInputElement, inputs: HTMLInputElement[]}>} */
       var groups = {};
       defs.forEach(function(def) {
         if (options.available && options.available.indexOf(def.path) === -1) return;
-        if (!groups[def.group]) {
+        var category = groups[def.group];
+        if (!category) {
           var group = element('fieldset', null, modal);
-          element('legend', def.group, group);
+          var legend = element('legend', null, group);
+          var groupLabel = element('label', null, legend);
+          groupLabel.className = 'development-category';
+          var toggle = element('input', null, groupLabel);
+          toggle.type = 'checkbox';
+          element('span', def.group, groupLabel);
           var fieldsGroup = element('div', null, group);
           fieldsGroup.className = 'development-fields';
-          groups[def.group] = fieldsGroup;
+          category = {container: fieldsGroup, toggle: toggle, inputs: []};
+          groups[def.group] = category;
+          toggle.addEventListener('change', function() {
+            groups[def.group]?.inputs.forEach(function(input) { input.checked = toggle.checked; });
+            update();
+          });
         }
-        var label = element('label', null, groups[def.group]);
+        var label = element('label', null, category.container);
         var input = element('input', null, label);
         input.type = 'checkbox'; input.value = def.path; input.checked = chosen.has(def.path);
         element('span', def.label, label);
         inputs.push(input);
+        category.inputs.push(input);
       });
       var actions = element('div', null, modal); actions.className = 'development-actions';
       button('Select all', actions, function() { inputs.forEach(function(i) { i.checked = true; }); update(); });
@@ -77,7 +89,14 @@ window.VireoBatchEdits = (function() {
         modal.close();
       });
       apply.className = 'primary';
-      function update() { apply.disabled = !inputs.some(function(i) { return i.checked; }); }
+      function update() {
+        Object.values(groups).forEach(function(category) {
+          var count = category.inputs.filter(function(i) { return i.checked; }).length;
+          category.toggle.checked = count === category.inputs.length;
+          category.toggle.indeterminate = count > 0 && count < category.inputs.length;
+        });
+        apply.disabled = !inputs.some(function(i) { return i.checked; });
+      }
       inputs.forEach(function(i) { i.addEventListener('change', update); }); update();
       modal.addEventListener('close', function() { modal.remove(); resolve(result); }, {once: true});
       modal.showModal();
