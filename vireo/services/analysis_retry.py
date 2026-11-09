@@ -209,7 +209,8 @@ def retry_detection(db: Database, pid: int, checkpoint: Callable[[], None],
 
 
 def retry_features(db: Database, pid: int, effective: JsonDict, cache_dir: str,
-                   checkpoint: Callable[[], None], *, quality_only: bool = False) -> None:
+                   checkpoint: Callable[[], None], *, quality_only: bool = False,
+                   expected_primary_detection_id: int | None = None) -> None:
     from subject_analysis import analyze_detection
 
     photo, path, identity = _source(db, pid)
@@ -217,6 +218,11 @@ def retry_features(db: Database, pid: int, effective: JsonDict, cache_dir: str,
     with _photo_lock(pid, checkpoint):
         _unchanged(db, pid, path, identity)
         detection = _selected_detection(db, pid, effective)
+        # Fail the retry if the primary changed between the click and lock
+        # acquisition, so measurements never publish for a subject other than
+        # the one the user chose.
+        if expected_primary_detection_id is not None and detection["id"] != expected_primary_detection_id:
+            raise ValueError("Primary subject changed before analysis started; retry the chosen subject")
         mask_path = db.masks_features.get_mask(pid, effective.get("pipeline", {}).get("sam2_variant") or "sam2-small")
         analysis = analyze_detection(db, photo, detection, effective, checkpoint, force=True,
                           existing_mask_path=mask_path["path"] if quality_only and mask_path else None,
@@ -322,7 +328,8 @@ def _publish_features(db: Database, pid: int, detection: JsonDict, analysis: Jso
 
 
 def run_retry(ctx: RetryContext, job: JobDict, photo_ids: list[int], effective: JsonDict, cache_dir: str,
-              *, results_dir: str | None = None) -> JsonDict:
+              *, results_dir: str | None = None,
+              expected_primary_detection_id: int | None = None) -> JsonDict:
     """Execute only the immutable selection; partial failures stay visible and retryable."""
     from resource_ledger import bind_resource_cancel_check
 
@@ -332,11 +339,12 @@ def run_retry(ctx: RetryContext, job: JobDict, photo_ids: list[int], effective: 
 
     with bind_resource_cancel_check(cancellation_probe):
         return _run_retry(ctx, job, photo_ids, effective, cache_dir,
-                          results_dir if results_dir is not None else cache_dir)
+                          results_dir if results_dir is not None else cache_dir,
+                          expected_primary_detection_id=expected_primary_detection_id)
 
 
 def _run_retry(ctx: RetryContext, job: JobDict, photo_ids: list[int], effective: JsonDict, cache_dir: str,
-               results_dir: str) -> JsonDict:
+               results_dir: str, *, expected_primary_detection_id: int | None = None) -> JsonDict:
     db = ctx.thread_db()
     result: JsonDict = {"ok": True, "photos": [], "errors": [], "requested_photo_ids": photo_ids,
                        "review_refresh": {"status": "not_needed", "photo_ids": []}}
@@ -357,6 +365,14 @@ def _run_retry(ctx: RetryContext, job: JobDict, photo_ids: list[int], effective:
                 stages = required_stages(photo)
                 job["progress"].update(current=index, current_file=photo["filename"], phase="Checking analysis")
                 ran = []
+                if expected_primary_detection_id is not None:
+                    stage = "segmentation and quality"
+                    job["progress"]["phase"] = "Rebuilding selected subject measurements"
+                    retry_features(db, pid, effective, cache_dir, checkpoint,
+                                   expected_primary_detection_id=expected_primary_detection_id)
+                    published.add(pid)
+                    ran.extend(["segmentation", "quality"])
+                    stages = []
                 if "detection" in stages:
                     stage = "detection"
                     job["progress"]["phase"] = "Retrying subject detection"
@@ -368,7 +384,8 @@ def _run_retry(ctx: RetryContext, job: JobDict, photo_ids: list[int], effective:
                 if stages and not no_subject:
                     stage = "quality" if stages == ["quality"] else "segmentation and quality"
                     job["progress"]["phase"] = f"Retrying {stage} measurements"
-                    retry_features(db, pid, effective, cache_dir, checkpoint, quality_only=stages == ["quality"])
+                    retry_features(db, pid, effective, cache_dir, checkpoint, quality_only=stages == ["quality"],
+                                   expected_primary_detection_id=expected_primary_detection_id)
                     published.add(pid)
                     ran.extend(stage_name for stage_name in stages if stage_name != "detection")
                 after = subject_analysis_readiness(_current_photo(db, pid, effective))

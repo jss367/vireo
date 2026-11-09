@@ -215,8 +215,9 @@ def refresh_pipeline_cache(db: Database, db_path: str, photo_ids: Sequence[int])
     cannot be rewritten is reported (the caller tells the user Process
     Review may be stale) rather than failing the verdict.
     """
-    from pipeline import refresh_cache_predictions_for_photos
+    from pipeline import load_results_raw, refresh_cache_predictions_for_photos
     from pipeline_locks import acquire_workspace_regroup
+    from services.review_refresh import queue_refresh, refresh_pending
 
     cache_dir = os.path.dirname(db_path)
     photos_by_workspace: dict[int, list[int]] = {}
@@ -234,10 +235,12 @@ def refresh_pipeline_cache(db: Database, db_path: str, photo_ids: Sequence[int])
                 # and the active workspace's effective config, so switch to
                 # each affected workspace before loading its features.
                 db.set_active_workspace(ws_id)
+                queue_refresh(cache_dir, ws_id, ws_photos)
                 with acquire_workspace_regroup(ws_id):
                     refresh_cache_predictions_for_photos(
                         db, cache_dir, ws_id, ws_photos,
                     )
+                    refresh_pending(db, load_results_raw(cache_dir, ws_id), cache_dir)
             except (OSError, ValueError, KeyError, TypeError, RuntimeError):
                 import logging
 

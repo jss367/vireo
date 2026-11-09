@@ -227,6 +227,7 @@ import { safeFetch, showToast } from './navbar-shared-helpers.js';
         _lbResetMaskOverlay();
       }
       data = result;
+      if (result.warning) showToast(result.warning, 'warning');
       _lbLoadDetections(photoId);
       _lbLoadMaskVariants(photoId);
       document.dispatchEvent(new CustomEvent('vireo:primary-subject-changed', {detail: {photoId}}));
@@ -337,12 +338,29 @@ import { safeFetch, showToast } from './navbar-shared-helpers.js';
     const photoId = data.photo_id;
     const seq = generation;
     busy = true; render();
-    status.textContent = detectionId ? 'Analyzing selected subject box…' : 'Analyzing retained subjects…';
+    status.textContent = detectionId ? 'Retrying the selected subject mask and quality measurements…' : 'Analyzing retained subjects…';
     try {
-      /** @type {{job_id: string}} */ const job = await safeFetch('/api/photos/' + photoId + '/subjects/analyze', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({detection_id: detectionId})}, {toast: false});
+      const route = detectionId ? '/api/photos/analysis-retry' : '/api/photos/' + photoId + '/subjects/analyze';
+      const body = detectionId
+        ? {photo_ids: [photoId], expected_workspace_id: data.workspace_id, expected_primary_detection_id: detectionId}
+        : {detection_id: null};
+      /** @type {{job_id: string}} */ const job = await safeFetch(route, {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+      }, {toast: false});
       while (generation === seq && vireoLightboxSession.requestedPhotoId() === photoId) {
-        /** @type {{status: string; error?: string}} */ const progress = await safeFetch('/api/jobs/' + job.job_id, {}, {toast: false});
-        if (progress.status === 'completed') { await load(photoId); break; }
+        /** @type {{status: string; error?: string; result?: {photos?: {status: string; error?: string}[]}}} */ const progress = await safeFetch('/api/jobs/' + job.job_id, {}, {toast: false});
+        if (generation !== seq || vireoLightboxSession.requestedPhotoId() !== photoId) break;
+        if (progress.status === 'completed') {
+          await load(photoId);
+          if (generation !== seq + 1 || vireoLightboxSession.requestedPhotoId() !== photoId) break;
+          _lbResetMaskOverlay(); _lbLoadDetections(photoId); _lbLoadMaskVariants(photoId);
+          const outcome = progress.result?.photos?.[0];
+          if (detectionId && outcome?.status !== 'complete') {
+            showToast(outcome?.error || 'Subject analysis remains incomplete. Review its analysis status before comparing photos.', 'warning');
+          }
+          document.dispatchEvent(new CustomEvent('vireo:primary-subject-changed', {detail: {photoId}}));
+          break;
+        }
         if (progress.status === 'failed' || progress.status === 'cancelled') throw new Error(progress.error || 'Subject analysis did not complete');
         await new Promise(resolve => setTimeout(resolve, 500));
       }
@@ -362,6 +380,7 @@ import { safeFetch, showToast } from './navbar-shared-helpers.js';
     openSubjectBox(photoId, result => {
       if (generation !== seq || vireoLightboxSession.requestedPhotoId() !== photoId) return;
       data = result;
+      if (result.warning) showToast(result.warning, 'warning');
       const photo = _lbPhotoDataByPhoto[photoId];
       if (photo) {
         /** @type {const} */ (['eye_x', 'eye_y', 'eye_conf', 'eye_tenengrad']).forEach(key => { photo[key] = null; });

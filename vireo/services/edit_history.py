@@ -10,7 +10,7 @@ import contextlib
 from functools import wraps
 from typing import TYPE_CHECKING, Any, TypedDict, cast
 
-from services import subject_verdicts
+from services import subject_selections, subject_verdicts
 from services.pending_changes import queue_location_sync_if_enabled
 
 if TYPE_CHECKING:
@@ -135,7 +135,7 @@ _CACHE_LINKED = frozenset({'pipeline_grouping', 'species_confirm_cache'})
 # Actions this module replays itself rather than through ``Database``'s
 # setter and handler tables.
 SERVICE_REPLAYED_ACTIONS = frozenset({
-    *_CACHE_LINKED, 'identity_alternatives', 'photo_location', subject_verdicts.ACTION_TYPE,
+    *_CACHE_LINKED, 'identity_alternatives', 'photo_location', subject_verdicts.ACTION_TYPE, subject_selections.ACTION_TYPE,
 })
 
 
@@ -251,6 +251,9 @@ def _replay_entry(
             _flip_cursor(history, entry, undo=undo)
         elif action == subject_verdicts.ACTION_TYPE:
             subject_verdicts.replay_history(db, items, undo=undo)
+            _flip_cursor(history, entry, undo=undo)
+        elif action == subject_selections.ACTION_TYPE:
+            subject_selections.replay_history(db, items, undo=undo)
             _flip_cursor(history, entry, undo=undo)
         elif action == 'photo_location':
             _replay_photo_locations(db, items, undo=undo)

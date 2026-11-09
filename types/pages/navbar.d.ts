@@ -158,6 +158,8 @@ interface NavSubject {
   analysis?: {source_key?: string; crop: NavBox; quality_score: number; exposure_ev: number;} | null;
 }
 interface NavSubjectData {
+  workspace_id: number;
+  warning?: string;
   full_image_predictions?: {species: string; confidence: number}[];
   primary_detection_id?: number | null;
   photo_id: number;
