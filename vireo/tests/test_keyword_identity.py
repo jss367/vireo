@@ -2075,8 +2075,6 @@ def test_catalog_import_matches_windows_paths_across_separator_and_case(catalog,
     from importer import execute_import
 
     db, _ = catalog
-    monkeypatch.setattr(importer.os.path, 'normpath', ntpath.normpath)
-    monkeypatch.setattr(importer.os.path, 'normcase', ntpath.normcase)
     folder = workspace_folders.add_folder(db, 'D:\\Pictures\\Trip', name='Trip')
     workspace_folders.add_workspace_folder(db, db._ws_id(), folder)
     photo = photo_ingest.add_photo(db, folder_id=folder, filename='DSC_1.jpg', extension='.jpg',
@@ -2087,7 +2085,13 @@ def test_catalog_import_matches_windows_paths_across_separator_and_case(catalog,
             'hierarchical_keywords': set(),
         },
     })
-    result = execute_import(['dummy.lrcat'], db, write_xmp=False)
+    # ``importer.os.path`` is the process-wide ``posixpath``; ending the patch
+    # with the call keeps coverage's per-test flush and pytest's reporting on
+    # real POSIX paths.
+    with monkeypatch.context() as patch:
+        patch.setattr(importer.os.path, 'normpath', ntpath.normpath)
+        patch.setattr(importer.os.path, 'normcase', ntpath.normcase)
+        result = execute_import(['dummy.lrcat'], db, write_xmp=False)
     assert result['skipped'] == 0
     assert [k['name'] for k in db.photo_keywords.get_for_photo(photo)] == ['Osprey']
 

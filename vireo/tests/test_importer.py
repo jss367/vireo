@@ -1,4 +1,5 @@
 # vireo/tests/test_importer.py
+import contextlib
 import os
 import sqlite3
 import sys
@@ -298,9 +299,6 @@ def test_execute_import_prefers_last_across_cased_paths(tmp_path, monkeypatch):
     letting the last one win. Windows' normalizers are patched in because the
     POSIX ones are identities and the mismatch is otherwise unreachable here.
     """
-    import ntpath
-
-    import importer
     from db import Database
     from importer import execute_import
 
@@ -316,9 +314,8 @@ def test_execute_import_prefers_last_across_cased_paths(tmp_path, monkeypatch):
     pid = photo_ingest.add_photo(db, folder_id=fid, filename='DSC_0001.NEF', extension='.nef',
                        file_size=100, file_mtime=1.0)
 
-    monkeypatch.setattr(importer.os.path, 'normpath', ntpath.normpath)
-    monkeypatch.setattr(importer.os.path, 'normcase', ntpath.normcase)
-    result = execute_import([cat1, cat2], db, write_xmp=False, strategy='prefer_last')
+    with _windows_paths(monkeypatch):
+        result = execute_import([cat1, cat2], db, write_xmp=False, strategy='prefer_last')
 
     assert result['imported'] == 1
     names = {k['name'] for k in db.photo_keywords.get_for_photo(pid)}
@@ -332,9 +329,6 @@ def test_preview_import_detects_conflicts_across_cased_paths(tmp_path, monkeypat
     Otherwise two catalogs that both claim the photo look like two untroubled
     singletons and the user is never told there is a conflict to resolve.
     """
-    import ntpath
-
-    import importer
     from db import Database
     from importer import preview_import
 
@@ -346,9 +340,8 @@ def test_preview_import_detects_conflicts_across_cased_paths(tmp_path, monkeypat
     _create_test_catalog(cat2, _cased_apart(root), [('DSC_0001.NEF', '', [('Blue jay', None)])])
 
     db = Database(str(tmp_path / "test.db"))
-    monkeypatch.setattr(importer.os.path, 'normpath', ntpath.normpath)
-    monkeypatch.setattr(importer.os.path, 'normcase', ntpath.normcase)
-    result = preview_import([cat1, cat2], db)
+    with _windows_paths(monkeypatch):
+        result = preview_import([cat1, cat2], db)
 
     assert result['conflict_count'] == 1
     conflict = result['conflicts'][0]
@@ -356,18 +349,25 @@ def test_preview_import_detects_conflicts_across_cased_paths(tmp_path, monkeypat
     assert set(conflict['keywords_by_catalog']) == {'cat1', 'cat2'}
 
 
+@contextlib.contextmanager
 def _windows_paths(monkeypatch):
     """Make importer path handling behave the way it does on Windows.
 
     normcase and normpath are identities on POSIX, so nothing about case
-    folding is observable from this runner without them.
+    folding is observable from this runner without them. ``importer.os.path``
+    is the process-wide ``posixpath``, so the patch ends with the block:
+    coverage's per-test flush and pytest's reporting both build absolute
+    paths after the test body, and ``ntpath.normpath`` turns those into
+    relative backslash paths that break every later test on the worker.
     """
     import ntpath
 
     import importer
 
-    monkeypatch.setattr(importer.os.path, 'normpath', ntpath.normpath)
-    monkeypatch.setattr(importer.os.path, 'normcase', ntpath.normcase)
+    with monkeypatch.context() as patch:
+        patch.setattr(importer.os.path, 'normpath', ntpath.normpath)
+        patch.setattr(importer.os.path, 'normcase', ntpath.normcase)
+        yield patch
 
 
 def test_execute_import_keeps_case_distinct_photos_apart(tmp_path, monkeypatch):
@@ -397,8 +397,8 @@ def test_execute_import_keeps_case_distinct_photos_apart(tmp_path, monkeypatch):
     lower = photo_ingest.add_photo(db, folder_id=fid, filename='bird.NEF', extension='.nef',
                          file_size=100, file_mtime=1.0)
 
-    _windows_paths(monkeypatch)
-    result = execute_import([cat_path], db, write_xmp=False)
+    with _windows_paths(monkeypatch):
+        result = execute_import([cat_path], db, write_xmp=False)
 
     assert result['imported'] == 2
     assert {k['name'] for k in db.photo_keywords.get_for_photo(upper)} == {'Cardinal'}
@@ -427,8 +427,8 @@ def test_execute_import_skips_a_path_that_folds_onto_two_photos(tmp_path, monkey
     lower = photo_ingest.add_photo(db, folder_id=fid, filename='bird.NEF', extension='.nef',
                          file_size=100, file_mtime=1.0)
 
-    _windows_paths(monkeypatch)
-    result = execute_import([cat_path], db, write_xmp=False)
+    with _windows_paths(monkeypatch):
+        result = execute_import([cat_path], db, write_xmp=False)
 
     assert result['imported'] == 0
     assert result['skipped'] == 1
@@ -456,9 +456,9 @@ def test_preview_import_keeps_two_case_distinct_files_apart(tmp_path, monkeypatc
     _create_test_catalog(cat2, root, [('bird.NEF', '', [('Blue jay', None)])])
 
     db = Database(str(tmp_path / "test.db"))
-    _windows_paths(monkeypatch)
-    monkeypatch.setattr(importer.os.path, 'samefile', lambda one, other: False)
-    result = preview_import([cat1, cat2], db)
+    with _windows_paths(monkeypatch) as patch:
+        patch.setattr(importer.os.path, 'samefile', lambda one, other: False)
+        result = preview_import([cat1, cat2], db)
 
     assert result['conflict_count'] == 0
 

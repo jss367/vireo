@@ -229,11 +229,13 @@ def test_classify_sources_does_not_stat_the_selected_paths(monkeypatch):
     def _refuse(*_args, **_kwargs):
         raise AssertionError("classify_sources must not stat the selected paths")
 
-    monkeypatch.setattr(os.path, "realpath", _refuse)
-    monkeypatch.setattr(os, "stat", _refuse)
-    monkeypatch.setattr(os, "lstat", _refuse)
-
-    policies = source_scan_policy.classify_sources(
-        ["/Volumes/Photography/2026/one"], platform="darwin", run=run,
-    )
+    # ``os.stat`` is process-wide and coverage's per-test flush stats its data
+    # file after the body, so the trap ends with the call.
+    with monkeypatch.context() as patch:
+        patch.setattr(os.path, "realpath", _refuse)
+        patch.setattr(os, "stat", _refuse)
+        patch.setattr(os, "lstat", _refuse)
+        policies = source_scan_policy.classify_sources(
+            ["/Volumes/Photography/2026/one"], platform="darwin", run=run,
+        )
     assert policies[0]["storage"] == "network"
