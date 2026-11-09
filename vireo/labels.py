@@ -571,19 +571,16 @@ def fetch_species_list(
             progress_callback, strict, records,
         )
 
+    names, identities, disambiguated, dropped, _sources = disambiguate_labels(records)
     hybrid_crosses = []
     hybrid_cross_identities = {}
     if drop_hybrid_crosses:
-        hybrid_crosses, hybrid_cross_identities, _, _, _ = disambiguate_labels(
-            [record for record in records if is_hybrid_cross(*record)]
-        )
-        records = [
-            record for record in records if not is_hybrid_cross(*record)
-        ]
-
-    names, identities, disambiguated, dropped, _sources = disambiguate_labels(
-        records
-    )
+        hybrid_crosses = [name for name in names if is_hybrid_cross(name, identities.get(name))]
+        hybrid_cross_identities = {name: identities[name] for name in hybrid_crosses if name in identities}
+        excluded = set(hybrid_crosses)
+        names = [name for name in names if name not in excluded]
+        identities = {name: entry for name, entry in identities.items() if name not in excluded}
+        disambiguated = [name for name in disambiguated if name not in excluded]
     if disambiguated:
         log.info(
             "%d fetched prompts shared a common name with another taxon and "
