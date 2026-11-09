@@ -714,3 +714,30 @@ def test_null_legacy_species_does_not_block_consensus(db, tmp_path, legacy_list)
     assert _row(db, _prediction_id(db, det, "BioCLIP-2.5", "legacy"))["source_taxon_id"] is None
     identified = db.conn.execute("SELECT source_taxon_id FROM predictions WHERE species='Redhead'").fetchone()
     assert identified[0] == 7056
+
+
+def test_legacy_merged_cross_fingerprint_remains_recoverable(db, tmp_path, monkeypatch):
+    monkeypatch.setattr("labels.LABELS_DIR", str(tmp_path))
+    paths = [tmp_path / "one.txt", tmp_path / "two.txt"]
+    names = ["Mallard", "Redhead", "Mallard × Mexican Duck"]
+    paths[0].write_text("Mallard\nMallard × Mexican Duck\n", encoding="utf-8")
+    paths[1].write_text("Redhead\n", encoding="utf-8")
+    for path in paths:
+        path.with_suffix(".json").write_text(json.dumps({
+            "name": path.stem, "labels_file": str(path), "place_id": 14,
+            "taxon_groups": ["birds"], "observation_filter": "research",
+        }))
+    fingerprint = compute_fingerprint(sorted(names))
+    db.model_runs.upsert_labels_fingerprint(fingerprint, "Two lists", [str(p) for p in paths], 3)
+    det = _detection(db, tmp_path, "duck.jpg")
+    db.predictions.add(det, "Redhead", .9, "BioCLIP-2.5", labels_fingerprint=fingerprint)
+    db.commit()
+    pending = pending_label_sets(db)
+    assert [entry["fingerprint"] for entry in pending] == [fingerprint]
+    assert list(pending[0]["labels"]) == sorted(names)
+    paths[1].write_text("Redhead\nAdded bird\n", encoding="utf-8")
+    assert pending_label_sets(db) == []
+    paths[1].write_text("Redhead\n", encoding="utf-8")
+    result = backfill(db, fetch=_fetch(names, {"Redhead": REDHEAD, "Mallard": MALLARD}))
+    assert result["ok"]
+    assert _row(db, _prediction_id(db, det, "BioCLIP-2.5", fingerprint))["source_taxon_id"] == REDHEAD["taxon_id"]

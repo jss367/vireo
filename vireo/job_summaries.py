@@ -423,6 +423,13 @@ def _fetch_labels(result: dict, config: dict) -> tuple[str, list[str]]:
             "is used by more than one species — saved as “Common Name "
             "(Scientific name)”"
         )
+    crosses = _int(result, "hybrid_crosses")
+    if crosses:
+        details.append(
+            f"{crosses:,} hybrid cross{'' if crosses == 1 else 'es'} between "
+            "two species left out — the classifier cannot tell a cross from "
+            "its parents"
+        )
     if result.get("labels_file"):
         details.append(f"Saved to {result['labels_file']}")
     return _n(count, "species label") + " fetched", details

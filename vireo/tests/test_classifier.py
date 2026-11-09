@@ -1222,3 +1222,42 @@ def test_upgrade_reuses_legacy_set_only_with_exact_label_identity(tmp_path, monk
         np.testing.assert_array_equal(individual.read("bird"), payload[:, 0])
         np.testing.assert_array_equal(individual.read("cat"), payload[:, 1])
     assert individual.read("dog") is None
+
+
+def test_upgrade_reuses_legacy_multi_source_cache_with_hybrid_cross(tmp_path, monkeypatch):
+    """A legacy multi-source cache was keyed on the unfiltered merged list.
+    Today's default merge drops hybrid crosses, so the filtered candidate's
+    digest no longer matches the stored one; the recovery must also try the
+    unfiltered merge, as the fingerprint-recovery code already does.
+    """
+    from types import SimpleNamespace
+
+    import classifier
+    import classify_job
+    from embedding_cache import LabelEmbeddingCache
+
+    model_dir = _make_model_dir(tmp_path)
+    monkeypatch.setattr(classifier, "CACHE_DIR", str(tmp_path / "cache"))
+    legacy_labels = ["Common Black Hawk", "Common Black × Red-shouldered Hawk", "Red-shouldered Hawk"]
+    identity = classifier._embedding_identity(legacy_labels, "ViT-B-16", str(model_dir))
+    cache = classifier._embedding_cache_service()
+    payload = np.arange(512 * len(legacy_labels), dtype=np.float32).reshape(512, len(legacy_labels))
+    cache.get_or_compute(identity, lambda: payload)
+
+    source_a = tmp_path / "region-a.txt"
+    source_a.write_text("Common Black Hawk\nCommon Black × Red-shouldered Hawk\n")
+    source_b = tmp_path / "region-b.txt"
+    source_b.write_text("Red-shouldered Hawk\n")
+
+    db = SimpleNamespace(model_runs=SimpleNamespace(
+        get_labels_fingerprints=lambda: [{"sources": [str(source_a), str(source_b)]}],
+    ))
+    monkeypatch.setattr(classify_job.label_loading, "get_saved_labels", lambda: [])
+    classify_job._reuse_saved_label_embeddings(db, "ViT-B-16", str(model_dir), legacy_labels)
+
+    individual = LabelEmbeddingCache(cache.cache_dir, identity, 512)
+    np.testing.assert_array_equal(individual.read("Common Black Hawk"), payload[:, 0])
+    np.testing.assert_array_equal(
+        individual.read("Common Black × Red-shouldered Hawk"), payload[:, 1],
+    )
+    np.testing.assert_array_equal(individual.read("Red-shouldered Hawk"), payload[:, 2])

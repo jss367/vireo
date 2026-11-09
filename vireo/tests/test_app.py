@@ -6627,6 +6627,38 @@ def test_labels_list_reports_skipped_names_without_shipping_identities(app_and_d
     assert entry["ambiguous_count"] == 0
 
 
+def test_hybrid_crosses_are_counted_and_still_offered_for_hand_tagging(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """The classifier is never asked for a cross, so Settings says how many
+    a list holds and autocomplete still offers them: tagging by hand is the
+    only way to record one."""
+    import labels as labels_mod
+
+    labels_dir = tmp_path / "labels"
+    labels_dir.mkdir(exist_ok=True)
+    label_path = str(labels_dir / "ducks.txt")
+    with open(label_path, "w", encoding="utf-8") as f:
+        f.write("Mallard\nMallard × Mexican Duck\nMexican Duck\n")
+    meta = {"name": "Ducks", "labels_file": label_path, "species_count": 3}
+    with open(str(labels_dir / "ducks.json"), "w") as f:
+        json.dump(meta, f)
+    monkeypatch.setattr(labels_mod, "LABELS_DIR", str(labels_dir))
+    monkeypatch.setattr("labels.get_active_labels", lambda: [meta])
+
+    app, _ = app_and_db
+    with app.test_client() as c:
+        entry = next(
+            l for l in c.get("/api/labels").get_json()["labels"]
+            if l["labels_file"] == label_path
+        )
+        offered = c.get("/api/species/search?q=Mexican").get_json()
+
+    assert entry["usable_count"] == 2
+    assert entry["hybrid_cross_count"] == 1
+    assert offered == ["Mexican Duck", "Mallard × Mexican Duck"]
+
+
 def test_species_search_does_not_offer_prompts_classification_refuses(
     app_and_db, tmp_path, monkeypatch,
 ):

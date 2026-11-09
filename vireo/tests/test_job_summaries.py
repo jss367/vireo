@@ -122,6 +122,13 @@ def test_regroup_and_fetch_labels_details():
         "2 labels whose common name is used by more than one species — "
         "saved as “Common Name (Scientific name)”"
     )
+    out = describe_result("fetch-labels", {"species_count": 3, "labels_file": "/x/y.txt",
+                                           "hybrid_crosses": 88})
+    assert out["details"] == [
+        "88 hybrid crosses between two species left out — the classifier "
+        "cannot tell a cross from its parents",
+        "Saved to /x/y.txt",
+    ]
 
 
 def test_explicit_summary_wins():
