@@ -4,11 +4,14 @@ import json
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from labels import (
     get_active_labels,
     load_merged_labels,
+    load_merged_labels_with_metas,
     read_label_file,
     set_active_labels,
 )
@@ -428,7 +431,7 @@ def test_label_set_summaries_survive_a_full_scan(tmp_path, monkeypatch):
     # An edit still invalidates: the key carries size and mtime.
     with open(metas[0]["labels_file"], "w") as f:
         f.write("Species 0\nSpecies 0b\n")
-    assert labels_mod.label_set_summary(metas[0]) == (2, 0)
+    assert labels_mod.label_set_summary(metas[0]) == (2, 0, 0)
 
 
 def test_label_cache_reads_and_writes_take_the_lock(tmp_path, monkeypatch):
@@ -480,7 +483,7 @@ def test_label_caches_survive_concurrent_readers(tmp_path):
         try:
             for _ in range(20):
                 for meta in metas:
-                    assert labels_mod.label_set_summary(meta) == (1, 0)
+                    assert labels_mod.label_set_summary(meta) == (1, 0, 0)
                     assert len(labels_mod.normalized_label_set(meta)) == 1
         except Exception as e:  # noqa: BLE001 - reported, not swallowed
             errors.append(e)
@@ -531,3 +534,100 @@ def test_set_active_labels_writes_atomically(tmp_path, monkeypatch):
     with open(config_path) as f:
         assert json.load(f) == {"active_labels": ["/a.txt"]}
     assert os.listdir(tmp_path) == ["labels_active.json"]
+
+
+@pytest.mark.parametrize(("name", "entry", "expected"), [
+    ("Common Black × Red-shouldered Hawk", None, True),
+    ("Anna's × Costa's Hummingbird hybrid", None, True),
+    ("Graylag × Swan × Canada Goose", None, True),
+    ("Red-shouldered Hawk", None, False),
+    # A hybrid taxon with a name of its own is one prompt, like any species.
+    ("Lewisia × whiteae", None, False),
+    ("× Chitalpa tashkentensis", None, False),
+    ("Freeman's Maple", {"taxon_id": 1, "scientific_name": "Acer × freemanii"}, False),
+    # The scientific name decides when the list records one.
+    ("hybrid island monkeyflower",
+     {"taxon_id": 2, "scientific_name": "Diplacus parviflorus × longiflorus"}, True),
+    ("Sandwich × Elegant Tern",
+     {"taxon_id": 3, "scientific_name": "Thalasseus sandvicensis × elegans"}, True),
+    ("Mallard × Mexican Duck", {"ambiguous": True}, True),
+])
+def test_is_hybrid_cross(name, entry, expected):
+    from labels import is_hybrid_cross
+
+    assert is_hybrid_cross(name, entry) is expected
+
+
+def test_load_merged_labels_leaves_out_hybrid_crosses(tmp_path):
+    """A cross embeds between its parents and wins on crops that show
+    neither clearly, so a list saved with crosses is classified without them
+    and says which it left out."""
+    birds = str(tmp_path / "birds.txt")
+    with open(birds, "w", encoding="utf-8") as f:
+        f.write(
+            "Common Black Hawk\n"
+            "Common Black × Red-shouldered Hawk\n"
+            "Lewisia × whiteae\n"
+            "Red-shouldered Hawk\n"
+        )
+    crosses_only = str(tmp_path / "crosses.txt")
+    with open(crosses_only, "w", encoding="utf-8") as f:
+        f.write("Mallard × Mexican Duck\n")
+
+    labels, consumed = load_merged_labels_with_metas(
+        [{"labels_file": birds}, {"labels_file": crosses_only}],
+    )
+
+    assert labels == [
+        "Common Black Hawk", "Lewisia × whiteae", "Red-shouldered Hawk",
+    ]
+    assert labels.hybrid_crosses == [
+        "Common Black × Red-shouldered Hawk", "Mallard × Mexican Duck",
+    ]
+    # A file that holds nothing but crosses backs no class.
+    assert consumed == [{"labels_file": birds}]
+
+
+def test_label_set_summary_counts_hybrid_crosses(tmp_path):
+    import labels as labels_mod
+
+    path = str(tmp_path / "ducks.txt")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("Mallard\nMallard × Mexican Duck\nMexican Duck\n")
+
+    assert labels_mod.label_set_summary({"labels_file": path}) == (2, 0, 1)
+
+
+def test_fetch_species_list_drops_hybrid_crosses_only_when_asked():
+    """A list saved for classification leaves crosses out; matching an old
+    list's prompts to taxa needs every taxon iNaturalist returned."""
+    from unittest.mock import patch
+
+    from labels import fetch_species_list
+
+    payload = {"total_results": 2, "results": [
+        {"taxon": {"id": 5212, "name": "Buteo lineatus",
+                   "preferred_common_name": "Red-shouldered Hawk", "rank": "species"}},
+        {"taxon": {"id": 900001, "name": "Buteogallus anthracinus × Buteo lineatus",
+                   "preferred_common_name": "Common Black × Red-shouldered Hawk",
+                   "rank": "hybrid"}},
+    ]}
+    messages = []
+    with patch("labels.urllib.request.urlopen") as request:
+        request.return_value.__enter__.return_value.read.return_value = (
+            json.dumps(payload).encode()
+        )
+        everything = fetch_species_list(14, ["birds"])
+        for_classifying = fetch_species_list(
+            14, ["birds"], drop_hybrid_crosses=True,
+            progress_callback=lambda msg, *_: messages.append(msg),
+        )
+
+    assert sorted(everything) == [
+        "Common Black × Red-shouldered Hawk", "Red-shouldered Hawk",
+    ]
+    assert everything.hybrid_crosses == []
+    assert for_classifying == ["Red-shouldered Hawk"]
+    assert for_classifying.hybrid_crosses == ["Common Black × Red-shouldered Hawk"]
+    assert "Common Black × Red-shouldered Hawk" not in for_classifying.identities
+    assert messages[-1] == "Done — 1 total species, 1 hybrid cross left out"

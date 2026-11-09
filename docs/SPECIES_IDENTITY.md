@@ -21,6 +21,16 @@ resolver uses explicit source identity first, model-native scientific names next
 and unambiguous taxonomy lookup for legacy common-name labels. Unresolved names
 retain their text. Hybrids are not merged into either parent species.
 
+A species list is classified without its crosses between two species (`Common
+Black × Red-shouldered Hawk`): `labels.is_hybrid_cross` keeps them out when a
+list is fetched and when a saved list is loaded, because such a prompt embeds
+between its parents and wins on crops that show neither clearly. A hybrid taxon
+with a name of its own (`Acer × freemanii`) stays. Settings reports how many
+crosses a list holds, species autocomplete still offers them for tagging by
+hand, and predictions already stored under a cross keep their text. Removing
+the crosses changes the list's fingerprint, so photos classified against the
+longer list count as not yet classified against the current one.
+
 Pipeline feature loading, cached Process Review names, culling, classifier burst
 comparison, and ID Conflicts use this resolution. Cached names are refreshed on
 read without rewriting confirmed keywords. Grouping fingerprints change when

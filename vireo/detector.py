@@ -36,10 +36,15 @@ CLASS_NAMES = {0: "animal", 1: "person", 2: "vehicle"}
 RAW_CONF_FLOOR = 0.01
 
 # A single 640px letterboxed pass can shrink a small bird to only a handful of
-# useful pixels.  When that pass has no ordinary-confidence animal, retry on a
-# small overlapping crop grid.  Keeping these values detector-owned (rather
-# than workspace config) makes a cached detector artifact mean the same thing
-# in every workspace.  Tiled crops themselves are postprocessed at
+# useful pixels.  When that pass has no animal box the detector is confident
+# about, retry on a small overlapping crop grid.  The trigger is the confidence
+# at which a box is trusted to hold an animal
+# (``background_match.CONFIDENT_DETECTION``), not the lower threshold at which
+# a box is merely retained: a weak box on a trunk or a branch sits beside the
+# small bird the full frame scored even lower, and stopping at that box leaves
+# the bird unfound.  Keeping these values detector-owned (rather than workspace
+# config) makes a cached detector artifact mean the same thing in every
+# workspace.  Tiled crops themselves are postprocessed at
 # ``RAW_CONF_FLOOR`` (not the trigger threshold) so that a workspace lowering
 # its user-visible confidence threshold can still surface small-subject boxes
 # that the crop grid found — matching the full-frame pass and preserving the
@@ -49,7 +54,7 @@ RAW_CONF_FLOOR = 0.01
 # whose bounding box crosses two corner crops' shared internal seam is only
 # recovered by the edge-center crop that contains it as an interior box.  An
 # early stop after the corner subset would silently blind those seams.
-TILED_FALLBACK_TRIGGER_CONFIDENCE = 0.20
+TILED_FALLBACK_TRIGGER_CONFIDENCE = 0.50
 TILED_CROP_FRACTION = 0.60
 TILED_SOURCE_MAX_SIZE = 2560
 TILED_EDGE_MARGIN = 0.01

@@ -36,13 +36,42 @@ class SpeciesLabels(list):
     share, so callers can say so instead of presenting a silently shorter
     list (CORE_PHILOSOPHY: no black boxes). Both are plain lists of the
     final prompt strings and are not part of the label text itself.
+    ``hybrid_crosses`` lists the prompts :func:`is_hybrid_cross` kept out of
+    the list, for the same reason.
     """
 
-    def __init__(self, names=(), identities=None, disambiguated=(), dropped=()):
+    def __init__(self, names=(), identities=None, disambiguated=(), dropped=(),
+                 hybrid_crosses=()):
         super().__init__(names)
         self.identities = identities or {}
         self.disambiguated = list(disambiguated)
         self.dropped_ambiguous = list(dropped)
+        self.hybrid_crosses = list(hybrid_crosses)
+
+
+# "Genus × epithet" and "× Genus epithet" name a hybrid taxon in its own
+# right (London plane, Platanus × hispanica); anything else holding the sign
+# names the two parents of a cross.
+_NAMED_HYBRID_TAXON = re.compile(
+    r"^(?:[A-Z][a-z-]+ × [a-z-]+|× ?[A-Z][a-z-]+(?: [a-z-]+)?)$"
+)
+
+
+def is_hybrid_cross(name, entry=None):
+    """Does this label name a cross between two parent taxa?
+
+    "Common Black × Red-shouldered Hawk" is not a species the classifier can
+    tell from its parents: the prompt embeds between them, takes probability
+    from both and wins on crops that show neither clearly, so a regional list
+    is classified without its crosses. The scientific name decides when the
+    list records one ("Buteogallus anthracinus × Buteo lineatus"), so a cross
+    with a plain common name is caught and a hybrid taxon with its own name
+    ("Freeman's Maple", Acer × freemanii) is kept; a list without identities
+    is judged on the prompt text.
+    """
+    scientific = entry.get("scientific_name") if isinstance(entry, dict) else None
+    text = (scientific if isinstance(scientific, str) and scientific.strip() else name).strip()
+    return "×" in text and not _NAMED_HYBRID_TAXON.match(text)
 
 
 def _text_identity(names):
@@ -497,7 +526,7 @@ def _fetch_group_species(place_id, group, group_prefix, filter_params,
 
 def fetch_species_list(
     place_id, taxon_groups, observation_filter="research", progress_callback=None,
-    strict=False,
+    strict=False, drop_hybrid_crosses=False,
 ):
     """Fetch species observed in a region from iNaturalist.
 
@@ -510,6 +539,11 @@ def fetch_species_list(
             of returning the species gathered so far. A caller that treats
             the list as complete must not mistake a dropped connection for
             "iNaturalist has nothing more".
+        drop_hybrid_crosses: leave out the taxa :func:`is_hybrid_cross`
+            names, listing them on the result's ``hybrid_crosses``. A list
+            saved for classification asks for this; a caller matching an
+            existing list's prompts to taxa needs every taxon iNaturalist
+            returned.
 
     Returns:
         SpeciesLabels of species prompts. Names two taxa share are
@@ -535,6 +569,15 @@ def fetch_species_list(
             progress_callback, strict, records,
         )
 
+    hybrid_crosses = []
+    if drop_hybrid_crosses:
+        hybrid_crosses = sorted({
+            name for name, entry in records if is_hybrid_cross(name, entry)
+        })
+        records = [
+            record for record in records if not is_hybrid_cross(*record)
+        ]
+
     names, identities, disambiguated, dropped, _sources = disambiguate_labels(
         records
     )
@@ -545,13 +588,20 @@ def fetch_species_list(
         )
 
     if progress_callback:
+        left_out = (
+            f", {len(hybrid_crosses)} hybrid "
+            f"cross{'' if len(hybrid_crosses) == 1 else 'es'} left out"
+            if hybrid_crosses else ""
+        )
         progress_callback(
-            f"Done — {len(names)} total species",
+            f"Done — {len(names)} total species{left_out}",
             len(names),
             len(names),
         )
 
-    return SpeciesLabels(names, identities, disambiguated, dropped)
+    return SpeciesLabels(
+        names, identities, disambiguated, dropped, hybrid_crosses,
+    )
 
 
 def save_labels(name, place_id, place_name, taxon_groups, species,
@@ -865,14 +915,19 @@ def normalized_label_set(meta):
             _NORMALIZED_CACHE_MAX,
         )
         _cache_put(
-            _SUMMARY_CACHE, key,
-            (len(cached), len(cached.dropped_ambiguous)), _SUMMARY_CACHE_MAX,
+            _SUMMARY_CACHE, key, _summary_counts(cached), _SUMMARY_CACHE_MAX,
         )
     return cached
 
 
+def _summary_counts(labels):
+    return (
+        len(labels), len(labels.dropped_ambiguous), len(labels.hybrid_crosses),
+    )
+
+
 def label_set_summary(meta):
-    """``(usable_count, skipped_count)`` for one saved set.
+    """``(usable_count, skipped_count, hybrid_cross_count)`` for one saved set.
 
     Cached apart from the list it came from: every saved set is counted on
     each Settings and Pipeline load, and a cache sized for megabyte lists
@@ -883,8 +938,7 @@ def label_set_summary(meta):
     if cached is None:
         merged = load_merged_labels([meta])
         cached = _cache_put(
-            _SUMMARY_CACHE, key,
-            (len(merged), len(merged.dropped_ambiguous)), _SUMMARY_CACHE_MAX,
+            _SUMMARY_CACHE, key, _summary_counts(merged), _SUMMARY_CACHE_MAX,
         )
     return cached
 
@@ -914,15 +968,18 @@ def load_label_set(path, meta=None):
 
 
 def _read_label_set_records(label_sets):
-    """``(records, read_sets)`` from every label file that could be read.
+    """``(records, read_sets, hybrid_crosses)`` from every readable label file.
 
     ``records`` is the deduplicated ``(name, identity)`` list;
     ``read_sets`` pairs each set actually read with the indices of its
-    records.
+    records. ``hybrid_crosses`` holds the prompts :func:`is_hybrid_cross`
+    kept out of ``records``: lists saved before fetches left them out still
+    hold them on disk.
     """
     index_of = {}
     records = []
     read_sets = []
+    hybrid_crosses = set()
     for ls in label_sets:
         path = ls.get("labels_file", "")
         if not path or not os.path.exists(path):
@@ -939,6 +996,9 @@ def _read_label_set_records(label_sets):
         own = set()
         for name in labels:
             entry = labels.identities.get(name)
+            if is_hybrid_cross(name, entry):
+                hybrid_crosses.add(name)
+                continue
             key = (name, json.dumps(entry, sort_keys=True))
             if key not in index_of:
                 # The same prompt in two sets is one record, referenced by
@@ -947,7 +1007,7 @@ def _read_label_set_records(label_sets):
                 records.append((name, entry))
             own.add(index_of[key])
         read_sets.append((ls, own))
-    return records, read_sets
+    return records, read_sets, sorted(hybrid_crosses)
 
 
 def load_merged_labels_with_metas(label_sets):
@@ -981,7 +1041,12 @@ def load_merged_labels_with_metas(label_sets):
     DELETE endpoint can retire a label file while the classify job is
     loading, so any two-pass check disagrees with reality.
     """
-    records, read_sets = _read_label_set_records(label_sets)
+    records, read_sets, hybrid_crosses = _read_label_set_records(label_sets)
+    if hybrid_crosses:
+        log.info(
+            "Classifying without %d hybrid cross label(s), e.g. %s",
+            len(hybrid_crosses), ", ".join(hybrid_crosses[:5]),
+        )
     # ``disambiguate_labels`` groups by the ASCII-NOCASE key so case-only
     # variants collapse the same way SQLite's ``COLLATE NOCASE`` does,
     # keeps the source spelling of every group that names one taxon, and
@@ -1041,6 +1106,7 @@ def load_merged_labels_with_metas(label_sets):
             kept_identities,
             [name for name in sorted(set(disambiguated)) if name in kept],
             sorted(set(dropped)),
+            hybrid_crosses,
         ),
         consumed_metas,
     )

@@ -725,6 +725,77 @@ def test_detect_animals_skips_tiled_fallback_after_strong_full_pass(
     assert detections[0]["confidence"] == pytest.approx(0.9)
 
 
+def test_weak_trunk_box_does_not_stop_the_search_for_the_small_bird(
+    monkeypatch, tmp_path,
+):
+    """A retained but unconvincing box (a trunk at 0.3) sits beside the small
+    bird the full frame scored lower still. The crop grid runs anyway, and
+    the bird it finds outranks the trunk without replacing it."""
+    from unittest.mock import MagicMock
+
+    import detector
+
+    fake_session = MagicMock()
+    fake_session.get_inputs.return_value = [MagicMock(name="images")]
+    # A tall box down the left edge, as a trunk is drawn.
+    trunk = np.array(
+        [[[80, 320, 120, 600, 0.30, 0.0, 0.0]]], dtype=np.float32,
+    )
+    bird = np.array(
+        [[[320, 320, 100, 100, 0.85, 0.0, 0.0]]], dtype=np.float32,
+    )
+    empty = np.zeros((1, 0, 7), dtype=np.float32)
+    outputs = [trunk, trunk, bird, *([empty] * 8)]
+    fake_session.run.side_effect = lambda *_args, **_kwargs: [outputs.pop(0)]
+    monkeypatch.setattr(detector, "_get_session", lambda: fake_session)
+
+    img_path = tmp_path / "kinglet-by-trunk.jpg"
+    from PIL import Image
+    Image.new("RGB", (1000, 1000), color="green").save(img_path)
+
+    detections = detector.detect_animals(str(img_path))
+
+    assert fake_session.run.call_count == 11
+    assert [d["confidence"] for d in detections] == pytest.approx([0.85, 0.30])
+    assert detections[0]["box"]["w"] < 0.2
+    assert detections[1]["box"]["h"] > 0.9
+
+
+def test_tiled_fallback_stops_at_the_confidence_the_pipeline_trusts(
+    monkeypatch, tmp_path,
+):
+    """The crop grid runs until a box is confident, and "confident" is one
+    line: the one above which a box is never called background and may open
+    a second species. A box at that line needs no second look."""
+    from unittest.mock import MagicMock
+
+    import background_match
+    import detector
+
+    assert (
+        detector.TILED_FALLBACK_TRIGGER_CONFIDENCE
+        == background_match.CONFIDENT_DETECTION
+    )
+
+    fake_session = MagicMock()
+    fake_session.get_inputs.return_value = [MagicMock(name="images")]
+    at_the_line = np.array(
+        [[[320, 320, 100, 100, detector.TILED_FALLBACK_TRIGGER_CONFIDENCE,
+           0.0, 0.0]]],
+        dtype=np.float32,
+    )
+    fake_session.run.return_value = [at_the_line]
+    monkeypatch.setattr(detector, "_get_session", lambda: fake_session)
+
+    img_path = tmp_path / "bird.jpg"
+    from PIL import Image
+    Image.new("RGB", (1000, 500), color="green").save(img_path)
+
+    detector.detect_animals(str(img_path))
+
+    assert fake_session.run.call_count == 1
+
+
 def test_get_primary_detection():
     """get_primary_detection must return highest-confidence animal."""
     from detector import get_primary_detection

@@ -96,7 +96,7 @@ interface SettingsConfig {
   time_format?: string;
   keyboard_shortcuts?: Record<string,SettingsValue>;
 }
-interface SettingsLabel {labels_file:string;name:string;taxon_groups?:string[];usable_count?:number;species_count?:number;ambiguous_count?:number}
+interface SettingsLabel {labels_file:string;name:string;taxon_groups?:string[];usable_count?:number;species_count?:number;ambiguous_count?:number;hybrid_cross_count?:number}
 interface SettingsEmbeddingPrecompute {job_id?:string;queued?:boolean;status?:string;model_id?:string;labels_file?:string;model_name?:string}
 interface SettingsJobResult {error?:string;removed?:number;downloaded?:number;species_count?:number;embedding_precompute?:SettingsEmbeddingPrecompute;ok?:string[];failed?:string[];verified?:boolean;config_written?:boolean;bin_path?:string;downloaded_to?:string;quarantined?:boolean}
 interface SettingsPlatformReadiness {platform?:string;support_tier?:string;windows_release?:string;architecture?:string;webview2_version?:string;long_paths?:{enabled:boolean};dependencies?:Record<string,{state:string;required?:boolean;path?:string;hint?:string;install_commands?:string[]}>}
