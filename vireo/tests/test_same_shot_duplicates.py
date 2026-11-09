@@ -323,7 +323,7 @@ def test_same_shot_api_restore_media_and_cleanup_guards(app_and_db, tmp_path, mo
     db.set_active_workspace(active)
     client = app.test_client()
     job = client.post("/api/duplicates/scan").get_json()["job_id"]
-    data = wait_for_job_via_client(client, job)
+    data = wait_for_job_via_client(client, job, wait_for_history=True)
     assert data["status"] == "completed"
     group, = data["result"]["same_shot_groups"]
     assert {p["id"] for p in group["photos"]} == {a, b}
