@@ -258,7 +258,15 @@ def _reuse_saved_label_embeddings(
             raise ClassificationCancelled("classification cancelled")
         try:
             sets = [by_file.get(path, {"labels_file": path}) for path in sources]
-            variants = [load_merged_labels(sets)]
+            # A pre-filter cache digest was built from the merged list before
+            # hybrid crosses were excluded; today's default merge omits them
+            # and would never match it, so offer the unfiltered merge as a
+            # candidate too (mirroring the legacy fingerprint recovery in
+            # ``label_source_identities.pending_label_sets``).
+            variants = [
+                load_merged_labels(sets),
+                load_merged_labels(sets, drop_hybrid_crosses=False),
+            ]
             if len(sources) == 1:
                 variants.append(read_label_file(sources[0]))
             for variant in variants:

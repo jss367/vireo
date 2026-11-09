@@ -107,8 +107,11 @@ def create_species_blueprint(get_db: GetDb) -> Blueprint:
                 # The normalized set, not the raw file: a prompt
                 # classification refuses to attribute must not be offered
                 # for hand-tagging either, and the qualified spellings are
-                # what predictions will be named.
-                for name in normalized_label_set(label_set):
+                # what predictions will be named. A hybrid cross is the
+                # exception: the classifier is never asked for one, so
+                # tagging by hand is the only way to record it.
+                normalized = normalized_label_set(label_set)
+                for name in (*normalized, *normalized.hybrid_crosses):
                     name_key = name.casefold()
                     if (
                         text_search_match(name, q, match_case, whole_word)

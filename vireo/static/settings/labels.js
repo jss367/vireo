@@ -37,6 +37,11 @@ async function loadLabels() {
                 ' shared by several species and skipped when classifying &middot; ' +
                 'download this list again to split them by scientific name</div>';
       }
+      if (l.hybrid_cross_count) {
+        html += '<div style="font-size:11px;color:var(--text-dim);margin-top:2px;">' +
+                l.hybrid_cross_count + ' hybrid cross' + (l.hybrid_cross_count > 1 ? 'es' : '') +
+                ' between two species left out when classifying</div>';
+      }
       html += '</div>';
       html += '</label>';
       html += '<button data-label-path="' + escapeAttr(l.labels_file) + '" data-label-name="' + escapeAttr(l.name) + '" onclick="deleteLabelSet(this.dataset.labelPath,this.dataset.labelName)" ' +

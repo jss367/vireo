@@ -586,10 +586,11 @@ def create_models_blueprint(
             ``label_identities`` is megabytes on a regional list and the
             page never reads it — but the page must still say how many
             species this set contributes and how many of its names the
-            classifier cannot use, so both counts travel in its place.
+            classifier cannot use, so those counts travel in its place.
             ``species_count`` is what the file holds; ``usable_count`` is
-            what a run receives, and they differ exactly when names are
-            shared between species.
+            what a run receives, and they differ when names are shared
+            between species (``ambiguous_count``) or name a cross between
+            two species (``hybrid_cross_count``).
             """
             trimmed = {k: v for k, v in meta.items() if k != "label_identities"}
             path = meta.get("labels_file")
@@ -599,9 +600,10 @@ def create_models_blueprint(
                     # answers for every saved set on each Settings and
                     # Pipeline load, and normalizing a regional list is
                     # ~0.5s of work that only changes when the files do.
-                    usable, skipped = label_set_summary(meta)
+                    usable, skipped, hybrid_crosses = label_set_summary(meta)
                     trimmed["usable_count"] = usable
                     trimmed["ambiguous_count"] = skipped
+                    trimmed["hybrid_cross_count"] = hybrid_crosses
                 except Exception:  # broad: one unreadable label set must not break the listing
                     log.warning(
                         "Could not inspect %s for ambiguous labels", path,

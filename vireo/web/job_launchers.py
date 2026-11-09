@@ -570,6 +570,7 @@ def create_job_launchers_blueprint(
                 place_id, taxon_groups,
                 observation_filter=observation_filter,
                 progress_callback=progress_cb,
+                drop_hybrid_crosses=True,
             )
             if not species:
                 raise RuntimeError(
@@ -592,6 +593,10 @@ def create_job_launchers_blueprint(
                 # keeps its own prompt. Reported so the list the user sees
                 # matches the names they will get back.
                 "disambiguated": len(getattr(species, "disambiguated", [])),
+                # Crosses between two species ("Mallard × Mexican Duck")
+                # that iNaturalist lists for the region and the saved list
+                # leaves out.
+                "hybrid_crosses": len(getattr(species, "hybrid_crosses", [])),
                 "embedding_precompute": precompute,
             }
 
