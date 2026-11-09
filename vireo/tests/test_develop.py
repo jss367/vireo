@@ -427,12 +427,13 @@ def test_find_darktable_finds_macos_app_bundle(monkeypatch):
     monkeypatch.setattr("shutil.which", lambda x: None)
     # A Mac is os.name == "posix" *and* sys.platform == "darwin". Pin both, or
     # this test exercises the Windows branch on the windows-latest CI leg.
-    monkeypatch.setattr(develop.os, "name", "posix")
-    monkeypatch.setattr("sys.platform", "darwin")
-    monkeypatch.setattr("os.path.isfile", lambda p: p == bundle)
-    monkeypatch.setattr("os.path.realpath", lambda p: p)
+    with monkeypatch.context() as patch:
+        patch.setattr(develop.os, "name", "posix")
+        patch.setattr("sys.platform", "darwin")
+        patch.setattr("os.path.isfile", lambda p: p == bundle)
+        patch.setattr("os.path.realpath", lambda p: p)
 
-    assert find_darktable("") == bundle
+        assert find_darktable("") == bundle
 
 
 def test_find_darktable_configured_path_wins_over_bundle(tmp_path, monkeypatch):
@@ -456,15 +457,16 @@ def test_darktable_search_paths_matches_find_darktable(monkeypatch):
     from develop import darktable_search_paths, find_darktable
 
     monkeypatch.setattr("shutil.which", lambda x: None)
-    monkeypatch.setattr(develop.os, "name", "posix")
-    monkeypatch.setattr("sys.platform", "darwin")
-    paths = darktable_search_paths()
-    assert paths, "expected at least one candidate on darwin"
+    with monkeypatch.context() as patch:
+        patch.setattr(develop.os, "name", "posix")
+        patch.setattr("sys.platform", "darwin")
+        paths = darktable_search_paths()
+        assert paths, "expected at least one candidate on darwin"
 
-    for candidate in paths:
-        monkeypatch.setattr("os.path.isfile", lambda p, c=candidate: p == c)
-        monkeypatch.setattr("os.path.realpath", lambda p: p)
-        assert find_darktable("") == candidate
+        for candidate in paths:
+            patch.setattr("os.path.isfile", lambda p, c=candidate: p == c)
+            patch.setattr("os.path.realpath", lambda p: p)
+            assert find_darktable("") == candidate
 
 
 def _force_linux_tools_dir(monkeypatch, tools_dir):
@@ -501,9 +503,10 @@ def test_darktable_search_paths_linux_orders_appimages_newest_first(tmp_path, mo
     os.utime(older, (1_000_000, 1_000_000))
     os.utime(newer, (2_000_000, 2_000_000))
 
-    _force_linux_tools_dir(monkeypatch, tools_dir)
+    with monkeypatch.context() as patch:
+        _force_linux_tools_dir(patch, tools_dir)
 
-    assert darktable_search_paths() == [str(newer), str(older)]
+        assert darktable_search_paths() == [str(newer), str(older)]
 
 
 def test_darktable_search_paths_linux_ignores_non_appimages(tmp_path, monkeypatch):
@@ -519,9 +522,10 @@ def test_darktable_search_paths_linux_ignores_non_appimages(tmp_path, monkeypatc
     (tools_dir / "SHA256SUMS").write_bytes(b"sums")
     (tools_dir / "README.txt").write_bytes(b"readme")
 
-    _force_linux_tools_dir(monkeypatch, tools_dir)
+    with monkeypatch.context() as patch:
+        _force_linux_tools_dir(patch, tools_dir)
 
-    assert darktable_search_paths() == [str(appimage)]
+        assert darktable_search_paths() == [str(appimage)]
 
 
 @pytest.mark.skipif(
@@ -550,18 +554,20 @@ def test_darktable_search_paths_linux_ignores_non_executable_appimages(tmp_path,
     abandoned.write_bytes(b"app")
     abandoned.chmod(0o644)  # what urllib leaves it as; hand_off's chmod never ran
 
-    _force_linux_tools_dir(monkeypatch, tools_dir)
+    with monkeypatch.context() as patch:
+        _force_linux_tools_dir(patch, tools_dir)
 
-    assert darktable_search_paths() == [str(installed)]
+        assert darktable_search_paths() == [str(installed)]
 
 
 def test_darktable_search_paths_linux_missing_dir_is_empty(tmp_path, monkeypatch):
     """No install yet is the common case and must not raise."""
     from develop import darktable_search_paths
 
-    _force_linux_tools_dir(monkeypatch, tmp_path / "never" / "created")
+    with monkeypatch.context() as patch:
+        _force_linux_tools_dir(patch, tmp_path / "never" / "created")
 
-    assert darktable_search_paths() == []
+        assert darktable_search_paths() == []
 
 
 def test_darktable_search_paths_linux_survives_vanishing_appimage(tmp_path, monkeypatch):
@@ -583,20 +589,21 @@ def test_darktable_search_paths_linux_survives_vanishing_appimage(tmp_path, monk
     vanished.write_bytes(b"doomed")
     vanished.chmod(0o755)
 
-    _force_linux_tools_dir(monkeypatch, tools_dir)
+    with monkeypatch.context() as patch:
+        _force_linux_tools_dir(patch, tools_dir)
 
-    real_getmtime = os.path.getmtime
+        real_getmtime = os.path.getmtime
 
-    def racing_getmtime(path):
-        if path == str(vanished):
-            raise FileNotFoundError(2, "No such file or directory", path)
-        return real_getmtime(path)
+        def racing_getmtime(path):
+            if path == str(vanished):
+                raise FileNotFoundError(2, "No such file or directory", path)
+            return real_getmtime(path)
 
-    monkeypatch.setattr(develop.os.path, "getmtime", racing_getmtime)
+        patch.setattr(develop.os.path, "getmtime", racing_getmtime)
 
-    paths = darktable_search_paths()
-    assert str(survivor) in paths
-    assert paths[0] == str(survivor)
+        paths = darktable_search_paths()
+        assert str(survivor) in paths
+        assert paths[0] == str(survivor)
 
 
 def _write_appimage(path):

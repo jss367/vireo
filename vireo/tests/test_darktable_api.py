@@ -267,12 +267,13 @@ def test_api_darktable_status_checked_paths_includes_detector_candidates(app_and
     import develop
     app, _ = app_and_db
     monkeypatch.setattr(develop, "darktable_search_paths", lambda: ["/sentinel/darktable-cli"])
-    monkeypatch.setattr(os, "name", "posix")
-    monkeypatch.setattr(sys, "platform", "darwin")
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "name", "posix")
+        patch.setattr(sys, "platform", "darwin")
 
-    data = app.test_client().get('/api/darktable/status').get_json()
+        data = app.test_client().get('/api/darktable/status').get_json()
 
-    assert data['checked_paths'] == ["$PATH (darktable-cli)", "/sentinel/darktable-cli"]
+        assert data['checked_paths'] == ["$PATH (darktable-cli)", "/sentinel/darktable-cli"]
 
 
 def test_api_darktable_status_checked_paths_names_linux_tools_dir(app_and_db, monkeypatch):
@@ -285,15 +286,16 @@ def test_api_darktable_status_checked_paths_names_linux_tools_dir(app_and_db, mo
     import develop
     app, _ = app_and_db
     monkeypatch.setattr(develop, "darktable_search_paths", lambda: [])
-    monkeypatch.setattr(os, "name", "posix")
-    monkeypatch.setattr(sys, "platform", "linux")
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "name", "posix")
+        patch.setattr(sys, "platform", "linux")
 
-    data = app.test_client().get('/api/darktable/status').get_json()
+        data = app.test_client().get('/api/darktable/status').get_json()
 
-    # Use the same helper the route uses so path-separator conventions match on
-    # Windows (os.path.join is bound at import time and ignores monkeypatched
-    # os.name, so a hand-built "~/.vireo/tools/darktable" would drift here).
-    assert develop.darktable_tools_dir() in data['checked_paths']
+        # Use the same helper the route uses so path-separator conventions match on
+        # Windows (os.path.join is bound at import time and ignores patched
+        # os.name, so a hand-built "~/.vireo/tools/darktable" would drift here).
+        assert develop.darktable_tools_dir() in data['checked_paths']
 
 
 def test_api_darktable_status_checked_paths_omits_linux_tools_dir_on_macos(app_and_db, monkeypatch):
@@ -301,13 +303,14 @@ def test_api_darktable_status_checked_paths_omits_linux_tools_dir_on_macos(app_a
     import develop
     app, _ = app_and_db
     monkeypatch.setattr(develop, "darktable_search_paths", lambda: [])
-    monkeypatch.setattr(os, "name", "posix")
-    monkeypatch.setattr(sys, "platform", "darwin")
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "name", "posix")
+        patch.setattr(sys, "platform", "darwin")
 
-    data = app.test_client().get('/api/darktable/status').get_json()
+        data = app.test_client().get('/api/darktable/status').get_json()
 
-    assert develop.darktable_tools_dir() not in data['checked_paths']
-    assert data['checked_paths'], "checked_paths must never be empty"
+        assert develop.darktable_tools_dir() not in data['checked_paths']
+        assert data['checked_paths'], "checked_paths must never be empty"
 
 
 @pytest.fixture(autouse=True)
