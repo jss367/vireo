@@ -210,7 +210,8 @@ def retry_detection(db: Database, pid: int, checkpoint: Callable[[], None],
 
 def retry_features(db: Database, pid: int, effective: JsonDict, cache_dir: str,
                    checkpoint: Callable[[], None], *, quality_only: bool = False,
-                   expected_primary_detection_id: int | None = None) -> None:
+                   expected_primary_detection_id: int | None = None,
+                   on_published: Callable[[], None] | None = None) -> None:
     from subject_analysis import analyze_detection
 
     photo, path, identity = _source(db, pid)
@@ -236,6 +237,37 @@ def retry_features(db: Database, pid: int, effective: JsonDict, cache_dir: str,
         _publish_features(db, pid, detection, analysis, effective, cache_dir, checkpoint,
                           lambda: _unchanged(db, pid, path, identity),
                           existing_mask_path=mask_path["path"] if quality_only and mask_path else None)
+    if on_published:
+        on_published()
+    if expected_primary_detection_id is not None:
+        _refresh_box_analysis(db, pid, detection["id"], cache_dir, checkpoint)
+
+
+def _refresh_box_analysis(db: Database, pid: int, detection_id: int, cache_dir: str,
+                          checkpoint: Callable[[], None]) -> None:
+    """Recompute the chosen subject's box quality and exposure.
+
+    The Subjects panel shows these box measurements, and its crop and exposure
+    suggestions need them, so a retry of the chosen subject is not complete
+    without them. Runs after the photo lock is released because
+    ``analyze_photo`` takes that lock itself.
+    """
+    from image_loader import get_canonical_image_path
+    from subject_ranking import SubjectComparison, resolve_subject
+    from subjects import analyze_photo
+
+    photo = db.photos.get(pid, verify_workspace=True)
+    if photo is None:
+        raise ValueError("Photo is no longer visible in this workspace")
+    folders = {f["id"]: f["path"] for f in db.folders.tree()}
+    def validate_primary() -> None:
+        current, _ = resolve_subject(db, pid, SubjectComparison())
+        if current is None or current["id"] != detection_id:
+            raise ValueError("Primary subject changed during analysis; retry the chosen subject")
+
+    analyze_photo(db, pid, get_canonical_image_path(photo, cache_dir, folders),
+                  detection_id=detection_id, force=True, checkpoint=checkpoint,
+                  validate_publication=validate_primary)
 
 
 def _selected_detection(db: Database, pid: int, effective: JsonDict) -> JsonDict:
@@ -369,8 +401,8 @@ def _run_retry(ctx: RetryContext, job: JobDict, photo_ids: list[int], effective:
                     stage = "segmentation and quality"
                     job["progress"]["phase"] = "Rebuilding selected subject measurements"
                     retry_features(db, pid, effective, cache_dir, checkpoint,
-                                   expected_primary_detection_id=expected_primary_detection_id)
-                    published.add(pid)
+                                   expected_primary_detection_id=expected_primary_detection_id,
+                                   on_published=lambda photo_id=pid: published.add(photo_id))
                     ran.extend(["segmentation", "quality"])
                     stages = []
                 if "detection" in stages:
@@ -385,8 +417,8 @@ def _run_retry(ctx: RetryContext, job: JobDict, photo_ids: list[int], effective:
                     stage = "quality" if stages == ["quality"] else "segmentation and quality"
                     job["progress"]["phase"] = f"Retrying {stage} measurements"
                     retry_features(db, pid, effective, cache_dir, checkpoint, quality_only=stages == ["quality"],
-                                   expected_primary_detection_id=expected_primary_detection_id)
-                    published.add(pid)
+                                   expected_primary_detection_id=expected_primary_detection_id,
+                                   on_published=lambda photo_id=pid: published.add(photo_id))
                     ran.extend(stage_name for stage_name in stages if stage_name != "detection")
                 after = subject_analysis_readiness(_current_photo(db, pid, effective))
                 result["photos"].append({"photo_id": pid, "status": "complete" if after["eligible"] else "review",

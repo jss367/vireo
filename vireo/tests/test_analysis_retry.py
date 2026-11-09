@@ -241,6 +241,10 @@ def test_expected_primary_detection_id_pins_retry_to_the_clicked_subject(retry_l
                         expected_primary_detection_id=detection_id)
     assert matched["ok"]
     assert matched["photos"][0]["status"] == "complete"
+    # The Subjects panel's box quality and exposure come from the box analysis,
+    # so a retry of the chosen subject must leave it populated.
+    chosen = next(subject for subject in subjects_payload(db, pid)["subjects"] if subject["id"] == detection_id)
+    assert chosen["analysis"] is not None
 
 
 def test_analysis_retry_route_rejects_invalid_expected_primary_detection_id(retry_library):
@@ -1017,3 +1021,68 @@ def test_selected_retry_missing_subject_does_not_run_replacement_detection(retry
                        ids[:1], effective, str(tmp_path), expected_primary_detection_id=123)
     assert result["photos"][0]["status"] == "failed"
     assert calls == {"detection": [], "segmentation": []}
+
+
+def test_cancel_inside_box_refresh_tracks_already_published_features(retry_library, tmp_path, monkeypatch):
+    from pipeline import load_results_raw, save_results_raw
+    from services.review_refresh import pending_refresh
+    from subjects import payload
+
+    _, db, ids, _ = retry_library
+    pid = ids[0]
+    execute(db, [pid], tmp_path)
+    expected = payload(db, pid)["primary_detection_id"]
+    save_results_raw(_stale_review(ids), str(tmp_path), db.require_workspace_id())
+    cancelled = False
+
+    def cancel_box_analysis(worker, photo_id, path, *, detection_id, force, checkpoint, validate_publication):
+        nonlocal cancelled
+        assert photo_id == pid and detection_id == expected and force
+        assert worker.masks_features.get_mask(pid, "sam2-small") is not None
+        assert not worker.in_transaction
+        cancelled = True
+        checkpoint()
+
+    monkeypatch.setattr("subjects.analyze_photo", cancel_box_analysis)
+    effective = db.get_effective_config({"pipeline": {"sam2_variant": "sam2-small", "eye_detect_enabled": False}})
+    job = {"id": "cancel-box-refresh", "progress": {}, "errors": []}
+    with pytest.raises(JobCancelled):
+        run_retry(Context(db, cancel=lambda: cancelled), job, [pid], effective, str(tmp_path),
+                  expected_primary_detection_id=expected)
+    assert job["result"]["review_refresh"] == {"status": "complete", "photo_ids": [pid]}
+    saved = load_results_raw(str(tmp_path), db.require_workspace_id())
+    first = next(photo for photo in saved["photos"] if photo["id"] == pid)
+    assert first["selection_eligible"] and first["mask_path"] and first["subject_tenengrad"] is not None
+    assert pending_refresh(str(tmp_path), db.require_workspace_id()) == {}
+
+
+@pytest.mark.parametrize("change", ["primary", "visibility"])
+def test_box_refresh_rechecks_pinned_subject_and_visibility_at_publication(retry_library, tmp_path, monkeypatch, change):
+    import subjects
+
+    _, db, ids, _ = retry_library
+    pid = ids[0]
+    execute(db, [pid], tmp_path)
+    expected = subjects.payload(db, pid)["primary_detection_id"]
+    before = db.subjects.analysis(expected)
+    original = subjects.analyze_image
+
+    def measure_then_change(image, detections):
+        results = original(image, detections)
+        if change == "primary":
+            subjects.select_reviewer_box(db, pid, {"x": .6, "y": .1, "w": .2, "h": .2})
+            db.commit()
+        else:
+            folder_id = db.photos.get(pid)["folder_id"]
+            workspace_folders.remove_workspace_folder(db, db.require_workspace_id(), folder_id)
+        return results
+
+    monkeypatch.setattr(subjects, "analyze_image", measure_then_change)
+    effective = db.get_effective_config({"pipeline": {"sam2_variant": "sam2-small", "eye_detect_enabled": False}})
+    job = {"id": "changed-during-box-measurement", "progress": {}, "errors": []}
+    result = run_retry(Context(db), job, [pid], effective, str(tmp_path),
+                       expected_primary_detection_id=expected)
+    assert not result["ok"]
+    message = "Primary subject changed" if change == "primary" else "no longer visible"
+    assert message in result["photos"][0]["error"]
+    assert db.subjects.analysis(expected) == before

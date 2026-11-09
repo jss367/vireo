@@ -76,7 +76,8 @@ def analyze_image(image, detections):
     return results
 
 
-def analyze_photo(db, photo_id, image_path, *, min_conf=None, force=False, checkpoint=None, detection_id=None):
+def analyze_photo(db, photo_id, image_path, *, min_conf=None, force=False, checkpoint=None, detection_id=None,
+                  validate_publication=None):
     """Backfill on cached detection runs too; failed/offline reads remain retryable."""
     from image_loader import load_image
     from pipeline_locks import acquire_photo_mask
@@ -122,6 +123,10 @@ def analyze_photo(db, photo_id, image_path, *, min_conf=None, force=False, check
         if checkpoint:
             checkpoint()
         with db.transaction(immediate=True):
+            if db.photos.get(photo_id, verify_workspace=True) is None:
+                raise ValueError("Photo is no longer visible in this workspace")
+            if validate_publication:
+                validate_publication()
             results = _current_analysis_results(db, photo_id, pending, results, detection_id, min_conf)
             db.subjects.save_analyses(source_key, results)
             sync_primary(db, photo_id, min_conf=min_conf)

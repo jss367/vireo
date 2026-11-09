@@ -149,8 +149,18 @@ def test_rejecting_a_region_as_not_an_animal_promotes_the_other_subject_and_is_r
     assert db.detections.row(stump)['subject_verdict'] is None
 
 
-def test_draw_missing_subject_and_retry_scoped_measurements(live_server, page, tmp_path):
+def test_draw_missing_subject_and_retry_scoped_measurements(live_server, page, tmp_path, monkeypatch):
     from subjects import payload
+
+    # Retry rebuilds the selected subject's mask; the SAM2 model is not
+    # installed in the test environment, so segment the drawn box itself.
+    def mask_for_box(image, box, variant):
+        mask = np.zeros((image.height, image.width), bool)
+        x, y, w, h = (box[k] for k in 'xywh')
+        mask[int(y * image.height):int((y + h) * image.height),
+             int(x * image.width):int((x + w) * image.width)] = True
+        return mask
+    monkeypatch.setattr('masking.generate_mask', mask_for_box)
     db = live_server['db']
     path = tmp_path / 'missing-bird.jpg'
     Image.new('RGB', (640, 400), (80, 95, 90)).save(path)
