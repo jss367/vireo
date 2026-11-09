@@ -18,6 +18,77 @@ import send2trash
 
 pytest_plugins = ["scripts.selected_tests_plugin"]
 
+# Process-wide path handling that must work again by the time the test body
+# returns. Between the body and fixture teardown, pytest builds pathlib paths
+# to report the result, and coverage (``--cov-context=test``, the Linux full
+# run) flushes the test's lines after checking its data file with
+# ``os.path.exists`` and ``pathlib.Path(os.path.abspath(...)).as_uri()``. A
+# patched ``os.name`` makes Path() an uninstantiable WindowsPath, ``ntpath``'s
+# normpath turns absolute POSIX paths relative, and an ``exists`` that fails
+# the test raises inside coverage; each one crashes the xdist worker or errors
+# every later test on it. Delegating wrappers that keep these working are fine.
+_HOST_OS_NAME = os.name
+_HOST_PATH_FUNCTIONS = {
+    name: getattr(os.path, name)
+    for name in ("abspath", "normpath", "isabs", "join", "exists")
+}
+_HOST_OS_FUNCTIONS = {
+    name: getattr(os, name) for name in ("stat", "lstat", "getcwd", "fspath")
+}
+
+
+def _host_path_failure():
+    """Run the path calls coverage's flush makes; return what breaks them."""
+    try:
+        probe = os.path.join(tempfile.gettempdir(), "vireo-path-probe")
+        Path(os.path.abspath(probe)).as_uri()
+        os.path.exists(probe)
+    except (Exception, pytest.fail.Exception) as exc:  # broad: any failure here is the leak being reported
+        return exc
+    return None
+
+
+def _restore_host_path_state():
+    """Put the real os.name and path functions back; name what changed."""
+    changed = []
+    if os.name != _HOST_OS_NAME:
+        changed.append(f"os.name = {os.name!r}")
+        os.name = _HOST_OS_NAME
+    for module, prefix, functions in (
+        (os.path, "os.path", _HOST_PATH_FUNCTIONS),
+        (os, "os", _HOST_OS_FUNCTIONS),
+    ):
+        for name, real in functions.items():
+            if getattr(module, name) is not real:
+                changed.append(f"{prefix}.{name}")
+                setattr(module, name, real)
+    return changed
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_call(item):
+    """Fail a test whose body leaves process-wide path handling broken.
+
+    The real functions are put back before pytest reports, so a test's own
+    failure is still shown intact; a test that otherwise passed fails here.
+    """
+    try:
+        result = yield
+    finally:
+        failure = _host_path_failure()
+        changed = _restore_host_path_state() if failure is not None else []
+    if failure is not None:
+        pytest.fail(
+            f"Path handling was still broken when the test body returned "
+            f"({type(failure).__name__}: {failure}; patched: "
+            f"{', '.join(changed) or 'unknown'}). pytest's reporting and "
+            "coverage's per-test flush need it before fixture teardown, so "
+            "patch these inside `with monkeypatch.context() as patch:` around "
+            "the call that needs them.",
+            pytrace=False,
+        )
+    return result
+
 
 @pytest.fixture(autouse=True)
 def isolated_trash(tmp_path, monkeypatch):

@@ -56,7 +56,6 @@ def test_program_files_candidates_are_deduplicated(monkeypatch, tmp_path):
     ],
 )
 def test_windows_support_tier(monkeypatch, release, build, expected_tier):
-    monkeypatch.setattr(platform_support.os, "name", "nt")
     monkeypatch.setattr(platform_support.platform, "release", lambda: release)
     monkeypatch.setattr(platform_support.platform, "version", lambda: build)
     monkeypatch.setattr(platform_support.platform, "machine", lambda: "AMD64")
@@ -68,7 +67,12 @@ def test_windows_support_tier(monkeypatch, release, build, expected_tier):
         lambda: {"state": "ready", "enabled": True},
     )
 
-    info = platform_support.platform_support_info({})
+    # ``os.name`` is process-wide, and on POSIX ``pathlib.Path()`` refuses to
+    # build a WindowsPath, which coverage's per-test flush and pytest's
+    # reporting both do after the body; so the patch ends with the call.
+    with monkeypatch.context() as patch:
+        patch.setattr(platform_support.os, "name", "nt")
+        info = platform_support.platform_support_info({})
 
     assert info["support_tier"] == expected_tier
     assert info["guaranteed_inference"] == "CPUExecutionProvider"

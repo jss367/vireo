@@ -208,13 +208,19 @@ def test_find_darktable_detects_standard_windows_install(monkeypatch, tmp_path):
     binary = tmp_path / "darktable" / "bin" / "darktable-cli.exe"
     binary.parent.mkdir(parents=True)
     binary.write_bytes(b"exe")
-    monkeypatch.setattr(develop.os, "name", "nt")
     monkeypatch.setenv("PROGRAMFILES", str(tmp_path))
     monkeypatch.delenv("PROGRAMFILES(X86)", raising=False)
     monkeypatch.delenv("PROGRAMW6432", raising=False)
     monkeypatch.setattr(develop.shutil, "which", lambda _name: None)
 
-    assert develop.find_darktable("") == str(binary.resolve())
+    expected = str(binary.resolve())
+    # ``os.name`` is process-wide, and on POSIX ``pathlib.Path()`` refuses to
+    # build a WindowsPath, which coverage's per-test flush and pytest's
+    # reporting both do after the body; so the patch ends with the call.
+    with monkeypatch.context() as patch:
+        patch.setattr(develop.os, "name", "nt")
+        found = develop.find_darktable("")
+    assert found == expected
 
 
 def test_is_nikon_high_efficiency_nef_from_metadata(tmp_path):

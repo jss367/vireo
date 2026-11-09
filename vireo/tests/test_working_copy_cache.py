@@ -42,7 +42,6 @@ def _seed_working_copies(tmp_path, sizes):
 def test_windows_identity_ignores_unstable_device_and_inode(monkeypatch):
     import working_copy_cache
 
-    monkeypatch.setattr(working_copy_cache.os, "name", "nt")
     sampled = SimpleNamespace(
         st_dev=0, st_ino=0, st_size=123, st_mtime_ns=456, st_ctime_ns=789,
     )
@@ -50,9 +49,14 @@ def test_windows_identity_ignores_unstable_device_and_inode(monkeypatch):
         st_dev=7, st_ino=99, st_size=123, st_mtime_ns=456, st_ctime_ns=789,
     )
 
-    assert working_copy_cache._file_identity(sampled) == (
-        working_copy_cache._file_identity(rechecked)
-    )
+    # ``os.name`` is process-wide, and on POSIX ``pathlib.Path()`` refuses to
+    # build a WindowsPath, which coverage's per-test flush and pytest's
+    # reporting both do after the body; so the patch ends with the call.
+    with monkeypatch.context() as patch:
+        patch.setattr(working_copy_cache.os, "name", "nt")
+        sampled_identity = working_copy_cache._file_identity(sampled)
+        rechecked_identity = working_copy_cache._file_identity(rechecked)
+    assert sampled_identity == rechecked_identity
 
 
 def test_evicts_oldest_working_copies_and_marks_catalog_rows(tmp_path):

@@ -49,9 +49,12 @@ def test_changed_dates_sizes_names_and_hashes_are_review_only(catalog, tmp_path,
     catalog.conn.execute("UPDATE photos SET file_size=2000 WHERE id=?", (b,))
     catalog.commit()
     # Same-shot discovery must work with a sleeping/offline NAS, with no stat.
+    # ``os.path`` is process-wide, and coverage's per-test flush calls
+    # ``exists`` after the body, so the trap ends with the scan.
     import services.same_shot_duplicates as same_shot
-    monkeypatch.setattr(same_shot.os.path, "exists", lambda *_: pytest.fail("unexpected original access"))
-    result = run_duplicate_scan({"progress": {}}, catalog)
+    with monkeypatch.context() as patch:
+        patch.setattr(same_shot.os.path, "exists", lambda *_: pytest.fail("unexpected original access"))
+        result = run_duplicate_scan({"progress": {}}, catalog)
     assert result["proposals"] == []
     assert result["buckets"] == []
     assert result["loser_count"] == result["resolved_loser_count"] == 0
