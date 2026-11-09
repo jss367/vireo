@@ -253,15 +253,21 @@ def _refresh_box_analysis(db: Database, pid: int, detection_id: int, cache_dir: 
     ``analyze_photo`` takes that lock itself.
     """
     from image_loader import get_canonical_image_path
+    from subject_ranking import SubjectComparison, resolve_subject
     from subjects import analyze_photo
 
     photo = db.photos.get(pid, verify_workspace=True)
     if photo is None:
         raise ValueError("Photo is no longer visible in this workspace")
     folders = {f["id"]: f["path"] for f in db.folders.tree()}
+    def validate_primary() -> None:
+        current, _ = resolve_subject(db, pid, SubjectComparison())
+        if current is None or current["id"] != detection_id:
+            raise ValueError("Primary subject changed during analysis; retry the chosen subject")
+
     analyze_photo(db, pid, get_canonical_image_path(photo, cache_dir, folders),
                   detection_id=detection_id, force=True, checkpoint=checkpoint,
-                  expected_primary_detection_id=detection_id)
+                  validate_publication=validate_primary)
 
 
 def _selected_detection(db: Database, pid: int, effective: JsonDict) -> JsonDict:

@@ -1035,7 +1035,7 @@ def test_cancel_inside_box_refresh_tracks_already_published_features(retry_libra
     save_results_raw(_stale_review(ids), str(tmp_path), db.require_workspace_id())
     cancelled = False
 
-    def cancel_box_analysis(worker, photo_id, path, *, detection_id, force, checkpoint, expected_primary_detection_id):
+    def cancel_box_analysis(worker, photo_id, path, *, detection_id, force, checkpoint, validate_publication):
         nonlocal cancelled
         assert photo_id == pid and detection_id == expected and force
         assert worker.masks_features.get_mask(pid, "sam2-small") is not None

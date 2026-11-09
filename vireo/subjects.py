@@ -77,7 +77,7 @@ def analyze_image(image, detections):
 
 
 def analyze_photo(db, photo_id, image_path, *, min_conf=None, force=False, checkpoint=None, detection_id=None,
-                  expected_primary_detection_id=None):
+                  validate_publication=None):
     """Backfill on cached detection runs too; failed/offline reads remain retryable."""
     from image_loader import load_image
     from pipeline_locks import acquire_photo_mask
@@ -123,22 +123,14 @@ def analyze_photo(db, photo_id, image_path, *, min_conf=None, force=False, check
         if checkpoint:
             checkpoint()
         with db.transaction(immediate=True):
-            _validate_analysis_scope(db, photo_id, expected_primary_detection_id)
+            if db.photos.get(photo_id, verify_workspace=True) is None:
+                raise ValueError("Photo is no longer visible in this workspace")
+            if validate_publication:
+                validate_publication()
             results = _current_analysis_results(db, photo_id, pending, results, detection_id, min_conf)
             db.subjects.save_analyses(source_key, results)
             sync_primary(db, photo_id, min_conf=min_conf)
     return len(results)
-
-
-def _validate_analysis_scope(db, photo_id, expected_primary_detection_id):
-    """Reject stale pinned work before publishing inside the writer transaction."""
-    if db.photos.get(photo_id, verify_workspace=True) is None:
-        raise ValueError("Photo is no longer visible in this workspace")
-    if expected_primary_detection_id is not None:
-        from subject_ranking import SubjectComparison, resolve_subject
-        current, _ = resolve_subject(db, photo_id, SubjectComparison())
-        if current is None or current["id"] != expected_primary_detection_id:
-            raise ValueError("Primary subject changed during analysis; retry the chosen subject")
 
 
 def _current_analysis_results(db, photo_id, pending, results, detection_id, min_conf):
