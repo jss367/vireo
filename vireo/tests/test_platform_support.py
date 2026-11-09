@@ -28,14 +28,15 @@ def test_dependency_readiness_requires_both_remote_tools(monkeypatch):
 
 
 def test_filesystem_type_is_not_probed_off_windows(monkeypatch):
-    monkeypatch.setattr(platform_support.os, "name", "posix")
-    monkeypatch.setattr(
-        platform_support.ctypes,
-        "windll",
-        SimpleNamespace(kernel32=SimpleNamespace()),
-        raising=False,
-    )
-    assert platform_support.filesystem_type("/photos") is None
+    with monkeypatch.context() as patch:
+        patch.setattr(platform_support.os, "name", "posix")
+        patch.setattr(
+            platform_support.ctypes,
+            "windll",
+            SimpleNamespace(kernel32=SimpleNamespace()),
+            raising=False,
+        )
+        assert platform_support.filesystem_type("/photos") is None
 
 
 def test_program_files_candidates_are_deduplicated(monkeypatch, tmp_path):
