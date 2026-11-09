@@ -630,4 +630,24 @@ def test_fetch_species_list_drops_hybrid_crosses_only_when_asked():
     assert for_classifying == ["Red-shouldered Hawk"]
     assert for_classifying.hybrid_crosses == ["Common Black × Red-shouldered Hawk"]
     assert "Common Black × Red-shouldered Hawk" not in for_classifying.identities
+    assert for_classifying.hybrid_cross_identities["Common Black × Red-shouldered Hawk"]["taxon_id"] == 900001
     assert messages[-1] == "Done — 1 total species, 1 hybrid cross left out"
+
+
+def test_filtered_fetch_survives_save_for_tagging_and_classification(tmp_path, monkeypatch):
+    import labels as labels_mod
+
+    monkeypatch.setattr(labels_mod, "LABELS_DIR", str(tmp_path))
+    cross = "Brewer's Duck"
+    identity = {"taxon_id": 900001, "scientific_name": "Anas platyrhynchos × Mareca strepera"}
+    fetched = labels_mod.SpeciesLabels(
+        ["Mallard"], {"Mallard": {"taxon_id": 6930, "scientific_name": "Anas platyrhynchos"}},
+        hybrid_crosses=[cross], hybrid_cross_identities={cross: identity},
+    )
+    path = labels_mod.save_labels("Ducks", 14, "California", ["birds"], fetched)
+    raw = labels_mod.read_label_file(path)
+    assert cross in raw and raw.identities[cross] == identity
+    loaded = labels_mod.normalized_label_set({"labels_file": path})
+    assert loaded == ["Mallard"]
+    assert loaded.hybrid_crosses == [cross]
+    assert labels_mod.label_set_summary({"labels_file": path}) == (1, 0, 1)

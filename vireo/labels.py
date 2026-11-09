@@ -37,16 +37,18 @@ class SpeciesLabels(list):
     list (CORE_PHILOSOPHY: no black boxes). Both are plain lists of the
     final prompt strings and are not part of the label text itself.
     ``hybrid_crosses`` lists the prompts :func:`is_hybrid_cross` kept out of
-    the list, for the same reason.
+    the classifier input, for the same reason. Their source identities are
+    retained separately so saving still preserves manual tagging and recovery.
     """
 
     def __init__(self, names=(), identities=None, disambiguated=(), dropped=(),
-                 hybrid_crosses=()):
+                 hybrid_crosses=(), hybrid_cross_identities=None):
         super().__init__(names)
         self.identities = identities or {}
         self.disambiguated = list(disambiguated)
         self.dropped_ambiguous = list(dropped)
         self.hybrid_crosses = list(hybrid_crosses)
+        self.hybrid_cross_identities = hybrid_cross_identities or {}
 
 
 # "Genus × epithet" and "× Genus epithet" name a hybrid taxon in its own
@@ -570,10 +572,11 @@ def fetch_species_list(
         )
 
     hybrid_crosses = []
+    hybrid_cross_identities = {}
     if drop_hybrid_crosses:
-        hybrid_crosses = sorted({
-            name for name, entry in records if is_hybrid_cross(name, entry)
-        })
+        hybrid_crosses, hybrid_cross_identities, _, _, _ = disambiguate_labels(
+            [record for record in records if is_hybrid_cross(*record)]
+        )
         records = [
             record for record in records if not is_hybrid_cross(*record)
         ]
@@ -600,7 +603,7 @@ def fetch_species_list(
         )
 
     return SpeciesLabels(
-        names, identities, disambiguated, dropped, hybrid_crosses,
+        names, identities, disambiguated, dropped, hybrid_crosses, hybrid_cross_identities,
     )
 
 
@@ -625,8 +628,10 @@ def save_labels(name, place_id, place_name, taxon_groups, species,
     labels_path = os.path.join(LABELS_DIR, f"{slug}.txt")
     meta_path = os.path.join(LABELS_DIR, f"{slug}.json")
 
-    # Write labels file (one per line)
-    species_text = "".join(sp + "\n" for sp in sorted(set(species)))
+    # Keep the fetched source complete for manual tagging and identity recovery;
+    # classifier loading applies the cross filter separately.
+    saved_names = sorted(set(species) | set(getattr(species, "hybrid_crosses", [])))
+    species_text = "".join(sp + "\n" for sp in saved_names)
     _atomic_write_text(labels_path, species_text)
 
     # Write metadata
@@ -640,13 +645,14 @@ def save_labels(name, place_id, place_name, taxon_groups, species,
         "taxon_groups": taxon_groups,
         "observation_filter": observation_filter,
         "observation_filter_name": filter_info["name"],
-        "species_count": len(set(species)),
+        "species_count": len(saved_names),
         "labels_file": labels_path,
     }
-    identities = getattr(species, "identities", {})
+    identities = {**getattr(species, "identities", {}),
+                  **getattr(species, "hybrid_cross_identities", {})}
     if identities:
         meta["label_identities"] = identities
-        meta["labels_text_sha256"] = _text_identity(sorted(set(species)))
+        meta["labels_text_sha256"] = _text_identity(saved_names)
     _atomic_write_text(meta_path, json.dumps(meta, indent=2))
 
     return labels_path
@@ -834,14 +840,15 @@ def set_active_labels(labels_files):
     _atomic_write_text(config_path, json.dumps({"active_labels": labels_files}, indent=2))
 
 
-def load_merged_labels(label_sets):
+def load_merged_labels(label_sets, *, drop_hybrid_crosses=True):
     """Read and merge species from multiple label sets.
 
     ``load_merged_labels_with_metas`` without the consumed-metas list; use
     that variant when the caller names label sources. Returns the sorted,
-    deduplicated species names (see it for the dedupe rules).
+    deduplicated species names (see it for the dedupe rules). Set
+    ``drop_hybrid_crosses=False`` only to reconstruct historical fingerprints.
     """
-    labels, _ = load_merged_labels_with_metas(label_sets)
+    labels, _ = load_merged_labels_with_metas(label_sets, drop_hybrid_crosses=drop_hybrid_crosses)
     return labels
 
 
@@ -967,7 +974,7 @@ def load_label_set(path, meta=None):
     return normalized_label_set(meta or {"labels_file": path})
 
 
-def _read_label_set_records(label_sets):
+def _read_label_set_records(label_sets, *, drop_hybrid_crosses=True):
     """``(records, read_sets, hybrid_crosses)`` from every readable label file.
 
     ``records`` is the deduplicated ``(name, identity)`` list;
@@ -996,7 +1003,7 @@ def _read_label_set_records(label_sets):
         own = set()
         for name in labels:
             entry = labels.identities.get(name)
-            if is_hybrid_cross(name, entry):
+            if drop_hybrid_crosses and is_hybrid_cross(name, entry):
                 hybrid_crosses.add(name)
                 continue
             key = (name, json.dumps(entry, sort_keys=True))
@@ -1010,7 +1017,7 @@ def _read_label_set_records(label_sets):
     return records, read_sets, sorted(hybrid_crosses)
 
 
-def load_merged_labels_with_metas(label_sets):
+def load_merged_labels_with_metas(label_sets, *, drop_hybrid_crosses=True):
     """Read and merge species, returning the metadata of the sets consumed.
 
     ``label_sets`` is a list of metadata dicts, each with a ``labels_file``
@@ -1041,7 +1048,7 @@ def load_merged_labels_with_metas(label_sets):
     DELETE endpoint can retire a label file while the classify job is
     loading, so any two-pass check disagrees with reality.
     """
-    records, read_sets, hybrid_crosses = _read_label_set_records(label_sets)
+    records, read_sets, hybrid_crosses = _read_label_set_records(label_sets, drop_hybrid_crosses=drop_hybrid_crosses)
     if hybrid_crosses:
         log.info(
             "Classifying without %d hybrid cross label(s), e.g. %s",

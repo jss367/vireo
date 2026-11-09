@@ -158,7 +158,8 @@ def pending_label_sets(db, saved_metas=None):
             continue
         metas = [meta for meta, _ in captured]
         source_snapshot = [entry for _, snapshot in captured for entry in snapshot]
-        candidates = [load_merged_labels(metas)]
+        candidates = [load_merged_labels(metas),
+                      load_merged_labels(metas, drop_hybrid_crosses=False)]
         if len(metas) == 1:
             candidates.append(read_label_file(metas[0]["labels_file"]))
         labels = next((c for c in candidates if compute_fingerprint(c) == fingerprint), None)
