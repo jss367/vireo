@@ -39,8 +39,8 @@ _HOST_OS_FUNCTIONS = {
 
 def _host_path_failure():
     """Run the path calls coverage's flush makes; return what breaks them."""
-    probe = os.path.join(tempfile.gettempdir(), "vireo-path-probe")
     try:
+        probe = os.path.join(tempfile.gettempdir(), "vireo-path-probe")
         Path(os.path.abspath(probe)).as_uri()
         os.path.exists(probe)
     except (Exception, pytest.fail.Exception) as exc:  # broad: any failure here is the leak being reported
