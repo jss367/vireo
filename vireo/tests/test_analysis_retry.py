@@ -241,6 +241,10 @@ def test_expected_primary_detection_id_pins_retry_to_the_clicked_subject(retry_l
                         expected_primary_detection_id=detection_id)
     assert matched["ok"]
     assert matched["photos"][0]["status"] == "complete"
+    # The Subjects panel's box quality and exposure come from the box analysis,
+    # so a retry of the chosen subject must leave it populated.
+    chosen = next(subject for subject in subjects_payload(db, pid)["subjects"] if subject["id"] == detection_id)
+    assert chosen["analysis"] is not None
 
 
 def test_analysis_retry_route_rejects_invalid_expected_primary_detection_id(retry_library):
