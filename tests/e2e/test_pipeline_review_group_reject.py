@@ -2915,6 +2915,9 @@ def test_history_panel_undo_labels_the_actual_reversible_edit(live_server, page)
     declined = page.locator('.bp-history-row').filter(has_text='Declined a suggestion')
     expect(declined.get_by_role('button', name='Undo', exact=True)).to_have_count(0)
     row.get_by_role('button', name='Undo', exact=True).click()
+    # Undo is also disabled while the request is pending. Redo becomes enabled
+    # only after undo finishes and the refreshed history controls are unblocked.
+    expect(page.locator('#historyRedoBtn')).to_be_enabled()
     expect(page.locator('#historyUndoBtn')).to_be_disabled()
     assert _flags(db, ids) == ['none'] * 4
 
