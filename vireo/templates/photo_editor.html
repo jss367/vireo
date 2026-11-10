@@ -17,7 +17,7 @@ body {
 .editor-shell {
   height: calc(100vh - 48px - 30px);
   display: grid;
-  grid-template-columns: minmax(360px, 1fr) 340px 300px;
+  grid-template-columns: minmax(360px, 1fr) 340px;
   gap: 0;
   border-top: 1px solid var(--border-primary);
 }
@@ -568,17 +568,15 @@ body {
   font-variant-numeric: tabular-nums;
 }
 .crop-meta input:disabled { opacity: 0.55; }
+.history-panel > summary {
+  padding: 16px;
+  margin: 0;
+  cursor: pointer;
+}
 .history-header {
-  position: sticky;
-  top: 0;
-  z-index: 2;
   padding: 16px;
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--border-primary);
-}
-.history-header h2 {
-  font-size: 14px;
-  margin-bottom: 4px;
 }
 .history-header p {
   color: var(--text-muted);
@@ -714,81 +712,6 @@ body {
 
   <aside class="editor-panel">
     <div class="panel-band">
-      <div class="panel-title">Transform</div>
-      <div class="button-row">
-        <button class="editor-btn" type="button" onclick="rotateRecipe(-90)">Rotate Left</button>
-        <button class="editor-btn" type="button" onclick="rotateRecipe(90)">Rotate Right</button>
-        <button class="editor-btn" type="button" onclick="flipRecipe('horizontal')">Flip H</button>
-        <button class="editor-btn" type="button" onclick="flipRecipe('vertical')">Flip V</button>
-      </div>
-      <div class="control-row">
-        <label for="straightenRange">Straighten</label>
-        <input id="straightenRange" type="range" min="-10" max="10" step="0.1" value="0" oninput="setStraighten(this.value)">
-        <span class="control-value" id="straightenValue">0.0</span>
-      </div>
-    </div>
-
-    <div class="panel-band">
-      <div class="panel-title">Crop</div>
-      <div class="button-row">
-        <button class="editor-btn" type="button" id="editCropBtn" onclick="beginCropEdit()">Edit Crop</button>
-        <button class="editor-btn" type="button" onclick="resetCrop()">Full Frame</button>
-        <button class="editor-btn" type="button" id="aspectLockBtn" onclick="toggleAspectLock()" title="Keep the current crop aspect ratio while resizing">Lock Ratio</button>
-        <button class="editor-btn" type="button" id="aspect32Btn" onclick="setAspect(1.5)" title="Set a 3:2 crop and lock the ratio; click again to unlock">3:2</button>
-        <button class="editor-btn" type="button" id="aspect43Btn" onclick="setAspect(1.3333333333)" title="Set a 4:3 crop and lock the ratio; click again to unlock">4:3</button>
-        <button class="editor-btn" type="button" id="aspect11Btn" onclick="setAspect(1)" title="Set a 1:1 crop and lock the ratio; click again to unlock">1:1</button>
-      </div>
-      <label class="crop-remember" title="Start each photo with your last ratio lock. Saved crops stay unchanged until you resize them.">
-        <input id="rememberCropRatio" type="checkbox" onchange="setRememberCropRatio(this.checked)">
-        Remember crop ratio
-      </label>
-      <div class="crop-meta">
-        <div><label for="cropX">x</label><input id="cropX" type="number" min="0" max="100" step="0.1" value="0" onfocus="beginCropEdit()" onchange="setCropField('x', this.value)" aria-label="Crop x (percent)"></div>
-        <div><label for="cropY">y</label><input id="cropY" type="number" min="0" max="100" step="0.1" value="0" onfocus="beginCropEdit()" onchange="setCropField('y', this.value)" aria-label="Crop y (percent)"></div>
-        <div><label for="cropW">w</label><input id="cropW" type="number" min="2" max="100" step="0.1" value="100" onfocus="beginCropEdit()" onchange="setCropField('w', this.value)" aria-label="Crop width (percent)"></div>
-        <div><label for="cropH">h</label><input id="cropH" type="number" min="2" max="100" step="0.1" value="100" onfocus="beginCropEdit()" onchange="setCropField('h', this.value)" aria-label="Crop height (percent)"></div>
-      </div>
-    </div>
-
-    <div class="panel-band">
-      <div class="panel-title">Feedback</div>
-      <canvas id="histogramCanvas" class="histogram-canvas" width="256" height="82" aria-label="Preview histogram"></canvas>
-      <div class="clip-readout">
-        <div class="clip-chip" id="shadowClipChip">
-          <strong>Shadows</strong>
-          <span id="shadowClipValue">--</span>
-        </div>
-        <div class="clip-chip" id="highlightClipChip">
-          <strong>Highlights</strong>
-          <span id="highlightClipValue">--</span>
-        </div>
-      </div>
-      <div class="feedback-note" id="feedbackNote">Current preview</div>
-    </div>
-
-    <div class="panel-band">
-      <div class="panel-title">Versions</div>
-      <div id="editorVersions" aria-label="Photo versions" aria-live="polite"></div>
-      <div class="button-row">
-        <button class="editor-btn" type="button" onclick="saveEditorSnapshot()">Save Snapshot</button>
-      </div>
-    </div>
-    <div class="panel-band">
-      <div class="panel-title">Presets</div>
-      <div class="preset-row">
-        <select id="presetSelect" onchange="onPresetSelected()">
-          <option value="">Select a preset...</option>
-        </select>
-        <input id="presetNameInput" type="text" maxlength="80" placeholder="Preset name" aria-label="Preset name">
-      </div>
-      <div class="button-row">
-        <button class="editor-btn" type="button" id="applyPresetBtn" onclick="applySelectedPreset()" disabled>Apply</button>
-        <button class="editor-btn" type="button" id="savePresetBtn" onclick="saveCurrentAsPreset()">Save</button>
-        <button class="editor-btn" type="button" id="deletePresetBtn" onclick="deleteSelectedPreset()" disabled>Delete</button>
-      </div>
-    </div>
-
-    <div class="panel-band">
       <div class="panel-title">Adjustments</div>
       <div class="button-row">
         <button class="editor-btn" type="button" id="autoToneBtn" onclick="autoTone('balanced')" title="Balance the whole photo, weighting the subject">Auto Tone</button>
@@ -862,6 +785,91 @@ body {
       </div>
       <div class="button-row">
         <button class="editor-btn" type="button" onclick="resetAdjustments()">Reset Adjustments</button>
+      </div>
+    </div>
+
+    <div class="panel-band">
+      <div class="panel-title">Transform</div>
+      <div class="button-row">
+        <button class="editor-btn" type="button" onclick="rotateRecipe(-90)">Rotate Left</button>
+        <button class="editor-btn" type="button" onclick="rotateRecipe(90)">Rotate Right</button>
+        <button class="editor-btn" type="button" onclick="flipRecipe('horizontal')">Flip H</button>
+        <button class="editor-btn" type="button" onclick="flipRecipe('vertical')">Flip V</button>
+      </div>
+      <div class="control-row">
+        <label for="straightenRange">Straighten</label>
+        <input id="straightenRange" type="range" min="-10" max="10" step="0.1" value="0" oninput="setStraighten(this.value)">
+        <span class="control-value" id="straightenValue">0.0</span>
+      </div>
+    </div>
+
+    <div class="panel-band">
+      <div class="panel-title">Crop</div>
+      <div class="button-row">
+        <button class="editor-btn" type="button" id="editCropBtn" onclick="beginCropEdit()">Edit Crop</button>
+        <button class="editor-btn" type="button" onclick="resetCrop()">Full Frame</button>
+        <button class="editor-btn" type="button" id="aspectLockBtn" onclick="toggleAspectLock()" title="Keep the current crop aspect ratio while resizing">Lock Ratio</button>
+        <button class="editor-btn" type="button" id="aspect32Btn" onclick="setAspect(1.5)" title="Set a 3:2 crop and lock the ratio; click again to unlock">3:2</button>
+        <button class="editor-btn" type="button" id="aspect43Btn" onclick="setAspect(1.3333333333)" title="Set a 4:3 crop and lock the ratio; click again to unlock">4:3</button>
+        <button class="editor-btn" type="button" id="aspect11Btn" onclick="setAspect(1)" title="Set a 1:1 crop and lock the ratio; click again to unlock">1:1</button>
+      </div>
+      <label class="crop-remember" title="Start each photo with your last ratio lock. Saved crops stay unchanged until you resize them.">
+        <input id="rememberCropRatio" type="checkbox" onchange="setRememberCropRatio(this.checked)">
+        Remember crop ratio
+      </label>
+      <div class="crop-meta">
+        <div><label for="cropX">x</label><input id="cropX" type="number" min="0" max="100" step="0.1" value="0" onfocus="beginCropEdit()" onchange="setCropField('x', this.value)" aria-label="Crop x (percent)"></div>
+        <div><label for="cropY">y</label><input id="cropY" type="number" min="0" max="100" step="0.1" value="0" onfocus="beginCropEdit()" onchange="setCropField('y', this.value)" aria-label="Crop y (percent)"></div>
+        <div><label for="cropW">w</label><input id="cropW" type="number" min="2" max="100" step="0.1" value="100" onfocus="beginCropEdit()" onchange="setCropField('w', this.value)" aria-label="Crop width (percent)"></div>
+        <div><label for="cropH">h</label><input id="cropH" type="number" min="2" max="100" step="0.1" value="100" onfocus="beginCropEdit()" onchange="setCropField('h', this.value)" aria-label="Crop height (percent)"></div>
+      </div>
+    </div>
+
+    <div class="panel-band">
+      <div class="panel-title">Feedback</div>
+      <canvas id="histogramCanvas" class="histogram-canvas" width="256" height="82" aria-label="Preview histogram"></canvas>
+      <div class="clip-readout">
+        <div class="clip-chip" id="shadowClipChip">
+          <strong>Shadows</strong>
+          <span id="shadowClipValue">--</span>
+        </div>
+        <div class="clip-chip" id="highlightClipChip">
+          <strong>Highlights</strong>
+          <span id="highlightClipValue">--</span>
+        </div>
+      </div>
+      <div class="feedback-note" id="feedbackNote">Current preview</div>
+    </div>
+
+    <div class="panel-band">
+      <div class="panel-title">Versions</div>
+      <div id="editorVersions" aria-label="Photo versions" aria-live="polite"></div>
+      <div class="button-row">
+        <button class="editor-btn" type="button" onclick="saveEditorSnapshot()">Save Snapshot</button>
+      </div>
+    </div>
+    <details class="history-panel">
+      <summary class="panel-title">Edit History</summary>
+      <div class="history-header">
+        <p>Restore any saved recipe checkpoint for this photo. Restores are saved as a new history item.</p>
+      </div>
+      <div class="history-list" id="historyList">
+        <div class="history-empty">Loading history...</div>
+      </div>
+    </details>
+
+    <div class="panel-band">
+      <div class="panel-title">Presets</div>
+      <div class="preset-row">
+        <select id="presetSelect" onchange="onPresetSelected()">
+          <option value="">Select a preset...</option>
+        </select>
+        <input id="presetNameInput" type="text" maxlength="80" placeholder="Preset name" aria-label="Preset name">
+      </div>
+      <div class="button-row">
+        <button class="editor-btn" type="button" id="applyPresetBtn" onclick="applySelectedPreset()" disabled>Apply</button>
+        <button class="editor-btn" type="button" id="savePresetBtn" onclick="saveCurrentAsPreset()">Save</button>
+        <button class="editor-btn" type="button" id="deletePresetBtn" onclick="deleteSelectedPreset()" disabled>Delete</button>
       </div>
     </div>
 
@@ -1131,16 +1139,6 @@ body {
     <div class="panel-band" id="localUnavailableBand" style="display:none">
       <div class="panel-title">Local (Subject / Background)</div>
       <p class="local-unavailable-note">No subject mask for this photo &mdash; run the pipeline's mask stage to enable local adjustments.</p>
-    </div>
-  </aside>
-
-  <aside class="history-panel">
-    <div class="history-header">
-      <h2>Edit History</h2>
-      <p>Restore any saved recipe checkpoint for this photo. Restores are saved as a new history item.</p>
-    </div>
-    <div class="history-list" id="historyList">
-      <div class="history-empty">Loading history...</div>
     </div>
   </aside>
 </main>
