@@ -13,9 +13,36 @@ through ``workspace_id_fn`` (``Database._ws_id``) before running any SQL, so
 with no workspace active they raise ``RuntimeError`` having touched nothing.
 """
 
+import re
 import sqlite3
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
+
+
+def photo_visible_in_workspace_sql(photo_id: str) -> str:
+    """``photo_workspace_visibility`` membership as a per-photo test.
+
+    ``photo_id`` is the qualified photo-id column of the enclosing query
+    (``"p.id"``, ``"d.photo_id"``). The fragment binds the workspace id
+    twice, so the caller passes it two times at this position.
+
+    For a query that already holds its rows by id (``pr.id IN (...)``). The
+    view is a ``UNION``, so SQLite materializes it instead of merging it
+    into the query: a lookup by id list that joins it first builds every
+    photo the workspace can see, and a chunked id list pays that once per
+    chunk. This tests the same two memberships, a linked folder or a
+    per-photo grant, as two index probes per row, so the cost follows the
+    rows asked for and not the size of the workspace.
+    """
+    if re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*\.[A-Za-z_][A-Za-z_0-9]*", photo_id) is None:
+        raise ValueError(f"Expected a qualified photo id column: {photo_id!r}")
+    return (
+        "(EXISTS (SELECT 1 FROM photos vis_p"
+        " JOIN workspace_folders vis_wf ON vis_wf.folder_id = vis_p.folder_id"
+        f" WHERE vis_p.id = {photo_id} AND vis_wf.workspace_id = ?)"
+        " OR EXISTS (SELECT 1 FROM workspace_photos vis_wp"
+        f" WHERE vis_wp.photo_id = {photo_id} AND vis_wp.workspace_id = ?))"
+    )
 
 
 class PhotoVisibilityRepository:
