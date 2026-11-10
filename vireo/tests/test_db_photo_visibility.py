@@ -13,7 +13,10 @@ import textwrap
 
 import pytest
 from db import Database
-from repositories.photo_visibility import PhotoVisibilityRepository
+from repositories.photo_visibility import (
+    PhotoVisibilityRepository,
+    photo_visible_in_workspace_sql,
+)
 from services import photo_ingest, workspace_folders
 
 
@@ -23,6 +26,50 @@ def _photo(db, name="bird.jpg"):
         db, folder_id=fid, filename=name, extension=".jpg",
         file_size=1000, file_mtime=1.0,
     )
+
+
+def test_per_photo_visibility_test_matches_the_view_in_every_workspace(db):
+    """The per-row fragment and ``photo_workspace_visibility`` name the same photos.
+
+    One photo per way of being visible: through a linked folder, through a
+    photo grant alone, through both, and not at all.
+    """
+    home = db.require_workspace_id()
+    other = db.create_workspace("Other")
+    db.commit()
+    _, by_folder = _photo(db, "folder.jpg")
+    both_folder, by_both = _photo(db, "both.jpg")
+    _, by_grant = _photo(db, "grant.jpg")
+    hidden_folder, _hidden = _photo(db, "hidden.jpg")
+    db.workspace_folders.add_exact(other, both_folder)
+    db.photo_visibility.grant(other, [by_both, by_grant])
+    db.conn.execute(
+        "DELETE FROM workspace_folders WHERE folder_id = ?", (hidden_folder,),
+    )
+    db.commit()
+
+    def by_fragment(workspace_id):
+        return {row[0] for row in db.conn.execute(
+            f"SELECT p.id FROM photos p WHERE {photo_visible_in_workspace_sql('p.id')}",
+            (workspace_id, workspace_id),
+        )}
+
+    def by_view(workspace_id):
+        return {row[0] for row in db.conn.execute(
+            "SELECT photo_id FROM photo_workspace_visibility WHERE workspace_id = ?",
+            (workspace_id,),
+        )}
+
+    assert by_view(home) == {by_folder, by_both, by_grant}
+    assert by_view(other) == {by_both, by_grant}
+    for workspace_id in (home, other):
+        assert by_fragment(workspace_id) == by_view(workspace_id)
+
+
+@pytest.mark.parametrize("column", ["id", "p.id; DROP TABLE photos", "p.id = 1 OR p.id", ""])
+def test_per_photo_visibility_test_takes_only_a_qualified_column(column):
+    with pytest.raises(ValueError, match="qualified photo id column"):
+        photo_visible_in_workspace_sql(column)
 
 
 def test_visible_photo_ids_keeps_order_drops_unknown_and_dedupes(db):

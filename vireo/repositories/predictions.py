@@ -63,6 +63,7 @@ from repositories import chunks
 from repositories.collections import CollectionRepository
 from repositories.effective_config import active_effective_config
 from repositories.photo_sql import TOP_PREDICTION_CONFIDENCE_EXPR
+from repositories.photo_visibility import photo_visible_in_workspace_sql
 from repositories.prediction_review import (
     AUTO_MATCH_REVIEW_MARKER,
     CLASSIFIER_MATCH_SCORE_JOIN,
@@ -949,8 +950,15 @@ class PredictionRepository:
                 )
 
     def evidence_context(self, prediction_ids):
-        """Batch evidence at the exact prediction/run key, scoped to this workspace."""
+        """Batch evidence at the exact prediction/run key, scoped to this workspace.
+
+        Review passes every prediction in its queue, so each chunk is looked
+        up by prediction id and its photo's visibility tested per row. Joining
+        ``photo_workspace_visibility`` here rebuilds the whole workspace's
+        photo set once per chunk.
+        """
         result = {}
+        ws = self.workspace_id
         for chunk in chunks(list(dict.fromkeys(prediction_ids))):
             placeholders = ','.join('?' for _ in chunk)
             rows = self.conn.execute(
@@ -963,15 +971,15 @@ class PredictionRepository:
                     FROM predictions pr
                     JOIN detections d ON d.id = pr.detection_id
                     JOIN photos p ON p.id = d.photo_id
-                    JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                     LEFT JOIN detection_evidence_reviews er
-                      ON er.detection_id = d.id AND er.workspace_id = wf.workspace_id
+                      ON er.detection_id = d.id AND er.workspace_id = ?
                     LEFT JOIN classifier_match_scores cms
                       ON cms.detection_id = pr.detection_id
                      AND cms.classifier_model = pr.classifier_model
                      AND cms.labels_fingerprint = pr.labels_fingerprint
-                    WHERE wf.workspace_id = ? AND pr.id IN ({placeholders})""",
-                [self.workspace_id, *chunk],
+                    WHERE pr.id IN ({placeholders})
+                      AND {photo_visible_in_workspace_sql('p.id')}""",
+                [ws, *chunk, ws, ws],
             )
             result.update((row['id'], dict(row)) for row in rows)
         return result

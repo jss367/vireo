@@ -179,6 +179,48 @@ def test_assessments_are_workspace_local_and_cascade_with_detection(app_and_db):
     assert not db.conn.execute('SELECT * FROM detection_evidence_reviews').fetchall()
 
 
+def test_evidence_lookup_covers_exactly_the_workspace_photos(app_and_db):
+    """A photo granted on its own is in scope; one the workspace cannot see is not."""
+    _, db = app_and_db
+    granted, unseen = db.photos.list_page()[:2]
+    ids = {}
+    for name, photo in (('granted', granted), ('unseen', unseen)):
+        det = detection(db, photo['id'])
+        add(db, det, 'Common Poorwill', .9)
+        ids[name] = db.conn.execute(
+            'SELECT id FROM predictions WHERE detection_id = ?', (det,),
+        ).fetchone()[0]
+    other_ws = db.create_workspace('Other review')
+    db.photo_visibility.grant(other_ws, [granted['id']])
+    db.commit()
+    assert set(db.predictions.evidence_context(list(ids.values()))) == set(ids.values())
+    db.set_active_workspace(other_ws)
+    assert set(db.predictions.evidence_context(list(ids.values()))) == {ids['granted']}
+
+
+def test_evidence_lookup_reads_by_prediction_id_not_by_workspace(app_and_db):
+    """Each chunk costs its own rows, however many photos the workspace holds.
+
+    Review hands this the whole queue in chunks. A plan that walks the
+    workspace's photos, or builds the visibility view, repeats that work for
+    every chunk: a minute on an 80,000-photo workspace.
+    """
+    _, db = app_and_db
+    det = detection(db, db.photos.list_page()[0]['id'])
+    add(db, det, 'Common Poorwill', .9)
+    prediction_id = db.conn.execute('SELECT id FROM predictions').fetchone()[0]
+    statements = []
+    db.conn.set_trace_callback(statements.append)
+    try:
+        assert prediction_id in db.predictions.evidence_context([prediction_id])
+    finally:
+        db.conn.set_trace_callback(None)
+    (lookup,) = [s for s in statements if 'FROM predictions pr' in s]
+    plan = [row[3] for row in db.conn.execute('EXPLAIN QUERY PLAN ' + lookup)]
+    assert plan[0] == 'SEARCH pr USING INTEGER PRIMARY KEY (rowid=?)'
+    assert not [step for step in plan if 'CO-ROUTINE' in step or step.startswith('SCAN')]
+
+
 def test_version_24_migration_adds_review_state_idempotently(tmp_path):
     path = str(tmp_path / 'previous.db')
     with Database(path):
