@@ -9,6 +9,7 @@ but the underlying files don't exist on disk, so `/photos/<id>/full` returns
 """
 import re
 
+import pytest
 from playwright.sync_api import expect
 
 
@@ -666,3 +667,46 @@ def test_lightbox_menu_find_similar_opens_above_lightbox(live_server, page):
     _click_menu_item_and_expect_overlay(
         page, live_server["url"], "Find Similar", "similarOverlay"
     )
+
+
+@pytest.mark.parametrize(
+    "label, endpoint, overlay_id",
+    [
+        ("Find Similar", "similar", "similarOverlay"),
+        ("Inspect Pipeline", "pipeline", "pipelineOverlay"),
+    ],
+)
+def test_lightbox_menu_tools_follow_menu_open_navigation(
+    live_server, page, label, endpoint, overlay_id
+):
+    """A tool targets the newly displayed photo when navigation leaves the menu open."""
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(
+            body='<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"/>',
+            content_type="image/svg+xml",
+        ),
+    )
+    _open_lightbox(page, live_server["url"])
+    page.wait_for_function(
+        "vireoLightboxSession.displayedPhotoId() !== null && !lbState.visualTransitionPending"
+    )
+    original_id = page.evaluate("vireoLightboxSession.displayedPhotoId()")
+    _fire_contextmenu_on_lightbox(page)
+    menu = page.locator(".vireo-ctx-menu")
+    expect(menu).to_be_visible()
+
+    page.keyboard.press("ArrowRight")
+    page.wait_for_function(
+        "id => vireoLightboxSession.displayedPhotoId() !== null"
+        " && vireoLightboxSession.displayedPhotoId() !== id"
+        " && !lbState.visualTransitionPending",
+        arg=original_id,
+    )
+    next_id = page.evaluate("vireoLightboxSession.displayedPhotoId()")
+    expect(menu).to_be_visible()
+    with page.expect_request(re.compile(rf"/api/photos/{next_id}/{endpoint}(?:\?|$)")):
+        menu.locator(".vireo-ctx-item", has_text=label).click()
+
+    expect(page.locator("#lightboxOverlay")).not_to_have_class(re.compile(r"\bactive\b"))
+    expect(page.locator(f"#{overlay_id}")).to_be_visible()

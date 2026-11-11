@@ -31,6 +31,36 @@ function test(name, body) { tests.push([name, body]); }
 const inspector = 'navbar-pipeline-inspector.js';
 const banners = 'navbar-folder-banners.js';
 const helpers = 'navbar-shared-helpers.js';
+const lightboxControls = 'lightbox/controls.js';
+
+for (const [label, tool] of [['Find Similar', 'similar'], ['Inspect Pipeline', 'pipeline']]) {
+  test(label + ' resolves the visible photo at click time before closing its session', () => {
+    let displayed = 11;
+    let requested = 11;
+    const calls = [];
+    const ctx = load([fn(lightboxControls, 'photoToolMenuItems')], {
+      vireoLightboxSession: {
+        displayedPhotoId: () => displayed,
+        requestedPhotoId: () => requested,
+      },
+      closeLightbox: () => { calls.push(['close']); displayed = requested = null; },
+      findSimilar: id => calls.push(['similar', id]),
+      openPipeline: id => calls.push(['pipeline', id]),
+    });
+    const item = ctx.photoToolMenuItems(11).find(entry => entry.label === label);
+    assert(item);
+    for (const [visible, pending, expected] of [[22, 22, 22], [22, 33, 22], [null, 33, 33]]) {
+      displayed = visible;
+      requested = pending;
+      calls.length = 0;
+      item.onClick();
+      assert.deepEqual(calls, [['close'], [tool, expected]]);
+    }
+    calls.length = 0;
+    item.onClick();
+    assert.deepEqual(calls, [], 'a dismissed session cannot launch a stale photo');
+  });
+}
 // Follow the order navbar-boot.js imports the lightbox modules in instead of
 // duplicating the list.
 const lightbox = Array.from(

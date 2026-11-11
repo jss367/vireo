@@ -182,7 +182,7 @@ export function buildLightboxContextMenu(/** @type {number} */ pid) {
     }));
   }
 
-  items.push.apply(items, photoToolMenuItems(pid));
+  items.push.apply(items, photoToolMenuItems());
   if (typeof openInEditor === 'function') {
     items = items.concat(buildOpenInEditorMenuItems([pid]));
   }
@@ -216,13 +216,20 @@ export function buildLightboxContextMenu(/** @type {number} */ pid) {
 /**
  * Find Similar and Inspect Pipeline open overlays that sit below the
  * lightbox (z-index 9997/9998 vs 9999), so each closes the lightbox first.
- * @param {number} pid
  * @returns {LightboxMenuItem[]}
  */
-function photoToolMenuItems(pid) {
+function photoToolMenuItems() {
+  var openTool = function(/** @type {(photoId: number) => unknown} */ tool) {
+    // Navigation can change the visible photo while its context menu stays open.
+    // Resolve its identity before closeLightbox clears the session.
+    var pid = vireoLightboxSession.displayedPhotoId() ?? vireoLightboxSession.requestedPhotoId();
+    if (pid == null) return;
+    closeLightbox();
+    tool(pid);
+  };
   return [
-    { label: 'Find Similar', onClick: function() { closeLightbox(); findSimilar(pid); } },
-    { label: 'Inspect Pipeline', onClick: function() { closeLightbox(); openPipeline(pid); } },
+    { label: 'Find Similar', onClick: function() { openTool(findSimilar); } },
+    { label: 'Inspect Pipeline', onClick: function() { openTool(openPipeline); } },
   ];
 }
 
