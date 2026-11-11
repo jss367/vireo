@@ -12,6 +12,8 @@ export const lbState = {
   // The Keymap Esc token while the lightbox is open; non-null means open.
   /** @type {number | null} */
   escToken: null,
+  /** @type {HTMLElement | null} */
+  returnFocus: null,
   // The list of {id, filename} arrow navigation walks.
   /** @type {LightboxPhoto[]} */
   photoList: [],

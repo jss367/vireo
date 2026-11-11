@@ -1892,3 +1892,14 @@ export function formatJobType(type) {
 // After the page's own scripts, as when this was a classic script waiting
 // for DOMContentLoaded: module scripts always run before it fires.
 document.addEventListener('DOMContentLoaded', init);
+
+/** @param {HTMLElement | null} target */
+export function restoreOverlayFocus(target) {
+  const canFocus = (/** @type {HTMLElement | null} */ element) => !!element &&
+    element !== document.body && element.isConnected && !element.matches(':disabled') &&
+    !element.closest('[inert]') && element.getClientRects().length > 0 &&
+    getComputedStyle(element).visibility === 'visible';
+  const fallback = /** @type {HTMLElement | null} */ (document.querySelector('.nav-tab.active[href]'));
+  const next = canFocus(target) ? target : fallback;
+  if (canFocus(next)) next?.focus({preventScroll: true});
+}
