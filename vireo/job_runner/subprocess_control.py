@@ -14,6 +14,23 @@ def process_group_kwargs():
     return {"start_new_session": True} if sys.platform != "win32" else {}
 
 
+def _signal_process_group(proc, sig):
+    """Reap through macOS's transient EPERM for zombie-only process groups."""
+    deadline = time.monotonic() + 3
+    while True:
+        try:
+            os.killpg(proc.pid, sig)
+            return
+        except PermissionError:
+            # XNU excludes zombies when checking group signal permissions.
+            # Reaping our child lets an empty group disappear; never infer
+            # that surviving descendants are stopped from the leader alone.
+            if sys.platform != "darwin" or time.monotonic() >= deadline:
+                raise
+            proc.poll()
+            time.sleep(0.05)
+
+
 def stop_process_tree(proc):
     """Stop local descendants too, including rsync's SSH transport."""
     if proc.poll() is not None:
@@ -30,13 +47,13 @@ def stop_process_tree(proc):
         try:
             # Give rsync a chance to save its partial file and shut down the
             # receiver/SSH transport. Escalate for tools that ignore TERM.
-            os.killpg(proc.pid, signal.SIGTERM)
+            _signal_process_group(proc, signal.SIGTERM)
             deadline = time.monotonic() + 3
             while time.monotonic() < deadline:
                 proc.poll()
-                os.killpg(proc.pid, 0)
+                _signal_process_group(proc, 0)
                 time.sleep(0.05)
-            os.killpg(proc.pid, signal.SIGKILL)
+            _signal_process_group(proc, signal.SIGKILL)
         except ProcessLookupError:
             pass
     # Also handles a Windows taskkill that returned without killing its root.
