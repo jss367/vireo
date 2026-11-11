@@ -35,8 +35,6 @@ import {
   _lbDetailSharpeningPending, _lbInitialSourceKey, _lbMarkDetailSettled, _lbRenderDetailStatus,
   _lbResetDetailStatus, _lbScheduleSourceSwap, _lbSetPreviewLoading, _lbSrcUrl,
 } from './source-loading.js';
-import { openPipeline } from '../navbar-pipeline-inspector.js';
-import { findSimilar } from '../navbar-similar-photos.js';
 import { showToast } from '../navbar-shared-helpers.js';
 
 function _lbThumbnailUrl(/** @type {LightboxPhotoId} */ photoId, /** @type {string | undefined} */ version) {
@@ -211,8 +209,6 @@ export function openLightbox(/** @type {number} */ photoId, /** @type {string | 
   var overlayCandidate = /** @type {HTMLElement | null} */ (document.getElementById('lightboxOverlay')); if (!overlayCandidate) return; const overlay = overlayCandidate;
   var imgCandidate = /** @type {HTMLImageElement | null} */ (document.getElementById('lightboxImg')); if (!imgCandidate) return; const img = imgCandidate;
   var labelCandidate = /** @type {HTMLElement | null} */ (document.getElementById('lightboxFilename')); if (!labelCandidate) return; const label = labelCandidate;
-  var inspectBtnCandidate = /** @type {HTMLElement | null} */ (document.getElementById('lightboxInspect')); if (!inspectBtnCandidate) return; const inspectBtn = inspectBtnCandidate;
-  var similarBtnCandidate = /** @type {HTMLElement | null} */ (document.getElementById('lightboxSimilar')); if (!similarBtnCandidate) return; const similarBtn = similarBtnCandidate;
   var inatBtnCandidate = /** @type {HTMLElement | null} */ (document.getElementById('lightboxInat')); if (!inatBtnCandidate) return; const inatBtn = inatBtnCandidate;
   var wrapCandidate = /** @type {HTMLElement | null} */ (document.getElementById('lightboxWrap')); if (!wrapCandidate) return; const wrap = wrapCandidate;
   /** @type {LightboxPhoto | null} */ var detailData = null;
@@ -585,8 +581,6 @@ export function openLightbox(/** @type {number} */ photoId, /** @type {string | 
   _lbRenderDetailStatus();
   img.src = initialSrc;
   if (!lbState.visualTransitionPending) commitVisiblePhotoIdentity();
-  inspectBtn.onclick = function() { closeLightbox(); openPipeline(photoId); };
-  similarBtn.onclick = function() { closeLightbox(); findSimilar(photoId); };
   inatBtn.onclick = function() { submitToInat(photoId); };
   var editPhotoBtn = document.getElementById('lightboxEditPhoto');
   if (editPhotoBtn) {

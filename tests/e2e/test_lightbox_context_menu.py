@@ -7,6 +7,8 @@ but the underlying files don't exist on disk, so `/photos/<id>/full` returns
 `contextmenu` event directly rather than using Playwright's
 `click(button="right")` which requires visibility/stability.
 """
+import re
+
 from playwright.sync_api import expect
 
 
@@ -635,3 +637,32 @@ def test_outside_click_dismiss_swallows_next_click(live_server, page):
     # The outside click should have been swallowed before reaching body.
     count = page.evaluate("window.__outside_click_count")
     assert count == 0, f"outside-click-to-dismiss reached body (count={count})"
+
+
+def _click_menu_item_and_expect_overlay(page, url, label, overlay_id):
+    _open_lightbox(page, url)
+    expect(page.locator("#lightboxSimilar")).to_have_count(0)
+    expect(page.locator("#lightboxInspect")).to_have_count(0)
+
+    _fire_contextmenu_on_lightbox(page)
+    menu = page.locator(".vireo-ctx-menu")
+    menu.locator(".vireo-ctx-item", has_text=label).click()
+
+    # The tool overlays stack below the lightbox, so the lightbox must close
+    # for the opened overlay to be visible.
+    expect(page.locator("#lightboxOverlay")).not_to_have_class(re.compile(r"\bactive\b"))
+    expect(page.locator(f"#{overlay_id}")).to_be_visible()
+
+
+def test_lightbox_menu_inspect_pipeline_opens_inspector(live_server, page):
+    """Inspect Pipeline moved from the action bar into the context menu."""
+    _click_menu_item_and_expect_overlay(
+        page, live_server["url"], "Inspect Pipeline", "pipelineOverlay"
+    )
+
+
+def test_lightbox_menu_find_similar_opens_above_lightbox(live_server, page):
+    """Find Similar closes the lightbox so its overlay is not hidden behind it."""
+    _click_menu_item_and_expect_overlay(
+        page, live_server["url"], "Find Similar", "similarOverlay"
+    )

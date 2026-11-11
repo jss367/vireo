@@ -14,6 +14,7 @@ import {
 import { lightboxToggleWildlifeExcluded } from './delete.js';
 import { _lbResetDetailStatus } from './source-loading.js';
 import { findSimilar } from '../navbar-similar-photos.js';
+import { openPipeline } from '../navbar-pipeline-inspector.js';
 import {
   buildOpenInEditorMenuItems, openInEditor, safeFetch, showRevealFeedback, showToast,
 } from '../navbar-shared-helpers.js';
@@ -181,10 +182,7 @@ export function buildLightboxContextMenu(/** @type {number} */ pid) {
     }));
   }
 
-  if (typeof findSimilar === 'function') {
-    items.push({ label: 'Find Similar',
-      onClick: function() { findSimilar(pid); } });
-  }
+  items.push.apply(items, photoToolMenuItems(pid));
   if (typeof openInEditor === 'function') {
     items = items.concat(buildOpenInEditorMenuItems([pid]));
   }
@@ -213,6 +211,19 @@ export function buildLightboxContextMenu(/** @type {number} */ pid) {
     onClick: function() { closeLightbox(); } });
 
   return items;
+}
+
+/**
+ * Find Similar and Inspect Pipeline open overlays that sit below the
+ * lightbox (z-index 9997/9998 vs 9999), so each closes the lightbox first.
+ * @param {number} pid
+ * @returns {LightboxMenuItem[]}
+ */
+function photoToolMenuItems(pid) {
+  return [
+    { label: 'Find Similar', onClick: function() { closeLightbox(); findSimilar(pid); } },
+    { label: 'Inspect Pipeline', onClick: function() { closeLightbox(); openPipeline(pid); } },
+  ];
 }
 
 function revealLightboxPhoto(/** @type {number} */ pid) {
