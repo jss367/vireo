@@ -1325,6 +1325,9 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   border-radius: 4px;
   display: block;
 }
+.pipeline-img-frame {
+  position: relative;
+}
 .pipeline-img-label {
   font-size: 11px;
   color: var(--text-muted);

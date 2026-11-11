@@ -220,6 +220,30 @@ function renderMatchScoreTable(rows) {
   return html;
 }
 
+/**
+ * The photo with its detection box and, when recorded, the classifier crop.
+ * @param {number} photoId @param {NavBox} db @param {NavBox | null | undefined} cropBox
+ */
+function renderDetectionImage(photoId, db, cropBox) {
+  /** @param {string} cls @param {NavBox} b */
+  var box = function(cls, b) {
+    return '<div class="' + cls + '" style="left:' + (b.x*100) + '%;top:' + (b.y*100) + '%;width:' + (b.w*100) + '%;height:' + (b.h*100) + '%;"></div>';
+  };
+  var hasCrop = cropBox?.x != null;
+  return '<div class="pipeline-images"><div class="pipeline-img-wrap">' +
+    // The boxes' percentages are fractions of the image, so they sit in a
+    // frame that holds only the image; the caption below it stays outside.
+    '<div class="pipeline-img-frame">' +
+      '<img src="/photos/' + photoId + '/full" alt="Detection">' +
+      box('pipeline-det-box', db) +
+      (hasCrop ? box('pipeline-crop-box', /** @type {NavBox} */ (cropBox)) : '') +
+    '</div>' +
+    // Box colors follow the theme, so the legend names line styles, not colors.
+    '<div class="pipeline-img-label">Solid box = detection' +
+      (hasCrop ? ', dashed box = classifier crop' : '') + '</div>' +
+  '</div></div>';
+}
+
 /** @param {NavPipelinePhotoData} data @param {number} photoId */
 function renderPipeline(data, photoId) {
   var c = /** @type {HTMLElement} */ (document.getElementById('pipelineContent'));
@@ -245,14 +269,7 @@ function renderPipeline(data, photoId) {
   if (hasDetection) {
     var db = /** @type {NavBox} */ (data.detection_box);
     var cropBox = data.crop_box;
-    html += '<div class="pipeline-images">' +
-      '<div class="pipeline-img-wrap">' +
-        '<img src="/photos/' + photoId + '/full" alt="Detection">' +
-        '<div class="pipeline-det-box" style="left:' + (db.x*100) + '%;top:' + (db.y*100) + '%;width:' + (db.w*100) + '%;height:' + (db.h*100) + '%;"></div>' +
-        (cropBox?.x != null ? '<div class="pipeline-crop-box" style="left:' + (cropBox.x*100) + '%;top:' + (cropBox.y*100) + '%;width:' + (cropBox.w*100) + '%;height:' + (cropBox.h*100) + '%;"></div>' : '') +
-        '<div class="pipeline-img-label">Green = detection box, Yellow dashed = crop sent to classifier</div>' +
-      '</div>' +
-    '</div>' +
+    html += renderDetectionImage(photoId, db, cropBox) +
     '<div style="margin-top:8px;">' +
       '<div class="pipeline-stat">Confidence: <b>' + Math.round(Number(data.detection_conf) * 100) + '%</b></div>' +
       '<div class="pipeline-stat">Subject size: <b>' + Math.round((db.w * db.h) * 10000) / 100 + '%</b> of frame</div>' +

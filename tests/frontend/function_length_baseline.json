@@ -48,7 +48,7 @@
   "vireo/static/move/quick-move-start.js:startQuickMove": 146,
   "vireo/static/navbar-folder-banners.js:checkNewImages": 151,
   "vireo/static/navbar-folder-banners.js:loadMissingFolders": 173,
-  "vireo/static/navbar-pipeline-inspector.js:renderPipeline": 169,
+  "vireo/static/navbar-pipeline-inspector.js:renderPipeline": 162,
   "vireo/static/navbar-shared-helpers.js:init": 103,
   "vireo/static/photo-editor/context-menu.js:buildPhotoEditorContextMenu": 155,
   "vireo/static/photo-editor/crop-drag.js:initCropDrag": 158,
