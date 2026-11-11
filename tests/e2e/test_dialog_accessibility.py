@@ -210,7 +210,12 @@ def test_lightbox_context_tools_are_keyboard_accessible(
         ),
     )
     open_browse(page, live_server)
-    page.locator(".grid-card").first.dblclick()
+    opener = page.locator("#detBoxToggle")
+    opener.focus()
+    page.evaluate("""() => {
+        const photo = browseState.photos[0];
+        openLightbox(photo.id, photo.filename, browseState.photos);
+    }""")
     page.wait_for_function(
         "vireoLightboxSession.displayedPhotoId() !== null && !lbState.visualTransitionPending"
     )
@@ -224,12 +229,16 @@ def test_lightbox_context_tools_are_keyboard_accessible(
     # The visible corner of a panned image can remain on-screen while its
     # midpoint is above/left of the viewport.
     image.evaluate("el => { el.getBoundingClientRect = () => new DOMRect(-900, -900, 1000, 1000); }")
+    page.locator("#lightboxWrap").evaluate(
+        "el => { el.getBoundingClientRect = () => new DOMRect(0, 0, 80, 60); }"
+    )
     page.keyboard.press("Shift+F10")
     menu = page.get_by_role("menu", name="Actions", exact=True)
     items = menu.locator('[role="menuitem"]:not([aria-disabled="true"])')
     expect(menu).to_be_visible()
     bounds = menu.bounding_box()
     assert bounds is not None and bounds["x"] >= 0 and bounds["y"] >= 0
+    assert bounds["x"] == 40, "anchor respects the wrapper's right edge"
     expect(items.first).to_be_focused()
     page.keyboard.press("End")
     expect(items.last).to_be_focused()
@@ -250,6 +259,9 @@ def test_lightbox_context_tools_are_keyboard_accessible(
     expect(page.locator("#lightboxOverlay")).not_to_have_class(re.compile(r"\bactive\b"))
     expect(page.locator(f"#{overlay_id}")).to_be_visible()
     expect(page.locator(f"#{overlay_id} button").first).to_be_focused()
+    page.keyboard.press("Escape" if activation == "Enter" else "Enter")
+    expect(page.locator(f"#{overlay_id}")).to_be_hidden()
+    expect(opener).to_be_focused()
 
 
 @pytest.mark.parametrize("dismiss", ["escape", "cancel"])

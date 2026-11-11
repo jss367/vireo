@@ -28,7 +28,7 @@ import {
   _lbMetadataOrientation, _lbRenderEyeCrosshair, _lbResetMaskOverlay,
   _lbSourceOverlaysAvailable,
 } from './overlays.js';
-import { closeLightbox } from './controls.js';
+import { beginLightboxInteraction, closeLightbox } from './controls.js';
 import { submitToInat } from './inat.js';
 import { matchesShortcut } from './keyboard.js';
 import {
@@ -153,7 +153,7 @@ export function openLightbox(/** @type {number} */ photoId, /** @type {string | 
   }
   if (alreadyOpen) Keymap.popEsc(lbState.escToken);
   lbState.escToken = Keymap.pushEsc(function() { closeLightbox(); });
-  if (!alreadyOpen) Keymap.lockBodyScroll();
+  if (!alreadyOpen) beginLightboxInteraction();
   var openToken = vireoLightboxSession.begin(photoId);
   var viewportOpen = vireoLightboxViewport.beginPhoto(photoId, {
     fallbackViewportState: fallbackViewportState,

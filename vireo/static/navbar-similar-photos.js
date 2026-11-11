@@ -1,12 +1,14 @@
 import { vireoThumbnailUrl } from './lightbox/edits.js';
 import { openLightbox } from './lightbox/navigation.js';
-import { safeFetch } from './navbar-shared-helpers.js';
+import { restoreOverlayFocus, safeFetch } from './navbar-shared-helpers.js';
 
 /** @type {number | null} */ var _similarEscToken = null;
+/** @type {HTMLElement | null} */ var _similarReturnFocus = null;
 
 /** @param {number} photoId */
 export function findSimilar(photoId) {
   var alreadyOpen = !!_similarEscToken;
+  if (!alreadyOpen) _similarReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   if (alreadyOpen) Keymap.popEsc(_similarEscToken ?? -1);
   _similarEscToken = Keymap.pushEsc(function() { closeSimilar(); });
 
@@ -82,8 +84,12 @@ export function findSimilar(photoId) {
 }
 
 export function closeSimilar() {
+  var ownedFocus = document.getElementById('similarOverlay')?.contains(document.activeElement);
+  var returnFocus = _similarReturnFocus;
+  _similarReturnFocus = null;
   var wasOpen = !!_similarEscToken;
   if (wasOpen) { Keymap.popEsc(_similarEscToken ?? -1); _similarEscToken = null; }
   /** @type {HTMLElement} */ (document.getElementById('similarOverlay')).classList.remove('active');
   if (wasOpen) Keymap.unlockBodyScroll();
+  if (wasOpen && ownedFocus) restoreOverlayFocus(returnFocus);
 }

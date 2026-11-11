@@ -16,7 +16,7 @@ import { _lbResetDetailStatus } from './source-loading.js';
 import { findSimilar } from '../navbar-similar-photos.js';
 import { openPipeline } from '../navbar-pipeline-inspector.js';
 import {
-  buildOpenInEditorMenuItems, openInEditor, safeFetch, showRevealFeedback, showToast,
+  buildOpenInEditorMenuItems, openInEditor, restoreOverlayFocus, safeFetch, showRevealFeedback, showToast,
 } from '../navbar-shared-helpers.js';
 
 export function toggleLightboxZoomPopover() { return vireoLightboxViewport.togglePopover(); }
@@ -26,8 +26,16 @@ export function setLightboxZoomToFit() { return vireoLightboxViewport.fit(); }
 export function setLightboxZoomToOneToOne(/** @type {Pick<MouseEvent, "clientX" | "clientY"> | undefined} */ value = undefined) { return vireoLightboxViewport.oneToOne(value); }
 export function toggleLightboxZoom(/** @type {Pick<MouseEvent, "clientX" | "clientY">} */ value) { return vireoLightboxViewport.toggleZoom(value); }
 
+export function beginLightboxInteraction() {
+  lbState.returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  Keymap.lockBodyScroll();
+}
+
 export function closeLightbox(/** @type {Event | undefined} */ e = undefined) {
   if (e && e.target instanceof Element && e.target.tagName === 'IMG') return;
+  var ownedFocus = document.getElementById('lightboxOverlay')?.contains(document.activeElement);
+  var returnFocus = lbState.returnFocus;
+  lbState.returnFocus = null;
   _lbFlushPendingAdjustmentSave();
   if (vireoLightboxSession.requestedPhotoId() != null) vireoLightboxViewport.save(vireoLightboxSession.requestedPhotoId());
   var wasOpen = !!lbState.escToken;
@@ -69,6 +77,7 @@ export function closeLightbox(/** @type {Event | undefined} */ e = undefined) {
   // no masks would leave the previous photo's mask painted across it.
   _lbResetMaskOverlay();
   if (wasOpen) Keymap.unlockBodyScroll();
+  if (wasOpen && ownedFocus) restoreOverlayFocus(returnFocus);
 }
 
 /* ---------- Lightbox right-click context menu ----------
@@ -266,9 +275,12 @@ function openLightboxKeyboardMenu(e) {
   var img = document.getElementById('lightboxImg');
   if (!img) return;
   var rect = img.getBoundingClientRect();
+  var wrap = document.getElementById('lightboxWrap')?.getBoundingClientRect();
   // A zoomed, panned image can have its midpoint outside the viewport.
-  var left = Math.max(rect.left, 0), right = Math.min(rect.right, window.innerWidth);
-  var top = Math.max(rect.top, 0), bottom = Math.min(rect.bottom, window.innerHeight);
+  var left = Math.max(rect.left, wrap?.left ?? 0, 0);
+  var right = Math.min(rect.right, wrap?.right ?? window.innerWidth, window.innerWidth);
+  var top = Math.max(rect.top, wrap?.top ?? 0, 0);
+  var bottom = Math.min(rect.bottom, wrap?.bottom ?? window.innerHeight, window.innerHeight);
   if (right <= left || bottom <= top) return;
   img.dispatchEvent(new MouseEvent('contextmenu', {
     bubbles: true, cancelable: true,
