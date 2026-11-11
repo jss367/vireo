@@ -1,7 +1,7 @@
 """Keyboard and focus contracts for the shared lifecycle and Browse dialogs."""
 
-from pathlib import Path
 import re
+from pathlib import Path
 
 import pytest
 from playwright.sync_api import expect
