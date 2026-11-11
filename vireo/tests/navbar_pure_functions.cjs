@@ -102,12 +102,14 @@ test('context-menu arrows wrap and dismissal restores the keyboard opener', () =
 test('lightbox keyboard context-menu keys use the image position and focus the first action', () => {
   const events = [];
   let focused = 0;
+  let rect = {left: 10, top: 20, right: 210, bottom: 120, width: 200, height: 100};
   const image = {
-    getBoundingClientRect: () => ({left: 10, top: 20, width: 200, height: 100}),
+    getBoundingClientRect: () => rect,
     dispatchEvent: event => events.push(event),
   };
   const ctx = load([fn(lightboxControls, 'openLightboxKeyboardMenu')], {
     document: {getElementById: () => image, querySelector: () => ({focus: () => { focused++; }})},
+    window: {innerWidth: 800, innerHeight: 600},
     MouseEvent: function(type, options) { Object.assign(this, {type}, options); },
   });
   for (const [key, shiftKey] of [['F10', true], ['ContextMenu', false], ['F10', false]]) {
@@ -120,6 +122,19 @@ test('lightbox keyboard context-menu keys use the image position and focus the f
     assert.equal(event.clientX, 110);
     assert.equal(event.clientY, 70);
   }
+  for (const [bounds, x, y] of [
+    [{left: -900, top: -900, right: 100, bottom: 100, width: 1000, height: 1000}, 50, 50],
+    [{left: 700, top: 500, right: 1700, bottom: 1500, width: 1000, height: 1000}, 750, 550],
+  ]) {
+    rect = bounds;
+    ctx.openLightboxKeyboardMenu({key: 'ContextMenu', preventDefault() {}, stopPropagation() {}});
+    assert.equal(events.at(-1).clientX, x);
+    assert.equal(events.at(-1).clientY, y);
+  }
+  rect = {left: -200, top: -200, right: -100, bottom: -100, width: 100, height: 100};
+  ctx.openLightboxKeyboardMenu({key: 'ContextMenu', preventDefault() {}, stopPropagation() {}});
+  assert.equal(events.length, 4, 'an entirely hidden image has no visible anchor');
+  assert.equal(focused, 4);
   assert.match(fs.readFileSync('vireo/templates/_navbar.html', 'utf8'),
     /<img id="lightboxImg"[^>]*tabindex="0"[^>]*aria-haspopup="menu"/);
 });
@@ -130,6 +145,10 @@ for (const [label, tool] of [['Find Similar', 'similar'], ['Inspect Pipeline', '
     let requested = 11;
     const calls = [];
     const ctx = load([fn(lightboxControls, 'photoToolMenuItems')], {
+      document: {getElementById: id => ({querySelector: selector => {
+        assert.equal(selector, 'button');
+        return {focus: () => calls.push(['focus', id])};
+      }})},
       vireoLightboxSession: {
         displayedPhotoId: () => displayed,
         requestedPhotoId: () => requested,
@@ -145,7 +164,8 @@ for (const [label, tool] of [['Find Similar', 'similar'], ['Inspect Pipeline', '
       requested = pending;
       calls.length = 0;
       item.onClick();
-      assert.deepEqual(calls, [['close'], [tool, expected]]);
+      const overlayId = tool === 'similar' ? 'similarOverlay' : 'pipelineOverlay';
+      assert.deepEqual(calls, [['close'], [tool, expected], ['focus', overlayId]]);
     }
     calls.length = 0;
     item.onClick();

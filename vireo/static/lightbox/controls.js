@@ -219,17 +219,18 @@ export function buildLightboxContextMenu(/** @type {number} */ pid) {
  * @returns {LightboxMenuItem[]}
  */
 function photoToolMenuItems() {
-  var openTool = function(/** @type {(photoId: number) => unknown} */ tool) {
+  var openTool = function(/** @type {(photoId: number) => unknown} */ tool, /** @type {string} */ overlayId) {
     // Navigation can change the visible photo while its context menu stays open.
     // Resolve its identity before closeLightbox clears the session.
     var pid = vireoLightboxSession.displayedPhotoId() ?? vireoLightboxSession.requestedPhotoId();
     if (pid == null) return;
     closeLightbox();
     tool(pid);
+    document.getElementById(overlayId)?.querySelector('button')?.focus();
   };
   return [
-    { label: 'Find Similar', onClick: function() { openTool(findSimilar); } },
-    { label: 'Inspect Pipeline', onClick: function() { openTool(openPipeline); } },
+    { label: 'Find Similar', onClick: function() { openTool(findSimilar, 'similarOverlay'); } },
+    { label: 'Inspect Pipeline', onClick: function() { openTool(openPipeline, 'pipelineOverlay'); } },
   ];
 }
 
@@ -265,9 +266,13 @@ function openLightboxKeyboardMenu(e) {
   var img = document.getElementById('lightboxImg');
   if (!img) return;
   var rect = img.getBoundingClientRect();
+  // A zoomed, panned image can have its midpoint outside the viewport.
+  var left = Math.max(rect.left, 0), right = Math.min(rect.right, window.innerWidth);
+  var top = Math.max(rect.top, 0), bottom = Math.min(rect.bottom, window.innerHeight);
+  if (right <= left || bottom <= top) return;
   img.dispatchEvent(new MouseEvent('contextmenu', {
     bubbles: true, cancelable: true,
-    clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2,
+    clientX: (left + right) / 2, clientY: (top + bottom) / 2,
   }));
   /** @type {HTMLElement | null} */ (document.querySelector(
     '.vireo-ctx-menu [role="menuitem"]:not([aria-disabled="true"])'))?.focus();

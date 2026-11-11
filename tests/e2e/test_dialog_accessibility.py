@@ -221,10 +221,15 @@ def test_lightbox_context_tools_are_keyboard_accessible(
     page.keyboard.press("Tab")
     expect(image).to_be_focused()
 
+    # The visible corner of a panned image can remain on-screen while its
+    # midpoint is above/left of the viewport.
+    image.evaluate("el => { el.getBoundingClientRect = () => new DOMRect(-900, -900, 1000, 1000); }")
     page.keyboard.press("Shift+F10")
     menu = page.get_by_role("menu", name="Actions", exact=True)
     items = menu.locator('[role="menuitem"]:not([aria-disabled="true"])')
     expect(menu).to_be_visible()
+    bounds = menu.bounding_box()
+    assert bounds is not None and bounds["x"] >= 0 and bounds["y"] >= 0
     expect(items.first).to_be_focused()
     page.keyboard.press("End")
     expect(items.last).to_be_focused()
@@ -244,6 +249,7 @@ def test_lightbox_context_tools_are_keyboard_accessible(
     expect(menu).to_have_count(0)
     expect(page.locator("#lightboxOverlay")).not_to_have_class(re.compile(r"\bactive\b"))
     expect(page.locator(f"#{overlay_id}")).to_be_visible()
+    expect(page.locator(f"#{overlay_id} button").first).to_be_focused()
 
 
 @pytest.mark.parametrize("dismiss", ["escape", "cancel"])
