@@ -333,6 +333,13 @@ def test_a_failed_write_restores_the_saved_label(live_server, page):
     # The write failed, so the server's label is still the truth — and the
     # recovery refetch has to put it back rather than leaving a blank card
     # that claims to be definitively unlabelled.
+    # The card still has its old purple DOM attribute while recovery runs, so
+    # wait for the asynchronous refetch itself before checking the rendering.
+    page.wait_for_function(
+        "(pid) => browseState.colorLabelsFetched.has(pid)"
+        " && browseState.colorLabels[pid] === 'purple'",
+        arg=photo_id,
+    )
     expect(card).to_have_attribute("data-color-label", "purple")
     assert page.evaluate("(pid) => browseState.colorLabelsFetched.has(pid)", photo_id) is True
 
