@@ -376,6 +376,7 @@ def test_slow_thumbnails_do_not_block_cleanup_and_have_visible_states(live_serve
     # Wait for both held routes before inspecting or completing either one.
     page.wait_for_function("window.pendingThumbnailCount === 2")
     assert len(pending) == 2
+    expect(page.locator("#trashAllBtn")).to_be_enabled()
     pending[0].fulfill(content_type="image/jpeg", body=image.getvalue())
     expect(page.locator(".thumb-wrap.loaded")).to_have_count(1)
     pending[1].abort()
