@@ -16,7 +16,9 @@ concurrency:
 jobs:
   full-e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # The complete suite takes about an hour on shared runners. Leave time for
+    # retries and the failure summary instead of cancelling near the finish.
+    timeout-minutes: 90
 
     steps:
       - uses: actions/checkout@v5
@@ -37,6 +39,6 @@ jobs:
         # release: rerun failures up to twice. A genuinely broken test still
         # fails all three attempts; only tests that pass on retry are tolerated.
         run: >-
-          python -m pytest -o addopts='' -q tests/e2e/
+          python -m pytest -o addopts='' -v tests/e2e/
           --tb=short --timeout=120 --timeout-method=thread
           --reruns 2 --reruns-delay 1
