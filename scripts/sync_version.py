@@ -17,12 +17,14 @@ SEMVER_PATTERN = re.compile(
 )
 
 
-def update_json_file(path, version):
-    """Update the 'version' field in a JSON file."""
+def update_json_file(path, version, *, root_package=False):
+    """Update the version and, for npm lockfiles, the root package version."""
     with open(path) as f:
         data = json.load(f)
     old = data.get("version", "unknown")
     data["version"] = version
+    if root_package:
+        data["packages"][""]["version"] = version
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
         f.write("\n")
@@ -136,6 +138,7 @@ def main():
 
     update_json_file("src-tauri/tauri.conf.json", version)
     update_json_file("package.json", version)
+    update_json_file("package-lock.json", version, root_package=True)
     update_toml_file("src-tauri/Cargo.toml", version)
     update_toml_file("pyproject.toml", version)
 
