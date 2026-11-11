@@ -359,7 +359,12 @@ def test_slow_thumbnails_do_not_block_cleanup_and_have_visible_states(live_serve
 
     _seed_catalog_cleanup(live_server["db"])
     pending = []
-    page.route("**/thumbnails/duplicate/**", lambda route: pending.append(route))
+
+    def hold_thumbnail(route):
+        pending.append(route)
+        page.evaluate("count => { window.pendingThumbnailCount = count; }", len(pending))
+
+    page.route("**/thumbnails/duplicate/**", hold_thumbnail)
     page.goto(f"{live_server['url']}/duplicates?show=resolved", wait_until="domcontentloaded")
     expect(page.locator("#results")).to_contain_text("extra.jpg")
     expect(page.locator("#initialLoading")).not_to_be_visible()
@@ -367,6 +372,9 @@ def test_slow_thumbnails_do_not_block_cleanup_and_have_visible_states(live_serve
     expect(page.locator(".thumb-wrap .thumb-placeholder").first).to_have_text("Loading thumbnail…")
     image = io.BytesIO()
     Image.new("RGB", (180, 135), color="green").save(image, format="JPEG")
+    # Rendering the cards precedes the queue's intersection/animation frame.
+    # Wait for both held routes before inspecting or completing either one.
+    page.wait_for_function("window.pendingThumbnailCount === 2")
     assert len(pending) == 2
     pending[0].fulfill(content_type="image/jpeg", body=image.getvalue())
     expect(page.locator(".thumb-wrap.loaded")).to_have_count(1)
