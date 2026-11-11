@@ -11,6 +11,7 @@ runs *after* `git tag` protects nothing: the tag is the point of no return, so a
 guard that only checked for the command's existence would still pass while the
 protection it describes had been silently lost.
 """
+import json
 import os
 import re
 import shlex
@@ -236,6 +237,10 @@ def release_repo(tmp_path):
     (repo / "pyproject.toml").write_text('[project]\nversion = "1.2.3"\n')
     for path in ["package.json", "src-tauri/tauri.conf.json"]:
         (repo / path).write_text('{"version": "1.2.3"}\n')
+    (repo / "package-lock.json").write_text(json.dumps({
+        "name": "vireo", "version": "1.2.3", "lockfileVersion": 3,
+        "packages": {"": {"name": "vireo", "version": "1.2.3"}},
+    }) + "\n")
     for path in ["src-tauri/Cargo.toml", "src-tauri/Cargo.lock"]:
         (repo / path).write_text('[package]\nname = "vireo"\nversion = "1.2.3"\n')
     _git(repo, "add", ".")
@@ -314,6 +319,10 @@ def test_release_syncs_remote_source_before_testing_and_publishes_both_refs(rele
     assert gates.read_text().splitlines() == ["cargo update --workspace", "cargo check --locked", "pytest"]
     assert _git(remote, "rev-parse", "main") == _git(repo, "rev-parse", "HEAD")
     assert _git(remote, "rev-parse", "v1.2.4") == _git(repo, "rev-parse", "HEAD")
+    lock = json.loads(_git(remote, "show", "v1.2.4:package-lock.json"))
+    assert lock["version"] == "1.2.4"
+    assert lock["packages"][""]["version"] == "1.2.4"
+    assert _git(repo, "status", "--porcelain") == ""
     assert "Tag pushed." in result.stdout
 
 

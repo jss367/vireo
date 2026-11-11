@@ -19,6 +19,23 @@ def version_files(tmp_path):
     pkg_json = tmp_path / "package.json"
     pkg_json.write_text(json.dumps({"version": "0.0.0"}, indent=2) + "\n")
 
+    lock = {
+        "name": "vireo",
+        "version": "0.0.0",
+        "lockfileVersion": 3,
+        "requires": True,
+        "packages": {
+            "": {"name": "vireo", "version": "0.0.0", "devDependencies": {"acorn": "^8.0.0"}},
+            "node_modules/acorn": {
+                "version": "8.15.0",
+                "resolved": "https://registry.npmjs.org/acorn/-/acorn-8.15.0.tgz",
+                "integrity": "sha512-test",
+                "dev": True,
+            },
+        },
+    }
+    (tmp_path / "package-lock.json").write_text(json.dumps(lock, indent=2) + "\n")
+
     cargo_toml = tmp_path / "src-tauri" / "Cargo.toml"
     cargo_toml.write_text('[package]\nname = "vireo"\nversion = "0.0.0"\n')
 
@@ -33,7 +50,7 @@ def version_files(tmp_path):
 
 
 def test_sync_version_updates_all_files(version_files, monkeypatch):
-    """sync_version.py should update version in all four manifest files."""
+    """sync_version.py should update every manifest, including the npm lockfile."""
     monkeypatch.chdir(version_files)
 
     script = str(REPO_ROOT / "scripts" / "sync_version.py")
@@ -58,6 +75,21 @@ def test_sync_version_updates_all_files(version_files, monkeypatch):
 
     pyproject = (version_files / "pyproject.toml").read_text()
     assert 'version = "1.2.3"' in pyproject
+
+
+@pytest.mark.parametrize("version", ["1.2.3", "v2.0.0-beta.1"])
+def test_sync_version_changes_only_root_lockfile_versions(version_files, version):
+    lock_path = version_files / "package-lock.json"
+    expected = json.loads(lock_path.read_text())
+    expected["version"] = version.removeprefix("v")
+    expected["packages"][""]["version"] = version.removeprefix("v")
+
+    subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts/sync_version.py"), version],
+        cwd=version_files, capture_output=True, text=True, check=True,
+    )
+
+    assert json.loads(lock_path.read_text()) == expected
 
 
 def test_sync_version_strips_v_prefix(version_files, monkeypatch):
