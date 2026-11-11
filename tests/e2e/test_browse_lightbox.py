@@ -1442,7 +1442,10 @@ def test_browse_lightbox_reserves_space_for_bottom_controls(live_server, page):
         "**/photos/*/full",
         lambda route: route.fulfill(body=svg, content_type="image/svg+xml"),
     )
-    page.set_viewport_size({"width": 1000, "height": 800})
+    # At this width the action row wraps below the filename and keywords,
+    # so hiding the controls frees their whole row. Wider, the actions sit
+    # beside the info block and the bar keeps its height.
+    page.set_viewport_size({"width": 800, "height": 800})
     page.goto(f"{live_server['url']}/browse")
     page.locator(".grid-card").first.dblclick()
 

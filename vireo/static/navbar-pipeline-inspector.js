@@ -1,10 +1,12 @@
-import { safeFetch } from './navbar-shared-helpers.js';
+import { restoreOverlayFocus, safeFetch } from './navbar-shared-helpers.js';
 
 /** @type {number | null} */ var _pipelineEscToken = null;
+/** @type {HTMLElement | null} */ var _pipelineReturnFocus = null;
 
 /** @param {number} photoId */
 export function openPipeline(photoId) {
   var alreadyOpen = !!_pipelineEscToken;
+  if (!alreadyOpen) _pipelineReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   if (alreadyOpen) Keymap.popEsc(_pipelineEscToken ?? -1);
   _pipelineEscToken = Keymap.pushEsc(function() { closePipeline(); });
 
@@ -20,10 +22,14 @@ export function openPipeline(photoId) {
 }
 
 export function closePipeline() {
+  var ownedFocus = document.getElementById('pipelineOverlay')?.contains(document.activeElement);
+  var returnFocus = _pipelineReturnFocus;
+  _pipelineReturnFocus = null;
   var wasOpen = !!_pipelineEscToken;
   if (wasOpen) { Keymap.popEsc(_pipelineEscToken ?? -1); _pipelineEscToken = null; }
   /** @type {HTMLElement} */ (document.getElementById('pipelineOverlay')).classList.remove('active');
   if (wasOpen) Keymap.unlockBodyScroll();
+  if (wasOpen && ownedFocus) restoreOverlayFocus(returnFocus);
 }
 
 // Raw match scores come in two scales that must never be mixed: a bounded

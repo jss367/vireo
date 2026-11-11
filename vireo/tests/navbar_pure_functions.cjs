@@ -31,6 +31,225 @@ function test(name, body) { tests.push([name, body]); }
 const inspector = 'navbar-pipeline-inspector.js';
 const banners = 'navbar-folder-banners.js';
 const helpers = 'navbar-shared-helpers.js';
+const lightboxControls = 'lightbox/controls.js';
+const contextMenu = 'navbar-report-context-menu.js';
+
+test('lightbox interaction remembers its external opener before locking scroll', () => {
+  class Element {}
+  const opener = new Element();
+  const state = {};
+  let locked = 0;
+  const ctx = load([fn(lightboxControls, 'beginLightboxInteraction')], {
+    HTMLElement: Element, document: {activeElement: opener}, lbState: state,
+    Keymap: {lockBodyScroll: () => { locked++; }},
+  });
+  ctx.beginLightboxInteraction();
+  assert.equal(state.returnFocus, opener);
+  assert.equal(locked, 1);
+});
+
+test('overlay focus restoration skips unavailable targets and uses a usable page fallback', () => {
+  const focused = [];
+  const target = name => ({name, isConnected: true, disabled: false, inert: false, visible: true,
+    matches() { return this.disabled; }, closest() { return this.inert; },
+    getClientRects() { return this.visible ? [{}] : []; },
+    focus: () => focused.push(name)});
+  const opener = target('opener');
+  const fallback = target('page');
+  const ctx = load([fn(helpers, 'restoreOverlayFocus')], {
+    document: {body: {}, querySelector: () => fallback},
+    getComputedStyle: element => ({visibility: element.visible ? 'visible' : 'hidden'}),
+  });
+  ctx.restoreOverlayFocus(opener);
+  assert.deepEqual(focused, ['opener']);
+  for (const key of ['isConnected', 'disabled', 'inert', 'visible']) {
+    const invalid = target('invalid');
+    invalid[key] = key === 'disabled' || key === 'inert';
+    ctx.restoreOverlayFocus(invalid);
+    assert.equal(focused.at(-1), 'page');
+  }
+  fallback.inert = true;
+  const count = focused.length;
+  ctx.restoreOverlayFocus(null);
+  assert.equal(focused.length, count, 'never focus an inert fallback behind another dialog');
+});
+
+for (const [file, openName, closeName, prefix, overlayId] of [
+  [inspector, 'openPipeline', 'closePipeline', '_pipeline', 'pipelineOverlay'],
+  ['navbar-similar-photos.js', 'findSimilar', 'closeSimilar', '_similar', 'similarOverlay'],
+]) {
+  test(closeName + ' restores the original page focus without stealing newer external focus', () => {
+    class Element {}
+    const opener = new Element();
+    const closeButton = new Element();
+    const otherControl = new Element();
+    const document = {activeElement: opener, getElementById: id => id === overlayId ? overlay : {}};
+    const overlay = {classList: {add() {}, remove() {}}, contains: target => target === closeButton};
+    const restored = [];
+    let token = 0;
+    const ctx = load([fn(file, openName), fn(file, closeName)], {
+      HTMLElement: Element, document, [prefix + 'EscToken']: null, [prefix + 'ReturnFocus']: null,
+      Keymap: {pushEsc: () => ++token, popEsc() {}, lockBodyScroll() {}, unlockBodyScroll() {}},
+      safeFetch: () => new Promise(() => {}),
+      restoreOverlayFocus: target => { restored.push(target); document.activeElement = target; },
+    });
+    ctx[openName](1);
+    document.activeElement = closeButton;
+    ctx[openName](2);
+    ctx[closeName]();
+    assert.deepEqual(restored, [opener], 'reopening must not replace the original return target');
+    ctx[openName](3);
+    document.activeElement = otherControl;
+    ctx[closeName]();
+    assert.deepEqual(restored, [opener]);
+    assert.equal(document.activeElement, otherControl);
+  });
+}
+
+test('context-menu rows and chips activate from the keyboard but disabled actions do not', () => {
+  const calls = [];
+  function element() {
+    return {
+      attributes: {}, handlers: {}, dataset: {}, children: [],
+      setAttribute(name, value) { this.attributes[name] = value; },
+      addEventListener(name, callback) { this.handlers[name] = callback; },
+      appendChild(child) { this.children.push(child); },
+      click() { this.handlers.click?.({stopPropagation() {}}); },
+    };
+  }
+  const ctx = load([fn(contextMenu, 'prepareContextMenuItem'), fn(contextMenu, '_renderItem')], {
+    document: {createElement: element}, window: {},
+    closeContextMenu: () => calls.push('close'),
+  });
+  for (const chips of [false, true]) {
+    for (const disabled of [false, true]) {
+      const item = {label: 'Action', title: 'Accessible action', disabled,
+        onClick: () => calls.push('action')};
+      const rendered = ctx._renderItem(chips ? {chips: [item]} : item);
+      const target = chips ? rendered.children[0] : rendered;
+      assert.equal(target.attributes.role, 'menuitem');
+      assert.equal(target.attributes['aria-disabled'], String(disabled));
+      assert.equal(target.tabIndex, disabled ? -1 : 0);
+      if (chips) assert.equal(target.attributes['aria-label'], 'Accessible action');
+      for (const key of ['Enter', ' ']) {
+        calls.length = 0;
+        target.handlers.keydown({key,
+          preventDefault: () => calls.push('prevent'),
+          stopPropagation: () => calls.push('stop')});
+        assert.deepEqual(calls, disabled ? [] : ['prevent', 'stop', 'close', 'action']);
+      }
+    }
+  }
+});
+
+test('context-menu arrows wrap and dismissal restores the keyboard opener', () => {
+  const document = {activeElement: null, removeEventListener() {}};
+  const opener = {isConnected: true, focus: () => { document.activeElement = opener; }};
+  const items = [0, 1, 2].map(() => ({focus() { document.activeElement = this; }}));
+  let removed = false;
+  const popped = [];
+  const menu = {
+    querySelectorAll: selector => { assert.match(selector, /aria-disabled/); return items; },
+    contains: target => items.includes(target),
+    remove: () => { removed = true; },
+  };
+  const ctx = load([fn(contextMenu, 'navigateContextMenu'), fn(contextMenu, 'closeContextMenu')], {
+    document, window: {removeEventListener() {}}, _outside() {},
+    _ctxEl: menu, _ctxReturnFocus: opener, _ctxEscToken: 7, _ctxDismiss: null,
+    Keymap: {popEsc: token => popped.push(token)},
+  });
+  const press = key => ctx.navigateContextMenu({key, preventDefault() {}, stopPropagation() {}});
+  press('ArrowDown'); assert.equal(document.activeElement, items[0]);
+  press('ArrowUp'); assert.equal(document.activeElement, items[2]);
+  press('Home'); assert.equal(document.activeElement, items[0]);
+  press('End'); assert.equal(document.activeElement, items[2]);
+  press('ArrowDown'); assert.equal(document.activeElement, items[0]);
+  press('Tab');
+  assert(removed);
+  assert.equal(document.activeElement, opener);
+  assert.equal(ctx._ctxEl, null);
+  assert.deepEqual(popped, [7]);
+});
+
+test('lightbox keyboard context-menu keys use the image position and focus the first action', () => {
+  const events = [];
+  let focused = 0;
+  let rect = {left: 10, top: 20, right: 210, bottom: 120, width: 200, height: 100};
+  let wrapper = {left: 0, top: 0, right: 800, bottom: 600};
+  const image = {
+    getBoundingClientRect: () => rect,
+    dispatchEvent: event => events.push(event),
+  };
+  const ctx = load([fn(lightboxControls, 'openLightboxKeyboardMenu')], {
+    document: {getElementById: id => id === 'lightboxImg' ? image : {getBoundingClientRect: () => wrapper},
+      querySelector: () => ({focus: () => { focused++; }})},
+    window: {innerWidth: 800, innerHeight: 600},
+    MouseEvent: function(type, options) { Object.assign(this, {type}, options); },
+  });
+  for (const [key, shiftKey] of [['F10', true], ['ContextMenu', false], ['F10', false]]) {
+    ctx.openLightboxKeyboardMenu({key, shiftKey, preventDefault() {}, stopPropagation() {}});
+  }
+  assert.equal(events.length, 2);
+  assert.equal(focused, 2);
+  for (const event of events) {
+    assert.equal(event.type, 'contextmenu');
+    assert.equal(event.clientX, 110);
+    assert.equal(event.clientY, 70);
+  }
+  for (const [bounds, x, y] of [
+    [{left: -900, top: -900, right: 100, bottom: 100, width: 1000, height: 1000}, 50, 50],
+    [{left: 700, top: 500, right: 1700, bottom: 1500, width: 1000, height: 1000}, 750, 550],
+  ]) {
+    rect = bounds;
+    ctx.openLightboxKeyboardMenu({key: 'ContextMenu', preventDefault() {}, stopPropagation() {}});
+    assert.equal(events.at(-1).clientX, x);
+    assert.equal(events.at(-1).clientY, y);
+  }
+  wrapper = {left: 0, top: 0, right: 750, bottom: 550};
+  ctx.openLightboxKeyboardMenu({key: 'ContextMenu', preventDefault() {}, stopPropagation() {}});
+  assert.equal(events.at(-1).clientX, 725);
+  assert.equal(events.at(-1).clientY, 525);
+  rect = {left: -200, top: -200, right: -100, bottom: -100, width: 100, height: 100};
+  ctx.openLightboxKeyboardMenu({key: 'ContextMenu', preventDefault() {}, stopPropagation() {}});
+  assert.equal(events.length, 5, 'an entirely hidden image has no visible anchor');
+  assert.equal(focused, 5);
+  assert.match(fs.readFileSync('vireo/templates/_navbar.html', 'utf8'),
+    /<img id="lightboxImg"[^>]*tabindex="0"[^>]*aria-haspopup="menu"/);
+});
+
+for (const [label, tool] of [['Find Similar', 'similar'], ['Inspect Pipeline', 'pipeline']]) {
+  test(label + ' resolves the visible photo at click time before closing its session', () => {
+    let displayed = 11;
+    let requested = 11;
+    const calls = [];
+    const ctx = load([fn(lightboxControls, 'photoToolMenuItems')], {
+      document: {getElementById: id => ({querySelector: selector => {
+        assert.equal(selector, 'button');
+        return {focus: () => calls.push(['focus', id])};
+      }})},
+      vireoLightboxSession: {
+        displayedPhotoId: () => displayed,
+        requestedPhotoId: () => requested,
+      },
+      closeLightbox: () => { calls.push(['close']); displayed = requested = null; },
+      findSimilar: id => calls.push(['similar', id]),
+      openPipeline: id => calls.push(['pipeline', id]),
+    });
+    const item = ctx.photoToolMenuItems(11).find(entry => entry.label === label);
+    assert(item);
+    for (const [visible, pending, expected] of [[22, 22, 22], [22, 33, 22], [null, 33, 33]]) {
+      displayed = visible;
+      requested = pending;
+      calls.length = 0;
+      item.onClick();
+      const overlayId = tool === 'similar' ? 'similarOverlay' : 'pipelineOverlay';
+      assert.deepEqual(calls, [['close'], [tool, expected], ['focus', overlayId]]);
+    }
+    calls.length = 0;
+    item.onClick();
+    assert.deepEqual(calls, [], 'a dismissed session cannot launch a stale photo');
+  });
+}
 // Follow the order navbar-boot.js imports the lightbox modules in instead of
 // duplicating the list.
 const lightbox = Array.from(

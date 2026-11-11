@@ -14,8 +14,9 @@ import {
 import { lightboxToggleWildlifeExcluded } from './delete.js';
 import { _lbResetDetailStatus } from './source-loading.js';
 import { findSimilar } from '../navbar-similar-photos.js';
+import { openPipeline } from '../navbar-pipeline-inspector.js';
 import {
-  buildOpenInEditorMenuItems, openInEditor, safeFetch, showRevealFeedback, showToast,
+  buildOpenInEditorMenuItems, openInEditor, restoreOverlayFocus, safeFetch, showRevealFeedback, showToast,
 } from '../navbar-shared-helpers.js';
 
 export function toggleLightboxZoomPopover() { return vireoLightboxViewport.togglePopover(); }
@@ -25,8 +26,16 @@ export function setLightboxZoomToFit() { return vireoLightboxViewport.fit(); }
 export function setLightboxZoomToOneToOne(/** @type {Pick<MouseEvent, "clientX" | "clientY"> | undefined} */ value = undefined) { return vireoLightboxViewport.oneToOne(value); }
 export function toggleLightboxZoom(/** @type {Pick<MouseEvent, "clientX" | "clientY">} */ value) { return vireoLightboxViewport.toggleZoom(value); }
 
+export function beginLightboxInteraction() {
+  lbState.returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  Keymap.lockBodyScroll();
+}
+
 export function closeLightbox(/** @type {Event | undefined} */ e = undefined) {
   if (e && e.target instanceof Element && e.target.tagName === 'IMG') return;
+  var ownedFocus = document.getElementById('lightboxOverlay')?.contains(document.activeElement);
+  var returnFocus = lbState.returnFocus;
+  lbState.returnFocus = null;
   _lbFlushPendingAdjustmentSave();
   if (vireoLightboxSession.requestedPhotoId() != null) vireoLightboxViewport.save(vireoLightboxSession.requestedPhotoId());
   var wasOpen = !!lbState.escToken;
@@ -68,6 +77,7 @@ export function closeLightbox(/** @type {Event | undefined} */ e = undefined) {
   // no masks would leave the previous photo's mask painted across it.
   _lbResetMaskOverlay();
   if (wasOpen) Keymap.unlockBodyScroll();
+  if (wasOpen && ownedFocus) restoreOverlayFocus(returnFocus);
 }
 
 /* ---------- Lightbox right-click context menu ----------
@@ -181,10 +191,7 @@ export function buildLightboxContextMenu(/** @type {number} */ pid) {
     }));
   }
 
-  if (typeof findSimilar === 'function') {
-    items.push({ label: 'Find Similar',
-      onClick: function() { findSimilar(pid); } });
-  }
+  items.push.apply(items, photoToolMenuItems());
   if (typeof openInEditor === 'function') {
     items = items.concat(buildOpenInEditorMenuItems([pid]));
   }
@@ -215,6 +222,27 @@ export function buildLightboxContextMenu(/** @type {number} */ pid) {
   return items;
 }
 
+/**
+ * Find Similar and Inspect Pipeline open overlays that sit below the
+ * lightbox (z-index 9997/9998 vs 9999), so each closes the lightbox first.
+ * @returns {LightboxMenuItem[]}
+ */
+function photoToolMenuItems() {
+  var openTool = function(/** @type {(photoId: number) => unknown} */ tool, /** @type {string} */ overlayId) {
+    // Navigation can change the visible photo while its context menu stays open.
+    // Resolve its identity before closeLightbox clears the session.
+    var pid = vireoLightboxSession.displayedPhotoId() ?? vireoLightboxSession.requestedPhotoId();
+    if (pid == null) return;
+    closeLightbox();
+    tool(pid);
+    document.getElementById(overlayId)?.querySelector('button')?.focus();
+  };
+  return [
+    { label: 'Find Similar', onClick: function() { openTool(findSimilar, 'similarOverlay'); } },
+    { label: 'Inspect Pipeline', onClick: function() { openTool(openPipeline, 'pipelineOverlay'); } },
+  ];
+}
+
 function revealLightboxPhoto(/** @type {number} */ pid) {
   // Browse and Review each register their own reveal hooks. Other pages can
   // also open the shared lightbox, so keep a direct API fallback here rather
@@ -239,9 +267,33 @@ function revealLightboxPhoto(/** @type {number} */ pid) {
   });
 }
 
+/** @param {KeyboardEvent} e */
+function openLightboxKeyboardMenu(e) {
+  if (e.key !== 'ContextMenu' && !(e.shiftKey && e.key === 'F10')) return;
+  e.preventDefault();
+  e.stopPropagation();
+  var img = document.getElementById('lightboxImg');
+  if (!img) return;
+  var rect = img.getBoundingClientRect();
+  var wrap = document.getElementById('lightboxWrap')?.getBoundingClientRect();
+  // A zoomed, panned image can have its midpoint outside the viewport.
+  var left = Math.max(rect.left, wrap?.left ?? 0, 0);
+  var right = Math.min(rect.right, wrap?.right ?? window.innerWidth, window.innerWidth);
+  var top = Math.max(rect.top, wrap?.top ?? 0, 0);
+  var bottom = Math.min(rect.bottom, wrap?.bottom ?? window.innerHeight, window.innerHeight);
+  if (right <= left || bottom <= top) return;
+  img.dispatchEvent(new MouseEvent('contextmenu', {
+    bubbles: true, cancelable: true,
+    clientX: (left + right) / 2, clientY: (top + bottom) / 2,
+  }));
+  /** @type {HTMLElement | null} */ (document.querySelector(
+    '.vireo-ctx-menu [role="menuitem"]:not([aria-disabled="true"])'))?.focus();
+}
+
 (function() {
   var img = document.getElementById('lightboxImg');
   if (!img) return;
+  img.addEventListener('keydown', openLightboxKeyboardMenu);
   img.addEventListener('contextmenu', function(e) {
     // Stop the event before the browser's native menu or the wrap's
     // mousedown pan handler can react. (contextmenu fires after mousedown
