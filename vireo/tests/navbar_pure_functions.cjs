@@ -31,6 +31,43 @@ function test(name, body) { tests.push([name, body]); }
 const inspector = 'navbar-pipeline-inspector.js';
 const banners = 'navbar-folder-banners.js';
 const helpers = 'navbar-shared-helpers.js';
+
+test('detection-only pipeline describes the crop without claiming classification ran', () => {
+  const content = {innerHTML: ''};
+  const ctx = load([
+    fn(inspector, 'renderDetectionImage'), fn(inspector, 'renderPipeline'),
+  ], {
+    document: {getElementById: () => content},
+    escapeHtml: value => String(value),
+    renderMatchSummary: () => '',
+    renderMatchScoreTable: () => '',
+  });
+  ctx.renderPipeline({
+    filename: 'bird.jpg',
+    detection_box: {x: 0.25, y: 0.25, w: 0.5, h: 0.5},
+    detection_conf: 0.9,
+    crop_box: {x: 0, y: 0, w: 1, h: 1},
+    predictions: [],
+    classification_diagnostics: {classifier_run_count: 0},
+  }, 42);
+  assert.match(content.innerHTML, /Solid box = detection, dashed box = classifier crop/);
+  assert.match(content.innerHTML, /No predictions yet &mdash; run classification first/);
+  assert.doesNotMatch(content.innerHTML, /sent to classifier/);
+  assert.match(content.innerHTML, /class="pipeline-crop-box" style="left:0%;top:0%;width:100%;height:100%;"/);
+  assert.match(content.innerHTML, /class="pipeline-crop-box"[^>]*><\/div><\/div><div class="pipeline-img-label">/);
+});
+
+test('detection image omits both crop box and crop legend when no crop exists', () => {
+  const ctx = load([fn(inspector, 'renderDetectionImage')]);
+  for (const crop of [undefined, null, {x: null}]) {
+    const html = ctx.renderDetectionImage(42, {x: 0, y: 0.25, w: 0.5, h: 0.5}, crop);
+    assert.match(html, /class="pipeline-det-box" style="left:0%;top:25%;width:50%;height:50%;"/);
+    assert.match(html, /class="pipeline-img-label">Solid box = detection<\/div>/);
+    assert.doesNotMatch(html, /pipeline-crop-box|dashed box|classifier/);
+    assert.match(html, /class="pipeline-det-box"[^>]*><\/div><\/div><div class="pipeline-img-label">/);
+  }
+});
+
 // Follow the order navbar-boot.js imports the lightbox modules in instead of
 // duplicating the list.
 const lightbox = Array.from(

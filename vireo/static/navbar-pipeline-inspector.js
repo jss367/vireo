@@ -234,7 +234,7 @@ function renderDetectionImage(photoId, db, cropBox) {
     '</div>' +
     // Box colors follow the theme, so the legend names line styles, not colors.
     '<div class="pipeline-img-label">Solid box = detection' +
-      (hasCrop ? ', dashed box = crop sent to classifier' : '') + '</div>' +
+      (hasCrop ? ', dashed box = classifier crop' : '') + '</div>' +
   '</div></div>';
 }
 
