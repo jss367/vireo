@@ -431,7 +431,7 @@ def _select_pinned_export_source(
 ):
     """Select a source, decoding offline working copies under their guard."""
     folder_path = folders.get(photo["folder_id"], "")
-    original_abs = os.path.join(folder_path, photo["filename"])
+    original_abs = os.path.join(folder_path, photo["filename"]) if folder_path else ""
     wc_rel = photo["working_copy_path"]
     wc_abs = os.path.join(vireo_dir, wc_rel) if wc_rel else None
     pin_offline_working_copy = bool(
@@ -829,7 +829,7 @@ class _PhotoExportBatch:
     def _load_catalog(self, db):
         """Fetch catalog data once for the whole batch."""
         self.photos_map = db.photos.get_by_ids(self.photo_ids)
-        self.folders = {f["id"]: f["path"] for f in db.folders.tree()}
+        self.folders = db.workspace_folders.visible_folder_paths(db.require_workspace_id())
         self.exif_data_map = _get_photo_exif_data(db, self.photo_ids)
         self.camera_data_map = (
             _get_photo_camera_data(db, self.photo_ids) if "camera" in self.metadata_fields else {}
@@ -1937,7 +1937,8 @@ def _resolve_source(photo, vireo_dir, folders, use_working_copy=False):
             if os.path.exists(wc):
                 return wc
     folder_path = folders.get(photo["folder_id"], "")
-    return os.path.join(folder_path, photo["filename"])
+    # An unknown folder must never resolve against the process working directory.
+    return os.path.join(folder_path, photo["filename"]) if folder_path else None
 
 
 def _select_export_source(
@@ -2187,7 +2188,7 @@ def preview_export(db, photo_ids, destination=None, options=None):
     )
 
     photos_map = db.photos.get_by_ids(photo_ids)
-    folders = {folder["id"]: folder["path"] for folder in db.folders.tree()}
+    folders = db.workspace_folders.visible_folder_paths(db.require_workspace_id())
     species_map = db.photo_species.get_species_for_photos(photo_ids)
     exif_data_map = _get_photo_exif_data(db, photo_ids)
     edit_recipes = db.edits.get_photo_recipes(photo_ids)

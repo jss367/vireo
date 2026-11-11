@@ -4302,3 +4302,62 @@ def test_combined_capture_time_without_offset_is_reported_written(export_env):
     metadata = extract_metadata([output])[output]
     assert metadata['EXIF']['DateTimeOriginal'] == '2024:06:15 14:30:22'
     assert 'TimeCreated' not in metadata.get('IPTC', {})
+
+
+
+def test_offline_export_uses_folder_scoped_developed_image(export_env, monkeypatch):
+    env = export_env
+    db = env["db"]
+    configured = env["tmp_path"] / "developed"
+    developed = configured / developed_folder_key(str(env["src"]))
+    developed.mkdir(parents=True)
+    Image.new("RGB", (800, 600), "green").save(developed / "bird1.jpg")
+    (env["src"] / "bird1.jpg").unlink()
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (env["fid"],))
+    db.commit()
+    monkeypatch.chdir(env["tmp_path"])
+    Image.new("RGB", (40, 30), "blue").save("bird1.jpg")
+    destination = Path(env["dest"])
+    (destination / "src").mkdir(parents=True)
+    (destination / "src" / "bird1.jpg").write_bytes(b"existing output")
+    options = {"developed_dir": str(configured), "naming_template": "{folder}/{original}"}
+
+    preview = export_mod.preview_export(db, [env["p1"]], env["dest"], options)
+    assert preview["renames"] == [{
+        "photo_id": env["p1"], "requested_name": "bird1.jpg",
+        "export_name": "bird1_2.jpg", "destination": str(destination / "src"),
+    }]
+    result = export_photos(db, env["vireo_dir"], [env["p1"]], env["dest"], options)
+    assert result["exported"] == 1
+    assert result["errors"] == []
+    output = destination / "src" / "bird1_2.jpg"
+    with Image.open(output) as rendered:
+        assert rendered.size == (800, 600)
+        r, g, b = rendered.getpixel((0, 0))
+        assert g > r and g > b
+    assert (destination / "src" / "bird1.jpg").read_bytes() == b"existing output"
+
+
+def test_offline_export_never_uses_same_named_working_directory_file(export_env, monkeypatch):
+    env = export_env
+    db = env["db"]
+    (env["src"] / "bird1.jpg").unlink()
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (env["fid"],))
+    db.commit()
+    monkeypatch.chdir(env["tmp_path"])
+    Image.new("RGB", (40, 30), "blue").save("bird1.jpg")
+
+    preview = export_mod.preview_export(db, [env["p1"]], env["dest"])
+    assert preview == {"renames": [], "destination_folders": []}
+    result = export_photos(db, env["vireo_dir"], [env["p1"]], env["dest"])
+    assert result["exported"] == 0
+    assert result["errors"] == ["bird1.jpg: source file missing"]
+    assert not (Path(env["dest"]) / "bird1.jpg").exists()
+
+
+def test_export_renderer_rejects_unknown_source_folder(export_env, monkeypatch):
+    env = export_env
+    monkeypatch.chdir(env["src"])
+    photo = env["db"].photos.get_by_ids([env["p1"]])[env["p1"]]
+    with pytest.raises(FileNotFoundError, match="source file missing"):
+        export_mod.load_export_image(photo, env["vireo_dir"], {})
