@@ -257,9 +257,26 @@ function revealLightboxPhoto(/** @type {number} */ pid) {
   });
 }
 
+/** @param {KeyboardEvent} e */
+function openLightboxKeyboardMenu(e) {
+  if (e.key !== 'ContextMenu' && !(e.shiftKey && e.key === 'F10')) return;
+  e.preventDefault();
+  e.stopPropagation();
+  var img = document.getElementById('lightboxImg');
+  if (!img) return;
+  var rect = img.getBoundingClientRect();
+  img.dispatchEvent(new MouseEvent('contextmenu', {
+    bubbles: true, cancelable: true,
+    clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2,
+  }));
+  /** @type {HTMLElement | null} */ (document.querySelector(
+    '.vireo-ctx-menu [role="menuitem"]:not([aria-disabled="true"])'))?.focus();
+}
+
 (function() {
   var img = document.getElementById('lightboxImg');
   if (!img) return;
+  img.addEventListener('keydown', openLightboxKeyboardMenu);
   img.addEventListener('contextmenu', function(e) {
     // Stop the event before the browser's native menu or the wrap's
     // mousedown pan handler can react. (contextmenu fires after mousedown

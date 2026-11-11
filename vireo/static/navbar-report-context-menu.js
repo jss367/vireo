@@ -71,10 +71,14 @@ export function sendReport() {
 /** @type {HTMLElement | null} */ let _ctxEl = null;
 /** @type {(() => void) | null} */ let _ctxDismiss = null;
 /** @type {number | null} */ let _ctxEscToken = null;
+/** @type {HTMLElement | null} */ let _ctxReturnFocus = null;
 
 export function closeContextMenu(){
   if (_ctxEscToken !== null) { Keymap.popEsc(_ctxEscToken); _ctxEscToken = null; }
+  const restoreFocus = _ctxEl?.contains(document.activeElement) ? _ctxReturnFocus : null;
   if (_ctxEl) { _ctxEl.remove(); _ctxEl = null; }
+  _ctxReturnFocus = null;
+  if (restoreFocus?.isConnected) restoreFocus.focus();
   document.removeEventListener('mousedown', _outside, true);
   window.removeEventListener('blur', closeContextMenu);
   if (_ctxDismiss) { const f = _ctxDismiss; _ctxDismiss = null; f(); }
@@ -102,11 +106,46 @@ function _outside(e){
   }
 }
 
+/** @param {HTMLElement} element @param {boolean | undefined} disabled */
+function prepareContextMenuItem(element, disabled) {
+  element.setAttribute('role', 'menuitem');
+  element.setAttribute('aria-disabled', String(!!disabled));
+  element.tabIndex = disabled ? -1 : 0;
+  element.addEventListener('keydown', e => {
+    if (disabled || (e.key !== 'Enter' && e.key !== ' ')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    element.click();
+  });
+}
+
+/** @param {KeyboardEvent} e */
+function navigateContextMenu(e) {
+  if (!_ctxEl) return;
+  if (e.key === 'Tab' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    closeContextMenu();
+    return;
+  }
+  if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) return;
+  const items = Array.from(/** @type {NodeListOf<HTMLElement>} */ (
+    _ctxEl.querySelectorAll('[role="menuitem"]:not([aria-disabled="true"])')));
+  if (!items.length) return;
+  const current = items.findIndex(item => item === document.activeElement);
+  let next = e.key === 'ArrowUp' ? (current < 0 ? items.length - 1 : current - 1)
+    : current + 1;
+  if (e.key === 'Home') next = 0;
+  if (e.key === 'End') next = items.length - 1;
+  e.preventDefault();
+  e.stopPropagation();
+  items[(next + items.length) % items.length]?.focus();
+}
+
 /** @param {NavMenuItem} item */
 function _renderItem(item){
   if (item.separator) {
     const s = document.createElement('div');
     s.className = 'vireo-ctx-sep';
+    s.setAttribute('role', 'separator');
     return s;
   }
   if (item.chips) {
@@ -117,6 +156,8 @@ function _renderItem(item){
       b.className = 'vireo-ctx-chip' + (c.active ? ' is-active' : '') +
         (c.disabled ? ' vireo-ctx-disabled' : '');
       b.textContent = c.label ?? '';
+      prepareContextMenuItem(b, c.disabled);
+      if (c.title) b.setAttribute('aria-label', c.title);
       if (c.disabled && c.disabledHint) b.title = c.disabledHint;
       else if (c.title) b.title = c.title;
       if (c.color) {
@@ -148,6 +189,7 @@ function _renderItem(item){
   const d = document.createElement('div');
   d.className = 'vireo-ctx-item' + (item.disabled ? ' vireo-ctx-disabled' : '');
   d.textContent = item.label ?? '';
+  prepareContextMenuItem(d, item.disabled);
   if (item.disabled && item.disabledHint) d.title = item.disabledHint;
   if (!item.disabled) {
     d.addEventListener('click', ev => {
@@ -163,6 +205,9 @@ function _renderItem(item){
   closeContextMenu();
   const menu = document.createElement('div');
   menu.className = 'vireo-ctx-menu';
+  menu.setAttribute('role', 'menu');
+  menu.setAttribute('aria-label', 'Actions');
+  menu.addEventListener('keydown', navigateContextMenu);
   menu.style.visibility = 'hidden';
   items.forEach(it => menu.appendChild(_renderItem(it)));
   document.body.appendChild(menu);
@@ -176,6 +221,7 @@ function _renderItem(item){
   menu.style.top  = y + 'px';
   menu.style.visibility = 'visible';
   _ctxEl = menu;
+  _ctxReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   _ctxDismiss = (opts && opts.onDismiss) || null;
   document.addEventListener('mousedown', _outside, true);
   // Esc handling: push onto the Keymap stack so a single Esc closes only the

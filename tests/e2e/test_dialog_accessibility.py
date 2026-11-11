@@ -1,6 +1,7 @@
 """Keyboard and focus contracts for the shared lifecycle and Browse dialogs."""
 
 from pathlib import Path
+import re
 
 import pytest
 from playwright.sync_api import expect
@@ -189,6 +190,60 @@ def test_shared_dialog_without_enabled_controls_keeps_focus_on_dialog(page):
 def open_browse(page, live_server):
     page.goto(f"{live_server['url']}/browse")
     page.locator(".grid-card").first.click()
+
+
+@pytest.mark.parametrize(
+    "label, activation, overlay_id",
+    [
+        ("Find Similar", "Enter", "similarOverlay"),
+        ("Inspect Pipeline", "Space", "pipelineOverlay"),
+    ],
+)
+def test_lightbox_context_tools_are_keyboard_accessible(
+    live_server, page, label, activation, overlay_id
+):
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(
+            body='<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"/>',
+            content_type="image/svg+xml",
+        ),
+    )
+    open_browse(page, live_server)
+    page.locator(".grid-card").first.dblclick()
+    page.wait_for_function(
+        "vireoLightboxSession.displayedPhotoId() !== null && !lbState.visualTransitionPending"
+    )
+    image = page.locator("#lightboxImg")
+    expect(image).to_have_attribute("tabindex", "0")
+    image.focus()
+    page.keyboard.press("Shift+Tab")
+    page.keyboard.press("Tab")
+    expect(image).to_be_focused()
+
+    page.keyboard.press("Shift+F10")
+    menu = page.get_by_role("menu", name="Actions", exact=True)
+    items = menu.locator('[role="menuitem"]:not([aria-disabled="true"])')
+    expect(menu).to_be_visible()
+    expect(items.first).to_be_focused()
+    page.keyboard.press("End")
+    expect(items.last).to_be_focused()
+    page.keyboard.press("Home")
+    expect(items.first).to_be_focused()
+    page.keyboard.press("Escape")
+    expect(menu).to_have_count(0)
+    expect(image).to_be_focused()
+
+    page.keyboard.press("Shift+F10")
+    expect(menu).to_be_visible()
+    target_index = items.all_text_contents().index(label)
+    for _ in range(target_index):
+        page.keyboard.press("ArrowDown")
+    expect(menu.get_by_role("menuitem", name=label, exact=True)).to_be_focused()
+    page.keyboard.press(activation)
+    expect(menu).to_have_count(0)
+    expect(page.locator("#lightboxOverlay")).not_to_have_class(re.compile(r"\bactive\b"))
+    expect(page.locator(f"#{overlay_id}")).to_be_visible()
 
 
 @pytest.mark.parametrize("dismiss", ["escape", "cancel"])

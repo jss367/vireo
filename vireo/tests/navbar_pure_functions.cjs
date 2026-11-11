@@ -32,6 +32,97 @@ const inspector = 'navbar-pipeline-inspector.js';
 const banners = 'navbar-folder-banners.js';
 const helpers = 'navbar-shared-helpers.js';
 const lightboxControls = 'lightbox/controls.js';
+const contextMenu = 'navbar-report-context-menu.js';
+
+test('context-menu rows and chips activate from the keyboard but disabled actions do not', () => {
+  const calls = [];
+  function element() {
+    return {
+      attributes: {}, handlers: {}, dataset: {}, children: [],
+      setAttribute(name, value) { this.attributes[name] = value; },
+      addEventListener(name, callback) { this.handlers[name] = callback; },
+      appendChild(child) { this.children.push(child); },
+      click() { this.handlers.click?.({stopPropagation() {}}); },
+    };
+  }
+  const ctx = load([fn(contextMenu, 'prepareContextMenuItem'), fn(contextMenu, '_renderItem')], {
+    document: {createElement: element}, window: {},
+    closeContextMenu: () => calls.push('close'),
+  });
+  for (const chips of [false, true]) {
+    for (const disabled of [false, true]) {
+      const item = {label: 'Action', title: 'Accessible action', disabled,
+        onClick: () => calls.push('action')};
+      const rendered = ctx._renderItem(chips ? {chips: [item]} : item);
+      const target = chips ? rendered.children[0] : rendered;
+      assert.equal(target.attributes.role, 'menuitem');
+      assert.equal(target.attributes['aria-disabled'], String(disabled));
+      assert.equal(target.tabIndex, disabled ? -1 : 0);
+      if (chips) assert.equal(target.attributes['aria-label'], 'Accessible action');
+      for (const key of ['Enter', ' ']) {
+        calls.length = 0;
+        target.handlers.keydown({key,
+          preventDefault: () => calls.push('prevent'),
+          stopPropagation: () => calls.push('stop')});
+        assert.deepEqual(calls, disabled ? [] : ['prevent', 'stop', 'close', 'action']);
+      }
+    }
+  }
+});
+
+test('context-menu arrows wrap and dismissal restores the keyboard opener', () => {
+  const document = {activeElement: null, removeEventListener() {}};
+  const opener = {isConnected: true, focus: () => { document.activeElement = opener; }};
+  const items = [0, 1, 2].map(() => ({focus() { document.activeElement = this; }}));
+  let removed = false;
+  const popped = [];
+  const menu = {
+    querySelectorAll: selector => { assert.match(selector, /aria-disabled/); return items; },
+    contains: target => items.includes(target),
+    remove: () => { removed = true; },
+  };
+  const ctx = load([fn(contextMenu, 'navigateContextMenu'), fn(contextMenu, 'closeContextMenu')], {
+    document, window: {removeEventListener() {}}, _outside() {},
+    _ctxEl: menu, _ctxReturnFocus: opener, _ctxEscToken: 7, _ctxDismiss: null,
+    Keymap: {popEsc: token => popped.push(token)},
+  });
+  const press = key => ctx.navigateContextMenu({key, preventDefault() {}, stopPropagation() {}});
+  press('ArrowDown'); assert.equal(document.activeElement, items[0]);
+  press('ArrowUp'); assert.equal(document.activeElement, items[2]);
+  press('Home'); assert.equal(document.activeElement, items[0]);
+  press('End'); assert.equal(document.activeElement, items[2]);
+  press('ArrowDown'); assert.equal(document.activeElement, items[0]);
+  press('Tab');
+  assert(removed);
+  assert.equal(document.activeElement, opener);
+  assert.equal(ctx._ctxEl, null);
+  assert.deepEqual(popped, [7]);
+});
+
+test('lightbox keyboard context-menu keys use the image position and focus the first action', () => {
+  const events = [];
+  let focused = 0;
+  const image = {
+    getBoundingClientRect: () => ({left: 10, top: 20, width: 200, height: 100}),
+    dispatchEvent: event => events.push(event),
+  };
+  const ctx = load([fn(lightboxControls, 'openLightboxKeyboardMenu')], {
+    document: {getElementById: () => image, querySelector: () => ({focus: () => { focused++; }})},
+    MouseEvent: function(type, options) { Object.assign(this, {type}, options); },
+  });
+  for (const [key, shiftKey] of [['F10', true], ['ContextMenu', false], ['F10', false]]) {
+    ctx.openLightboxKeyboardMenu({key, shiftKey, preventDefault() {}, stopPropagation() {}});
+  }
+  assert.equal(events.length, 2);
+  assert.equal(focused, 2);
+  for (const event of events) {
+    assert.equal(event.type, 'contextmenu');
+    assert.equal(event.clientX, 110);
+    assert.equal(event.clientY, 70);
+  }
+  assert.match(fs.readFileSync('vireo/templates/_navbar.html', 'utf8'),
+    /<img id="lightboxImg"[^>]*tabindex="0"[^>]*aria-haspopup="menu"/);
+});
 
 for (const [label, tool] of [['Find Similar', 'similar'], ['Inspect Pipeline', 'pipeline']]) {
   test(label + ' resolves the visible photo at click time before closing its session', () => {
