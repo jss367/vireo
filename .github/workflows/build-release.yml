@@ -53,6 +53,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
       # ── Version sync ──────────────────────────────────────
       - name: Sync version from tag
@@ -101,6 +103,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install "pyinstaller>=6.15"
           pip install -e ".[dev]"
+
+      - name: Install Nikon RAW decoder
+        uses: ./.github/actions/build-raw-decoder
+
+      - name: Upload RAW decoder sources
+        uses: actions/upload-artifact@v6
+        with:
+          name: raw-decoder-${{ matrix.label }}
+          path: build/rawpy-snapshot/vireo-rawpy-sources-*.tar.gz
+          if-no-files-found: error
 
       - name: Check macOS signing environment
         if: runner.os == 'macOS'
@@ -714,6 +726,8 @@ jobs:
           # would ship alongside the signed installers.
           rm -rf artifacts/vireo-windows-installers-unsigned
           rm -rf artifacts/vireo-windows-binaries-unsigned
+          # Corresponding sources for the bundled LibRaw/wrapper build.
+          find artifacts -type f -name 'vireo-rawpy-sources-*.tar.gz' -exec cp {} release-files/ \;
           # Regular installers (unique names across platforms)
           find artifacts -type f \( \
             -name "*.dmg" -o \

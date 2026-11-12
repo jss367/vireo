@@ -16,9 +16,10 @@ RAW strategy:
 - Modern cameras embed a full-resolution JPEG in the RAW file (the same image
   the camera would produce in RAW+JPEG mode). For a photo organizer, that's
   both faster to decode and sufficient in quality.
-- It also works for RAW variants libraw cannot decode. Example: Nikon Z 8
-  "High Efficiency*" (HE*) files use TicoRAW compression that libraw 0.22
-  cannot decode. The embedded JPEG is our only path for those files.
+- It also works for RAW variants the installed libraw cannot decode. Published
+  rawpy wheels with libraw 0.22 cannot decode Nikon HE/HE* (TicoRAW); desktop
+  builds use the official November 2026 LibRaw snapshot for native decoding.
+  Source installs can opt in through scripts/build_rawpy_snapshot.py.
 - Browsing paths use the JPEG-first strategy: prefer the embedded JPEG whenever
   it meets the requested size, and fall back to it when demosaic-based decode
   raises.

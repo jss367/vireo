@@ -40,7 +40,8 @@ except ImportError:
 #   8 — camera-aware denoising.
 #   9 — manual lens corrections and edge-aware defringing.
 #  10 — Shadows/Highlights as scene-linear local exposure before the shoulder.
-EDIT_MATH_VERSION = 10
+#  11 — native Nikon HE/HE* sensor decoding replaces JPEG fallback edit renders.
+EDIT_MATH_VERSION = 11
 
 # Tile budget for the tone pass, in pixels. Bounds peak memory on
 # full-resolution originals/exports; overridable in tests to force many tiles.

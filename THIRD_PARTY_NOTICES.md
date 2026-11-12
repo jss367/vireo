@@ -5,6 +5,18 @@ not replace or override the licenses of third-party code, data, or model
 weights used by Vireo. Those components retain their respective licenses and
 notices, including the components documented below.
 
+## RAW decoding (rawpy and LibRaw)
+
+Desktop builds temporarily bundle rawpy 0.28.0 with LibRaw snapshot 202611
+for native Nikon High Efficiency and High Efficiency* sensor decoding.
+rawpy is MIT licensed; Vireo distributes LibRaw under LGPL-2.1.
+The wheel and desktop bundle include their licenses and the notices for the
+statically linked JPEG, Jasper, Little CMS, and zlib dependencies.
+Complete corresponding LibRaw and modified rawpy sources are provided as
+`vireo-rawpy-sources-<platform>-<architecture>.tar.gz` assets alongside each
+desktop release. The sources include the build script and exact upstream revisions.
+Build and removal instructions: [Nikon RAW decoding](docs/nikon-high-efficiency.md).
+
 ## ExifTool
 
 Vireo desktop builds bundle ExifTool by Phil Harvey.

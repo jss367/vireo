@@ -1,0 +1,52 @@
+name: Nikon RAW decoder
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/build_rawpy_snapshot.py'
+      - 'scripts/check_nikon_raw.py'
+      - 'scripts/smoke_raw_decoder.py'
+      - 'scripts/pyinstaller_hooks/hook-rawpy.py'
+      - '.github/actions/build-raw-decoder/**'
+      - '.github/workflows/raw-decoder.yml'
+      - '.github/workflows/build-release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: raw-decoder-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  decode:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+      - run: python -m pip install numpy pyinstaller
+      - uses: ./.github/actions/build-raw-decoder
+      - uses: actions/cache@v4
+        with:
+          path: build/nikon-raw-samples
+          key: nikon-raw-samples-${{ hashFiles('scripts/check_nikon_raw.py') }}
+      - name: Decode public Nikon files
+        run: python scripts/check_nikon_raw.py --report build/nikon-raw-results.json
+      - name: Verify frozen decoder
+        run: python scripts/smoke_raw_decoder.py
+      - uses: actions/upload-artifact@v6
+        with:
+          name: raw-decoder-verification-${{ runner.os }}
+          path: |
+            build/nikon-raw-results.json
+            build/rawpy-snapshot/*

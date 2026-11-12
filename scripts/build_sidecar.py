@@ -15,6 +15,12 @@ import sys
 from pathlib import Path
 
 
+def check_raw_decoder():
+    from scripts.build_rawpy_snapshot import check_installation
+
+    check_installation()
+
+
 def assert_no_evaluation_modules(binary_path):
     """Inspect archive indexes without unpacking the app or running experiments."""
     from PyInstaller.archive.readers import CArchiveReader
@@ -113,6 +119,7 @@ def main():
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     # Fail before a lengthy build if the optional source-install build failed.
     sys.path.insert(0, repo_root)
+    check_raw_decoder()
     from vireo._native_detail import Filters
 
     Filters(1)
