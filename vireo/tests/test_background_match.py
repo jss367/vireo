@@ -12,6 +12,7 @@ from species_memberships import (
     SECONDARY_SUBJECT_FLOOR,
     bucket_opening_subjects,
     candidate_subjects,
+    explain_subject_roles,
     photo_species_memberships,
     subject_evidence_order,
     subject_is_background_like,
@@ -297,3 +298,24 @@ def test_mixed_bucket_averages_only_detected_regions():
     assert bucket["avg_confidence"] == pytest.approx(0.52)
     assert bucket["whole_frame_count"] == 1
     assert bucket["certainty"] == "candidate"
+
+
+def test_repository_rank_decides_the_primary_over_the_fallback_order():
+    strip = dict(_subject("Common Leopard Gecko", 0.92, detector=0.47, prediction_id=20), subject_rank=2)
+    hawk = dict(_subject("Red-shouldered Hawk", 1.0, detector=0.37, prediction_id=21), subject_rank=1)
+    assert [s["species"] for s in candidate_subjects({"subject_predictions": [strip, hawk]})] == [
+        "Red-shouldered Hawk", "Common Leopard Gecko"]
+
+
+def test_explain_subject_roles_names_why_a_region_opens_nothing():
+    trunk = dict(TRUNK, detection_id=2)
+    hawk = dict(HAWK, detection_id=1)
+    roles = explain_subject_roles({"species_names": [], "subject_predictions": [trunk, hawk]})
+    assert roles == {1: ("bucket", "Red-shouldered Hawk"), 2: ("background", None)}
+    tagged = explain_subject_roles({"species_names": ["Red-shouldered Hawk"], "subject_predictions": [trunk, hawk]})
+    assert tagged[1] == ("tagged", "Red-shouldered Hawk")
+    disagree = explain_subject_roles({"species_names": ["Wrentit"], "subject_predictions": [hawk]})
+    assert disagree == {1: ("tags_disagree", None)}
+    # A region the user chose is never called background.
+    chosen = explain_subject_roles({"species_names": [], "subject_predictions": [dict(trunk, subject_chosen=True)]})
+    assert chosen == {2: ("bucket", "Elf Owl")}

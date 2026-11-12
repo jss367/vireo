@@ -59,8 +59,9 @@ from repositories.prediction_review import (
     prediction_review_join,
     prediction_review_status,
 )
+from repositories.subject_order import chosen_subject_sql, subject_rank_sql
 from settings_source import config_value
-from species_memberships import photo_species_memberships, subject_evidence_order
+from species_memberships import photo_species_memberships, subject_evidence_order, subject_from_row
 
 # ``get_highlights(eligible_only=True)``: the joins and filter that keep only
 # highlights whose photo is reachable, not rejected and still in the bucket.
@@ -453,16 +454,20 @@ class SpeciesCurationRepository:
         """``{photo_id: [subject, ...]}``: each scoped photo's detections'
         top non-rejected prediction with the region evidence
         ``species_memberships`` ranks by, in ``subject_evidence_order``
-        (strongest detector box first, whole-frame rows last)."""
+        (the photo's primary subject first, whole-frame rows last)."""
         subjects = {}
         rows = self.conn.execute(
             f"""WITH scope AS ({scope_sql})
-               SELECT photo_id, detection_id, id AS prediction_id, species,
-                      confidence, detector_confidence, detector_model,
-                      max_match_score, background_score, score_kind
+               SELECT sub.photo_id, sub.detection_id, sub.id, sub.species,
+                      sub.confidence, sub.detector_confidence, sub.detector_model,
+                      sub.max_match_score, sub.background_score, sub.score_kind,
+                      sub.box_w, sub.box_h,
+                      {chosen_subject_sql("dd")} AS subject_chosen,
+                      {subject_rank_sql("dd")} AS subject_rank
                FROM (
                    SELECT d.photo_id, d.id AS detection_id, pr.id, pr.species,
                           pr.confidence, d.detector_confidence, d.detector_model,
+                          d.box_w, d.box_h,
                           cms.max_match_score, cms.background_score, cms.score_kind,
                           ROW_NUMBER() OVER (
                               PARTITION BY d.id
@@ -483,22 +488,14 @@ class SpeciesCurationRepository:
                          ORDER BY pr2.created_at DESC, pr2.id DESC
                          LIMIT 1
                      )
-               ) WHERE rn = 1
-               ORDER BY photo_id, confidence DESC, id DESC""",
+               ) sub
+               JOIN detections dd ON dd.id = sub.detection_id
+               WHERE sub.rn = 1
+               ORDER BY sub.photo_id, subject_rank""",
             (*scope_params, ws, self._detector_floor()),
         ).fetchall()
         for row in sorted(rows, key=subject_evidence_order):
-            subjects.setdefault(row["photo_id"], []).append({
-                "detection_id": row["detection_id"],
-                "prediction_id": row["prediction_id"],
-                "species": row["species"],
-                "confidence": row["confidence"],
-                "detector_confidence": row["detector_confidence"],
-                "detector_model": row["detector_model"],
-                "max_match_score": row["max_match_score"],
-                "background_score": row["background_score"],
-                "score_kind": row["score_kind"],
-            })
+            subjects.setdefault(row["photo_id"], []).append(subject_from_row(row))
         return subjects
 
     def get_life_list_candidates(self, species=None):

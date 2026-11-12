@@ -1836,6 +1836,9 @@ def create_pipeline_blueprint(
             result["predictions"].append(pred)
 
         _attach_inspector_match_scores(db, photo_id, effective_cfg, result)
+        result["regions"] = _inspector_regions(db, photo_id, dets, result["predictions"])
+        from species_memberships import SECONDARY_SUBJECT_FLOOR
+        result["secondary_subject_floor"] = SECONDARY_SUBJECT_FLOOR
 
         result["classification_diagnostics"] = _inspector_classification_diagnostics(
             db, photo_id, min_conf, raw_dets, dets, preds,
@@ -1852,11 +1855,13 @@ def create_pipeline_blueprint(
             box = {"x": primary_det["box_x"], "y": primary_det["box_y"],
                    "w": primary_det["box_w"], "h": primary_det["box_h"]}
             pad = config_value(cfg.load(), "detection_padding")
+            left = max(0, box["x"] - box["w"] * pad)
+            top = max(0, box["y"] - box["h"] * pad)
             result["crop_box"] = {
-                "x": max(0, box["x"] - box["w"] * pad),
-                "y": max(0, box["y"] - box["h"] * pad),
-                "w": min(1.0, box["w"] * (1 + 2 * pad)),
-                "h": min(1.0, box["h"] * (1 + 2 * pad)),
+                "x": left,
+                "y": top,
+                "w": min(1.0, box["x"] + box["w"] * (1 + pad)) - left,
+                "h": min(1.0, box["y"] + box["h"] * (1 + pad)) - top,
             }
 
         return jsonify(result)
@@ -1981,6 +1986,44 @@ def _results_cache_info(db: Database, results: JsonDict, total_photos: int, effe
         "group_fingerprint_status": fp_status,
         "review_mode": results.get("review_mode"),
     }
+
+
+def _inspector_regions(db: Database, photo_id: int, dets: list[Row], predictions: list[JsonDict]) -> list[JsonDict]:
+    """Every retained region of the photo, subject first, numbered as the
+    inspector draws them, with its top prediction and what Highlights does
+    with it (``species_memberships.explain_subject_roles``)."""
+    from highlights_payload import species_canonicalizer
+    from species_memberships import explain_subject_roles, subject_from_row, subject_spans_frame
+    rows = db.predictions.top_unrejected_by_detection([photo_id]).get(photo_id, [])
+    names = db.photo_species.get_species_for_photos([photo_id]).get(photo_id, [])
+    roles = explain_subject_roles(
+        {"species_names": list(names), "subject_predictions": [subject_from_row(r) for r in rows]},
+        species_canonicalizer(db),
+    )
+    top: dict[int, JsonDict] = {}
+    for pred in predictions:
+        top.setdefault(pred["detection_id"], pred)
+    choice = db.subjects.choice(photo_id)
+    chosen_id = choice["detection_id"] if choice else None
+    regions = []
+    for number, det in enumerate(dets, start=1):
+        best = top.get(det["id"])
+        role, species = roles.get(det["id"], ("unclassified", None))
+        regions.append({
+            "number": number,
+            "detection_id": det["id"],
+            "box": {"x": det["box_x"], "y": det["box_y"], "w": det["box_w"], "h": det["box_h"]},
+            "detector_model": det["detector_model"],
+            "detector_confidence": det["detector_confidence"],
+            "is_subject": number == 1,
+            "chosen": det["id"] == chosen_id,
+            "spans_frame": subject_spans_frame({"box_w": det["box_w"], "box_h": det["box_h"]}),
+            "top_species": best["species"] if best else None,
+            "top_confidence": best["confidence"] if best else None,
+            "highlights_role": role,
+            "highlights_species": species,
+        })
+    return regions
 
 
 def _attach_inspector_match_scores(db: Database, photo_id: int, effective_cfg: JsonDict, result: JsonDict) -> None:

@@ -185,17 +185,19 @@ function backgroundCell(r) {
 // threshold. Those are routinely where the species a user is asking about
 // actually came from, so listing them here is the difference between the
 // inspector explaining the photo and quietly omitting the relevant half.
-/** @param {NavMatchRun[] | undefined} rows */
-function renderMatchScoreTable(rows) {
+/** @param {NavMatchRun[] | undefined} rows @param {Record<number, number>} numbers */
+function renderMatchScoreTable(rows, numbers) {
   if (!rows || rows.length === 0) return '';
   var html = '<div style="margin-top:10px;">';
   html += '<div class="pipeline-stat" style="color:var(--text-muted);">Match strength per run</div>';
   html += '<table class="pipeline-table"><tr><th>Model</th><th>Best label</th><th>Match</th>' +
     '<th>Margin</th><th>Background</th><th>Labels</th><th>Detection</th><th>Verdict</th></tr>';
   rows.forEach(function(r) {
+    var region = numbers[r.detection_id ?? -1];
     var det = r.detector_model === 'full-image'
       ? 'full image'
-      : escapeHtml(String(r.detector_model || '')) + ' ' +
+      : (region == null ? '' : '#' + region + ' ') +
+        escapeHtml(String(r.detector_model || '')) + ' ' +
         (r.detector_confidence == null ? '' : Math.round(r.detector_confidence * 100) + '%');
     var verdict = matchRunVerdict(r);
     html += '<tr>' +
@@ -212,6 +214,139 @@ function renderMatchScoreTable(rows) {
   });
   html += '</table></div>';
   return html;
+}
+
+/** @param {NavInspectorRegion[] | undefined} regions @returns {Record<number, number>} */
+function regionNumbers(regions) {
+  /** @type {Record<number, number>} */
+  var numbers = {};
+  (regions || []).forEach(function(r) { numbers[r.detection_id] = r.number; });
+  return numbers;
+}
+
+/** @param {NavBox} b */
+function boxStyle(b) {
+  return 'left:' + (b.x * 100) + '%;top:' + (b.y * 100) + '%;width:' + (b.w * 100) + '%;height:' + (b.h * 100) + '%;';
+}
+
+// What Highlights does with each region: the server's
+// species_memberships.explain_subject_roles, in words.
+/** @param {NavInspectorRegion} r @param {number} floorPct */
+function highlightsRoleText(r, floorPct) {
+  var sp = r.highlights_species ? '“' + r.highlights_species + '”' : '';
+  switch (r.highlights_role) {
+    case 'tagged': return 'Matches your tag ' + sp;
+    case 'bucket': return 'Opens the ' + sp + ' bucket';
+    case 'second_species': return 'Opens the ' + sp + ' bucket as a second species';
+    case 'same_species': return 'Same species as another region (' + sp + ')';
+    case 'tags_disagree': return 'Not shown: your tags on this photo match none of its regions';
+    case 'background': return 'Not shown: matched background scenery about as well as any species';
+    case 'below_floor': return 'Not shown: a second region needs a detector score of at least ' + floorPct + '%';
+    case 'spans_frame': return 'Not shown: spans the frame, so it is treated as scenery beside the subject';
+    default: return 'Not classified yet';
+  }
+}
+
+/** @param {NavInspectorRegion} r */
+function regionDetectorText(r) {
+  if (r.detector_model === 'reviewer-selected') return 'drawn by you';
+  return escapeHtml(String(r.detector_model || '')) + ' ' + Math.round(r.detector_confidence * 100) + '%';
+}
+
+// Every region the detector kept, numbered as drawn on the image, so a
+// species in the tables below can be traced to the part of the photo it
+// came from, and the subject the lightbox shows can be told apart from a
+// trunk strip beside it.
+/** @param {NavInspectorRegion[]} regions @param {number} floorPct */
+function renderRegionTable(regions, floorPct) {
+  var html = '<table class="pipeline-table" style="margin-top:8px;"><tr><th>#</th><th>Detector</th>' +
+    '<th>Best label</th><th>Lightbox</th><th>Highlights</th></tr>';
+  regions.forEach(function(r) {
+    var label = r.top_species
+      ? escapeHtml(r.top_species) + ' <span style="color:var(--text-dim);">' + Math.round(Number(r.top_confidence) * 100) + '%</span>'
+      : '—';
+    var subject = r.is_subject ? '<b>Subject</b>' + (r.chosen ? ' (your choice)' : '') : '—';
+    if (r.spans_frame) subject += ' <span style="color:var(--text-dim);">· spans frame</span>';
+    html += '<tr><td>' + r.number + '</td><td style="color:var(--text-dim);">' + regionDetectorText(r) + '</td>' +
+      '<td>' + label + '</td><td>' + subject + '</td>' +
+      '<td style="color:var(--text-dim);">' + escapeHtml(highlightsRoleText(r, floorPct)) + '</td></tr>';
+  });
+  html += '</table><p style="color:var(--text-dim);font-size:12px;margin-top:6px;">' +
+    'The subject is the region you chose; otherwise the region whose crop best matches a species label, ' +
+    'passing over regions that span the frame or look like background scenery. The lightbox, quality scoring ' +
+    'and Highlights all use it.</p>';
+  return html;
+}
+
+/** @param {NavPipelinePhotoData} data @param {number} photoId */
+function renderDetectionStep(data, photoId) {
+  var diag = data.classification_diagnostics || {};
+  var detectorThresholdPct = Math.round((diag.detector_confidence_threshold != null ? diag.detector_confidence_threshold : 0.2) * 100);
+  var maxDetectorPct = diag.max_detector_confidence != null ? Math.round(diag.max_detector_confidence * 100) : null;
+  var regions = data.regions || [];
+  var html = '<div class="pipeline-step">' +
+    '<div class="pipeline-step-header"><span class="pipeline-step-num">2</span><span class="pipeline-step-title">Subject Detection (MegaDetector)</span></div>';
+  if (data.detection_box && data.detection_box.x != null) {
+    var db = /** @type {NavBox} */ (data.detection_box);
+    var cropBox = data.crop_box;
+    var overlays = regions.length ? regions.map(function(r) {
+      return '<div class="' + (r.is_subject ? 'pipeline-det-box' : 'pipeline-region-box') + '" style="' + boxStyle(r.box) + '">' +
+        '<span class="pipeline-region-tag">' + r.number + '</span></div>';
+    }).join('') : '<div class="pipeline-det-box" style="' + boxStyle(db) + '"></div>';
+    // Boxes are fractions of the image, so they sit in a frame exactly the
+    // image's size; the caption below must not stretch it.
+    html += '<div class="pipeline-images"><div class="pipeline-img-wrap"><div class="pipeline-img-frame">' +
+        '<img src="/photos/' + photoId + '/full" alt="Detection">' + overlays +
+        (cropBox?.x != null ? '<div class="pipeline-crop-box" style="' + boxStyle(cropBox) + '"></div>' : '') +
+        '</div><div class="pipeline-img-label">Box 1 (bold) is the subject; other numbered boxes are regions ' +
+        'the detector also kept; dashed = crop sent to the classifier for the subject</div>' +
+      '</div></div>' +
+      '<div style="margin-top:8px;">' +
+        '<div class="pipeline-stat">Subject confidence: <b>' + Math.round(Number(data.detection_conf) * 100) + '%</b></div>' +
+        '<div class="pipeline-stat">Subject size: <b>' + Math.round((db.w * db.h) * 10000) / 100 + '%</b> of frame</div>' +
+      '</div>';
+    if (regions.length) {
+      html += renderRegionTable(regions, Math.round((data.secondary_subject_floor ?? 0.5) * 100));
+    }
+  } else if ((diag.hidden_detection_count || 0) > 0) {
+    html += '<p style="color:var(--text-dim);font-size:13px;">No subject above the current detector threshold. ' +
+      diag.hidden_detection_count + ' lower-confidence detection' + (diag.hidden_detection_count === 1 ? ' is' : 's are') +
+      ' stored' + (maxDetectorPct != null ? ' (best ' + maxDetectorPct + '%, threshold ' + detectorThresholdPct + '%)' : '') + '.</p>';
+  } else {
+    html += '<p style="color:var(--text-dim);font-size:13px;">No subject detected</p>';
+  }
+  return html + '</div>';
+}
+
+// Predictions from every region in one table, grouped by region in the
+// order the image numbers them, so a runner-up row is never mistaken for
+// a guess about the subject when it came from another region.
+/** @param {NavPipelinePrediction[]} predictions @param {Record<number, number>} numbers */
+function renderPredictionTable(predictions, numbers) {
+  var rows = predictions.slice().sort(function(a, b) {
+    var ra = numbers[a.detection_id ?? -1] ?? Infinity;
+    var rb = numbers[b.detection_id ?? -1] ?? Infinity;
+    return ra - rb || b.confidence - a.confidence;
+  });
+  var html = '<table class="pipeline-table"><tr><th>Region</th><th>Species</th><th>Confidence</th><th>Match</th><th>Model</th><th>Status</th><th>Category</th></tr>';
+  rows.forEach(function(p) {
+    var pct = Math.round(p.confidence * 100);
+    var statusColor = p.status === 'accepted' ? 'var(--accent)' : p.status === 'rejected' ? 'var(--danger)' : 'var(--text-dim)';
+    var region = numbers[p.detection_id ?? -1];
+    // Species/model values can carry user-typed text (freeform species
+    // confirms, custom label files) — escape before interpolating.
+    html += '<tr>' +
+      '<td style="color:var(--text-dim);">' + (region == null ? '—' : '#' + region) + '</td>' +
+      '<td>' + escapeHtml(p.species) + (p.scientific_name ? '<br><span style="font-size:11px;color:var(--text-dim);font-style:italic;">' + escapeHtml(p.scientific_name) + '</span>' : '') + '</td>' +
+      '<td><span class="pipeline-conf-bar" style="width:' + pct + 'px;"></span> ' + pct + '%</td>' +
+      '<td style="color:var(--text-dim);" title="Raw pre-softmax match score — absolute, and unchanged by which other labels are in the list">' +
+        (p.match_score == null ? '&mdash;' : escapeHtml(formatMatchScore(p.match_score))) + '</td>' +
+      '<td style="color:var(--text-dim);">' + escapeHtml(p.model) + '</td>' +
+      '<td style="color:' + statusColor + ';">' + escapeHtml(p.status) + '</td>' +
+      '<td style="color:var(--text-dim);">' + escapeHtml(p.category) + '</td>' +
+    '</tr>';
+  });
+  return html + '</table>';
 }
 
 /** @param {NavPipelinePhotoData} data @param {number} photoId */
@@ -233,32 +368,7 @@ function renderPipeline(data, photoId) {
 
   // Step 2: Detection
   var hasDetection = data.detection_box && data.detection_box.x != null;
-  html += '<div class="pipeline-step">' +
-    '<div class="pipeline-step-header"><span class="pipeline-step-num">2</span><span class="pipeline-step-title">Subject Detection (MegaDetector)</span></div>';
-
-  if (hasDetection) {
-    var db = /** @type {NavBox} */ (data.detection_box);
-    var cropBox = data.crop_box;
-    html += '<div class="pipeline-images">' +
-      '<div class="pipeline-img-wrap">' +
-        '<img src="/photos/' + photoId + '/full" alt="Detection">' +
-        '<div class="pipeline-det-box" style="left:' + (db.x*100) + '%;top:' + (db.y*100) + '%;width:' + (db.w*100) + '%;height:' + (db.h*100) + '%;"></div>' +
-        (cropBox?.x != null ? '<div class="pipeline-crop-box" style="left:' + (cropBox.x*100) + '%;top:' + (cropBox.y*100) + '%;width:' + (cropBox.w*100) + '%;height:' + (cropBox.h*100) + '%;"></div>' : '') +
-        '<div class="pipeline-img-label">Green = detection box, Yellow dashed = crop sent to classifier</div>' +
-      '</div>' +
-    '</div>' +
-    '<div style="margin-top:8px;">' +
-      '<div class="pipeline-stat">Confidence: <b>' + Math.round(Number(data.detection_conf) * 100) + '%</b></div>' +
-      '<div class="pipeline-stat">Subject size: <b>' + Math.round((db.w * db.h) * 10000) / 100 + '%</b> of frame</div>' +
-    '</div>';
-  } else if ((diag.hidden_detection_count || 0) > 0) {
-    html += '<p style="color:var(--text-dim);font-size:13px;">No subject above the current detector threshold. ' +
-      diag.hidden_detection_count + ' lower-confidence detection' + (diag.hidden_detection_count === 1 ? ' is' : 's are') +
-      ' stored' + (maxDetectorPct != null ? ' (best ' + maxDetectorPct + '%, threshold ' + detectorThresholdPct + '%)' : '') + '.</p>';
-  } else {
-    html += '<p style="color:var(--text-dim);font-size:13px;">No subject detected</p>';
-  }
-  html += '</div>';
+  html += renderDetectionStep(data, photoId);
 
   // Step 3: Classification crop
   html += '<div class="pipeline-step">' +
@@ -266,7 +376,7 @@ function renderPipeline(data, photoId) {
     '<div class="pipeline-images">' +
       '<div class="pipeline-img-wrap" style="max-width:300px;">' +
         '<img src="/photos/' + photoId + '/crop" alt="Crop">' +
-        '<div class="pipeline-img-label">' + (hasDetection ? 'Cropped + padded region' : 'Full image (no detection)') + '</div>' +
+        '<div class="pipeline-img-label">' + (hasDetection ? 'Cropped + padded subject (region 1)' : 'Full image (no detection)') + '</div>' +
       '</div>' +
     '</div>' +
   '</div>';
@@ -283,23 +393,7 @@ function renderPipeline(data, photoId) {
   html += renderMatchSummary(data.match_summary);
 
   if (data.predictions && data.predictions.length > 0) {
-    html += '<table class="pipeline-table"><tr><th>Species</th><th>Confidence</th><th>Match</th><th>Model</th><th>Status</th><th>Category</th></tr>';
-    data.predictions.forEach(function(p) {
-      var pct = Math.round(p.confidence * 100);
-      var statusColor = p.status === 'accepted' ? 'var(--accent)' : p.status === 'rejected' ? 'var(--danger)' : 'var(--text-dim)';
-      // Species/model values can carry user-typed text (freeform species
-      // confirms, custom label files) — escape before interpolating.
-      html += '<tr>' +
-        '<td>' + escapeHtml(p.species) + (p.scientific_name ? '<br><span style="font-size:11px;color:var(--text-dim);font-style:italic;">' + escapeHtml(p.scientific_name) + '</span>' : '') + '</td>' +
-        '<td><span class="pipeline-conf-bar" style="width:' + pct + 'px;"></span> ' + pct + '%</td>' +
-        '<td style="color:var(--text-dim);" title="Raw pre-softmax match score — absolute, and unchanged by which other labels are in the list">' +
-          (p.match_score == null ? '&mdash;' : escapeHtml(formatMatchScore(p.match_score))) + '</td>' +
-        '<td style="color:var(--text-dim);">' + escapeHtml(p.model) + '</td>' +
-        '<td style="color:' + statusColor + ';">' + escapeHtml(p.status) + '</td>' +
-        '<td style="color:var(--text-dim);">' + escapeHtml(p.category) + '</td>' +
-      '</tr>';
-    });
-    html += '</table>';
+    html += renderPredictionTable(data.predictions, regionNumbers(data.regions));
 
     // Taxonomy hierarchy
     var withTax = data.predictions.find(function(p) { return p.taxonomy_order; });
@@ -358,7 +452,7 @@ function renderPipeline(data, photoId) {
       html += '<p style="color:var(--text-dim);font-size:13px;">No predictions yet &mdash; run classification first</p>';
     }
   }
-  html += renderMatchScoreTable(data.match_scores);
+  html += renderMatchScoreTable(data.match_scores, regionNumbers(data.regions));
   html += '</div>';
 
   // Step 5: Quality scoring

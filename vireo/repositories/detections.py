@@ -375,8 +375,8 @@ class DetectionsRepository:
         if detector_model is not None:
             q += " AND detector_model = ?"
             params.append(detector_model)
-        # The same ordering drives masks, crop previews, and bulk payloads:
-        # manual choice, subject quality, then confidence and stable ID.
+        # The same ordering drives masks, crop previews, and bulk payloads
+        # (``repositories.subject_order``): the photo's primary subject first.
         from repositories.subject_order import primary_order_sql
         q += " ORDER BY " + primary_order_sql()
         return self.conn.execute(q, params).fetchall()

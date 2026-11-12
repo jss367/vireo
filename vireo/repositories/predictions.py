@@ -75,6 +75,7 @@ from repositories.prediction_rules import (
     filter_prediction_rows_by_rules,
     relax_negated_prediction_leaves,
 )
+from repositories.subject_order import chosen_subject_sql, subject_rank_sql
 from settings_source import config_value
 from species_memberships import subject_evidence_order
 
@@ -1341,13 +1342,13 @@ class PredictionRepository:
         match score, the stored taxonomy and provenance, the workspace's
         review state (``status`` defaults to ``pending``; ``individual``,
         ``group_id`` and the vote counts are NULL without a review row) and
-        the detection's box and confidence. Only real detections at or above
+        the detection's id, box and confidence. Only real detections at or above
         ``min_detector_confidence``, and only the latest ``labels_fingerprint``
         per (detection, classifier model). ``workspace_id`` is taken as
         given (not the bound workspace) and only scopes the review join.
         """
         return self.conn.execute(
-            f"""SELECT pr.species, pr.confidence, pr.classifier_model AS model,
+            f"""SELECT pr.detection_id, pr.species, pr.confidence, pr.classifier_model AS model,
                       pr.category, pr.match_score,
                       pr.labels_fingerprint, pr.source_taxon_id,
                       pr.scientific_name, pr.taxonomy_kingdom, pr.taxonomy_phylum,
@@ -1403,12 +1404,15 @@ class PredictionRepository:
 
         Rows have the shape ``top_unrejected_by_photo`` documents plus the
         region evidence ``species_memberships`` ranks subjects by
-        (``detector_confidence``, ``detector_model``, and the run's
-        ``max_match_score`` / ``background_score`` / ``score_kind``), so a
-        photo with two subjects keeps both species instead of only the most
-        confident one. Each photo's list runs in ``subject_evidence_order``:
-        the strongest detector box first, whole-frame rows last. Same
-        detector floor, visibility and empty-input rules.
+        (``detector_confidence``, ``detector_model``, the run's
+        ``max_match_score`` / ``background_score`` / ``score_kind``, and the
+        ``subject_rank`` (the detection's place in the photo's
+        ``primary_order_sql``), ``subject_chosen``, and ``box_w`` /
+        ``box_h``), so a photo with two subjects keeps both species instead of
+        only the most confident one. Each photo's list runs in
+        ``subject_evidence_order``: the photo's primary subject first,
+        whole-frame rows last. Same detector floor, visibility and
+        empty-input rules.
         """
         if not photo_ids:
             return {}
@@ -1418,13 +1422,16 @@ class PredictionRepository:
         for chunk in chunks(photo_ids):
             placeholders = ",".join("?" for _ in chunk)
             rows = self.conn.execute(
-                f"""SELECT photo_id, detection_id, id, species, confidence,
-                          classifier_model, group_id, status,
-                          detector_confidence, detector_model,
-                          max_match_score, background_score, score_kind
+                f"""SELECT sub.photo_id, sub.detection_id, sub.id, sub.species,
+                          sub.confidence, sub.classifier_model, sub.group_id,
+                          sub.status, sub.detector_confidence, sub.detector_model,
+                          sub.max_match_score, sub.background_score, sub.score_kind,
+                          sub.box_w, sub.box_h,
+                          {chosen_subject_sql("dd")} AS subject_chosen,
+                          {subject_rank_sql("dd")} AS subject_rank
                    FROM (
                        SELECT d.photo_id, d.id AS detection_id, pr.id,
-                              pr.species, pr.confidence,
+                              pr.species, pr.confidence, d.box_w, d.box_h,
                               pr.classifier_model,
                               pr_rev.group_id,
                               {prediction_review_status()} AS status,
@@ -1450,8 +1457,10 @@ class PredictionRepository:
                              ORDER BY pr2.created_at DESC, pr2.id DESC
                              LIMIT 1
                          )
-                   ) WHERE rn = 1
-                   ORDER BY photo_id, confidence DESC, id DESC""",
+                   ) sub
+                   JOIN detections dd ON dd.id = sub.detection_id
+                   WHERE sub.rn = 1
+                   ORDER BY sub.photo_id, subject_rank""",
                 (ws, *chunk, detector_floor),
             ).fetchall()
             for row in sorted(rows, key=subject_evidence_order):

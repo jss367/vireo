@@ -33,7 +33,7 @@ from keyword_normalization import keyword_match_key, normalize_keyword_display
 from photo_payload import attach_edit_recipes
 from services import keyword_tagging, prediction_decisions, review_decisions
 from services.pending_changes import queue_keyword_add, queue_keyword_remove
-from species_memberships import photo_species_memberships
+from species_memberships import photo_species_memberships, subject_from_row
 from web.request_args import request_bool_arg
 
 if TYPE_CHECKING:
@@ -479,22 +479,6 @@ def _parse_optional_species(body: JsonDict, field: str) -> tuple[str | None, str
     return normalize_keyword_display(value.strip()), None
 
 
-def _subject_prediction(row: Row) -> JsonDict:
-    """A ``top_unrejected_by_detection`` row as ``photo_species_memberships``
-    reads it: the prediction plus the region evidence the rule ranks by."""
-    return {
-        "detection_id": row["detection_id"],
-        "prediction_id": row["id"],
-        "species": row["species"],
-        "confidence": row["confidence"],
-        "detector_confidence": row["detector_confidence"],
-        "detector_model": row["detector_model"],
-        "max_match_score": row["max_match_score"],
-        "background_score": row["background_score"],
-        "score_kind": row["score_kind"],
-    }
-
-
 def _top_prediction_confirm_targets(db: Database, photo_ids: list[int]) -> tuple[dict[int, Row], dict[int, str]]:
     """Whole-photo confirm: each photo's top prediction, unless the photo
     already carries any species."""
@@ -527,7 +511,7 @@ def _species_confirm_targets(db: Database, photo_ids: list[int], species: str) -
         rows = subjects_by_pid.get(pid, [])
         memberships = photo_species_memberships({
             "species_names": list(names_by_pid.get(pid, [])),
-            "subject_predictions": [_subject_prediction(r) for r in rows],
+            "subject_predictions": [subject_from_row(r) for r in rows],
         }, canonicalize)
         membership = next((
             m for m in memberships
