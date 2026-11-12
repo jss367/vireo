@@ -10,7 +10,6 @@ explained the gecko.
 import json
 
 import pytest
-
 from services import detection_store
 from subjects import payload, resync_after_classification, sync_primary
 
