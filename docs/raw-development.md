@@ -3,6 +3,11 @@
 Vireo's built-in editor develops supported RAW originals through its own
 high-precision pipeline. Darktable remains a separate optional integration.
 
+Desktop builds decode Nikon High Efficiency and High Efficiency* sensor data
+using the official November 2026 LibRaw snapshot. See
+[native Nikon RAW decoding](nikon-high-efficiency.md) for source-install setup,
+verification, and the temporary build's removal plan.
+
 ## Processing and output
 
 1. LibRaw applies the camera's as-shot white balance and demosaics at full

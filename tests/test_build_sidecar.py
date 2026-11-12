@@ -17,6 +17,7 @@ def test_sidecar_bundles_synchronized_release_manifest(monkeypatch, tmp_path, pl
     monkeypatch.setattr(sys, "argv", ["build_sidecar.py", "--ci"])
     monkeypatch.setattr(build_sidecar.platform, "system", lambda: platform)
     monkeypatch.setattr(build_sidecar, "get_target_triple", lambda: "test-target")
+    monkeypatch.setattr(build_sidecar, "check_raw_decoder", lambda: None)
     monkeypatch.setitem(sys.modules, "vireo._native_detail", SimpleNamespace(Filters=lambda _: None))
     monkeypatch.setitem(sys.modules, "fetch_exiftool", SimpleNamespace(fetch=lambda _: tmp_path))
     stamp = tmp_path / "build-commit.txt"

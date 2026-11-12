@@ -1,0 +1,35 @@
+name: Build Nikon RAW decoder
+description: Temporary pinned rawpy and LibRaw snapshot; remove after upstream wheel support
+runs:
+  using: composite
+  steps:
+    - name: Initialize Windows compiler
+      if: runner.os == 'Windows'
+      uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: x64
+    - name: Install macOS build tools
+      if: runner.os == 'macOS'
+      shell: bash
+      env:
+        HOMEBREW_NO_AUTO_UPDATE: '1'
+        HOMEBREW_NO_INSTALL_CLEANUP: '1'
+      run: brew install pkgconf autoconf automake libtool ninja
+    - name: Install Linux build tools
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y pkg-config autoconf automake libtool ninja-build
+    - name: Set native dependency cache
+      shell: bash
+      run: |
+        mkdir -p .cache/vcpkg
+        echo "VCPKG_DEFAULT_BINARY_CACHE=$GITHUB_WORKSPACE/.cache/vcpkg" >> "$GITHUB_ENV"
+    - uses: actions/cache@v4
+      with:
+        path: .cache/vcpkg
+        key: raw-decoder-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build_rawpy_snapshot.py') }}
+    - name: Build and verify decoder
+      shell: bash
+      run: python scripts/build_rawpy_snapshot.py
