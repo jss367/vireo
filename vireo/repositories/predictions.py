@@ -1418,20 +1418,29 @@ class PredictionRepository:
             return {}
         ws = self.workspace_id
         detector_floor = config_value(self.effective_config(), "detector_confidence")
+        # Rank retained regions before prediction filtering: an unclassified
+        # or rejected primary must not promote a secondary into its place.
         results = {}
         for chunk in chunks(photo_ids):
             placeholders = ",".join("?" for _ in chunk)
             rows = self.conn.execute(
-                f"""SELECT sub.photo_id, sub.detection_id, sub.id, sub.species,
+                f"""WITH ranked_detections AS (
+                       SELECT d.*, {chosen_subject_sql("d")} AS subject_chosen,
+                              {subject_rank_sql("d")} AS subject_rank
+                       FROM detections d
+                       WHERE d.photo_id IN ({placeholders})
+                         AND (d.detector_model = 'full-image' OR d.detector_confidence >= ? AND d.subject_verdict IS NULL)
+                   )
+                   SELECT sub.photo_id, sub.detection_id, sub.id, sub.species,
                           sub.confidence, sub.classifier_model, sub.group_id,
                           sub.status, sub.detector_confidence, sub.detector_model,
                           sub.max_match_score, sub.background_score, sub.score_kind,
                           sub.box_w, sub.box_h,
-                          {chosen_subject_sql("dd")} AS subject_chosen,
-                          {subject_rank_sql("dd")} AS subject_rank
+                          sub.subject_chosen,
+                          sub.subject_rank
                    FROM (
                        SELECT d.photo_id, d.id AS detection_id, pr.id,
-                              pr.species, pr.confidence, d.box_w, d.box_h,
+                              pr.species, pr.confidence, d.box_w, d.box_h, d.subject_chosen, d.subject_rank,
                               pr.classifier_model,
                               pr_rev.group_id,
                               {prediction_review_status()} AS status,
@@ -1442,13 +1451,11 @@ class PredictionRepository:
                                   PARTITION BY d.id
                                   ORDER BY pr.confidence DESC, pr.id DESC
                               ) AS rn
-                       FROM detections d
+                       FROM ranked_detections d
                        JOIN predictions pr ON pr.detection_id = d.id
                        {prediction_review_join('pr')}
                        {CLASSIFIER_MATCH_SCORE_JOIN}
-                       WHERE d.photo_id IN ({placeholders})
-                         AND (d.detector_model = 'full-image' OR d.detector_confidence >= ? AND d.subject_verdict IS NULL)
-                         AND pr.species IS NOT NULL
+                       WHERE pr.species IS NOT NULL
                          AND {prediction_review_status()} != 'rejected'
                          AND pr.labels_fingerprint = (
                              SELECT pr2.labels_fingerprint FROM predictions pr2
@@ -1458,10 +1465,9 @@ class PredictionRepository:
                              LIMIT 1
                          )
                    ) sub
-                   JOIN detections dd ON dd.id = sub.detection_id
                    WHERE sub.rn = 1
                    ORDER BY sub.photo_id, subject_rank""",
-                (ws, *chunk, detector_floor),
+                (*chunk, detector_floor, ws),
             ).fetchall()
             for row in sorted(rows, key=subject_evidence_order):
                 results.setdefault(row["photo_id"], []).append(row)

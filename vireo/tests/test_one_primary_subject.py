@@ -9,6 +9,8 @@ explained the gecko.
 
 import json
 
+import pytest
+
 from services import detection_store
 from subjects import payload, resync_after_classification, sync_primary
 
@@ -165,3 +167,35 @@ def test_classification_moves_the_projected_subject(db):
     assert db.subjects.primary_state(pid)["detection_id"] == hawk
     photo = db.conn.execute("SELECT quality_score FROM photos WHERE id = ?", (pid,)).fetchone()
     assert photo["quality_score"] == 0.68
+
+
+@pytest.mark.parametrize("primary_prediction", ["missing", "rejected"])
+@pytest.mark.parametrize("secondary_confidence", [0.4, 0.8])
+def test_unclassified_or_rejected_primary_does_not_promote_secondary(
+    app_and_db, primary_prediction, secondary_confidence,
+):
+    from services import review_decisions
+
+    app, db = app_and_db
+    fid = _folder(db)
+    pid, hawk, strip, _blur = _hawk_frame(db, fid)
+    db.conn.execute(
+        "UPDATE detections SET detector_confidence = ? WHERE id = ?",
+        (secondary_confidence, strip),
+    )
+    prediction_id = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id = ?", (hawk,),
+    ).fetchone()["id"]
+    if primary_prediction == "missing":
+        db.conn.execute("DELETE FROM predictions WHERE id = ?", (prediction_id,))
+    else:
+        review_decisions.update_prediction_status(db, prediction_id, "rejected")
+    db.commit()
+
+    assert detection_store.get_detections(db, pid)[0]["id"] == hawk
+    rows = db.predictions.top_unrejected_by_detection([pid])[pid]
+    assert {row["detection_id"]: row["subject_rank"] for row in rows}[strip] > 1
+    candidates = db.species_curation.get_highlights_candidates(fid)
+    photo = next(row for row in candidates if row["id"] == pid)
+    assert all(subject["subject_rank"] > 1 for subject in photo["subject_predictions"])
+    assert _buckets(app.test_client(), fid) == {}

@@ -455,31 +455,37 @@ class SpeciesCurationRepository:
         top non-rejected prediction with the region evidence
         ``species_memberships`` ranks by, in ``subject_evidence_order``
         (the photo's primary subject first, whole-frame rows last)."""
+        # Rank retained regions before prediction filtering: an unclassified
+        # or rejected primary must not promote a secondary into its place.
         subjects = {}
         rows = self.conn.execute(
-            f"""WITH scope AS ({scope_sql})
+            f"""WITH scope AS ({scope_sql}), ranked_detections AS (
+                   SELECT d.*, {chosen_subject_sql("d")} AS subject_chosen,
+                          {subject_rank_sql("d")} AS subject_rank
+                   FROM detections d
+                   WHERE d.photo_id IN (SELECT id FROM scope)
+                     AND (d.detector_model = 'full-image' OR d.detector_confidence >= ? AND d.subject_verdict IS NULL)
+               )
                SELECT sub.photo_id, sub.detection_id, sub.id, sub.species,
                       sub.confidence, sub.detector_confidence, sub.detector_model,
                       sub.max_match_score, sub.background_score, sub.score_kind,
                       sub.box_w, sub.box_h,
-                      {chosen_subject_sql("dd")} AS subject_chosen,
-                      {subject_rank_sql("dd")} AS subject_rank
+                      sub.subject_chosen,
+                      sub.subject_rank
                FROM (
                    SELECT d.photo_id, d.id AS detection_id, pr.id, pr.species,
                           pr.confidence, d.detector_confidence, d.detector_model,
-                          d.box_w, d.box_h,
+                          d.box_w, d.box_h, d.subject_chosen, d.subject_rank,
                           cms.max_match_score, cms.background_score, cms.score_kind,
                           ROW_NUMBER() OVER (
                               PARTITION BY d.id
                               ORDER BY pr.confidence DESC, pr.id DESC
                           ) AS rn
-                   FROM detections d
+                   FROM ranked_detections d
                    JOIN predictions pr ON pr.detection_id = d.id
                    {prediction_review_join('pr')}
                    {CLASSIFIER_MATCH_SCORE_JOIN}
-                   WHERE d.photo_id IN (SELECT id FROM scope)
-                     AND (d.detector_model = 'full-image' OR d.detector_confidence >= ? AND d.subject_verdict IS NULL)
-                     AND pr.species IS NOT NULL
+                   WHERE pr.species IS NOT NULL
                      AND {prediction_review_status()} != 'rejected'
                      AND pr.labels_fingerprint = (
                          SELECT pr2.labels_fingerprint FROM predictions pr2
@@ -489,10 +495,9 @@ class SpeciesCurationRepository:
                          LIMIT 1
                      )
                ) sub
-               JOIN detections dd ON dd.id = sub.detection_id
                WHERE sub.rn = 1
                ORDER BY sub.photo_id, subject_rank""",
-            (*scope_params, ws, self._detector_floor()),
+            (*scope_params, self._detector_floor(), ws),
         ).fetchall()
         for row in sorted(rows, key=subject_evidence_order):
             subjects.setdefault(row["photo_id"], []).append(subject_from_row(row))
