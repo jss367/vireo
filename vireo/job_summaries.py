@@ -242,14 +242,19 @@ def _classify(result: dict, config: dict) -> tuple[str, list[str]]:
     # Process reports ``groups``; the standalone classify job ``burst_groups``.
     groups = _int(result, "groups") or _int(result, "burst_groups")
     cached = _int(result, "already_classified")
-    if total:
+    if "classified" not in result:
+        summary = "Classified photo count unavailable"
+        if total:
+            summary += f" ({_n(total, 'photo')} total)"
+    elif total:
         summary = f"{classified:,} of {_n(total, 'photo')} classified"
     else:
         summary = _n(classified, "photo") + " classified"
     if groups:
         summary += f" in {_n(groups, 'group')}"
     if cached:
-        summary += f", {cached:,} already classified"
+        # Both standalone producers count cached detections, not photos.
+        summary += f", {_n(cached, 'cached detection')} reused"
     if failed:
         summary += f", {failed:,} failed"
     # A run that went without the taxonomy (or on its older copy) finished

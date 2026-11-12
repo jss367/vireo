@@ -669,4 +669,28 @@ def test_standalone_classify_result_reports_its_photos_and_groups():
         "total": 50, "classified": 0, "predictions_stored": 40, "burst_groups": 0,
         "already_classified": 50, "failed": 0,
     })
-    assert cached["summary"] == "0 of 50 photos classified, 50 already classified"
+    assert cached["summary"] == "0 of 50 photos classified, 50 cached detections reused"
+
+
+def test_classify_history_without_photo_count_does_not_invent_zero():
+    out = describe_result("classify", {
+        "total": 4066, "predictions_stored": 4766, "burst_groups": 190,
+    })
+    assert out["summary"] == (
+        "Classified photo count unavailable (4,066 photos total) in 190 groups"
+    )
+    assert describe_result("classify", {"predictions_stored": 2})["summary"] == (
+        "Classified photo count unavailable"
+    )
+    assert describe_result("classify", {"classified": 0})["summary"] == "0 photos classified"
+
+
+def test_classify_cached_detections_are_not_reported_as_photos():
+    for count, noun in [(1, "detection"), (3, "detections")]:
+        out = describe_result("classify", {
+            "classified": 0, "total": 1, "already_classified": count,
+            "predictions_stored": 0,
+        })
+        assert out["summary"] == (
+            f"0 of 1 photo classified, {count} cached {noun} reused"
+        )
