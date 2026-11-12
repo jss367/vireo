@@ -10,10 +10,13 @@ with sensor data when their originals are available.
 ## Build and source installs
 
 The release workflow builds and installs the custom wheel before freezing
-the sidecar. `scripts/build_sidecar.py` refuses an older decoder. Ordinary
-`pip install -e .` and `uv sync` still select published rawpy wheels; source
-installations opt in by running the builder **after** installing Vireo's
-dependencies, with the same Python interpreter:
+the sidecar. `scripts/build_sidecar.py` refuses an older decoder, so
+`scripts/release.sh` (local non-publish builds) and `scripts/build_signed.sh`
+also require the snapshot; `release.sh` fails fast with the install command
+before running the E2E gate, and `build_signed.sh` fails at the sidecar step.
+Ordinary `pip install -e .` and `uv sync` still select published rawpy wheels;
+source installations opt in by running the builder **after** installing
+Vireo's dependencies, with the same Python interpreter:
 
 ```sh
 python scripts/build_rawpy_snapshot.py

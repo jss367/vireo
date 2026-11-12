@@ -168,6 +168,24 @@ if $PUBLISH; then
     echo ""
 fi
 
+# --- Verify custom Nikon RAW decoder (local sidecar build only) ---
+# Publishing hands the sidecar build to CI (build-release.yml runs the
+# build-raw-decoder action before build_sidecar.py), so this check only
+# gates the non-publish path. Fail fast instead of discovering it after
+# the long E2E suite, since build_sidecar.py's check_raw_decoder() will
+# otherwise refuse to freeze a stock rawpy wheel.
+if ! $PUBLISH; then
+    echo "==> Verifying custom Nikon RAW decoder..."
+    if ! python scripts/build_rawpy_snapshot.py --check; then
+        echo "" >&2
+        echo "ERROR: The custom rawpy build is required to build the sidecar." >&2
+        echo "Install it with: python scripts/build_rawpy_snapshot.py" >&2
+        echo "See docs/nikon-high-efficiency.md for prerequisites." >&2
+        exit 1
+    fi
+    echo ""
+fi
+
 # --- Run E2E tests ---
 echo "==> Running E2E tests..."
 # Match the release gate in e2e-full.yml: retry a failed test up to twice so a
