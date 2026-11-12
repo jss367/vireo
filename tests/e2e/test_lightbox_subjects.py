@@ -58,6 +58,7 @@ def test_choose_subject_preview_and_apply_suggestion(live_server, page, tmp_path
     page.locator('#lightboxSubjectAutomatic').click()
     expect(cards.nth(1)).to_have_attribute('aria-pressed', 'true')
     expect(page.locator('#lightboxSubjectStatus')).to_contain_text('picked automatically')
+    expect(page.locator('#lightboxSubjectStatus')).to_contain_text('regions that do not span the frame, then non-background regions')
     page.locator('#lightboxSubjectUseExposure').click()
     page.wait_for_function('!_lbEditWritePending')
     recipe = db.get_photo_edit_recipe(photo_id)
@@ -90,6 +91,7 @@ def test_existing_photo_can_analyze_without_rerunning_models(live_server, page, 
     page.locator('#lightboxSubjectAnalyze').click()
     expect(page.locator('#lightboxSubjectStatus')).to_contain_text('Suggestions leave saved edits unchanged', timeout=30000)
     expect(page.locator('#lightboxSubjectStatus')).to_contain_text('picked automatically')
+    expect(page.locator('#lightboxSubjectStatus')).to_contain_text('regions that do not span the frame, then non-background regions')
     expect(page.locator('#lightboxSubjectAnalyze')).to_be_hidden()
     assert db.get_photo_edit_recipe(photo_id) is None
 

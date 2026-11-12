@@ -15,7 +15,7 @@ import { safeFetch, showToast } from './navbar-shared-helpers.js';
 
 /* The automatic rule is repositories/subject_order.primary_order_sql, which
    does not read subject quality, so analysis never changes the primary. */
-const AUTOMATIC_PRIMARY = 'Primary picked automatically: best species-label match, then detector confidence.';
+const AUTOMATIC_PRIMARY = 'Primary picked automatically: favors animal regions that do not span the frame, then non-background regions, species-label match and detector confidence.';
 
 (function () {
   'use strict';
