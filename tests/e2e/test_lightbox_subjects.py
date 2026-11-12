@@ -27,6 +27,11 @@ def test_choose_subject_preview_and_apply_suggestion(live_server, page, tmp_path
         {'box': {'x': .06, 'y': .2, 'w': .33, 'h': .55}, 'confidence': .95, 'category': 'animal'},
         {'box': {'x': .59, 'y': .2, 'w': .33, 'h': .55}, 'confidence': .8, 'category': 'animal'},
     ])
+    # The automatic primary is the best species-label match, so the Blue Jay
+    # wins despite the Robin's higher detector confidence.
+    db.model_runs.record_classifier_match_score(ids[0], 'bioclip', 'fp', .40, score_kind='cosine')
+    db.model_runs.record_classifier_match_score(ids[1], 'bioclip', 'fp', .55, score_kind='cosine')
+    db.commit()
     analyze_photo(db, photo_id, path)
     db.predictions.add(ids[0], 'American Robin', .91, 'bioclip')
     db.predictions.add(ids[1], 'Blue Jay', .87, 'bioclip')
@@ -52,7 +57,8 @@ def test_choose_subject_preview_and_apply_suggestion(live_server, page, tmp_path
     assert db.get_photo_edit_recipe(photo_id) == original_recipe
     page.locator('#lightboxSubjectAutomatic').click()
     expect(cards.nth(1)).to_have_attribute('aria-pressed', 'true')
-    expect(page.locator('#lightboxSubjectStatus')).to_contain_text('selected by quality')
+    expect(page.locator('#lightboxSubjectStatus')).to_contain_text('picked automatically')
+    expect(page.locator('#lightboxSubjectStatus')).to_contain_text('regions that do not span the frame, then non-background regions')
     page.locator('#lightboxSubjectUseExposure').click()
     page.wait_for_function('!_lbEditWritePending')
     recipe = db.get_photo_edit_recipe(photo_id)
@@ -81,8 +87,11 @@ def test_existing_photo_can_analyze_without_rerunning_models(live_server, page, 
     page.evaluate("id => openLightbox(id, 'existing.jpg')", photo_id)
     expect(page.locator('#lightboxSubjects')).to_be_visible()
     page.locator('#lightboxSubjectSummary').click()
+    expect(page.locator('#lightboxSubjectStatus')).to_contain_text('Analyze to see crop and exposure suggestions')
     page.locator('#lightboxSubjectAnalyze').click()
-    expect(page.locator('#lightboxSubjectStatus')).to_contain_text('selected by quality', timeout=30000)
+    expect(page.locator('#lightboxSubjectStatus')).to_contain_text('Suggestions leave saved edits unchanged', timeout=30000)
+    expect(page.locator('#lightboxSubjectStatus')).to_contain_text('picked automatically')
+    expect(page.locator('#lightboxSubjectStatus')).to_contain_text('regions that do not span the frame, then non-background regions')
     expect(page.locator('#lightboxSubjectAnalyze')).to_be_hidden()
     assert db.get_photo_edit_recipe(photo_id) is None
 
