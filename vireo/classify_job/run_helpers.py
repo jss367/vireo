@@ -15,6 +15,7 @@ def _empty_classify_result(total: int, detected: int = 0) -> dict[str, int]:
     """The result of a run that stored no predictions."""
     return {
         "total": total,
+        "classified": 0,
         "predictions_stored": 0,
         "burst_groups": 0,
         "already_classified": 0,

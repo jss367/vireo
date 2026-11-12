@@ -655,3 +655,18 @@ def test_export_summary_includes_metadata_outcomes():
     assert 'metadata requested: Location (GPS)' in out['summary']
     assert any('2 requested, 1 written, 1 unavailable, 0 failed, 0 not attempted' in d
                for d in out['details'])
+
+
+def test_standalone_classify_result_reports_its_photos_and_groups():
+    """The standalone job reports ``burst_groups`` and ``already_classified``
+    beside ``classified``; a reclassify of 4,066 photos is not "0 classified"."""
+    out = describe_result("classify", {
+        "total": 4066, "classified": 4066, "predictions_stored": 4766, "burst_groups": 190,
+        "already_classified": 0, "already_labeled": 0, "detected": 3427, "failed": 0,
+    })
+    assert out["summary"] == "4,066 of 4,066 photos classified in 190 groups"
+    cached = describe_result("classify", {
+        "total": 50, "classified": 0, "predictions_stored": 40, "burst_groups": 0,
+        "already_classified": 50, "failed": 0,
+    })
+    assert cached["summary"] == "0 of 50 photos classified, 50 already classified"
