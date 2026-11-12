@@ -27,12 +27,16 @@ Prerequisites: Git, a C++ compiler, Python with pip, and platform build tools.
 On macOS, install `pkgconf autoconf automake libtool ninja` with Homebrew.
 On Linux, install `pkg-config autoconf automake libtool ninja-build` with the
 system package manager. On Windows, run from an x64 MSVC developer shell.
+The temporary-directory path must have no whitespace because rawpy's upstream
+CMake wrapper constructs shell commands. Set `TMPDIR` on macOS/Linux, or `TMP`
+and `TEMP` on Windows, to a path without spaces if the default contains any.
 The shared CI action `.github/actions/build-raw-decoder/action.yml` sets these up.
 Build parallelism is capped at four processes.
 
 The builder pins full Git revisions for rawpy, LibRaw, LibRaw's CMake support,
 and vcpkg. Codec dependencies (Little CMS, libjpeg-turbo with JPEG 8 support,
 Jasper, and zlib) are built statically through the pinned vcpkg ports.
+Windows libraries use the dynamic Microsoft runtime to match Python and rawpy.
 The resulting rawpy version is `0.28.0+vireo.libraw202611`; it carries source
 provenance, licenses, and its private LibRaw shared library. The build checks
 both compiled and loaded LibRaw versions and retains the existing codec flags.

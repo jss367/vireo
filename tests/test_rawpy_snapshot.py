@@ -76,3 +76,17 @@ def test_verified_samples_can_run_offline(monkeypatch, tmp_path):
 
     monkeypatch.setattr("urllib.request.urlopen", no_network)
     assert download_sample(tmp_path, "test", 1, digest) == sample
+
+
+def test_windows_codec_libraries_use_pythons_dynamic_runtime(monkeypatch):
+    monkeypatch.setattr(snapshot.sys, "platform", "win32")
+    monkeypatch.setattr(snapshot.platform, "machine", lambda: "AMD64")
+    assert snapshot.triplet() == "x64-windows-static-md"
+
+
+def test_rejects_whitespace_in_build_staging_path_before_fetching(monkeypatch, tmp_path):
+    monkeypatch.setattr(snapshot.tempfile, "gettempdir", lambda: "/tmp/space in name")
+    output = tmp_path / "wheels"
+    with pytest.raises(RuntimeError, match="Set TMPDIR"):
+        snapshot.build(output)
+    assert not output.exists()

@@ -42,7 +42,7 @@ def checkout(repository, commit, destination):
 def triplet():
     machine = platform.machine().lower()
     arch = {"arm64": "arm64", "aarch64": "arm64", "x86_64": "x64", "amd64": "x64"}.get(machine)
-    system = {"darwin": "osx", "linux": "linux", "win32": "windows-static"}.get(sys.platform)
+    system = {"darwin": "osx", "linux": "linux", "win32": "windows-static-md"}.get(sys.platform)
     if not arch or not system:
         raise RuntimeError(f"Unsupported native build: {sys.platform}/{machine}")
     return f"{arch}-{system}"
@@ -125,6 +125,9 @@ def check_installation():
 
 
 def build(output):
+    if any(char.isspace() for char in tempfile.gettempdir()):
+        raise RuntimeError("rawpy's CMake wrapper requires a temporary directory without spaces. "
+                           "Set TMPDIR (macOS/Linux) or TMP and TEMP (Windows) to a path without whitespace.")
     output.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     # Do not inherit a machine-specific system LibRaw or enable GPL demosaic packs.
