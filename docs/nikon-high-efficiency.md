@@ -82,7 +82,8 @@ Once a published rawpy release bundles the official HE/HE* decoder:
 
 1. Raise Vireo's rawpy minimum and refresh `uv.lock` to that release.
 2. Delete `scripts/build_rawpy_snapshot.py`, its build action, the snapshot unit
-   tests, and the pre-freeze snapshot check in `scripts/build_sidecar.py`.
+   tests, the pre-freeze snapshot check in `scripts/build_sidecar.py`, and the
+   local-release snapshot prerequisite check in `scripts/release.sh`.
 3. Remove the custom-build and source-archive steps from the release workflow.
 4. Keep `scripts/check_nikon_raw.py`, the rawpy packaging hook, and the frozen
    decoder smoke check. Replace the smoke check's snapshot assertion with the
