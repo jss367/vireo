@@ -157,8 +157,8 @@ def get_detections_for_photos(
     """Return {photo_id: [det_dict, ...]} for a batch of photos.
 
     Each det_dict has keys: id, x, y, w, h, confidence, category and
-    detector_model. Lists put the chosen primary first,
-    then quality and detector confidence. The detections table is global —
+    detector_model. Lists run in ``primary_order_sql`` order, the
+    photo's primary subject first. The detections table is global —
     threshold filtering happens at read time. Photos with no retained
     detections above ``min_conf`` are omitted from the result; regions the
     user rejected as background are not retained (see ``get_detections``).

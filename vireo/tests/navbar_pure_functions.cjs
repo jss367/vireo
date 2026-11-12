@@ -35,7 +35,7 @@ const helpers = 'navbar-shared-helpers.js';
 test('detection-only pipeline describes the crop without claiming classification ran', () => {
   const content = {innerHTML: ''};
   const ctx = load([
-    fn(inspector, 'renderDetectionImage'), fn(inspector, 'renderPipeline'),
+    ...['boxStyle', 'regionNumbers', 'renderDetectionImage', 'renderDetectionStep', 'renderPipeline'].map(name => fn(inspector, name)),
   ], {
     document: {getElementById: () => content},
     escapeHtml: value => String(value),
@@ -58,13 +58,31 @@ test('detection-only pipeline describes the crop without claiming classification
 });
 
 test('detection image omits both crop box and crop legend when no crop exists', () => {
-  const ctx = load([fn(inspector, 'renderDetectionImage')]);
+  const ctx = load([fn(inspector, 'boxStyle'), fn(inspector, 'renderDetectionImage')]);
   for (const crop of [undefined, null, {x: null}]) {
     const html = ctx.renderDetectionImage(42, {x: 0, y: 0.25, w: 0.5, h: 0.5}, crop);
     assert.match(html, /class="pipeline-det-box" style="left:0%;top:25%;width:50%;height:50%;"/);
     assert.match(html, /class="pipeline-img-label">Solid box = detection<\/div>/);
     assert.doesNotMatch(html, /pipeline-crop-box|dashed box|classifier/);
     assert.match(html, /class="pipeline-det-box"[^>]*><\/div><\/div><div class="pipeline-img-label">/);
+  }
+});
+
+test('detection image numbers every retained region without inventing a crop', () => {
+  const ctx = load([fn(inspector, 'boxStyle'), fn(inspector, 'renderDetectionImage')]);
+  const box = {x: 0.1, y: 0.2, w: 0.3, h: 0.4};
+  const regions = [
+    {number: 1, is_subject: true, box},
+    {number: 2, is_subject: false, box: {x: 0.6, y: 0, w: 0.1, h: 1}},
+  ];
+  for (const crop of [undefined, box]) {
+    const html = ctx.renderDetectionImage(42, box, crop, regions);
+    assert.match(html, /pipeline-det-box[^]*pipeline-region-tag">1/);
+    assert.match(html, /pipeline-region-box[^]*pipeline-region-tag">2/);
+    assert.match(html, /Bold box = subject; other numbered boxes = retained regions/);
+    assert.equal(html.includes('dashed box = classifier crop'), !!crop);
+    assert.equal(html.includes('pipeline-crop-box'), !!crop);
+    assert.doesNotMatch(html, /sent to the classifier/);
   }
 });
 

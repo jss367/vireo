@@ -173,6 +173,26 @@ def sync_primary(db, photo_id, *, min_conf=None, detector_model=None):
     db.subjects.set_primary_state(photo_id, primary["id"])
 
 
+def resync_after_classification(db, photo_ids, min_conf):
+    """Re-project the primary subject of each photo with two or more
+    retained regions, once its classification is stored.
+
+    ``primary_order_sql`` ranks regions by their newest classifier match,
+    and detection-time analysis syncs before classification writes those
+    scores, so a classification can move a photo's primary to another
+    region. ``sync_primary`` then clears the outputs measured on the old
+    region and projects the new one's quality.
+    """
+    from pipeline_locks import acquire_photo_mask
+    by_photo = detection_store.get_detections_for_photos(db, photo_ids, min_conf=min_conf)
+    for photo_id, regions in by_photo.items():
+        if len([d for d in regions if d.get("detector_model") != "full-image"]) < 2:
+            continue
+        with acquire_photo_mask(photo_id):
+            sync_primary(db, photo_id, min_conf=min_conf)
+            db.commit_with_retry()
+
+
 def select_primary(db, photo_id, detection_id):
     if detection_id is not None:
         if isinstance(detection_id, bool) or not isinstance(detection_id, int):

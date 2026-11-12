@@ -462,8 +462,8 @@ class MasksFeaturesRepository:
     def find_stale(self, detector_confidence: float | None = None) -> list[dict[str, Any]]:
         """Return masks whose prompts differ from the selected primary.
 
-        Selection uses the same manual-choice, quality, confidence, and ID
-        ordering as extraction. When supplied, ``detector_confidence`` hides
+        Selection uses the same primary-subject ordering as extraction
+        (``repositories.subject_order.primary_order_sql``). When supplied, ``detector_confidence`` hides
         boxes below the workspace floor before selection. A mask matching a
         secondary or now-hidden detection is stale even if its row remains
         cached for later reuse.

@@ -1099,3 +1099,14 @@ def _classifier_candidates(detection_map: DetectionMap, floor: float) -> tuple[D
         elif confident:
             non_animal_ids.add(photo_id)
     return filtered, non_animal_ids
+
+
+def _resync_primary_subjects(db: Database, photos: Sequence[sqlite3.Row]) -> None:
+    """Re-project each multi-region photo's primary subject once its new
+    classification is stored (``subjects.resync_after_classification``):
+    the primary order reads classifier match scores that detection-time
+    analysis could not see yet."""
+    import config as cfg
+    from subjects import resync_after_classification
+    floor = config_value(db.get_effective_config(cfg.load()), "detector_confidence")
+    resync_after_classification(db, [p["id"] for p in photos], floor)

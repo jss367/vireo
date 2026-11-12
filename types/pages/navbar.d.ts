@@ -341,9 +341,26 @@ interface NavPipelinePhotoData {
   subject_sharpness?: number;
   quality_score?: number;
   keywords?: {name: string}[];
+  regions?: NavInspectorRegion[];
+  secondary_subject_floor?: number;
   classification_diagnostics?: {detector_confidence_threshold?: number; max_detector_confidence?: number; hidden_detection_count?: number; current_prediction_count?: number; hidden_prediction_count?: number; classifier_run_count?: number; full_image_prediction_count?: number; full_image_classifier_run_count?: number};
 }
+interface NavInspectorRegion {
+  number: number;
+  detection_id: number;
+  box: NavBox;
+  detector_model?: string;
+  detector_confidence: number;
+  is_subject: boolean;
+  chosen: boolean;
+  spans_frame: boolean;
+  top_species?: string | null;
+  top_confidence?: number | null;
+  highlights_role: string;
+  highlights_species?: string | null;
+}
 interface NavPipelinePrediction {
+  detection_id?: number;
   species: string;
   confidence: number;
   scientific_name?: string;

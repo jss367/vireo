@@ -507,24 +507,91 @@ def test_get_detections_filters_at_read_time_and_orders_primary_first(db):
         db, pid, min_conf=0, detector_model="full-image")] == [full]
 
 
-def test_get_detections_manual_choice_then_quality_beat_confidence(db):
+def _region_box(db, photo_id, conf, w=0.2, h=0.2, match=None, background=None, quality=None):
+    """A detection with an explicit box, optionally with a newest classifier
+    run (cosine ``match`` against its best label, ``background`` against the
+    best scenery prompt) and a subject-quality analysis."""
+    det = db.conn.execute(
+        """INSERT INTO detections
+             (photo_id, detector_model, runtime_fingerprint,
+              box_x, box_y, box_w, box_h, detector_confidence, category)
+           VALUES (?, ?, 'legacy', 0.0, 0.0, ?, ?, ?, 'animal')""",
+        (photo_id, MODEL, w, h, conf),
+    ).lastrowid
+    if match is not None:
+        db.conn.execute(
+            """INSERT INTO classifier_match_scores
+                 (detection_id, classifier_model, labels_fingerprint,
+                  max_match_score, background_score, score_kind)
+               VALUES (?, 'BioCLIP-2.5', 'fp', ?, ?, 'cosine')""",
+            (det, match, background),
+        )
+    if quality is not None:
+        db.conn.execute(
+            """INSERT INTO detection_subjects
+                 (detection_id, source_key, crop, quality_score, exposure_ev, features)
+               VALUES (?, 'k', '{}', ?, 0.0, '{}')""", (det, quality),
+        )
+    db.conn.commit()
+    return det
+
+
+def _order(db, photo_id):
+    return [r["id"] for r in detection_store.get_detections(db, photo_id, min_conf=0)]
+
+
+def test_primary_is_the_region_that_best_matches_a_species_label(db):
+    """The hawk beside a trunk strip: the detector scores the strip higher and
+    subject quality favors a sharp speck, but the hawk crop fits its label best."""
     pid = _photo(db)
-    a = _raw_det(db, pid, conf=0.9)
-    b = _raw_det(db, pid, conf=0.5)
-    c = _raw_det(db, pid, conf=0.4)
+    strip = _region_box(db, pid, 0.47, w=0.34, h=1.0, match=0.445, background=0.20)
+    speck = _region_box(db, pid, 0.30, w=0.02, h=0.02, match=0.35, background=0.10, quality=0.95)
+    hawk = _region_box(db, pid, 0.37, w=0.35, h=0.74, match=0.494, background=0.10, quality=0.68)
+    assert _order(db, pid) == [hawk, speck, strip]
+
+
+def test_frame_spanning_and_background_like_regions_rank_last(db):
+    pid = _photo(db)
+    spanning = _region_box(db, pid, 0.9, w=0.4, h=0.97, match=0.60, background=0.10)
+    scenery = _region_box(db, pid, 0.4, match=0.50, background=0.45)
+    bird = _region_box(db, pid, 0.3, match=0.48, background=0.10)
+    unscored = _region_box(db, pid, 0.8)
+    # A confident box is never background-like, so its match decides.
+    confident = _region_box(db, pid, 0.6, match=0.47, background=0.45)
+    assert _order(db, pid) == [bird, confident, unscored, scenery, spanning]
+
+
+def test_manual_choice_beats_every_other_rule(db):
+    pid = _photo(db)
+    best = _region_box(db, pid, 0.9, match=0.6, background=0.1)
+    chosen = _region_box(db, pid, 0.3, w=1.0, h=1.0, match=0.2, background=0.3)
     db.conn.execute(
-        """INSERT INTO detection_subjects
-             (detection_id, source_key, crop, quality_score, exposure_ev, features)
-           VALUES (?, 'k', '{}', 0.99, 0.0, '{}')""", (c,),
+        "INSERT INTO photo_subject_choices (photo_id, detection_id) VALUES (?, ?)", (pid, chosen),
     )
     db.conn.commit()
-    assert [r["id"] for r in detection_store.get_detections(db, pid, min_conf=0)] == [c, a, b]
+    assert _order(db, pid) == [chosen, best]
+
+
+def test_newest_classifier_run_decides_and_cosine_outranks_other_scales(db):
+    pid = _photo(db)
+    a = _region_box(db, pid, 0.5, match=0.40, background=0.1)
+    b = _region_box(db, pid, 0.5, match=0.45, background=0.1)
+    # An older run that scored ``a`` higher no longer counts.
     db.conn.execute(
-        "INSERT INTO photo_subject_choices (photo_id, detection_id) VALUES (?, ?)",
-        (pid, b),
+        """INSERT INTO classifier_match_scores
+             (detection_id, classifier_model, labels_fingerprint, max_match_score,
+              background_score, score_kind, run_at)
+           VALUES (?, 'BioCLIP-2.5', 'old', 0.9, 0.1, 'cosine', '2020-01-01')""", (a,),
+    )
+    # A logit run is on another scale: its larger number must not win.
+    c = _region_box(db, pid, 0.5)
+    db.conn.execute(
+        """INSERT INTO classifier_match_scores
+             (detection_id, classifier_model, labels_fingerprint, max_match_score, score_kind)
+           VALUES (?, 'iNat21', 'fp', 12.0, 'logit')""", (c,),
     )
     db.conn.commit()
-    assert [r["id"] for r in detection_store.get_detections(db, pid, min_conf=0)] == [b, c, a]
+    assert _order(db, pid) == [b, a, c]
 
 
 def test_get_detections_default_floor_comes_from_workspace_config(db, monkeypatch):

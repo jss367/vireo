@@ -25,7 +25,7 @@ from classify_job.common import (
     taxonomy_step_warning,
     with_taxonomy_notice,
 )
-from classify_job.detection import DetectionHandoff, _detect_subjects
+from classify_job.detection import DetectionHandoff, _detect_subjects, _resync_primary_subjects
 from classify_job.label_loading import _load_labels, _record_labels_fingerprint, _reuse_saved_label_embeddings
 from classify_job.label_source import _sources_from_metas, describe_label_source
 from classify_job.run_helpers import _CachePeek, _empty_classify_result, _rearm_label_desc_heal
@@ -1131,6 +1131,7 @@ class _ClassifyJobRun:
             taxonomy_identity=job.get("_taxonomy_identity", "no-tax"),
             store=_publish_store,
         )
+        _resync_primary_subjects(thread_db, self.photos)
         runner.update_step(
             job["id"], "finalize", status="completed",
             summary=_finalize_summary(group_result),

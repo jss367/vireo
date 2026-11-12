@@ -117,6 +117,36 @@ never localized (a bird behind foliage with the box on the branches below)
 still needs a region before it can be identified; rejecting the wrong box
 only stops it from standing in as evidence.
 
+## Which region is the photo's subject
+
+A photo with several retained regions has one primary subject, chosen by
+`repositories.subject_order.primary_order_sql`. The lightbox and Subjects
+panel, the mask, eye and quality stages, the pipeline stage counts and the
+Highlights bucket rule all read that one order, so they never disagree about
+which region a photo is "of":
+
+1. the region the user chose (or drew) as the subject;
+2. a region that does not span the frame before one that does: a box at
+   least `species_memberships.FRAME_SPANNING_EXTENT` of the frame's height or
+   width beside another region is a trunk strip or blurred foreground;
+3. a region the classifier scored as an animal before a background-like one;
+4. the region whose crop best matched a species label in its newest
+   classifier run;
+5. the detector's confidence.
+
+Subject quality is not an input: on a speck or a bush top it reads higher
+than on the animal. Because the order reads classifier scores, both classify
+paths re-project the subject after storing a classification
+(`subjects.resync_after_classification`); a mask drawn from the previous
+subject is then stale and the next Process run redoes it.
+
+Highlights opens the primary's species unless it is background-like. Another
+region suggests a second species only at or above
+`species_memberships.SECONDARY_SUBJECT_FLOOR` and only if it does not span
+the frame. The Pipeline inspector (Inspect Pipeline) draws every retained
+region numbered, marks the subject, labels each prediction with its region,
+and says what Highlights did with each region and why.
+
 ## Confirm only reviewed photo IDs
 
 1. Read the evidence and inspect the full frame and specific subject. Review

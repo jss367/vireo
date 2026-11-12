@@ -20,10 +20,23 @@ def subject_photo(db, tmp_path):
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": .05, "category": "animal"},
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": .99, "category": "person"},
     ])
+    # The sharp animal's crop matches its species label better than the
+    # blurry one's, which is what makes it the primary subject.
+    _match_score(db, ids[0], 0.40)
+    _match_score(db, ids[1], 0.55)
     return photo_id, ids, path
 
 
-def test_analyzes_every_retained_subject_and_selects_quality(db, subject_photo):
+def _match_score(db, detection_id, score, background=0.10):
+    db.conn.execute(
+        "INSERT INTO classifier_match_scores (detection_id, classifier_model, labels_fingerprint, "
+        "max_match_score, background_score, score_kind) VALUES (?, 'BioCLIP-2.5', 'fp', ?, ?, 'cosine')",
+        (detection_id, score, background),
+    )
+    db.commit()
+
+
+def test_analyzes_every_retained_subject_and_selects_best_label_match(db, subject_photo):
     photo_id, ids, path = subject_photo
     assert analyze_photo(db, photo_id, path) == 2
     result = payload(db, photo_id)

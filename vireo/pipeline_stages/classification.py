@@ -1716,6 +1716,10 @@ class _ClassifyPass:
                 if publish_cache_dir else None
             ),
         )
+        from subjects import resync_after_classification
+        resync_after_classification(
+            thread_db, [p["id"] for p in self.photos], self.detector_confidence,
+        )
         return group_result["predictions_stored"]
 
     def _purge_stale_detections(self) -> None:
