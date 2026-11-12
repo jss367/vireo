@@ -152,6 +152,7 @@ def _finalize_cached_only(
     )
     return with_taxonomy_notice(job, {
         "total": total,
+        "classified": 0,
         "predictions_stored": group_result["predictions_stored"],
         "burst_groups": group_result["burst_groups"],
         "already_classified": reused_results,

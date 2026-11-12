@@ -1149,6 +1149,11 @@ class _ClassifyJobRun:
 
         return with_taxonomy_notice(self.job, {
             "total": total,
+            # Photos this run classified afresh; cached ones are
+            # ``already_classified``. One photo can carry several results.
+            "classified": len({
+                r["photo"]["id"] for r in raw_results if not r.get("_existing")
+            }),
             "predictions_stored": group_result["predictions_stored"],
             "burst_groups": group_result["burst_groups"],
             "already_classified": self.skipped_existing,
