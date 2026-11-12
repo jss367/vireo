@@ -326,18 +326,24 @@ def open_library(path):
         "photos": ("companion_path", "active_mask_variant", "quality_input_recipe"),
         "detector_runs": ("input_fingerprint",),
         "detections": ("subject_verdict",),
+        "classifier_match_scores": ("score_kind", "background_score"),
     }.items():
         columns = {r["name"] for r in conn.execute(f"PRAGMA main.table_info({table})")}
         missing = [column for column in optional if column not in columns]
         if columns and missing:
             projection = ", ".join(f"NULL AS {column}" for column in missing)
-            conn.execute(f"CREATE TEMP VIEW {table} AS SELECT *, {projection} FROM main.{table}")
+            # Subject ordering breaks ties between score runs by their real
+            # rowid. Views otherwise expose NULL for that implicit column.
+            rowid = "rowid AS rowid, " if table == "classifier_match_scores" else ""
+            conn.execute(f"CREATE TEMP VIEW {table} AS SELECT {rowid}*, {projection} FROM main.{table}")
     # Subject analysis was added after older evaluation catalogs were captured.
     # Empty TEMP views preserve their confidence ordering and absent suggestions,
     # while current catalogs retain their real analysis and manual choices.
     for table, columns in {
         "detection_subjects": ("detection_id", "crop", "quality_score", "exposure_ev"),
         "photo_subject_choices": ("photo_id", "detection_id"),
+        "classifier_match_scores": ("rowid", "detection_id", "score_kind", "max_match_score",
+                                    "background_score", "run_at"),
         "photo_masks": ("photo_id", "variant", "path", "detector_model",
                         "prompt_x", "prompt_y", "prompt_w", "prompt_h"),
     }.items():

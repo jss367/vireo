@@ -536,6 +536,43 @@ def test_subject_analysis_compatibility_keeps_library_unchanged(library, has_sub
     assert library.read_bytes() == before
 
 
+@pytest.mark.parametrize("score_schema", ["absent", "legacy", "without_background", "current"])
+def test_match_score_compatibility_preserves_subject_order_without_source_writes(library, score_schema):
+    with sqlite3.connect(library) as conn:
+        conn.execute("""INSERT INTO detections VALUES(100, 1, 'megadetector-v6', 'runtime',
+                        .6, .1, .2, .2, .7, 'animal', NULL)""")
+        if score_schema != "absent":
+            columns = "detection_id INTEGER, max_match_score REAL, run_at TEXT"
+            if score_schema != "legacy":
+                columns += ", score_kind TEXT"
+            if score_schema == "current":
+                columns += ", background_score REAL"
+            conn.execute(f"CREATE TABLE classifier_match_scores({columns})")
+            # Same-time runs must use the newest rowid: the older .99 score
+            # must not outrank the newer .1 score for detection 1.
+            for detection, score in [(1, .99), (1, .1), (100, .9)]:
+                values = [detection, score, "2026-01-02"]
+                if score_schema != "legacy":
+                    values.append("cosine")
+                if score_schema == "current":
+                    values.append(0.)
+                conn.execute(f"INSERT INTO classifier_match_scores VALUES({','.join('?' for _ in values)})", values)
+    before = library.read_bytes()
+    conn = open_library(library)
+    try:
+        detections = FeatureReader(conn, 1).get_detections_for_photos([1], .2)[1]
+        assert detections[0]["id"] == (1 if score_schema == "absent" else 100)
+        if score_schema != "absent":
+            assert [row["max_match_score"] for row in conn.execute(
+                "SELECT * FROM classifier_match_scores ORDER BY rowid"
+            )] == [.99, .1, .9]
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            conn.execute("DELETE FROM main.photos")
+    finally:
+        conn.close()
+    assert library.read_bytes() == before
+
+
 @pytest.mark.parametrize("canonical_view", [False, True])
 def test_reader_includes_photo_grants_without_siblings_or_source_writes(library, tmp_path, canonical_view):
     conn = sqlite3.connect(library)
