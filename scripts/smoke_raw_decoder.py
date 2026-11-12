@@ -11,6 +11,17 @@ from build_rawpy_snapshot import check_installation
 from check_nikon_raw import SAMPLES, check_raw
 
 
+def check_licenses():
+    from importlib.metadata import distribution
+
+    package = distribution("rawpy")
+    licenses = {item.name: item for item in package.files or () if "/licenses/" in str(item)}
+    for name in ("LICENSE", "LibRaw-COPYRIGHT", "LibRaw-LICENSE.LGPL", "jasper-LICENSE.txt",
+                 "lcms-LICENSE.txt", "libjpeg-turbo-LICENSE.txt", "zlib-LICENSE.txt"):
+        if name not in licenses or not package.locate_file(licenses[name]).read_text().strip():
+            raise RuntimeError(f"Frozen RAW decoder is missing its license: {name}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--samples", type=Path, default=Path("build/nikon-raw-samples"))
@@ -18,6 +29,7 @@ def main():
     args = parser.parse_args()
     if getattr(sys, "frozen", False):
         check_installation()
+        check_licenses()
         for name, _, _ in SAMPLES:
             print(check_raw(args.samples / f"{name}.NEF"), flush=True)
         return

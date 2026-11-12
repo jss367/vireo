@@ -143,11 +143,15 @@ def build(output):
         with tarfile.open(archive, "w:gz") as bundle:
             bundle.add(source, arcname="rawpy", filter=source_filter)
             bundle.add(__file__, arcname="build_rawpy_snapshot.py")
-        run([sys.executable, "-m", "pip", "wheel", source, "--no-deps", "--wheel-dir", output], env=env)
-    wheels = list(output.glob(f"rawpy-{VERSION}-*.whl"))
-    if len(wheels) != 1:
-        raise RuntimeError(f"Expected one rawpy wheel in {output}, found {wheels}")
-    run([sys.executable, "-m", "pip", "install", "--force-reinstall", "--no-deps", wheels[0]])
+        wheel_dir = root / "wheels"
+        wheel_dir.mkdir()
+        run([sys.executable, "-m", "pip", "wheel", source, "--no-deps", "--wheel-dir", wheel_dir], env=env)
+        wheels = list(wheel_dir.glob(f"rawpy-{VERSION}-*.whl"))
+        if len(wheels) != 1:
+            raise RuntimeError(f"Expected one newly built rawpy wheel, found {wheels}")
+        wheel = output / wheels[0].name
+        shutil.copyfile(wheels[0], wheel)
+    run([sys.executable, "-m", "pip", "install", "--force-reinstall", "--no-deps", wheel])
     # A new interpreter verifies the installed wheel, not cached imports.
     run([sys.executable, __file__, "--check"])
 

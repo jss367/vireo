@@ -4,6 +4,8 @@ Vireo desktop builds use a temporary rawpy 0.28.0 build with the official
 LibRaw November 2026 snapshot to decode Nikon HE and HE* sensor data.
 This enables RAW white balance and highlight processing instead of using
 the embedded JPEG fallback. Browsing still prefers embedded JPEGs for speed.
+The edit-render cache version advances so existing edited previews regenerate
+with sensor data when their originals are available.
 
 ## Build and source installs
 
