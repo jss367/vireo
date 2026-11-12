@@ -13,6 +13,10 @@ import {
 } from './lightbox/overlays.js';
 import { safeFetch, showToast } from './navbar-shared-helpers.js';
 
+/* The automatic rule is repositories/subject_order.primary_order_sql, which
+   does not read subject quality, so analysis never changes the primary. */
+const AUTOMATIC_PRIMARY = 'Primary picked automatically: best species-label match, then detector confidence.';
+
 (function () {
   'use strict';
   /** @type {NavSubjectData | null} */ let data = null;
@@ -182,8 +186,8 @@ import { safeFetch, showToast } from './navbar-shared-helpers.js';
     }
     status.textContent = data.choice_unavailable ? 'Your chosen subject is unavailable. Showing the best retained subject; your choice is remembered.'
       : data.selection === 'manual' ? 'Primary chosen by you. Saved edits are unchanged.'
-      : data.subjects.every(s => s.analysis) ? 'Primary selected by quality. Suggestions leave saved edits unchanged.'
-      : 'Quality analysis is incomplete. Primary selection is provisional.';
+      : data.subjects.every(s => s.analysis) ? AUTOMATIC_PRIMARY + ' Suggestions leave saved edits unchanged.'
+      : AUTOMATIC_PRIMARY + ' Analyze to see crop and exposure suggestions.';
   }
   /** @param {number} photoId */
   async function load(photoId) {
