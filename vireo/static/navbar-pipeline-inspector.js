@@ -1,10 +1,12 @@
-import { safeFetch } from './navbar-shared-helpers.js';
+import { restoreOverlayFocus, safeFetch } from './navbar-shared-helpers.js';
 
 /** @type {number | null} */ var _pipelineEscToken = null;
+/** @type {HTMLElement | null} */ var _pipelineReturnFocus = null;
 
 /** @param {number} photoId */
 export function openPipeline(photoId) {
   var alreadyOpen = !!_pipelineEscToken;
+  if (!alreadyOpen) _pipelineReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   if (alreadyOpen) Keymap.popEsc(_pipelineEscToken ?? -1);
   _pipelineEscToken = Keymap.pushEsc(function() { closePipeline(); });
 
@@ -20,10 +22,14 @@ export function openPipeline(photoId) {
 }
 
 export function closePipeline() {
+  var ownedFocus = document.getElementById('pipelineOverlay')?.contains(document.activeElement);
+  var returnFocus = _pipelineReturnFocus;
+  _pipelineReturnFocus = null;
   var wasOpen = !!_pipelineEscToken;
   if (wasOpen) { Keymap.popEsc(_pipelineEscToken ?? -1); _pipelineEscToken = null; }
   /** @type {HTMLElement} */ (document.getElementById('pipelineOverlay')).classList.remove('active');
   if (wasOpen) Keymap.unlockBodyScroll();
+  if (wasOpen && ownedFocus) restoreOverlayFocus(returnFocus);
 }
 
 // Raw match scores come in two scales that must never be mixed: a bounded
@@ -278,6 +284,27 @@ function renderRegionTable(regions, floorPct) {
   return html;
 }
 
+/**
+ * Overlay every region within the image frame; keep captions outside it.
+ * @param {number} photoId @param {NavBox} db @param {NavBox | null | undefined} cropBox
+ * @param {NavInspectorRegion[]} [regions]
+ */
+function renderDetectionImage(photoId, db, cropBox, regions = []) {
+  var hasCrop = cropBox?.x != null;
+  var overlays = regions.length ? regions.map(function(r) {
+    return '<div class="' + (r.is_subject ? 'pipeline-det-box' : 'pipeline-region-box') + '" style="' + boxStyle(r.box) + '">' +
+      '<span class="pipeline-region-tag">' + r.number + '</span></div>';
+  }).join('') : '<div class="pipeline-det-box" style="' + boxStyle(db) + '"></div>';
+  var legend = regions.length
+    ? 'Bold box = subject; other numbered boxes = retained regions'
+    : 'Solid box = detection';
+  return '<div class="pipeline-images"><div class="pipeline-img-wrap"><div class="pipeline-img-frame">' +
+    '<img src="/photos/' + photoId + '/full" alt="Detection">' + overlays +
+    (hasCrop ? '<div class="pipeline-crop-box" style="' + boxStyle(/** @type {NavBox} */ (cropBox)) + '"></div>' : '') +
+    '</div><div class="pipeline-img-label">' + legend +
+    (hasCrop ? ', dashed box = classifier crop' : '') + '</div></div></div>';
+}
+
 /** @param {NavPipelinePhotoData} data @param {number} photoId */
 function renderDetectionStep(data, photoId) {
   var diag = data.classification_diagnostics || {};
@@ -289,18 +316,7 @@ function renderDetectionStep(data, photoId) {
   if (data.detection_box && data.detection_box.x != null) {
     var db = /** @type {NavBox} */ (data.detection_box);
     var cropBox = data.crop_box;
-    var overlays = regions.length ? regions.map(function(r) {
-      return '<div class="' + (r.is_subject ? 'pipeline-det-box' : 'pipeline-region-box') + '" style="' + boxStyle(r.box) + '">' +
-        '<span class="pipeline-region-tag">' + r.number + '</span></div>';
-    }).join('') : '<div class="pipeline-det-box" style="' + boxStyle(db) + '"></div>';
-    // Boxes are fractions of the image, so they sit in a frame exactly the
-    // image's size; the caption below must not stretch it.
-    html += '<div class="pipeline-images"><div class="pipeline-img-wrap"><div class="pipeline-img-frame">' +
-        '<img src="/photos/' + photoId + '/full" alt="Detection">' + overlays +
-        (cropBox?.x != null ? '<div class="pipeline-crop-box" style="' + boxStyle(cropBox) + '"></div>' : '') +
-        '</div><div class="pipeline-img-label">Box 1 (bold) is the subject; other numbered boxes are regions ' +
-        'the detector also kept; dashed = crop sent to the classifier for the subject</div>' +
-      '</div></div>' +
+    html += renderDetectionImage(photoId, db, cropBox, regions) +
       '<div style="margin-top:8px;">' +
         '<div class="pipeline-stat">Subject confidence: <b>' + Math.round(Number(data.detection_conf) * 100) + '%</b></div>' +
         '<div class="pipeline-stat">Subject size: <b>' + Math.round((db.w * db.h) * 10000) / 100 + '%</b> of frame</div>' +

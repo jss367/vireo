@@ -1325,6 +1325,9 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   border-radius: 4px;
   display: block;
 }
+.pipeline-img-frame {
+  position: relative;
+}
 .pipeline-img-label {
   font-size: 11px;
   color: var(--text-muted);
@@ -1982,6 +1985,10 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 }
 .vireo-ctx-item:hover:not(.vireo-ctx-disabled) {
   background: var(--bg-tertiary);
+}
+.vireo-ctx-item:focus-visible, .vireo-ctx-chip:focus-visible, #lightboxImg:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 .vireo-ctx-disabled {
   color: var(--text-faint); cursor: default;

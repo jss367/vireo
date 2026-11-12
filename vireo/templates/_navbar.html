@@ -308,7 +308,7 @@
       </div>
     </div>
     <div class="lightbox-transform" id="lightboxTransform">
-      <img id="lightboxImg" src="" alt="">
+      <img id="lightboxImg" src="" alt="" tabindex="0" aria-haspopup="menu" aria-label="Photo preview. Press Shift+F10 for photo actions.">
       <canvas id="lightboxToneCanvas" class="lb-tone-canvas" aria-hidden="true"></canvas>
       <img id="lightboxAdjustmentImage" class="lb-tone-canvas" alt="" aria-hidden="true">
       <img id="lightboxMaskOverlay" class="lb-mask-overlay" src="" alt="">
@@ -358,12 +358,6 @@
     <span class="lb-action-sep" aria-hidden="true"></span>
     <button class="lb-action-btn" id="lightboxInat">
       iNaturalist
-    </button>
-    <button class="lb-action-btn" id="lightboxSimilar">
-      Find Similar
-    </button>
-    <button class="lb-action-btn" id="lightboxInspect">
-      Inspect Pipeline
     </button>
     <span class="lb-action-sep" aria-hidden="true"></span>
     <button class="lb-action-btn" id="lightboxAdjustBtn" aria-expanded="false" title="Quick non-destructive adjustments" data-navbar-on="click:toggleLightboxAdjustPanel">
@@ -551,7 +545,7 @@
 <!-- Pipeline Inspector -->
 <div class="pipeline-overlay" id="pipelineOverlay">
   <div class="pipeline-panel" style="position:relative;">
-    <button class="pipeline-close" data-navbar-on="click:closePipeline">&times;</button>
+    <button class="pipeline-close" aria-label="Close Pipeline Inspector" data-navbar-on="click:closePipeline">&times;</button>
     <h2>Pipeline Inspector</h2>
     <div id="pipelineContent">Loading...</div>
   </div>
@@ -561,7 +555,7 @@
 <!-- Similar Photos -->
 <div class="similar-overlay" id="similarOverlay">
   <div class="similar-panel">
-    <button class="pipeline-close" data-navbar-on="click:closeSimilar">&times;</button>
+    <button class="pipeline-close" aria-label="Close Similar Photos" data-navbar-on="click:closeSimilar">&times;</button>
     <h2>Similar Photos</h2>
     <div id="similarContent">Loading...</div>
   </div>
