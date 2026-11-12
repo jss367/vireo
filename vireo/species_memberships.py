@@ -173,13 +173,20 @@ def candidate_subjects(row):
     }]
 
 
+def _primary_subject(subjects):
+    """Use the retained-region rank even when the primary has no prediction."""
+    if any(_field(s, "subject_rank") is not None for s in subjects):
+        return next((s for s in subjects if _field(s, "subject_rank") == 1), None)
+    return subjects[0] if subjects else None
+
+
 def bucket_opening_subjects(subjects):
     """The subjects whose top prediction may open a species bucket, primary first.
 
     ``subjects`` is in ``subject_evidence_order``. Background-like regions
     never open a bucket unless the user chose the region as the subject.
-    Among the rest, the first localized box is the primary subject and
-    always may; further boxes may only above ``SECONDARY_SUBJECT_FLOOR``
+    Among the rest, the retained primary may always open a bucket; a
+    missing prediction never promotes a secondary. Other boxes may only above ``SECONDARY_SUBJECT_FLOOR``
     and only when they do not span the frame (``subject_spans_frame``); the
     whole-frame row may only when the photo has no localized subject left
     at all.
@@ -190,13 +197,16 @@ def bucket_opening_subjects(subjects):
     ]
     localized = [s for s in eligible if not subject_is_whole_frame(s)]
     if localized:
-        primary, *others = localized
-        return [primary] + [
-            s for s in others
-            if (s.get("detector_confidence") or 0.0) >= SECONDARY_SUBJECT_FLOOR
-            and not subject_spans_frame(s)
+        primary = _primary_subject(localized)
+        return [
+            s for s in localized
+            if s is primary or (
+                (s.get("detector_confidence") or 0.0) >= SECONDARY_SUBJECT_FLOOR
+                and not subject_spans_frame(s)
+            )
         ]
-    return [s for s in eligible if subject_is_whole_frame(s)][:1]
+    primary = _primary_subject(eligible)
+    return [primary] if primary is not None and subject_is_whole_frame(primary) else []
 
 
 def photo_species_memberships(
@@ -292,14 +302,14 @@ def explain_subject_roles(row, canonicalize_species=None):
     opening = {id(s) for s in bucket_opening_subjects(subjects)}
     tags_disagree = bool(tag_keys) and not any(k in tag_keys for _, k in keys)
     localized = [s for s in subjects if not subject_is_whole_frame(s)]
-    primary = localized[0] if localized else None
+    primary = _primary_subject(localized)
     roles = {}
     for subject, key in keys:
         species = canonical(subject["species"])
         if key in tag_keys:
             role = ("tagged", species)
         elif id(subject) in opened:
-            role = ("bucket" if subject is primary or primary is None else "second_species", opened[id(subject)])
+            role = ("bucket" if subject is primary or subject_is_whole_frame(subject) else "second_species", opened[id(subject)])
         elif tags_disagree:
             role = ("tags_disagree", None)
         elif id(subject) in opening:

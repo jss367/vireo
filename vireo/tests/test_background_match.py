@@ -319,3 +319,13 @@ def test_explain_subject_roles_names_why_a_region_opens_nothing():
     # A region the user chose is never called background.
     chosen = explain_subject_roles({"species_names": [], "subject_predictions": [dict(trunk, subject_chosen=True)]})
     assert chosen == {2: ("bucket", "Elf Owl")}
+
+
+def test_missing_rank_one_never_promotes_a_secondary_prediction():
+    weak = dict(_subject("Gecko", 0.92, detector=0.4), subject_rank=2)
+    strip = dict(_subject("Gecko", 0.92, detector=0.8), subject_rank=2, box_w=0.3, box_h=1)
+    bird = dict(_subject("Warbler", 0.95, detector=0.8), subject_rank=3, box_w=0.2, box_h=0.2)
+    assert bucket_opening_subjects([weak]) == []
+    assert bucket_opening_subjects([strip]) == []
+    assert bucket_opening_subjects([strip, bird]) == [bird]
+    assert bucket_opening_subjects([dict(WHOLE, subject_rank=2)]) == []
