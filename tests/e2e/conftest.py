@@ -7,6 +7,7 @@ from PIL import Image
 
 from e2e.module_pages import install_page_module_exposure
 from e2e.navbar_modules import install_navbar_exposure
+from e2e.navigation import install_initial_navigation_retry
 from e2e.threaded_server import start_server, stop_server
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'vireo'))
@@ -124,6 +125,7 @@ def page(browser, page):
     Requests ``browser`` first so the session's browser launches before a
     fixture like ``live_server`` points HOME at a temporary directory (the
     browser binaries are found under HOME)."""
+    page = install_initial_navigation_retry(page)
     return install_page_module_exposure(install_navbar_exposure(page), "browse", "browseState")
 
 
