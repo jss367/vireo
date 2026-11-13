@@ -1,5 +1,7 @@
 """Clipped sensels are rebuilt toward neutral before the linear RAW decode."""
 
+from types import SimpleNamespace
+
 import highlight_reconstruction as hr
 import numpy as np
 import pytest
@@ -123,6 +125,53 @@ def test_bright_unclipped_highlights_are_left_alone(peak, smooth):
     assert levels == [None] * 4
     assert count == 0
     np.testing.assert_array_equal(mosaic, before)
+
+
+def test_camera_metadata_rebuilds_flat_clipped_channels_without_a_histogram_tail():
+    import rawpy
+
+    levels = [WHITE, 15000, 16000, 14500]
+    colors = colors_for((64, 64))
+    mosaic = np.asarray(levels, np.uint16)[colors]
+    raw = SimpleNamespace(
+        raw_type=rawpy.RawType.Flat, raw_pattern=PATTERN, raw_image_visible=mosaic,
+        color_desc=b"RGBG", camera_whitebalance=GAINS, raw_colors_visible=colors,
+        black_level_per_channel=BLACKS, white_level=WHITE,
+        camera_white_level_per_channel=levels,
+    )
+    assert hr.reconstruct_highlights(raw) > 0
+    assert hr.clip_levels(mosaic, PATTERN, 4, WHITE, levels) == levels
+    np.testing.assert_allclose(balanced(mosaic), (WHITE - BLACK) * 2.0, rtol=2e-3)
+
+
+def test_camera_metadata_does_not_lower_a_known_ceiling_to_an_observed_spike():
+    mosaic = np.full((64, 64), 9000, dtype=np.uint16)
+    colors = colors_for(mosaic.shape)
+    mosaic[colors == 1] = np.minimum(np.arange(1024) + 14600, 15000)
+    assert hr.clip_levels(mosaic, PATTERN, 4, WHITE)[1] == 15000
+    levels = hr.clip_levels(mosaic, PATTERN, 4, WHITE, [WHITE] * 4)
+    assert levels == [None] * 4
+    before = mosaic.copy()
+    assert hr.rebuild_clipped(mosaic, colors, PLANES, GAINS, BLACKS, levels) == 0
+    np.testing.assert_array_equal(mosaic, before)
+
+
+@pytest.mark.parametrize("metadata", [None, [], [0, -1, np.nan, np.inf], [65536] * 4])
+def test_missing_or_invalid_camera_levels_keep_scalar_and_histogram_fallback(metadata):
+    mosaic = np.full((64, 64), 15000, dtype=np.uint16)
+    colors = colors_for(mosaic.shape)
+    mosaic[colors == 0] = WHITE
+    mosaic[colors == 1] = np.minimum(np.arange(1024) + 15800, 16240)
+    assert hr.clip_levels(mosaic, PATTERN, 4, WHITE, metadata) == [WHITE, 16240, None, None]
+
+
+def test_partial_camera_levels_fall_back_independently_for_each_channel():
+    mosaic = np.full((64, 64), 15000, dtype=np.uint16)
+    colors = colors_for(mosaic.shape)
+    mosaic[colors == 1] = WHITE
+    mosaic[colors == 2] = WHITE
+    metadata = [15000, 0]  # The remaining channels have no metadata entries.
+    assert hr.clip_levels(mosaic, PATTERN, 4, WHITE, metadata) == [15000, WHITE, WHITE, None]
 
 
 def write_blown_dng(path):

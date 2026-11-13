@@ -53,10 +53,13 @@ def _has_terminal_spike(views, peak, white, size):
             and hist[-1] >= max(16, size * 1e-5, 8 * tail.mean()))
 
 
-def clip_levels(mosaic, pattern, n_colors, white_level):
+def clip_levels(mosaic, pattern, n_colors, white_level, camera_white_levels=None):
     """Each sensor color's ceiling in raw units, or None where it never clips.
 
     ``pattern`` is the repeating color-filter tile at the mosaic's origin.
+    Valid per-channel camera metadata takes precedence over the scalar white
+    level and histogram inference; no populated tail is needed at a known
+    saturation ceiling. Missing or invalid entries use the fallback below.
     Some sensors saturate a channel below the nominal white level (a D850's
     greens stop near 16240 of 16383). Such a channel piles sensels up at its
     own peak, which then stands in for the ceiling only when a narrow terminal
@@ -70,12 +73,18 @@ def clip_levels(mosaic, pattern, n_colors, white_level):
         for col in range(cols):
             sites[int(pattern[row, col])].append(mosaic[row::rows, col::cols])
     levels = []
-    for views in sites:
+    for color, views in enumerate(sites):
         size = sum(view.size for view in views)
         if not size:
             levels.append(None)
             continue
         peak = float(max(view.max() for view in views))
+        camera_level = (camera_white_levels[color] if camera_white_levels is not None
+                        and color < len(camera_white_levels) else None)
+        if (camera_level is not None and np.isfinite(camera_level)
+                and 0 < camera_level <= _SENSEL_MAX):
+            levels.append(float(camera_level) if peak >= camera_level else None)
+            continue
         if peak >= white:
             levels.append(white)
         elif 0.9 * white <= peak and _has_terminal_spike(views, peak, white, size):
@@ -193,6 +202,7 @@ def reconstruct_highlights(raw):
     tile = raw.raw_pattern.shape
     levels = clip_levels(
         mosaic, colors[:tile[0], :tile[1]], len(description), raw.white_level,
+        camera_white_levels=getattr(raw, "camera_white_level_per_channel", None),
     )
     return rebuild_clipped(
         mosaic, colors, planes, gains, list(raw.black_level_per_channel), levels,

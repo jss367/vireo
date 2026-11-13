@@ -99,7 +99,9 @@ Vireo therefore raises clipped sensels in white-balanced camera space:
 - A sensel is only raised, never lowered, and the correction fades in over the
   last tenth below the ceiling. Unclipped photos decode exactly as before.
 
-Each channel's ceiling is the sensor's white level, or the channel's own peak
+Each channel uses valid per-channel saturation metadata when available. A
+flat clipped area at that known ceiling needs no histogram evidence. Otherwise,
+its ceiling is the sensor's scalar white level, or the channel's own peak
 when a narrow terminal histogram spike rises above a populated highlight tail
 just below that (a D850's greens can stop near 16240 of 16383). A flat bright
 field or a smooth peak below white is left alone without that evidence.
