@@ -26,9 +26,6 @@ import numpy as np
 # The correction fades in between these fractions of a channel's ceiling.
 _FADE_START = 0.90
 _FADE_END = 0.98
-# A channel counts as clipping only if its brightest sensel reaches this
-# fraction of its ceiling.
-_CLIPPING_PEAK = 0.98
 # Rows per band. Bounds the float temporaries on a 45 MP mosaic to a few MB
 # each; a multiple of the 2- and 6-row filter tiles so every band starts on
 # the same CFA phase.
@@ -40,13 +37,31 @@ _UNCLIPPED = np.float32(1e12)
 _SENSEL_MAX = 65535
 
 
+def _has_terminal_spike(views, peak, white, size):
+    """Require a narrow spike above a populated tail, not just bright samples.
+
+    A flat bright field is ambiguous without sensor metadata. Conservatively
+    leave it alone unless it reaches the nominal white level. Below white,
+    compare the last histogram bin with eight equally wide preceding bins;
+    several populated bins must lead into the spike.
+    """
+    width = max(1, round(white / 4096))
+    edges = np.arange(peak - 9 * width, peak + width, width)
+    hist = sum((np.histogram(view, bins=edges)[0] for view in views))
+    tail = hist[:-1]
+    return (np.count_nonzero(tail) >= 4
+            and hist[-1] >= max(16, size * 1e-5, 8 * tail.mean()))
+
+
 def clip_levels(mosaic, pattern, n_colors, white_level):
     """Each sensor color's ceiling in raw units, or None where it never clips.
 
     ``pattern`` is the repeating color-filter tile at the mosaic's origin.
     Some sensors saturate a channel below the nominal white level (a D850's
     greens stop near 16240 of 16383). Such a channel piles sensels up at its
-    own peak, which then stands in for the ceiling.
+    own peak, which then stands in for the ceiling only when a narrow terminal
+    histogram spike rises above a populated tail. Flat fields and smooth
+    highlight peaks below white are insufficient evidence of saturation.
     """
     white = float(white_level)
     rows, cols = pattern.shape
@@ -61,12 +76,12 @@ def clip_levels(mosaic, pattern, n_colors, white_level):
             levels.append(None)
             continue
         peak = float(max(view.max() for view in views))
-        level = white
-        if 0.9 * white <= peak < white:
-            piled = sum(np.count_nonzero(view >= peak * 0.995) for view in views)
-            if piled >= max(16, size * 1e-5):
-                level = peak
-        levels.append(level if peak >= _CLIPPING_PEAK * level else None)
+        if peak >= white:
+            levels.append(white)
+        elif 0.9 * white <= peak and _has_terminal_spike(views, peak, white, size):
+            levels.append(peak)
+        else:
+            levels.append(None)
     return levels
 
 

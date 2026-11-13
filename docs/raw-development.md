@@ -100,7 +100,9 @@ Vireo therefore raises clipped sensels in white-balanced camera space:
   last tenth below the ceiling. Unclipped photos decode exactly as before.
 
 Each channel's ceiling is the sensor's white level, or the channel's own peak
-when it piles up just below that (a D850's greens stop near 16240 of 16383).
+when a narrow terminal histogram spike rises above a populated highlight tail
+just below that (a D850's greens can stop near 16240 of 16383). A flat bright
+field or a smooth peak below white is left alone without that evidence.
 The pass adds roughly 0.2 to 0.6 seconds to a 45 MP decode. Render version 12
 invalidates edited caches so existing RAW edits pick it up. Raised values have
 to fit the 16-bit mosaic: a file whose white level is already near 65535 has

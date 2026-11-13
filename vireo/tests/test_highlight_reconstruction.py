@@ -93,9 +93,36 @@ def test_bands_match_a_single_pass(monkeypatch):
 def test_a_channel_that_saturates_below_white_uses_its_own_ceiling():
     mosaic = np.full((64, 64), 9000, dtype=np.uint16)
     colors = colors_for(mosaic.shape)
-    mosaic[(colors == 1) | (colors == 3)] = 16240
+    mosaic[colors == 0] = 12000
+    mosaic[colors == 2] = 14000
+    # A rising highlight hits the green ceiling and piles up there.
+    highlight = np.minimum(np.arange(1024) + 15800, 16240).astype(np.uint16)
+    mosaic[colors == 1] = highlight
+    mosaic[colors == 3] = highlight
     levels = hr.clip_levels(mosaic, PATTERN, 4, WHITE)
     assert levels == [None, 16240.0, None, 16240.0]
+    before = mosaic.copy()
+    assert rebuild(mosaic)[0] > 0
+    np.testing.assert_array_equal(mosaic[colors == 0], before[colors == 0])
+    np.testing.assert_array_equal(mosaic[colors == 2], before[colors == 2])
+
+
+@pytest.mark.parametrize("peak", [15000, 16000, 16240])
+@pytest.mark.parametrize("smooth", [False, True], ids=["flat", "smooth-ramp"])
+def test_bright_unclipped_highlights_are_left_alone(peak, smooth):
+    # The former population threshold mistakes both a bright field and an
+    # ordinary smooth tail for a channel-specific saturation ceiling.
+    values = (np.linspace(BLACK, peak, 4096).astype(np.uint16) if smooth
+              else np.full(4096, peak, dtype=np.uint16))
+    mosaic = np.empty((128, 128), dtype=np.uint16)
+    colors = colors_for(mosaic.shape)
+    for color in range(4):
+        mosaic[colors == color] = values
+    before = mosaic.copy()
+    count, levels = rebuild(mosaic)
+    assert levels == [None] * 4
+    assert count == 0
+    np.testing.assert_array_equal(mosaic, before)
 
 
 def write_blown_dng(path):
