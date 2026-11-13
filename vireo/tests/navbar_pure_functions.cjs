@@ -35,7 +35,12 @@ const helpers = 'navbar-shared-helpers.js';
 test('detection-only pipeline describes the crop without claiming classification ran', () => {
   const content = {innerHTML: ''};
   const ctx = load([
-    ...['boxStyle', 'regionNumbers', 'renderDetectionImage', 'renderDetectionStep', 'renderPipeline'].map(name => fn(inspector, name)),
+    ...[
+      'boxStyle', 'regionNumbers', 'highlightsRoleText', 'regionDetectorText', 'renderRegionTable',
+      'renderDetectionImage', 'renderDetectionStep', 'formatMatchScore', 'renderPredictionTable',
+      'renderOriginalStep', 'renderCropStep', 'renderPredictionContext', 'renderNoPredictionsNote',
+      'renderClassificationStep', 'renderQualityStep', 'renderKeywordsStep', 'renderPipeline',
+    ].map(name => fn(inspector, name)),
   ], {
     document: {getElementById: () => content},
     escapeHtml: value => String(value),
@@ -649,6 +654,8 @@ test('checkNewImages shows zero-count local-copy exclusions and allows dismissal
   let localOnly = true;
   const ctx = load([
     fn(banners, 'checkNewImages'),
+    fn(banners, '_renderNewImagesBanner'),
+    fn(banners, '_finishNewImagesRecheck'),
     fn(banners, '_localCopiesSentence'),
     fn(banners, '_appendBannerTitlePaths'),
   ], {
