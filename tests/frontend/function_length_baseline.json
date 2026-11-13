@@ -37,10 +37,6 @@
   "vireo/static/misses/scope.js:applyLegacyMissScopes": 114,
   "vireo/static/move/quick-move-preview.js:updateQuickMovePreview": 114,
   "vireo/static/move/quick-move-start.js:startQuickMove": 146,
-  "vireo/static/navbar-folder-banners.js:checkNewImages": 151,
-  "vireo/static/navbar-folder-banners.js:loadMissingFolders": 173,
-  "vireo/static/navbar-pipeline-inspector.js:renderPipeline": 128,
-  "vireo/static/navbar-shared-helpers.js:init": 103,
   "vireo/static/photo-editor/context-menu.js:buildPhotoEditorContextMenu": 155,
   "vireo/static/photo-editor/crop-drag.js:initCropDrag": 158,
   "vireo/static/pipeline-rapid-review/apply.js:applyCurrent": 315,
@@ -67,10 +63,5 @@
   "vireo/static/settings/models.js:loadModels": 114,
   "vireo/static/settings/nas-setup.js:_nwRunSshCheck": 105,
   "vireo/static/settings/nas-setup.js:nwArchiveStep": 112,
-  "vireo/static/settings/system-tools.js:downloadDarktable": 170,
-  "vireo/static/vireo-batch-edits.js:open": 127,
-  "vireo/static/vireo-browse-compare.js:create": 340,
-  "vireo/static/vireo-dialog.js:create": 104,
-  "vireo/static/vireo-filter.js:installEvents": 398,
-  "vireo/static/vireo-workspace-switcher.js:create": 225
+  "vireo/static/settings/system-tools.js:downloadDarktable": 170
 }

@@ -365,28 +365,22 @@ function renderPredictionTable(predictions, numbers) {
   return html + '</table>';
 }
 
-/** @param {NavPipelinePhotoData} data @param {number} photoId */
-function renderPipeline(data, photoId) {
-  var c = /** @type {HTMLElement} */ (document.getElementById('pipelineContent'));
-  var diag = data.classification_diagnostics || {};
-  var detectorThreshold = diag.detector_confidence_threshold != null ? diag.detector_confidence_threshold : 0.2;
-  var detectorThresholdPct = Math.round(detectorThreshold * 100);
-  var maxDetectorPct = diag.max_detector_confidence != null ? Math.round(diag.max_detector_confidence * 100) : null;
-  var html = '<div class="pipeline-steps">';
-
-  // Step 1: Original image
+/** @param {NavPipelinePhotoData} data */
+function renderOriginalStep(data) {
+  var html = '';
   html += '<div class="pipeline-step">' +
     '<div class="pipeline-step-header"><span class="pipeline-step-num">1</span><span class="pipeline-step-title">Original Image</span></div>' +
     '<div class="pipeline-stat"><b>' + escapeHtml(data.filename) + '</b></div>' +
     (data.width ? '<div class="pipeline-stat">' + data.width + ' &times; ' + data.height + '</div>' : '') +
     (data.timestamp ? '<div class="pipeline-stat">' + escapeHtml(window.VireoTime.captureDateTime(data.timestamp, true)) + '</div>' : '') +
     '</div>';
+  return html;
+}
 
-  // Step 2: Detection
+/** @param {NavPipelinePhotoData} data @param {number} photoId */
+function renderCropStep(data, photoId) {
   var hasDetection = data.detection_box && data.detection_box.x != null;
-  html += renderDetectionStep(data, photoId);
-
-  // Step 3: Classification crop
+  var html = '';
   html += '<div class="pipeline-step">' +
     '<div class="pipeline-step-header"><span class="pipeline-step-num">3</span><span class="pipeline-step-title">Classification Input (BioCLIP)</span></div>' +
     '<div class="pipeline-images">' +
@@ -396,9 +390,84 @@ function renderPipeline(data, photoId) {
       '</div>' +
     '</div>' +
   '</div>';
+  return html;
+}
 
-  // Step 4: Predictions
-  html += '<div class="pipeline-step">' +
+// The taxonomy path and burst-vote lines under the prediction table.
+/** @param {NavPipelinePrediction[]} predictions */
+function renderPredictionContext(predictions) {
+  var html = '';
+  // Taxonomy hierarchy
+  var withTax = predictions.find(function(p) { return p.taxonomy_order; });
+  if (withTax) {
+    var parts = [];
+    if (withTax.taxonomy_kingdom) parts.push(withTax.taxonomy_kingdom);
+    if (withTax.taxonomy_phylum) parts.push(withTax.taxonomy_phylum);
+    if (withTax.taxonomy_class) parts.push(withTax.taxonomy_class);
+    if (withTax.taxonomy_order) parts.push(withTax.taxonomy_order);
+    if (withTax.taxonomy_family) parts.push(withTax.taxonomy_family);
+    if (withTax.taxonomy_genus) parts.push(withTax.taxonomy_genus);
+    html += '<div style="margin-top:8px;font-size:12px;color:var(--text-dim);">' +
+      '<span style="color:var(--text-muted);">Taxonomy:</span> ' +
+      parts.map(escapeHtml).join(' &rsaquo; ') +
+    '</div>';
+  }
+
+  // Group info
+  var grouped = predictions.find(function(p) { return p.group_id; });
+  if (grouped) {
+    html += '<div style="margin-top:8px;">' +
+      '<div class="pipeline-stat">Burst group: <b>' + grouped.group_id + '</b></div>' +
+      '<div class="pipeline-stat">Votes: <b>' + grouped.vote_count + '/' + grouped.total_votes + '</b></div>' +
+    '</div>';
+  }
+  return html;
+}
+
+// Why no prediction is listed: which stage ran, and what hid its output.
+/** @param {NonNullable<NavPipelinePhotoData['classification_diagnostics']>} diag */
+function renderNoPredictionsNote(diag) {
+  var detectorThreshold = diag.detector_confidence_threshold != null ? diag.detector_confidence_threshold : 0.2;
+  var detectorThresholdPct = Math.round(detectorThreshold * 100);
+  var maxDetectorPct = diag.max_detector_confidence != null ? Math.round(diag.max_detector_confidence * 100) : null;
+  var html = '';
+  var currentPreds = diag.current_prediction_count || 0;
+  var hiddenPreds = diag.hidden_prediction_count || 0;
+  var classifierRuns = diag.classifier_run_count || 0;
+  var fullImagePreds = diag.full_image_prediction_count || 0;
+  var fullImageRuns = diag.full_image_classifier_run_count || 0;
+  if (hiddenPreds > 0) {
+    html += '<p style="color:var(--text-dim);font-size:13px;">Classification ran, but ' +
+      hiddenPreds + ' stored prediction' + (hiddenPreds === 1 ? ' is' : 's are') +
+      ' attached to detection' + (hiddenPreds === 1 ? '' : 's') +
+      ' below the current detector threshold' +
+      (maxDetectorPct != null ? ' (best detection ' + maxDetectorPct + '%, threshold ' + detectorThresholdPct + '%)' : '') + '.</p>';
+    // Both conditions routinely hold at once — a weak box plus a full-image
+    // pass. Naming only the first left the species the user is looking at
+    // unexplained, because it usually came from the full-image run this
+    // table excludes. The per-run table below lists them.
+    if (fullImagePreds > 0) {
+      html += '<p style="color:var(--text-dim);font-size:13px;">' + fullImagePreds +
+        ' further prediction' + (fullImagePreds === 1 ? '' : 's') +
+        ' came from classifying the full image, which this table excludes.</p>';
+    }
+  } else if (fullImagePreds > 0) {
+    html += '<p style="color:var(--text-dim);font-size:13px;">Classification ran using the full image because no detector box was available.</p>';
+  } else if (fullImageRuns > 0) {
+    html += '<p style="color:var(--text-dim);font-size:13px;">Classification ran using the full image, but no predictions were stored above the classification threshold.</p>';
+  } else if (classifierRuns > 0 && currentPreds === 0) {
+    html += '<p style="color:var(--text-dim);font-size:13px;">Classification ran, but no predictions were stored above the classification threshold.</p>';
+  } else if ((diag.hidden_detection_count || 0) > 0) {
+    html += '<p style="color:var(--text-dim);font-size:13px;">No predictions visible because all stored detections are below the current detector threshold.</p>';
+  } else {
+    html += '<p style="color:var(--text-dim);font-size:13px;">No predictions yet &mdash; run classification first</p>';
+  }
+  return html;
+}
+
+/** @param {NavPipelinePhotoData} data */
+function renderClassificationStep(data) {
+  var html = '<div class="pipeline-step">' +
     '<div class="pipeline-step-header"><span class="pipeline-step-num">4</span><span class="pipeline-step-title">Classification Results</span></div>';
 
   // The confidence column below is a softmax over whichever label list ran,
@@ -410,68 +479,17 @@ function renderPipeline(data, photoId) {
 
   if (data.predictions && data.predictions.length > 0) {
     html += renderPredictionTable(data.predictions, regionNumbers(data.regions));
-
-    // Taxonomy hierarchy
-    var withTax = data.predictions.find(function(p) { return p.taxonomy_order; });
-    if (withTax) {
-      var parts = [];
-      if (withTax.taxonomy_kingdom) parts.push(withTax.taxonomy_kingdom);
-      if (withTax.taxonomy_phylum) parts.push(withTax.taxonomy_phylum);
-      if (withTax.taxonomy_class) parts.push(withTax.taxonomy_class);
-      if (withTax.taxonomy_order) parts.push(withTax.taxonomy_order);
-      if (withTax.taxonomy_family) parts.push(withTax.taxonomy_family);
-      if (withTax.taxonomy_genus) parts.push(withTax.taxonomy_genus);
-      html += '<div style="margin-top:8px;font-size:12px;color:var(--text-dim);">' +
-        '<span style="color:var(--text-muted);">Taxonomy:</span> ' +
-        parts.map(escapeHtml).join(' &rsaquo; ') +
-      '</div>';
-    }
-
-    // Group info
-    var grouped = data.predictions.find(function(p) { return p.group_id; });
-    if (grouped) {
-      html += '<div style="margin-top:8px;">' +
-        '<div class="pipeline-stat">Burst group: <b>' + grouped.group_id + '</b></div>' +
-        '<div class="pipeline-stat">Votes: <b>' + grouped.vote_count + '/' + grouped.total_votes + '</b></div>' +
-      '</div>';
-    }
+    html += renderPredictionContext(data.predictions);
   } else {
-    var currentPreds = diag.current_prediction_count || 0;
-    var hiddenPreds = diag.hidden_prediction_count || 0;
-    var classifierRuns = diag.classifier_run_count || 0;
-    var fullImagePreds = diag.full_image_prediction_count || 0;
-    var fullImageRuns = diag.full_image_classifier_run_count || 0;
-    if (hiddenPreds > 0) {
-      html += '<p style="color:var(--text-dim);font-size:13px;">Classification ran, but ' +
-        hiddenPreds + ' stored prediction' + (hiddenPreds === 1 ? ' is' : 's are') +
-        ' attached to detection' + (hiddenPreds === 1 ? '' : 's') +
-        ' below the current detector threshold' +
-        (maxDetectorPct != null ? ' (best detection ' + maxDetectorPct + '%, threshold ' + detectorThresholdPct + '%)' : '') + '.</p>';
-      // Both conditions routinely hold at once — a weak box plus a full-image
-      // pass. Naming only the first left the species the user is looking at
-      // unexplained, because it usually came from the full-image run this
-      // table excludes. The per-run table below lists them.
-      if (fullImagePreds > 0) {
-        html += '<p style="color:var(--text-dim);font-size:13px;">' + fullImagePreds +
-          ' further prediction' + (fullImagePreds === 1 ? '' : 's') +
-          ' came from classifying the full image, which this table excludes.</p>';
-      }
-    } else if (fullImagePreds > 0) {
-      html += '<p style="color:var(--text-dim);font-size:13px;">Classification ran using the full image because no detector box was available.</p>';
-    } else if (fullImageRuns > 0) {
-      html += '<p style="color:var(--text-dim);font-size:13px;">Classification ran using the full image, but no predictions were stored above the classification threshold.</p>';
-    } else if (classifierRuns > 0 && currentPreds === 0) {
-      html += '<p style="color:var(--text-dim);font-size:13px;">Classification ran, but no predictions were stored above the classification threshold.</p>';
-    } else if ((diag.hidden_detection_count || 0) > 0) {
-      html += '<p style="color:var(--text-dim);font-size:13px;">No predictions visible because all stored detections are below the current detector threshold.</p>';
-    } else {
-      html += '<p style="color:var(--text-dim);font-size:13px;">No predictions yet &mdash; run classification first</p>';
-    }
+    html += renderNoPredictionsNote(data.classification_diagnostics || {});
   }
   html += renderMatchScoreTable(data.match_scores, regionNumbers(data.regions));
-  html += '</div>';
+  return html + '</div>';
+}
 
-  // Step 5: Quality scoring
+/** @param {NavPipelinePhotoData} data */
+function renderQualityStep(data) {
+  var html = '';
   html += '<div class="pipeline-step">' +
     '<div class="pipeline-step-header"><span class="pipeline-step-num">5</span><span class="pipeline-step-title">Quality Scoring</span></div>' +
     '<div class="pipeline-stat">Overall sharpness: <b>' + (data.sharpness != null ? Math.round(data.sharpness) : 'N/A') + '</b></div>' +
@@ -479,7 +497,12 @@ function renderPipeline(data, photoId) {
     '<div class="pipeline-stat">Quality score: <b>' + (data.quality_score != null ? data.quality_score : 'N/A') + '</b></div>' +
   '</div>';
 
-  // Step 6: Keywords
+  return html;
+}
+
+/** @param {NavPipelinePhotoData} data */
+function renderKeywordsStep(data) {
+  var html = '';
   if (data.keywords && data.keywords.length > 0) {
     html += '<div class="pipeline-step">' +
       '<div class="pipeline-step-header"><span class="pipeline-step-num">6</span><span class="pipeline-step-title">Current Keywords</span></div>' +
@@ -491,6 +514,18 @@ function renderPipeline(data, photoId) {
     html += '</div></div>';
   }
 
-  html += '</div>';
-  c.innerHTML = html;
+  return html;
+}
+
+/** @param {NavPipelinePhotoData} data @param {number} photoId */
+function renderPipeline(data, photoId) {
+  var c = /** @type {HTMLElement} */ (document.getElementById('pipelineContent'));
+  c.innerHTML = '<div class="pipeline-steps">' +
+    renderOriginalStep(data) +
+    renderDetectionStep(data, photoId) +
+    renderCropStep(data, photoId) +
+    renderClassificationStep(data) +
+    renderQualityStep(data) +
+    renderKeywordsStep(data) +
+    '</div>';
 }

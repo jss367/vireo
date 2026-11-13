@@ -515,6 +515,94 @@ function _newImagesAnswersRecheck(startInvalidated) {
     || startInvalidated === _newImagesRecheckToken;
 }
 
+// The manual "Check again" got its answer: hand the button back, unless a
+// forced re-poll is queued behind this one and will answer it instead.
+/** @param {number} startInvalidated */
+function _finishNewImagesRecheck(startInvalidated) {
+  if (!_newImagesForcedRerun && _newImagesAnswersRecheck(startInvalidated)) {
+    _newImagesRecheckToken = 0;
+    _setNewImagesRecheckBusy(false);
+  }
+}
+
+// Show, reword or hide the new-images banner for a finished check. Returns
+// false when the banner is not on this page.
+/** @param {NavNewImagesPayload} data */
+function _renderNewImagesBanner(data) {
+  const banner = /** @type {HTMLElement} */ (document.getElementById('newImagesBanner'));
+  const msg = /** @type {HTMLElement} */ (document.getElementById('newImagesMsg'));
+  if (!banner || !msg) return false;
+  const wsId = (data && data.workspace_id != null) ? String(data.workspace_id) : '';
+
+  // Count dropping to zero means the user resolved the backlog (e.g. ran a
+  // scan / import). Clear any prior dismissal so a future non-zero count is
+  // treated as fresh news — without this, the exact-match suppression
+  // would keep "20 === 20" active through the round-trip dismiss-20 ->
+  // scan-to-0 -> import-20-again, leaving the banner hidden when it
+  // should show.
+  // Roots the walk could not check because their volume is offline. The
+  // count above covers only the reachable roots, so the banner must say
+  // so rather than present a partial number as the whole truth.
+  /** @type {string[]} */ const unreachable = Array.isArray(data.unreachable_roots) ? data.unreachable_roots : [];
+  // Folders whose originals are staged as a local copy (Work Locally). The
+  // walk leaves them out -- the catalog knows those photos by their local
+  // path, and an import of them is refused until the copy is synced or
+  // discarded -- so the count does not cover them and the banner says so.
+  /** @type {string[]} */ const localCopies = Array.isArray(data.local_copy_excluded) ? data.local_copy_excluded : [];
+  const uncheckedRoots = [
+    ...unreachable.map(path => 'offline:' + path),
+    ...localCopies.map(path => 'local:' + path),
+  ];
+  const cta = /** @type {HTMLElement | null} */ (banner.querySelector('.banner-cta'));
+
+  // Only a *real* zero — every root checked, nothing new — resets the
+  // dismissal. A zero with offline roots is "unknown", not "resolved".
+  if (data.new_count === 0 && !uncheckedRoots.length && wsId !== '') {
+    sessionStorage.removeItem(_newImagesDismissKey(wsId));
+    sessionStorage.removeItem(_newImagesOfflineDismissKey(wsId));
+  }
+
+  banner.dataset.ws = wsId;
+  if (uncheckedRoots.length) {
+    banner.dataset.offline = _offlineRootsKey(uncheckedRoots);
+  } else {
+    delete banner.dataset.offline;
+  }
+
+  if (data.new_count > 0 && wsId !== '' && !_isNewImagesDismissed(wsId, data.new_count, uncheckedRoots)) {
+    const s = data.new_count === 1 ? '' : 's';
+    let text = `${data.new_count} new image${s} detected in your registered folders.`;
+    if (unreachable.length) {
+      text += ` ${_offlineRootsPhrase(unreachable)} offline and not checked.`;
+    }
+    text += _localCopiesSentence(localCopies);
+    msg.textContent = text;
+    if (cta) cta.style.display = '';
+    _applyOfflineBannerDetail(unreachable, data.checked_at);
+    _appendBannerTitlePaths(localCopies);
+    banner.dataset.count = String(data.new_count);
+    banner.style.display = 'flex';
+  } else if (data.new_count === 0 && uncheckedRoots.length && wsId !== '' && !_isNewImagesDismissed(wsId, 0, uncheckedRoots)) {
+    // Nothing importable was found, but that is not a real zero: at least
+    // one registered folder is on a volume that is offline right now.
+    // Say that instead of silently hiding, and offer nothing to import.
+    // (Gated on a zero count: a dismissed *positive* banner with offline
+    // roots must stay dismissed, not fall through to this notice.)
+    msg.textContent = (unreachable.length
+      ? `Couldn't check for new images: ${_offlineRootsPhrase(unreachable)} offline.`
+      : 'No new images found in the checked folders.')
+      + _localCopiesSentence(localCopies);
+    if (cta) cta.style.display = 'none';
+    _applyOfflineBannerDetail(unreachable, data.checked_at);
+    _appendBannerTitlePaths(localCopies);
+    banner.dataset.count = '0';
+    banner.style.display = 'flex';
+  } else {
+    banner.style.display = 'none';
+  }
+  return true;
+}
+
 /** @param {{manualRecheck?: boolean; answersRecheck?: boolean; force?: boolean} | undefined} [options] */
 export async function checkNewImages(options) {
   if (_newImagesInFlight) {
@@ -563,92 +651,15 @@ export async function checkNewImages(options) {
     if (data && data.error) {
       const banner = /** @type {HTMLElement} */ (document.getElementById('newImagesBanner'));
       if (banner) banner.style.display = 'none';
-      if (!_newImagesForcedRerun
-          && _newImagesAnswersRecheck(startInvalidated)) {
-        _newImagesRecheckToken = 0;
-        _setNewImagesRecheckBusy(false);
-      }
+      _finishNewImagesRecheck(startInvalidated);
       return;
     }
-    const banner = /** @type {HTMLElement} */ (document.getElementById('newImagesBanner'));
-    const msg = /** @type {HTMLElement} */ (document.getElementById('newImagesMsg'));
-    if (!banner || !msg) return;
-    const wsId = (data && data.workspace_id != null) ? String(data.workspace_id) : '';
-
-    // Count dropping to zero means the user resolved the backlog (e.g. ran a
-    // scan / import). Clear any prior dismissal so a future non-zero count is
-    // treated as fresh news — without this, the exact-match suppression
-    // would keep "20 === 20" active through the round-trip dismiss-20 ->
-    // scan-to-0 -> import-20-again, leaving the banner hidden when it
-    // should show.
-    // Roots the walk could not check because their volume is offline. The
-    // count above covers only the reachable roots, so the banner must say
-    // so rather than present a partial number as the whole truth.
-    /** @type {string[]} */ const unreachable = Array.isArray(data.unreachable_roots) ? data.unreachable_roots : [];
-    // Folders whose originals are staged as a local copy (Work Locally). The
-    // walk leaves them out -- the catalog knows those photos by their local
-    // path, and an import of them is refused until the copy is synced or
-    // discarded -- so the count does not cover them and the banner says so.
-    /** @type {string[]} */ const localCopies = Array.isArray(data.local_copy_excluded) ? data.local_copy_excluded : [];
-    const uncheckedRoots = [
-      ...unreachable.map(path => 'offline:' + path),
-      ...localCopies.map(path => 'local:' + path),
-    ];
-    const cta = /** @type {HTMLElement | null} */ (banner.querySelector('.banner-cta'));
-
-    // Only a *real* zero — every root checked, nothing new — resets the
-    // dismissal. A zero with offline roots is "unknown", not "resolved".
-    if (data.new_count === 0 && !uncheckedRoots.length && wsId !== '') {
-      sessionStorage.removeItem(_newImagesDismissKey(wsId));
-      sessionStorage.removeItem(_newImagesOfflineDismissKey(wsId));
-    }
-
-    banner.dataset.ws = wsId;
-    if (uncheckedRoots.length) {
-      banner.dataset.offline = _offlineRootsKey(uncheckedRoots);
-    } else {
-      delete banner.dataset.offline;
-    }
-
-    if (data.new_count > 0 && wsId !== '' && !_isNewImagesDismissed(wsId, data.new_count, uncheckedRoots)) {
-      const s = data.new_count === 1 ? '' : 's';
-      let text = `${data.new_count} new image${s} detected in your registered folders.`;
-      if (unreachable.length) {
-        text += ` ${_offlineRootsPhrase(unreachable)} offline and not checked.`;
-      }
-      text += _localCopiesSentence(localCopies);
-      msg.textContent = text;
-      if (cta) cta.style.display = '';
-      _applyOfflineBannerDetail(unreachable, data.checked_at);
-      _appendBannerTitlePaths(localCopies);
-      banner.dataset.count = String(data.new_count);
-      banner.style.display = 'flex';
-    } else if (data.new_count === 0 && uncheckedRoots.length && wsId !== '' && !_isNewImagesDismissed(wsId, 0, uncheckedRoots)) {
-      // Nothing importable was found, but that is not a real zero: at least
-      // one registered folder is on a volume that is offline right now.
-      // Say that instead of silently hiding, and offer nothing to import.
-      // (Gated on a zero count: a dismissed *positive* banner with offline
-      // roots must stay dismissed, not fall through to this notice.)
-      msg.textContent = (unreachable.length
-        ? `Couldn't check for new images: ${_offlineRootsPhrase(unreachable)} offline.`
-        : 'No new images found in the checked folders.')
-        + _localCopiesSentence(localCopies);
-      if (cta) cta.style.display = 'none';
-      _applyOfflineBannerDetail(unreachable, data.checked_at);
-      _appendBannerTitlePaths(localCopies);
-      banner.dataset.count = '0';
-      banner.style.display = 'flex';
-    } else {
-      banner.style.display = 'none';
-    }
+    if (!_renderNewImagesBanner(data)) return;
     // A payload we could render is a finished answer, so the manual
     // "Check again" is done regardless of which branch above ran — unless a
     // forced re-poll is queued behind this one, in which case this payload
     // predates the recheck and the button is still working.
-    if (!_newImagesForcedRerun && _newImagesAnswersRecheck(startInvalidated)) {
-      _newImagesRecheckToken = 0;
-      _setNewImagesRecheckBusy(false);
-    }
+    _finishNewImagesRecheck(startInvalidated);
   } catch (e) {
     // Network error or malformed payload: the recheck produced no answer,
     // so hand the button back rather than leaving it disabled.
@@ -954,6 +965,143 @@ export function closeMissingFoldersModal() {
   checkMissingFolders();
 }
 
+// Take a /api/folders/check-health response as the current folder health:
+// the poll snapshot, the page's folder-health event and the banner. Returns
+// false, changing nothing, when a newer check has superseded this one.
+/** @param {{missing: NavMissingFolder[]; folder_health_version?: number; changed?: number; workspace_changed?: number}} data @param {number} myMutationGen */
+function _adoptFolderHealthCheck(data, myMutationGen) {
+  const folders = data.missing;
+  const serverVersion = _parseFolderHealthVersion(
+    data.folder_health_version);
+  // Folder health is part of the effective photo dataset: ok→missing hides
+  // a folder's photos, while missing→ok makes them available again. Notify
+  // the current page so a long-lived Browse view does not keep showing the
+  // pre-check empty grid after a drive or network share reconnects.
+  //
+  // Dispatch on the workspace-scoped missing-ID transition rather than
+  // ``data.changed``, for two reasons:
+  //   * ``check_folder_health()`` scans every folder in the database and
+  //     returns a global change count, so a flip in another workspace's
+  //     folder would trigger a needless Browse reset here — clearing the
+  //     user's active selection and detail view even though the active
+  //     dataset did not change.
+  //   * When the modal is used to relocate a missing folder, the
+  //     ``/api/folders/<id>/relocate`` endpoint has already flipped the
+  //     folder to ``ok`` by the time this POST runs, so ``data.changed``
+  //     is zero — but the workspace's missing set did change and Browse
+  //     still needs to repopulate.
+  // A newer POST superseded this one (rare — modal reopened before this
+  // POST finished). Skip *everything* below — snapshot, dispatch,
+  // banner, modal rendering. The newer POST is the freshness authority
+  // and will paint the correct rows/error when it settles; letting a
+  // stale POST run past its guard would overwrite the newer POST's
+  // "Checking folders…" placeholder with pre-mutation rows or a false
+  // failure message.
+  //
+  // But *client-side* issuance order isn't a freshness guarantee for
+  // /api/folders/check-health, which mutates the DB and then reads the
+  // post-mutation missing set: if the filesystem changed between the
+  // two server-side scans, the discarded response can represent the
+  // final committed state while the newer-issued POST's already-
+  // dispatched result is now stale. Without a reconciliation, the
+  // snapshot, banner, and Browse grid would stay wrong until the
+  // ten-minute poll. Schedule a poll to fire once every in-flight POST
+  // has settled — the same wait-for-settle helper the catch path uses —
+  // so one GET reconciles with whatever the server actually committed
+  // last.
+  if (myMutationGen !== missingFolders.mutationGen) {
+    _scheduleMissingFoldersRecovery();
+    return false;
+  }
+  if (missingFolders.serverVersion !== null && serverVersion !== null &&
+      serverVersion < missingFolders.serverVersion) {
+    _scheduleMissingFoldersRecovery();
+    return false;
+  }
+  const prevIds = missingFolders.lastIds;
+  const currentIds = folders.map(f => f.id).sort((a, b) => a - b);
+  // Keep the poll snapshot in sync with what this POST just observed
+  // on the server — closeMissingFoldersModal() and the 10-minute
+  // interval both call checkMissingFolders() next, and without this
+  // the poll would see (last-poll ≠ post-POST) and fire a second
+  // redundant vireo:folder-health-changed for the same transition.
+  missingFolders.lastIds = currentIds;
+  if (serverVersion !== null) missingFolders.serverVersion = serverVersion;
+  missingFolders.snapshotVersion++;
+  const dispatched = _dispatchFolderHealthChangeFromIds(
+    prevIds, currentIds, 'check-health');
+  // Narrow initial-load race: the user opened this modal before the
+  // page-load ``checkMissingFolders()`` finished AND before /api/browse/init
+  // seeded the snapshot, so no ID baseline exists yet. A status flip in the
+  // active workspace still needs to reach Browse in that window, so gate on
+  // ``workspace_changed`` (server-side
+  // computed pre-vs-post-check diff of THIS workspace's missing set)
+  // instead of ``data.changed`` (a global count across all workspaces).
+  // Without the workspace-scoped gate this fallback would fire for a
+  // cross-workspace flip and blow away the active selection / detail view
+  // for a transition that never touched the active dataset.
+  if (!dispatched && prevIds === null && data.workspace_changed) {
+    document.dispatchEvent(new CustomEvent('vireo:folder-health-changed', {
+      detail: { restored: [], wentMissing: [], source: 'check-health' },
+    }));
+  }
+  // Update the banner directly from this POST's authoritative response
+  // rather than tail-calling checkMissingFolders(). See the helper's
+  // comment for the race that makes the delegation unrecoverable when
+  // the modal is closed mid-POST. Runs for
+  // both empty and non-empty results so the banner is right regardless
+  // of whether closeMissingFoldersModal's own GET was rejected by our
+  // in-flight guard.
+  _updateMissingFoldersBanner(folders);
+  return true;
+}
+
+// The Missing Folders modal's rows, or its all-clear line.
+/** @param {HTMLElement} container @param {NavMissingFolder[]} folders */
+function _renderMissingFolderRows(container, folders) {
+  _missingFoldersRows = folders;
+  /** @type {HTMLButtonElement} */ (document.getElementById('missingFoldersRemoveAllBtn')).style.display = folders.length ? '' : 'none';
+  if (folders.length === 0) {
+    container.textContent = '';
+    const ok = document.createElement('p');
+    ok.style.cssText = 'color:#4caf50;display:flex;align-items:center;gap:8px;font-weight:500;';
+    const check = document.createElement('span');
+    check.textContent = '✓';
+    check.style.cssText = 'font-size:18px;line-height:1;';
+    ok.append(check, document.createTextNode('All folders are accounted for.'));
+    container.appendChild(ok);
+    return;
+  }
+  // Paths are user-controlled: build rows with DOM methods instead of
+  // interpolating into HTML/onclick strings — a quote, backslash, or
+  // angle bracket in a folder name broke the inline handlers (and could
+  // inject markup). Closures carry the path values safely.
+  container.textContent = '';
+  folders.forEach(f => {
+    const row = document.createElement('div');
+    row.className = 'missing-folder-row';
+    const pathEl = document.createElement('div');
+    pathEl.className = 'missing-folder-path';
+    pathEl.title = f.path;
+    pathEl.textContent = f.path;
+    const countEl = document.createElement('div');
+    countEl.className = 'missing-folder-count';
+    countEl.textContent = `${f.photo_count} photo${f.photo_count !== 1 ? 's' : ''}`;
+    const actions = document.createElement('div');
+    actions.className = 'missing-folder-actions';
+    const relocateBtn = document.createElement('button');
+    relocateBtn.textContent = 'Relocate';
+    relocateBtn.addEventListener('click', () => startRelocate(f.id, f.path));
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'danger';
+    removeBtn.textContent = 'Remove';
+    removeBtn.addEventListener('click', () => startRemoveFolder(f.id, f.path, f.photo_count || 0));
+    actions.append(relocateBtn, removeBtn);
+    row.append(pathEl, countEl, actions);
+    container.appendChild(row);
+  });
+}
+
 export async function loadMissingFolders() {
   if (_missingFoldersRemoving) return;
   _missingFoldersRows = [];
@@ -972,130 +1120,8 @@ export async function loadMissingFolders() {
     const resp = await fetch('/api/folders/check-health', { method: 'POST' });
     if (!resp.ok) throw new Error('check failed');
     /** @type {{missing: NavMissingFolder[]; folder_health_version?: number; changed?: number; workspace_changed?: number}} */ const data = await resp.json();
-    const folders = data.missing;
-    const serverVersion = _parseFolderHealthVersion(
-      data.folder_health_version);
-    // Folder health is part of the effective photo dataset: ok→missing hides
-    // a folder's photos, while missing→ok makes them available again. Notify
-    // the current page so a long-lived Browse view does not keep showing the
-    // pre-check empty grid after a drive or network share reconnects.
-    //
-    // Dispatch on the workspace-scoped missing-ID transition rather than
-    // ``data.changed``, for two reasons:
-    //   * ``check_folder_health()`` scans every folder in the database and
-    //     returns a global change count, so a flip in another workspace's
-    //     folder would trigger a needless Browse reset here — clearing the
-    //     user's active selection and detail view even though the active
-    //     dataset did not change.
-    //   * When the modal is used to relocate a missing folder, the
-    //     ``/api/folders/<id>/relocate`` endpoint has already flipped the
-    //     folder to ``ok`` by the time this POST runs, so ``data.changed``
-    //     is zero — but the workspace's missing set did change and Browse
-    //     still needs to repopulate.
-    // A newer POST superseded this one (rare — modal reopened before this
-    // POST finished). Skip *everything* below — snapshot, dispatch,
-    // banner, modal rendering. The newer POST is the freshness authority
-    // and will paint the correct rows/error when it settles; letting a
-    // stale POST run past its guard would overwrite the newer POST's
-    // "Checking folders…" placeholder with pre-mutation rows or a false
-    // failure message.
-    //
-    // But *client-side* issuance order isn't a freshness guarantee for
-    // /api/folders/check-health, which mutates the DB and then reads the
-    // post-mutation missing set: if the filesystem changed between the
-    // two server-side scans, the discarded response can represent the
-    // final committed state while the newer-issued POST's already-
-    // dispatched result is now stale. Without a reconciliation, the
-    // snapshot, banner, and Browse grid would stay wrong until the
-    // ten-minute poll. Schedule a poll to fire once every in-flight POST
-    // has settled — the same wait-for-settle helper the catch path uses —
-    // so one GET reconciles with whatever the server actually committed
-    // last.
-    if (myMutationGen !== missingFolders.mutationGen) {
-      _scheduleMissingFoldersRecovery();
-      return;
-    }
-    if (missingFolders.serverVersion !== null && serverVersion !== null &&
-        serverVersion < missingFolders.serverVersion) {
-      _scheduleMissingFoldersRecovery();
-      return;
-    }
-    const prevIds = missingFolders.lastIds;
-    const currentIds = folders.map(f => f.id).sort((a, b) => a - b);
-    // Keep the poll snapshot in sync with what this POST just observed
-    // on the server — closeMissingFoldersModal() and the 10-minute
-    // interval both call checkMissingFolders() next, and without this
-    // the poll would see (last-poll ≠ post-POST) and fire a second
-    // redundant vireo:folder-health-changed for the same transition.
-    missingFolders.lastIds = currentIds;
-    if (serverVersion !== null) missingFolders.serverVersion = serverVersion;
-    missingFolders.snapshotVersion++;
-    const dispatched = _dispatchFolderHealthChangeFromIds(
-      prevIds, currentIds, 'check-health');
-    // Narrow initial-load race: the user opened this modal before the
-    // page-load ``checkMissingFolders()`` finished AND before /api/browse/init
-    // seeded the snapshot, so no ID baseline exists yet. A status flip in the
-    // active workspace still needs to reach Browse in that window, so gate on
-    // ``workspace_changed`` (server-side
-    // computed pre-vs-post-check diff of THIS workspace's missing set)
-    // instead of ``data.changed`` (a global count across all workspaces).
-    // Without the workspace-scoped gate this fallback would fire for a
-    // cross-workspace flip and blow away the active selection / detail view
-    // for a transition that never touched the active dataset.
-    if (!dispatched && prevIds === null && data.workspace_changed) {
-      document.dispatchEvent(new CustomEvent('vireo:folder-health-changed', {
-        detail: { restored: [], wentMissing: [], source: 'check-health' },
-      }));
-    }
-    // Update the banner directly from this POST's authoritative response
-    // rather than tail-calling checkMissingFolders(). See the helper's
-    // comment for the race that makes the delegation unrecoverable when
-    // the modal is closed mid-POST. Runs for
-    // both empty and non-empty results so the banner is right regardless
-    // of whether closeMissingFoldersModal's own GET was rejected by our
-    // in-flight guard.
-    _updateMissingFoldersBanner(folders);
-    _missingFoldersRows = folders;
-    /** @type {HTMLButtonElement} */ (document.getElementById('missingFoldersRemoveAllBtn')).style.display = folders.length ? '' : 'none';
-    if (folders.length === 0) {
-      container.textContent = '';
-      const ok = document.createElement('p');
-      ok.style.cssText = 'color:#4caf50;display:flex;align-items:center;gap:8px;font-weight:500;';
-      const check = document.createElement('span');
-      check.textContent = '✓';
-      check.style.cssText = 'font-size:18px;line-height:1;';
-      ok.append(check, document.createTextNode('All folders are accounted for.'));
-      container.appendChild(ok);
-      return;
-    }
-    // Paths are user-controlled: build rows with DOM methods instead of
-    // interpolating into HTML/onclick strings — a quote, backslash, or
-    // angle bracket in a folder name broke the inline handlers (and could
-    // inject markup). Closures carry the path values safely.
-    container.textContent = '';
-    folders.forEach(f => {
-      const row = document.createElement('div');
-      row.className = 'missing-folder-row';
-      const pathEl = document.createElement('div');
-      pathEl.className = 'missing-folder-path';
-      pathEl.title = f.path;
-      pathEl.textContent = f.path;
-      const countEl = document.createElement('div');
-      countEl.className = 'missing-folder-count';
-      countEl.textContent = `${f.photo_count} photo${f.photo_count !== 1 ? 's' : ''}`;
-      const actions = document.createElement('div');
-      actions.className = 'missing-folder-actions';
-      const relocateBtn = document.createElement('button');
-      relocateBtn.textContent = 'Relocate';
-      relocateBtn.addEventListener('click', () => startRelocate(f.id, f.path));
-      const removeBtn = document.createElement('button');
-      removeBtn.className = 'danger';
-      removeBtn.textContent = 'Remove';
-      removeBtn.addEventListener('click', () => startRemoveFolder(f.id, f.path, f.photo_count || 0));
-      actions.append(relocateBtn, removeBtn);
-      row.append(pathEl, countEl, actions);
-      container.appendChild(row);
-    });
+    if (!_adoptFolderHealthCheck(data, myMutationGen)) return;
+    _renderMissingFolderRows(container, data.missing);
   } catch (e) {
     // Same stale guard as the success path — a superseded POST must not
     // overwrite the newer POST's in-flight "Checking folders…" placeholder
