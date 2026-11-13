@@ -1315,7 +1315,8 @@ def _postprocess_raw_linear(raw):
     conversion, then restore that scale in float. Decode to XYZ, whose positive
     primaries avoid clipping out-of-sRGB colors in LibRaw's integer RGB output.
     Convert XYZ to linear sRGB in float, retaining negative and above-white
-    channels until the display transform. This cannot recover saturated sensels.
+    channels until the display transform. Saturated sensels are rebuilt toward
+    neutral first (highlight_reconstruction); their detail is not recoverable.
     Always demosaic at full resolution: half-size binning makes fine detail
     change between fitted previews and exports. Browsing keeps its fast path.
     """
@@ -1324,9 +1325,15 @@ def _postprocess_raw_linear(raw):
 
     try:
         from .float_image import FloatImage
+        from .highlight_reconstruction import reconstruct_highlights
     except ImportError:
         from float_image import FloatImage
+        from highlight_reconstruction import reconstruct_highlights
 
+    # HighlightMode.Ignore leaves each channel at its own white-balanced
+    # ceiling, so a blown area would decode pink. Rebuild the clipped sensels
+    # in the mosaic first; LibRaw then carries them through unclipped.
+    reconstruct_highlights(raw)
     rgb = raw.postprocess(
         output_bps=16, gamma=(1, 1), output_color=rawpy.ColorSpace.XYZ,
         use_camera_wb=True, no_auto_bright=True, bright=1.0,

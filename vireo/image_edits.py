@@ -41,7 +41,8 @@ except ImportError:
 #   9 — manual lens corrections and edge-aware defringing.
 #  10 — Shadows/Highlights as scene-linear local exposure before the shoulder.
 #  11 — native Nikon HE/HE* sensor decoding replaces JPEG fallback edit renders.
-EDIT_MATH_VERSION = 11
+#  12 — clipped sensels are rebuilt toward neutral before the linear RAW decode.
+EDIT_MATH_VERSION = 12
 
 # Tile budget for the tone pass, in pixels. Bounds peak memory on
 # full-resolution originals/exports; overridable in tests to force many tiles.

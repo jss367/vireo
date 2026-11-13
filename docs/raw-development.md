@@ -10,7 +10,8 @@ verification, and the temporary build's removal plan.
 
 ## Processing and output
 
-1. LibRaw applies the camera's as-shot white balance and demosaics at full
+1. Clipped sensels are rebuilt in the mosaic first (see
+   [Clipped highlights](#clipped-highlights)). LibRaw then applies the camera's as-shot white balance and demosaics at full
    resolution. It produces 16-bit linear XYZ with automatic brightening disabled
    and two stops of reserved integer headroom. The default demosaicing algorithm
    is used rather than the browsing path's faster Bayer algorithm or half-size
@@ -69,9 +70,8 @@ retain their existing fast JPEG paths and disk working copies.
   precision limits; their TIFF exports remain 8-bit. A pre-existing darktable
   development continues to take precedence during export.
 - Preserving values above display white allows exposure recovery of retained
-  data. It does not reconstruct detail from saturated sensor samples. The new
-  decode preserves channels without LibRaw's highlight blending; dedicated
-  sensor-aware highlight reconstruction remains future work.
+  data. Detail is not reconstructed where every channel saturated; such an
+  area is rebuilt flat and neutral.
 - XYZ avoids prematurely clipping colors to the sRGB triangle, but the integer
   decoder still imposes a finite range. The final working/output primaries and
   profile are sRGB; wide-gamut output profiles are not yet offered.
@@ -83,6 +83,29 @@ retain their existing fast JPEG paths and disk working copies.
   finer tonal steps.
 - This change upgrades RAW processing and TIFF output. It does not add a
   high-bit-depth loader for arbitrary TIFF or PNG inputs.
+
+## Clipped highlights
+
+A saturated sensel records only a lower bound, and each channel's ceiling
+lands at a different level once white balance is applied. Decoded as they are,
+blown areas come out pink: red and blue stand above green. Before demosaicing,
+Vireo therefore raises clipped sensels in white-balanced camera space:
+
+- A clipped channel takes the mean of the other two channels around it, so a
+  highlight that clipped only green keeps the color red and blue measured.
+- A neighboring channel that is also clipped counts as reaching the brightest
+  channel there. An area where every channel clipped becomes neutral at the
+  highest ceiling, which LibRaw scales to display white.
+- A sensel is only raised, never lowered, and the correction fades in over the
+  last tenth below the ceiling. Unclipped photos decode exactly as before.
+
+Each channel's ceiling is the sensor's white level, or the channel's own peak
+when it piles up just below that (a D850's greens stop near 16240 of 16383).
+The pass adds roughly 0.2 to 0.6 seconds to a 45 MP decode. Render version 12
+invalidates edited caches so existing RAW edits pick it up. Raised values have
+to fit the 16-bit mosaic: a file whose white level is already near 65535 has
+no room and keeps its clipped values. Mosaics with a fourth filter color,
+and files LibRaw delivers without a mosaic, are not rebuilt.
 
 ## Lens corrections and defringing
 
