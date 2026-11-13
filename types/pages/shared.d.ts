@@ -7,6 +7,8 @@ interface VireoDom {
 }
 interface VireoNamespace { dom?: VireoDom; }
 interface Window { VIREO_CONFIG_DEFAULTS?: {pipeline: PipelineDefaults}; }
+// The navbar's thumbnail URL builder (navbar-globals.js), absent until its modules have run.
+interface Window { vireoThumbnailUrl?(photo: {id: number}): string; }
 
 interface VireoApi {
   fetch: typeof fetch;

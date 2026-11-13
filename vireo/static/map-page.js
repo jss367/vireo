@@ -185,14 +185,6 @@ function openPhotoMarker(photoId) {
   return true;
 }
 
-/** @param {MapPhoto | null | undefined} p */
-function photoThumbnailUrl(p) {
-  if (!p || p.id == null) return '';
-  return window.vireoThumbnailUrl
-    ? window.vireoThumbnailUrl(p)
-    : '/thumbnails/' + p.id + '.jpg';
-}
-
 /* ── Virtualized sidebar rendering ── */
 /** @param {MapPhoto} p @param {number} index */
 function makeSidebarCard(p, index) {

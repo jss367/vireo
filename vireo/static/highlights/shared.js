@@ -12,6 +12,7 @@
 // first and nobody replaces, so they are bound once.
 
 export const escapeAttr = window.escapeAttr;
+export const photoThumbnailUrl = window.photoThumbnailUrl;
 export const VireoTextSearch = window.VireoTextSearch;
 export const VireoViewPreferences = window.VireoViewPreferences;
 
@@ -50,11 +51,6 @@ export function lightboxRequestedPhotoId() {
 /** The list the open lightbox navigates. */
 export function lightboxPhotoList() {
   return window._lightboxPhotoList;
-}
-
-/** The navbar's thumbnail URL builder, or null where it is not loaded. */
-export function sharedThumbnailUrl() {
-  return window.vireoThumbnailUrl || null;
 }
 
 export function isAdvancedMode() {

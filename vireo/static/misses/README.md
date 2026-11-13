@@ -18,7 +18,7 @@ they are.
 | --- | --- |
 | `state.js` | Page state: the `state` object (`missesData`, the tuning config and preview state, focus, `selection`, lightbox tracking, `appliedMissFilters`, the fail-closed scope error) and the constants `CATEGORY_ORDER`, `CATEGORY_LABELS`, `MISS_TUNING_CONTROL_IDS` |
 | `shared.js` | The boundary with shared code: every navbar, lightbox, filter-bar and `vireo-utils.js` global the page uses, and `registerPageHooks()` |
-| `helpers.js` | `photoThumbnailUrl`, `parseDetectionBox`, `sortPhotos`, and `getSinceParam` |
+| `helpers.js` | `parseDetectionBox`, `sortPhotos`, and `getSinceParam` |
 | `filters.js` | Reading, cloning and comparing the filter-bar payload, adding it to request bodies, and `applyMissFilters()` |
 | `scope.js` | Legacy `?collection_id=` / `?folder_id=` deep links, `noteLegacyScopeError`, and the scope banner |
 | `tuning.js` | The threshold sliders and labels, tuning status and disabled state, `loadMissConfig`, and preview, recompute and reset |

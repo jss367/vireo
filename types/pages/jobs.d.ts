@@ -63,6 +63,7 @@ interface JobsSourceCleanup {checking?:boolean;state?:string;file_count?:number;
 interface Window {
   escapeHtml(value: unknown): string;
   escapeAttr(value: unknown): string;
+  timeAgo(iso: string | null | undefined): string;
   showToast?(message: string | undefined, kind?: string): void;
   safeFetch<T>(url: string, options?: RequestInit): Promise<T>;
   importFailedBeforeStart(result: JobsResult | null | undefined): boolean;

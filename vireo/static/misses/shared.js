@@ -13,6 +13,7 @@
 
 export const escapeHtml = window.escapeHtml;
 export const escapeAttr = window.escapeAttr;
+export const photoThumbnailUrl = window.photoThumbnailUrl;
 
 /** The shared filter bar from vireo-filter.js, which _filterbar.html loads. */
 export const VireoFilter = /** @type {MissFilterController} */ (window.VireoFilter);
@@ -34,11 +35,6 @@ export function preferredScrollBehavior() {
 /** The user's configured browse.flag/reject/unflag keys, if loaded. */
 export function browseShortcuts() {
   return (window._vireoShortcuts && window._vireoShortcuts.browse) || {};
-}
-
-/** The navbar's thumbnail URL builder, or null where it is not loaded. */
-export function sharedThumbnailUrl() {
-  return window.vireoThumbnailUrl || null;
 }
 
 export function hasLightbox() {

@@ -12,7 +12,7 @@ conventions). The template loads one entry module after the shared navbar:
 | --- | --- |
 | `state.js` | The `state` object (each check's last results) and the check and hash-status labels |
 | `shared.js` | The boundary with shared code: `safeFetch`, `showToast`, the escape helpers |
-| `helpers.js` | `byId`, `timeAgo`, the status line's found/clean/error states, the paint-before-scan pause, and posting an audit action |
+| `helpers.js` | `byId`, the status line's found/clean/error states, the paint-before-scan pause, and posting an audit action |
 | `summary.js` | The tabs, the summary banner and its chips, and Run All Checks |
 | `drift.js` | Drift between the catalog and XMP sidecars, resolved per row or in bulk |
 | `orphans.js` | Catalog entries whose file is gone |

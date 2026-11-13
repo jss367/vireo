@@ -12,6 +12,7 @@
 
 export const escapeHtml = window.escapeHtml;
 export const escapeAttr = window.escapeAttr;
+export const photoThumbnailUrl = window.photoThumbnailUrl;
 export const VireoViewPreferences = window.VireoViewPreferences;
 export const VireoTextSearch = window.VireoTextSearch;
 
@@ -50,15 +51,6 @@ export function openLightbox(id, filename, photos) {
 /** The photo the shared lightbox is showing or loading. */
 export function lightboxRequestedPhotoId() {
   return window.vireoLightboxSession.requestedPhotoId();
-}
-
-/**
- * The navbar's thumbnail URL for a photo, or the plain one where the navbar's
- * builder is not loaded.
- * @param {LifePhoto} photo
- */
-export function thumbnailUrl(photo) {
-  return window.vireoThumbnailUrl ? window.vireoThumbnailUrl(photo) : '/thumbnails/' + photo.id + '.jpg';
 }
 
 /** The desktop app's native folder picker (tauri-bridge.js), where there is one. */

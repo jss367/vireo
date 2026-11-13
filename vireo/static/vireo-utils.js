@@ -158,6 +158,36 @@ function formatBytes(n) {
   return (value / 1024 / 1024 / 1024 / 1024).toFixed(2) + ' TB';
 }
 
+/*
+ * The one thumbnail URL for a photo row. The navbar's builder adds the query
+ * that follows an edit, so an edited photo's thumbnail is refetched; before
+ * the navbar's modules run, or on a page without them, the plain path is
+ * used. A row without an id has no thumbnail and renders as ''.
+ * test_shared_frontend_helpers.py keeps photoThumbnailUrl to this definition.
+ */
+/** @param {{id?: number | null} | null | undefined} photo */
+function photoThumbnailUrl(photo) {
+  if (!photo || photo.id == null) return '';
+  return window.vireoThumbnailUrl
+    ? window.vireoThumbnailUrl(/** @type {{id: number}} */ (photo))
+    : '/thumbnails/' + photo.id + '.jpg';
+}
+
+/*
+ * How long ago an ISO timestamp was, in one unit: "just now", "5m ago",
+ * "3h ago", "2d ago". A missing timestamp renders as ''.
+ * test_shared_frontend_helpers.py keeps timeAgo to this definition.
+ */
+/** @param {string | null | undefined} iso */
+function timeAgo(iso) {
+  if (!iso) return '';
+  var secs = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (secs < 60) return 'just now';
+  if (secs < 3600) return Math.floor(secs / 60) + 'm ago';
+  if (secs < 86400) return Math.floor(secs / 3600) + 'h ago';
+  return Math.floor(secs / 86400) + 'd ago';
+}
+
 var VireoTextInputs = (function() {
   var selector = 'input[type="text"], input[type="search"], input:not([type]), textarea';
 

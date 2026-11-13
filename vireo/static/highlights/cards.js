@@ -1,18 +1,11 @@
 // Photo cards: thumbnails, card markup, and their click and order buttons.
 // ES module.
 
-import { escapeAttr, hasLightbox, openLightbox, sharedThumbnailUrl } from './shared.js';
+import { escapeAttr, hasLightbox, openLightbox, photoThumbnailUrl } from './shared.js';
 import { isHighlightsAdvancedMode } from './loading.js';
 import { formatPercent, formatScore } from './scope.js';
 import { moveSpeciesHighlight, otherTaggedSpecies, photoSpeciesName, removeSpeciesHighlight } from './species.js';
 import { state } from './state.js';
-
-/** @param {HighlightsPhoto | null | undefined} p */
-export function photoThumbnailUrl(p) {
-  if (!p || p.id == null) return '';
-  var thumbnailUrl = sharedThumbnailUrl();
-  return thumbnailUrl ? thumbnailUrl(p) : '/thumbnails/' + p.id + '.jpg';
-}
 
 // The card's identification chip. "ID 88%" is only shown for a prediction
 // from a detected region the classifier scored as a subject; a whole-frame

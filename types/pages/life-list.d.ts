@@ -17,6 +17,7 @@ declare class VireoFolderBrowser {constructor(options:{overlayId:string;defaultM
 interface Window {
   escapeHtml(value:unknown):string;
   escapeAttr(value:unknown):string;
+  photoThumbnailUrl(photo:LifePhoto|null|undefined):string;
   showToast?(message:string,kind?:string):void;
   safeFetch<T>(url:string,options?:RequestInit,feedback?:{toast?:boolean}):Promise<T>;
   safeEventSource?(url:string,callbacks:{onComplete:()=>void}):unknown;
@@ -26,7 +27,6 @@ interface Window {
   VireoViewPreferences:{restoreAll(element:HTMLElement|null):void};
   VireoTextSearch:{readOptions(prefix:string):{caseSensitive?:boolean;wholeWord?:boolean;regex?:boolean};matchesFields(fields:string[],query:string,options:{caseSensitive?:boolean;wholeWord?:boolean;regex?:boolean}):boolean;toggle(prefix:string,option:string,callback:()=>unknown):void};
   VireoFolderBrowser:typeof VireoFolderBrowser;
-  vireoThumbnailUrl?(photo:LifePhoto):string;
   vireoLightboxSession:{requestedPhotoId():number|null};
   Vireo:VireoPageHookRegistry;
 }

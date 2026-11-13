@@ -3,8 +3,8 @@
 // ES module.
 
 import { CHECK_LABELS } from './state.js';
-import { byId, errorMessage, timeAgo } from './helpers.js';
-import { safeFetch } from './shared.js';
+import { byId, errorMessage } from './helpers.js';
+import { safeFetch, timeAgo } from './shared.js';
 import { runDriftCheck } from './drift.js';
 import { runOrphanCheck } from './orphans.js';
 import { runUntrackedCheck } from './untracked.js';

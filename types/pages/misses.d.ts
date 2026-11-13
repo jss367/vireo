@@ -13,6 +13,7 @@ interface MissFilterController {getRules():MissFilters['rules'];getUserRules():M
 declare const VireoFilter:MissFilterController;
 declare function escapeHtml(value:unknown):string;
 declare function escapeAttr(value:unknown):string;
+declare function photoThumbnailUrl(photo:MissPhoto|null|undefined):string;
 declare function showToast(message:string,kind?:string):void;
 declare function matchesShortcut(event:KeyboardEvent,shortcut:string):boolean;
 declare function preferredScrollBehavior():ScrollBehavior;
@@ -20,5 +21,5 @@ declare function requestLightboxFullscreen():void;
 declare function openContextMenu(event:MouseEvent,items:MissMenuItem[]):void;
 declare function openLightbox(id:number,filename:string,photos:{id:number;filename?:string;missCategory:MissCategory}[]):void;
 declare function showDeleteDialog(ids:number[],companions:number,callback:(data:{failed_photo_ids?:number[]})=>void):void;
-interface Window {VireoFilter?:MissFilterController;vireoThumbnailUrl?(photo:MissPhoto):string;_vireoShortcuts?:{browse?:{flag?:string;reject?:string;unflag?:string}};Vireo:VireoPageHookRegistry;buildSpeciesHighlightMenuItems?(ids:number[],options:{showFetchFallback:boolean}):MissMenuItem[];buildSpeciesRepresentativeMenuItems?(ids:number[],options:{showFetchFallback:boolean}):MissMenuItem[]}
+interface Window {VireoFilter?:MissFilterController;_vireoShortcuts?:{browse?:{flag?:string;reject?:string;unflag?:string}};Vireo:VireoPageHookRegistry;buildSpeciesHighlightMenuItems?(ids:number[],options:{showFetchFallback:boolean}):MissMenuItem[];buildSpeciesRepresentativeMenuItems?(ids:number[],options:{showFetchFallback:boolean}):MissMenuItem[]}
 interface DocumentEventMap {'lifelist:changed':CustomEvent<{species?:string;photoId?:number}>;'lightbox:flagchanged':CustomEvent<{photoId?:number;flag?:string}>;'lightbox:photochanged':CustomEvent<{photoId?:number}>;'lightbox:closed':CustomEvent<void>}

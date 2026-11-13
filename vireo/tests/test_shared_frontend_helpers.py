@@ -1,15 +1,11 @@
 """Shared browser helpers have one definition: ``vireo/static/vireo-utils.js``.
 
 ``_navbar.html`` loads ``vireo-utils.js`` before every other script, so each
-page already has ``escapeHtml``, ``escapeAttr`` and ``formatBytes`` in scope.
-Pages used to carry their own copies (eight HTML escapers, eight byte
-formatters, each slightly different: one escaped no quotes, one rendered
-zero as ``0``). These tests keep the consolidation from sliding back, and
-hold the helpers that are still copied per page to a count that may only
-shrink.
-
-Deadline: the entries in ``REMAINING_COPIES`` are gone by 2026-12-31
-(``docs/plans/2026-10-16-frontend-schema-consolidation-plan.md``).
+page already has ``escapeHtml``, ``escapeAttr``, ``formatBytes``,
+``photoThumbnailUrl`` and ``timeAgo`` in scope. Pages used to carry their own
+copies (eight HTML escapers, eight byte formatters, each slightly different:
+one escaped no quotes, one rendered zero as ``0``). These tests keep the
+consolidation from sliding back.
 """
 import re
 from pathlib import Path
@@ -25,14 +21,8 @@ SHARED_SOURCE = "static/vireo-utils.js"
 SHARED_HELPERS = {
     "escapeHtml": {"escapeHtml", "escapeAttr", "esc", "escapeHTML", "htmlEscape"},
     "formatBytes": {"formatBytes", "formatBytesNav", "formatSize", "humanBytes", "fmtBytes"},
-}
-
-# Helpers still defined once per page: definitions on disk today. Lower an
-# entry when you move one into vireo-utils.js (delete it at one); never raise
-# one: use the shared definition instead of adding a copy.
-REMAINING_COPIES = {
-    "photoThumbnailUrl": 4,
-    "timeAgo": 2,
+    "photoThumbnailUrl": {"photoThumbnailUrl"},
+    "timeAgo": {"timeAgo"},
 }
 
 # ``export`` is optional: the module pages (frontend-module-pages.json) export
@@ -86,30 +76,6 @@ def test_shared_helpers_are_defined_only_in_vireo_utils():
             f"Call the shared {canonical} from {SHARED_SOURCE} instead; "
             "_navbar.html loads it before every page script."
         )
-
-
-def test_remaining_helper_copies_only_shrink():
-    declared = _declarations()
-    actual = {name: len(declared.get(name, [])) for name in REMAINING_COPIES}
-    grown = {
-        name: (count, REMAINING_COPIES[name])
-        for name, count in actual.items()
-        if count > REMAINING_COPIES[name]
-    }
-    assert not grown, (
-        f"A per-page helper gained a copy (count, limit): {grown}. Move it to "
-        f"{SHARED_SOURCE} and call that instead."
-    )
-    shrunk = {
-        name: (count, REMAINING_COPIES[name])
-        for name, count in actual.items()
-        if count < REMAINING_COPIES[name]
-    }
-    assert not shrunk, (
-        f"A per-page helper lost a copy (count, limit): {shrunk}. Lower "
-        "REMAINING_COPIES in vireo/tests/test_shared_frontend_helpers.py "
-        "(delete the entry at one) so the move sticks."
-    )
 
 
 def test_navbar_loads_shared_helpers_before_every_other_script():

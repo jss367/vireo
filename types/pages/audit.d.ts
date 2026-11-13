@@ -23,6 +23,7 @@ interface AuditVerifyJob {
 interface Window {
   escapeHtml(value: unknown): string;
   escapeAttr(value: unknown): string;
+  timeAgo(iso: string | null | undefined): string;
   safeFetch<T>(url: string, init?: RequestInit, options?: {toast?: boolean}): Promise<T>;
   showToast?(message: string, kind?: string): void;
 }
