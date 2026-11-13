@@ -26,13 +26,16 @@ import numpy as np
 # The correction fades in between these fractions of a channel's ceiling.
 _FADE_START = 0.90
 _FADE_END = 0.98
-# Rows per band. Bounds the float temporaries on a 45 MP mosaic to a few MB
-# each; a multiple of the 2- and 6-row filter tiles so every band starts on
-# the same CFA phase.
+# Rows per band. A 45 MP mosaic keeps each float32 plane under 8 MiB; a worker
+# retains roughly a dozen such planes at once, so the bound is tens of MiB per
+# worker, not the aggregate below. A multiple of the 2- and 6-row filter tiles
+# so every band starts on the same CFA phase.
 _BAND_ROWS = 240
-# NumPy and OpenCV release the GIL, so bands run in parallel; kept small
-# because several decodes can run at once.
-_WORKERS = 4
+# NumPy and OpenCV release the GIL, so bands run in parallel; kept at two
+# because several decodes can run at once (SLOT_CAP pipelines plus an editor
+# preview), and each worker's three-plane filter buffers already run above
+# 100 MiB on a 45 MP mosaic.
+_WORKERS = 2
 _UNCLIPPED = np.float32(1e12)
 _SENSEL_MAX = 65535
 
