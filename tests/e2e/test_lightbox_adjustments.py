@@ -9,7 +9,7 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 from PIL import Image
 from playwright.sync_api import expect
-from services import photo_ingest, workspace_folders
+from services import photo_ingest, subject_masks, workspace_folders
 
 
 @pytest.fixture
@@ -331,3 +331,99 @@ def test_raw_exposure_uses_full_server_recipe_even_when_webgl_is_available(
     assert 'analysis' not in query
     assert page.evaluate('window.rawShaderCalls') == 0
     _wait_saved(page)
+
+
+
+def _masked_recipe(live_server, page, photo_id, mask_dir):
+    """Store a recipe with a masked (``local``) section on the photo, as the
+    Photo Editor would, and return it as the server normalized it."""
+    db = live_server['db']
+    mask_path = mask_dir / f'{photo_id}.sam2-small.png'
+    mask = Image.new('L', (256, 64))
+    mask.paste(255, (0, 0, 128, 64))
+    mask.save(mask_path)
+    db.masks_features.upsert_mask(
+        photo_id, 'sam2-small', str(mask_path), 'megadetector-v6', (0.0, 0.0, 0.5, 1.0),
+    )
+    subject_masks.set_active_mask_variant(db, photo_id, 'sam2-small')
+    db.commit()
+    snapshot = page.request.post(f"{live_server['url']}/api/photos/{photo_id}/local-mask/snapshot")
+    assert snapshot.ok, snapshot.text()
+    saved = page.request.put(
+        f"{live_server['url']}/api/photos/{photo_id}/edit-recipe",
+        data={'recipe': {
+            'adjustments': {'contrast': 10},
+            'local': {
+                'mask': snapshot.json()['mask'],
+                'regions': [{'region': 'subject', 'adjustments': {'exposure': 0.5}}],
+            },
+        }},
+    )
+    assert saved.ok, saved.text()
+    return saved.json()['recipe']
+
+
+@pytest.mark.parametrize('recipe_handed_over_again', [False, True])
+def test_adjustment_save_keeps_sections_the_lightbox_does_not_edit(
+    live_server, page, adjustment_photo, tmp_path, recipe_handed_over_again,
+):
+    """A lightbox slider writes the whole recipe back. The masked (``local``)
+    adjustments, which only the Photo Editor can author, must survive that
+    write, including after the open page hands the lightbox the photo's recipe
+    again (Browse does on every card and detail-panel render)."""
+    stored = _masked_recipe(live_server, page, adjustment_photo, tmp_path)
+    assert stored['local']['regions']
+    _open(page, live_server, adjustment_photo)
+    if recipe_handed_over_again:
+        page.evaluate(
+            "([id, recipe]) => vireoRememberPhotoEditRecipe(id, recipe)",
+            [adjustment_photo, stored],
+        )
+    with page.expect_request(
+        lambda request: request.method == 'PUT' and request.url.endswith('/edit-recipe')
+    ) as save:
+        _set_exposure(page, 1)
+    sent = json.loads(save.value.post_data)['recipe']
+    assert sent.get('local') == stored['local']
+    assert sent['adjustments'] == {'contrast': 10, 'exposure': 1}
+    _wait_saved(page)
+    saved = live_server['db'].get_photo_edit_recipe(adjustment_photo)
+    assert saved['local'] == stored['local']
+    assert saved['adjustments'] == {'contrast': 10, 'exposure': 1}
+
+
+def test_stale_detail_response_keeps_sections_the_lightbox_does_not_edit(
+    live_server, page, adjustment_photo, tmp_path,
+):
+    """A detail response that was in flight while the photo's recipe was
+    written is answered with the recipe the lightbox holds. That recipe is
+    what the next slider save starts from, so it must be the whole one."""
+    stored = _masked_recipe(live_server, page, adjustment_photo, tmp_path)
+    page.goto(live_server['url'] + '/browse')
+    held = []
+    page.route(f'**/api/photos/{adjustment_photo}', lambda route: held.append(route))
+    page.evaluate("id => openLightbox(id, 'gradient.png')", adjustment_photo)
+    deadline = time.time() + 10
+    while not held and time.time() < deadline:
+        page.wait_for_timeout(20)
+    assert held, 'the lightbox requested the photo detail'
+    page.evaluate(
+        "([id, recipe]) => vireoRefreshEditRecipeCache({[id]: recipe})",
+        [adjustment_photo, stored],
+    )
+    held[0].continue_()
+    page.wait_for_function("""id => {
+      const img = document.getElementById('lightboxImg');
+      return img.complete && img.naturalWidth > 0 && _lbPhotoDataByPhoto[String(id)]
+        && _lbPhotoDataByPhoto[String(id)].width === 256;
+    }""", arg=adjustment_photo)
+    page.locator('#lightboxAdjustBtn').click()
+    expect(page.locator('#lbAdjExposure')).to_be_enabled()
+    with page.expect_request(
+        lambda request: request.method == 'PUT' and request.url.endswith('/edit-recipe')
+    ) as save:
+        _set_exposure(page, 1)
+    sent = json.loads(save.value.post_data)['recipe']
+    assert sent.get('local') == stored['local']
+    _wait_saved(page)
+    assert live_server['db'].get_photo_edit_recipe(adjustment_photo)['local'] == stored['local']

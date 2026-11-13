@@ -592,13 +592,27 @@ export function _lbRememberEditRecipe(/** @type {LightboxPhotoId | null} */ phot
   if (vireoLightboxSession.requestedPhotoId() === numericId) {
     lbState.currentEditRecipe = currentRecipe;
     if (!preserveAdjustmentInput) {
-      lbState.editRecipe = _lbCloneRecipe(storedRecipe);
+      // The recipe the sliders and the crop editor start from and write back
+      // whole, so it keeps every section. Starting from ``storedRecipe`` would
+      // make the next save delete the sections the lightbox does not model
+      // (``local``, the Photo Editor's masked adjustments).
+      lbState.editRecipe = _lbCloneRecipe(recipe);
       lbState.editRecipeLoaded = true;
       _lbRenderAdjustmentControls();
       _lbSetAdjustmentControlsDisabled(false);
     }
   }
   _lbApplyEditButtonState();
+}
+
+// The recipe held for a photo with every section intact, or null when it has no
+// edits. A save starts from this; ``_lbEditRecipeByPhoto`` holds only the
+// sections the lightbox models.
+/** @returns {LightboxRecipe | null} */
+export function _lbHeldEditRecipe(/** @type {LightboxPhotoId | null} */ photoId) {
+  var recipe = _lbRawEditRecipeByPhoto[String(photoId)];
+  if (recipe === undefined) recipe = _lbEditRecipeByPhoto[String(photoId)];
+  return _lbRecipeHasEdits(recipe) ? _lbCloneRecipe(recipe) : null;
 }
 
 export function _lbEditRecipeWriteSeqFor(/** @type {LightboxPhotoId | null} */ photoId) {

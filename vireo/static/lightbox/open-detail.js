@@ -10,7 +10,7 @@ import {
 } from './state.js';
 import { _lbRenderLifeListPanel } from './curation.js';
 import {
-  _lbCloneEditRecipe, _lbCloneRecipe, _lbEditRecipeWriteSeqFor, _lbRecipeHasEdits,
+  _lbCloneRecipe, _lbEditRecipeWriteSeqFor, _lbHeldEditRecipe, _lbRecipeHasEdits,
   _lbReloadCurrentRenderAfterEdit, _lbRememberEditRecipe, _lbRenderAdjustmentControls,
   _lbSetAdjustmentControlsDisabled, _lbSetAdjustmentStatus, _vireoBumpRenderVersion,
   _vireoEditRecipeCacheKey, _vireoPairKnownByPhoto, _vireoPairSourceImageLoaded,
@@ -142,10 +142,10 @@ function applyPhotoDetail(/** @type {LightboxOpenContext} */ open, /** @type {Li
   if (!adoptDetailPair(open, data)) return;
   var editRecipeFresh = _lbEditRecipeWriteSeqFor(photoId) === seqs.recipeWrite;
   var recipeKeyBefore = heldRecipeKey(photoId);
-  if (!editRecipeFresh) {
-    var currentRecipe = _lbEditRecipeByPhoto[String(photoId)];
-    data.edit_recipe = _lbRecipeHasEdits(currentRecipe) ? _lbCloneEditRecipe(currentRecipe) : null;
-  }
+  // The recipe was written while this request was in flight, so what the
+  // lightbox holds is newer than what the response carries. Keep it whole:
+  // the adjustment controls below start their next save from it.
+  if (!editRecipeFresh) data.edit_recipe = _lbHeldEditRecipe(photoId);
   _lbPhotoDataByPhoto[String(photoId)] = data;
   open.detail = data;
   if (open.identityCommitted) _lbRenderKeywords(data.keywords);
