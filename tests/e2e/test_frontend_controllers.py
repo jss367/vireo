@@ -289,6 +289,12 @@ def test_lightbox_reopen_rejects_old_metadata_and_image_callbacks(live_server, p
     assert errors == []
 
 
+VIEWPORT_MODULES = (
+    "viewport-zoom-control", "viewport-geometry", "viewport-views", "viewport-zoom",
+    "viewport-interaction", "viewport",
+)
+
+
 def mount_lightbox_viewport(page):
     page.set_content('''
         <div id="lightboxWrap" style="position:relative;width:800px;height:600px;overflow:hidden">
@@ -300,10 +306,15 @@ def mount_lightbox_viewport(page):
         <span id="lightboxZoomBadge"></span>
     ''')
     page.wait_for_function("document.getElementById('lightboxImg').naturalWidth === 3200")
-    # viewport.js is an ES module; load it as a script that publishes its factory.
-    viewport_source = (STATIC / "lightbox/viewport.js").read_text(encoding="utf-8")
-    page.add_script_tag(content=re.sub(r"^export ", "", viewport_source, flags=re.M)
-                        + "\nwindow.VireoLightboxViewport = VireoLightboxViewport;\n")
+    # The viewport is ES modules that import only each other; load them as one
+    # script, in dependency order, that publishes the factory.
+    viewport_source = "\n".join(
+        (STATIC / "lightbox" / f"{name}.js").read_text(encoding="utf-8")
+        for name in VIEWPORT_MODULES
+    )
+    viewport_source = re.sub(r"^import\s[^;]*?\sfrom\s+'[^']+';\n", "", viewport_source, flags=re.M)
+    page.add_script_tag(content="(function() {\n" + re.sub(r"^export ", "", viewport_source, flags=re.M)
+                        + "\nwindow.VireoLightboxViewport = VireoLightboxViewport;\n})();\n")
     page.evaluate('''() => {
         window.timers = new Map();
         window.observers = [];

@@ -1,5 +1,6 @@
 import { lbState } from './shared-state.js';
-import { _lbDisplayDimsForRecipe, _lbSrcRank } from './viewport.js';
+import { _lbDisplayDimsForRecipe } from './viewport-geometry.js';
+import { _lbSrcRank } from './viewport-zoom.js';
 import { vireoLightboxSession, vireoLightboxViewport } from './state.js';
 import {
   _lbEditVersionByPhoto, _vireoPairKnownByPhoto, _vireoPairSource, _vireoUrlWithQueryParam,

@@ -11,7 +11,14 @@ The viewport controller owns zoom, pan, saved views and interaction lifecycle.
 | --- | --- |
 | `shared-state.js` | `lbState`, the lightbox state more than one module writes (imports nothing, so it evaluates first) |
 | `session.js` | `VireoLightboxSession`: factory owning photo identity, request tokens, load callbacks, timers and preloads |
+| `session-requests.js` | The session's request tokens, source-swap timer, image listeners and initial-load handoff |
+| `session-preloads.js` | The session's adjacent-photo and original preload cache and queue |
 | `viewport.js` | `VireoLightboxViewport`: factory owning viewport geometry, saved views, eye alignment, zoom controls and interaction listeners |
+| `viewport-geometry.js` | The viewport's layout box, fit and native scales, transform and pan clamp |
+| `viewport-zoom.js` | Anchored zoom, the source tier a zoom needs, deferred 1:1 and the zoom commands |
+| `viewport-zoom-control.js` | The zoom limit, slider mapping, badge and popover |
+| `viewport-views.js` | Per-photo saved views, the view restored after navigation, and eye alignment |
+| `viewport-interaction.js` | What a new photo inherits, the wheel, drag and resize listeners, and close |
 | `state.js` | Controller wiring (`vireoLightboxSession`, `vireoLightboxViewport`, `lbViewportHost`), shared render/edit caches, and read-only guards |
 | `curation.js` | Species representatives and highlights |
 | `edits.js` | Render URLs, RAW/JPEG source selection, edit recipes, adjustment previews and saves |
@@ -34,6 +41,17 @@ variable keeps it as a plain module variable and exports it, and importers read
 its current value through the live binding. `lbOverlays` (the view-menu
 preferences and the mask URL) and `lbDetailStatus` (the detail chip's timing
 and state) are objects for the same reason: browser tests set them.
+
+## Controllers
+
+`session.js` and `viewport.js` each build one state record in `create()` and
+return frozen methods bound to it. The record is never exported or returned, so
+nothing outside the controller can write its fields. The functions that read
+and write it live in the `session-*.js` and `viewport-*.js` modules and take
+the record as their first argument (`vp`, `session`); other lightbox modules
+call the controller's methods, never those functions. These modules import only
+each other, which lets a test load a controller without the rest of the
+lightbox.
 
 ## Load order and listeners
 

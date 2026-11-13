@@ -76,7 +76,9 @@ exercise real clicks, keyboard navigation, deep links, sorting and health races.
 `VireoLightboxSession` in `static/lightbox/session.js` owns requested and displayed
 photo identity, navigation generations, initial-load handoff callbacks, source-swap
 timers and image listeners, and the adjacent/original preload cache and queue.
-Its factory is inert and returns frozen methods. `lightbox/state.js` constructs the
+Its factory is inert and returns frozen methods bound to one private state record;
+`session-requests.js` and `session-preloads.js` hold the functions that work on it.
+`lightbox/state.js` constructs the
 shared instance with callbacks for source URLs, geometry, cached metadata and the
 page's navigation list. Viewport state belongs to `VireoLightboxViewport`;
 rendering and editing state stay with their existing owners.
@@ -109,7 +111,9 @@ source fallback, preload budgets, and page integrations.
 `VireoLightboxViewport` in `static/lightbox/viewport.js` owns zoom, pan, fit and
 native scale, deferred 1:1 intent, per-photo saved views and eye-alignment anchors.
 It also owns zoom controls, wheel and drag listeners, its resize timer and the
-wrap's `ResizeObserver`. `lightbox/state.js` injects current photo geometry, source
+wrap's `ResizeObserver`. Its state is one private record, worked on by the
+`viewport-*.js` modules (geometry, zoom, zoom control, saved views, interaction).
+`lightbox/state.js` injects current photo geometry, source
 selection callbacks and eye metadata. The factory also accepts controlled browser
 dependencies for tests. Source loading still belongs to the session and loader;
 the viewport requests source changes through callbacks rather than changing their
