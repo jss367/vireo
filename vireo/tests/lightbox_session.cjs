@@ -36,12 +36,14 @@ function mount(overrides = {}) {
     clearTimeout(id) { timers.delete(id); },
   };
   const context = vm.createContext({window});
-  // session.js is an ES module; run its body as a script and publish the export.
-  vm.runInContext(
-    fs.readFileSync('vireo/static/lightbox/session.js', 'utf8').replace(/^export /m, '')
-      + '\nwindow.VireoLightboxSession = VireoLightboxSession;',
-    context,
-  );
+  // The session is ES modules that import only each other; run their bodies as
+  // one script, in dependency order, and publish the factory.
+  const source = ['session-requests', 'session-preloads', 'session']
+    .map(name => fs.readFileSync(`vireo/static/lightbox/${name}.js`, 'utf8'))
+    .join('\n')
+    .replace(/^import\s[^;]*?\sfrom\s+'[^']+';\n/gm, '')
+    .replace(/^export /gm, '');
+  vm.runInContext(source + '\nwindow.VireoLightboxSession = VireoLightboxSession;', context);
   assert.equal(timers.size, 0, 'loading the factory is inert');
   const photos = [1, 2, 3, 4].map(id => ({id, width: 6000, height: 4000}));
   const view = {currentSrcKey: 'full', fullUsesOriginal: false, originalUnavailable: false,

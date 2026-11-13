@@ -28,6 +28,31 @@ interface LightboxPreloadEntry {
   bytes: number;
   retrying?: boolean;
 }
+interface LightboxPreloadCandidate { photoId: number; sourceKey: string; url: string; cacheKey: string; bytes: number }
+/** One session controller's state. session.js creates it and never hands it out; the session-*.js functions take it as their first argument. */
+interface LightboxSessionContext {
+  readonly window: Window & typeof globalThis;
+  readonly document: Document;
+  readonly options: LightboxSessionOptions;
+  currentId: number | null;
+  displayedId: number | null;
+  generation: number;
+  preloadSerial: number;
+  swapTimer: number | null;
+  initialLoad: {token: LightboxSessionToken; commit: () => void; abandon: () => void} | null;
+  cleanups: Set<() => void>;
+  adjacentPreloads: Record<string, LightboxPreloadEntry>;
+  adjacentTimer: number | null;
+  adjacentRetry: Record<string, {openSeq: number; count: number; at?: number}>;
+  lastNavDelta: number;
+  originalTimer: number | null;
+  originalPreload: LightboxPreloadEntry | null;
+  originalWaiting: {photoId: number; retryCount: number} | null;
+  speculativeInFlight: LightboxPreloadEntry | null;
+  speculativeLoads: Set<LightboxPreloadEntry>;
+  readonly preloadConcurrency: number;
+  readonly preloadBudgetBytes: number;
+}
 interface LightboxSessionView {
   currentSrcKey: string | null;
   fullUsesOriginal: boolean | null;
@@ -115,7 +140,66 @@ interface LightboxViewportOptions {
   cancelProgressiveLoad(): void;
   handledClick(): void;
 }
+/** One openLightbox call: the photo being opened and what its image and detail callbacks share. */
+interface LightboxOpenContext {
+  readonly photoId: number;
+  readonly filename: string | null | undefined;
+  /** The session request this open began; callbacks check it before touching the page. */
+  readonly token: LightboxSessionToken;
+  /** The photo's entry in the page's navigation list, when it has one. */
+  readonly listed: LightboxPhoto | undefined;
+  readonly img: HTMLImageElement;
+  readonly label: HTMLElement;
+  /** The zoom the outgoing bitmap keeps until the incoming image is laid out. */
+  readonly transitionZoom: number;
+  /** The call reopened the photo already on screen, so no bitmap handoff is needed. */
+  readonly reopeningVisiblePhoto: boolean;
+  /** The /api/photos/<id> response, once it has arrived. */
+  detail: LightboxPhoto | null;
+  /** The filename, counter and displayed photo id name this photo. */
+  identityCommitted: boolean;
+  readonly onLoad: () => void;
+  readonly onError: () => void;
+  readonly onAbandon: () => void;
+}
+/** Edit sequence numbers captured when a photo's detail request starts. */
+interface LightboxDetailSeqs { flag: number; recipeWrite: number; adjust: number }
 interface LightboxViewportMetrics { w: number; h: number; wrapW: number; wrapH: number; scale: number }
+/** One viewport controller's state. viewport.js creates it and never hands it out; the viewport-*.js functions take it as their first argument. */
+interface LightboxViewportContext {
+  readonly window: Window & typeof globalThis;
+  readonly document: Document;
+  readonly options: LightboxViewportOptions;
+  zoom: number;
+  panX: number;
+  panY: number;
+  nativeZoom: number | null;
+  fitScale: number;
+  pendingOneToOne: boolean;
+  pendingOneToOneAnchor: LightboxPoint | null;
+  savedViews: Record<string, LightboxViewportState | null>;
+  pendingRestore: LightboxViewportState | null;
+  pendingEye: (LightboxEyeAnchor & {photoId: number}) | null;
+  eyeAnchor: LightboxEyeAnchor | null;
+  active: boolean;
+  resizeTimer: number | null;
+  refreshSourceTier: boolean;
+  deferredRefreshPending: boolean;
+  layoutObserver: ResizeObserver | null;
+  dragging: boolean;
+  didDrag: boolean;
+  dragStartX: number;
+  dragStartY: number;
+  panStartX: number;
+  panStartY: number;
+  listeners: {
+    wheel(event: WheelEvent): void;
+    mousedown(event: MouseEvent): void;
+    mousemove(event: MouseEvent): void;
+    mouseup(): void;
+    resize(): void;
+  } | null;
+}
 interface LightboxViewport {
   beginPhoto(photoId: number, options?: LightboxOpenOptions): Readonly<{zoom: number; oneToOne: boolean}>;
   close(): void;

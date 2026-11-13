@@ -1,6 +1,7 @@
 import { lbState } from './shared-state.js';
 import { VireoLightboxSession } from './session.js';
-import { VireoLightboxViewport, _lbSrcRank } from './viewport.js';
+import { VireoLightboxViewport } from './viewport.js';
+import { _lbSrcRank } from './viewport-zoom.js';
 import {
   _lbAdjustmentSourceHint, _lbRememberEditRecipe, _vireoPairKnownByPhoto, _vireoPairSource,
   vireoRememberPhotoRenderKey,
