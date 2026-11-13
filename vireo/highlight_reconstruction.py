@@ -47,7 +47,7 @@ def _has_terminal_spike(views, peak, white, size):
     """
     width = max(1, round(white / 4096))
     edges = np.arange(peak - 9 * width, peak + width, width)
-    hist = sum((np.histogram(view, bins=edges)[0] for view in views))
+    hist = sum(np.histogram(view, bins=edges)[0] for view in views)
     tail = hist[:-1]
     return (np.count_nonzero(tail) >= 4
             and hist[-1] >= max(16, size * 1e-5, 8 * tail.mean()))
