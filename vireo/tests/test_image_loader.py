@@ -47,6 +47,8 @@ class _FakeRaw:
         self.sizes = SimpleNamespace(width=sensor_size[0], height=sensor_size[1])
         self.postprocess_calls = 0
         self.postprocess_kwargs = []
+        # No mosaic to read: highlight reconstruction skips this handle.
+        self.raw_type = None
         import numpy as np
         if raw_pattern == "bayer":
             self.raw_pattern = np.array([[0, 1], [3, 2]], dtype=np.uint8)
