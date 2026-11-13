@@ -94,10 +94,27 @@ export function closeLightbox(/** @type {Event | undefined} */ e = undefined) {
  */
 export function buildLightboxContextMenu(/** @type {number} */ pid) {
   var readOnlyHint = lbState.readOnly ? lbState.readOnlyMessage : null;
+  /** @type {LightboxMenuItem[]} */ var items = [];
+  return items.concat(
+    curationMenuItems(pid, readOnlyHint),
+    [{ separator: true }],
+    viewToggleMenuItems(readOnlyHint),
+    [{ separator: true }],
+    photoDestinationMenuItems(pid),
+    photoToolMenuItems(),
+    photoFileMenuItems(pid),
+    [{ separator: true }, { label: 'Close Lightbox', onClick: function() { closeLightbox(); } }]
+  );
+}
 
+/**
+ * The rating, color and flag chip rows.
+ * @param {number} pid @param {string | null} readOnlyHint @returns {LightboxMenuItem[]}
+ */
+function curationMenuItems(pid, readOnlyHint) {
   var rateChip = function(/** @type {number} */ n) {
     return {
-      label: n === 0 ? '\u2606' : String(n),
+      label: n === 0 ? '☆' : String(n),
       title: n === 0 ? 'No rating' : 'Rate ' + n,
       disabled: !!readOnlyHint,
       disabledHint: readOnlyHint || undefined,
@@ -130,6 +147,33 @@ export function buildLightboxContextMenu(/** @type {number} */ pid) {
       },
     };
   };
+
+  /** @type {LightboxMenuItem[]} */ var items = [
+    { chips: [0, 1, 2, 3, 4, 5].map(rateChip) },
+  ];
+  if (Vireo.pageHook('setColorLabelFor')) {
+    items.push({ chips: [
+      colorChip(null, '○', 'No color'),
+      colorChip('red', '●', 'Red'),
+      colorChip('yellow', '●', 'Yellow'),
+      colorChip('green', '●', 'Green'),
+      colorChip('blue', '●', 'Blue'),
+      colorChip('purple', '●', 'Purple'),
+    ] });
+  }
+  items.push({ chips: [
+    flagChip('flagged', '⚑', 'Flag as pick'),
+    flagChip('rejected', '✕', 'Reject'),
+    flagChip('none', '○', 'Unflag'),
+  ] });
+  return items;
+}
+
+/**
+ * The View toggles, each labeled with its current state.
+ * @param {string | null} readOnlyHint @returns {LightboxMenuItem[]}
+ */
+function viewToggleMenuItems(readOnlyHint) {
   var toggleItem = function(/** @type {string} */ label, /** @type {boolean} */ visible, /** @type {() => unknown} */ onClick, /** @type {string | null | undefined} */ disabledHint = undefined) {
     return {
       label: label + ': ' + (visible ? 'On' : 'Off'),
@@ -138,35 +182,25 @@ export function buildLightboxContextMenu(/** @type {number} */ pid) {
       onClick: onClick,
     };
   };
-
-  /** @type {LightboxMenuItem[]} */ var items = [
-    { chips: [0, 1, 2, 3, 4, 5].map(rateChip) },
+  return [
+    toggleItem('Detection boxes', lbOverlays.boxesVisible, toggleLightboxBoxes),
+    toggleItem('Mask overlay', lbOverlays.masksVisible, toggleLightboxMasks),
+    toggleItem('Eye marker', lbOverlays.eyeVisible, toggleLightboxEye),
+    toggleItem('Track eye', lbOverlays.trackEyeEnabled, toggleLightboxTrackEye),
+    toggleItem('Filename and counter', lbOverlays.infoVisible, toggleLightboxInfo),
+    toggleItem('Lightbox controls', lbOverlays.chromeVisible, toggleLightboxChrome),
+    toggleItem('Wildlife classification', !lbState.currentWildlifeExcluded,
+      lightboxToggleWildlifeExcluded, readOnlyHint),
   ];
-  if (Vireo.pageHook('setColorLabelFor')) {
-    items.push({ chips: [
-      colorChip(null, '\u25CB', 'No color'),
-      colorChip('red', '\u25CF', 'Red'),
-      colorChip('yellow', '\u25CF', 'Yellow'),
-      colorChip('green', '\u25CF', 'Green'),
-      colorChip('blue', '\u25CF', 'Blue'),
-      colorChip('purple', '\u25CF', 'Purple'),
-    ] });
-  }
-  items.push({ chips: [
-    flagChip('flagged', '\u2691', 'Flag as pick'),
-    flagChip('rejected', '\u2715', 'Reject'),
-    flagChip('none', '\u25CB', 'Unflag'),
-  ] });
-  items.push({ separator: true });
-  items.push(toggleItem('Detection boxes', lbOverlays.boxesVisible, toggleLightboxBoxes));
-  items.push(toggleItem('Mask overlay', lbOverlays.masksVisible, toggleLightboxMasks));
-  items.push(toggleItem('Eye marker', lbOverlays.eyeVisible, toggleLightboxEye));
-  items.push(toggleItem('Track eye', lbOverlays.trackEyeEnabled, toggleLightboxTrackEye));
-  items.push(toggleItem('Filename and counter', lbOverlays.infoVisible, toggleLightboxInfo));
-  items.push(toggleItem('Lightbox controls', lbOverlays.chromeVisible, toggleLightboxChrome));
-  items.push(toggleItem('Wildlife classification', !lbState.currentWildlifeExcluded,
-    lightboxToggleWildlifeExcluded, readOnlyHint));
-  items.push({ separator: true });
+}
+
+/**
+ * Where the photo can be taken from here: the editor, Browse, and the species
+ * highlight and representative choices.
+ * @param {number} pid @returns {LightboxMenuItem[]}
+ */
+function photoDestinationMenuItems(pid) {
+  /** @type {LightboxMenuItem[]} */ var items = [];
   const editButton = /** @type {HTMLButtonElement | null} */ (document.getElementById('lightboxEditPhoto'));
   if (editButton) {
     items.push({ label: 'Edit Photo', disabled: editButton.disabled,
@@ -190,13 +224,20 @@ export function buildLightboxContextMenu(/** @type {number} */ pid) {
       photoById: _lbPhotoDataByPhoto,
     }));
   }
+  return items;
+}
 
-  items.push.apply(items, photoToolMenuItems());
+/**
+ * The photo's file: external editors, export, reveal and its path.
+ * @param {number} pid @returns {LightboxMenuItem[]}
+ */
+function photoFileMenuItems(pid) {
+  /** @type {LightboxMenuItem[]} */ var items = [];
   if (typeof openInEditor === 'function') {
     items = items.concat(buildOpenInEditorMenuItems([pid]));
   }
   if (Vireo.pageHook('openPhotoExportModal')) {
-    items.push({ label: 'Export\u2026',
+    items.push({ label: 'Export…',
       onClick: function() {
         // The lightbox can navigate while its context menu remains open.
         // Resolve the visible identity now instead of exporting the photo
@@ -214,11 +255,6 @@ export function buildLightboxContextMenu(/** @type {number} */ pid) {
     items.push({ label: 'Copy Path',
       onClick: function() { const hook = Vireo.pageHook('copyPhotoPaths'); if (hook) hook([pid]); } });
   }
-
-  items.push({ separator: true });
-  items.push({ label: 'Close Lightbox',
-    onClick: function() { closeLightbox(); } });
-
   return items;
 }
 

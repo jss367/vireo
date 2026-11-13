@@ -25,7 +25,9 @@ The viewport controller owns zoom, pan, saved views and interaction lifecycle.
 | `flags.js` | Confirmed, pending, and provisional review flags |
 | `overlays.js` | View-menu preferences (`lbOverlays`), detections, eye markers, and masks |
 | `crop.js` | Crop-editor interaction and saves |
-| `navigation.js` | Opening photos, navigation, metadata loading, and fullscreen |
+| `navigation.js` | `openLightbox` (the steps of opening a photo, in order), arrow navigation, edit-cache refresh, and fullscreen |
+| `open-image.js` | The incoming photo's first image: the handoff of visible identity and viewport when it decodes, and source fallbacks when it fails |
+| `open-detail.js` | The incoming photo's detail request: pair, recipe, geometry, flag and overlays |
 | `controls.js` | Zoom button adapters, closing, and context menus |
 | `delete.js` | Deletion confirmation, job progress, and lightbox reconciliation |
 | `inat.js` | iNaturalist upload/export queues and modal lifecycle |
@@ -63,6 +65,12 @@ module's and may stop it reaching the next (the lightbox's document `keydown`
 handlers) are not attached at evaluation: `navbar-boot.js` calls
 `bindLightboxKeyboard()` after the command palette's and the shortcuts sheet's
 binders, the order the classic scripts attached them in.
+
+`openLightbox` builds one record per call (`LightboxOpenContext`: the photo,
+its session token, its navigation-list entry, and the three image callbacks)
+and passes it to each step, so a late image or detail callback acts on the
+open that started it. The session compares the initial-load callbacks by
+identity, so they are created once per open, on that record.
 
 Preserve request generation checks when moving behavior: requested photo
 identity and the photo currently visible on screen can differ during

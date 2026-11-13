@@ -2,39 +2,33 @@ import { navbarState } from '../navbar-state.js';
 import { lbState } from './shared-state.js';
 import { vireoEditNav } from '../navbar-edit-nav.js';
 import {
-  _lbApplyReadOnlyState, _lbEditRecipeByPhoto, _lbGuardReadOnly, _lbPageBrowseDisabledHint,
-  _lbPhotoDataByPhoto, _lbRawEditRecipeByPhoto, _lbSetPhotoTransitionPending,
-  vireoLightboxSession, vireoLightboxViewport,
+  _lbApplyReadOnlyState, _lbGuardReadOnly, _lbPageBrowseDisabledHint, _lbPhotoDataByPhoto,
+  _lbSetPhotoTransitionPending, vireoLightboxSession, vireoLightboxViewport,
 } from './state.js';
-import { _lbRenderLifeListPanel } from './curation.js';
 import {
-  _lbApplyEditButtonState, _lbClearAdjustmentPreview, _lbCloneEditRecipe, _lbCloneRecipe,
-  _lbEditRecipeWriteSeqFor, _lbEditVersionByPhoto, _lbFlushPendingAdjustmentSave,
-  _lbMarkEditRecipeWrite, _lbRecipeHasEdits, _lbReloadCurrentRenderAfterEdit,
+  _lbApplyEditButtonState, _lbClearAdjustmentPreview, _lbEditVersionByPhoto,
+  _lbFlushPendingAdjustmentSave, _lbMarkEditRecipeWrite, _lbReloadCurrentRenderAfterEdit,
   _lbRememberEditRecipe, _lbRenderAdjustmentControls, _lbSetAdjustmentControlsDisabled,
-  _lbSetAdjustmentStatus, _vireoBumpRenderVersion, _vireoEditRecipeCacheKey,
-  _vireoPairKnownByPhoto, _vireoPairSourceImageLoaded, _vireoRenderedImageSource,
+  _lbSetAdjustmentStatus, _vireoBumpRenderVersion, _vireoRenderedImageSource,
   _vireoSetRenderedImageSource, vireoCacheBustedPhotoUrl, vireoRefreshPhotoRenders,
   vireoRememberPhotoPair, vireoRememberPhotoRenderKey, vireoUpdatePairSourceControls,
 } from './edits.js';
 import {
-  _lbDisplayedFlagFor, _lbForgetConfirmedFlag, _lbRecordFetchedFlag, _lbRememberConfirmedFlag,
-  _lbSetFlagStatus,
+  _lbDisplayedFlagFor, _lbForgetConfirmedFlag, _lbRememberConfirmedFlag, _lbSetFlagStatus,
 } from './flags.js';
 import {
   _lbApplyBoxesVisibility, _lbApplyChromeVisibility, _lbApplyEyeVisibility,
-  _lbApplyInfoVisibility, _lbApplyMaskToggleButton, _lbApplyMaskVisibility,
-  _lbApplyTrackEyeState, _lbFlushDeferredOverlayApply, _lbLoadDetections, _lbLoadMaskVariants,
-  _lbMetadataOrientation, _lbRenderEyeCrosshair, _lbResetMaskOverlay,
-  _lbSourceOverlaysAvailable,
+  _lbApplyInfoVisibility, _lbApplyMaskToggleButton, _lbApplyTrackEyeState, _lbLoadMaskVariants,
+  _lbMetadataOrientation,
 } from './overlays.js';
 import { beginLightboxInteraction, closeLightbox } from './controls.js';
 import { submitToInat } from './inat.js';
 import { matchesShortcut } from './keyboard.js';
+import { loadPhotoDetail } from './open-detail.js';
 import {
-  _lbDetailSharpeningPending, _lbInitialSourceKey, _lbMarkDetailSettled, _lbRenderDetailStatus,
-  _lbResetDetailStatus, _lbScheduleSourceSwap, _lbSetPreviewLoading, _lbSrcUrl,
-} from './source-loading.js';
+  abandonInitialLoad, handleInitialImageError, handleInitialImageLoad, startInitialImage,
+} from './open-image.js';
+import { _lbInitialSourceKey, _lbResetDetailStatus, _lbSetPreviewLoading } from './source-loading.js';
 import { showToast } from '../navbar-shared-helpers.js';
 
 function _lbThumbnailUrl(/** @type {LightboxPhotoId} */ photoId, /** @type {string | undefined} */ version) {
@@ -88,47 +82,17 @@ export function _lbRefreshEditRecipeCache(/** @type {Record<string, LightboxReci
 
 export var vireoRefreshEditRecipeCache = _lbRefreshEditRecipeCache;
 
-export function _lbRenderKeywords(/** @type {{name: string}[] | undefined} */ keywords) {
-  const container = document.getElementById('lightboxKeywords');
-  if (!container) return;
-  container.innerHTML = '';
-
-  var label = document.createElement('span');
-  label.className = 'lightbox-keywords-label';
-  label.textContent = 'Keywords';
-  label.setAttribute('aria-hidden', 'true');
-  container.appendChild(label);
-
-  var entries = Array.isArray(keywords) ? keywords.filter(function(keyword) {
-    return keyword && keyword.name;
-  }) : [];
-  if (!entries.length) {
-    var empty = document.createElement('span');
-    empty.className = 'lightbox-keywords-empty';
-    empty.textContent = 'None';
-    container.appendChild(empty);
-    return;
-  }
-
-  entries.forEach(function(keyword) {
-    var pill = document.createElement('span');
-    pill.className = 'lightbox-keyword';
-    pill.textContent = keyword.name;
-    pill.title = keyword.name;
-    container.appendChild(pill);
-  });
-}
-
-export function openLightbox(/** @type {number} */ photoId, /** @type {string | null | undefined} */ filename, /** @type {LightboxPhoto[] | undefined} */ photoList = undefined, /** @type {LightboxOpenOptions | undefined} */ options = undefined) {
+// Retire the photo being left and begin the next one: its read-only state, the
+// Escape handler, and the session and viewport requests every later step of
+// this open is checked against.
+function beginOpen(/** @type {number} */ photoId, /** @type {LightboxOpenOptions} */ options) {
   var alreadyOpen = !!lbState.escToken;
-  var transitionAlreadyPending = lbState.visualTransitionPending;
   var reopeningVisiblePhoto = !!(
     alreadyOpen &&
-    !transitionAlreadyPending &&
+    !lbState.visualTransitionPending &&
     vireoLightboxSession.requestedPhotoId() != null &&
     String(vireoLightboxSession.requestedPhotoId()) === String(photoId)
   );
-  options = options || {};
   var nextReadOnly = Object.prototype.hasOwnProperty.call(options, 'readOnly')
     ? !!options.readOnly
     : (alreadyOpen && lbState.readOnly);
@@ -142,8 +106,6 @@ export function openLightbox(/** @type {number} */ photoId, /** @type {string | 
   // that decodes in 100ms still announce Loading and then Full detail.
   _lbResetDetailStatus();
   _lbSetPreviewLoading(false);
-  var fallbackViewportState = options.fallbackViewportState || null;
-  var eyeTrackAnchor = options.eyeTrackAnchor || null;
   _lbFlushPendingAdjustmentSave();
   lbState.readOnly = nextReadOnly;
   lbState.readOnlyMessage = nextReadOnlyMessage || 'This lightbox is read-only';
@@ -154,14 +116,12 @@ export function openLightbox(/** @type {number} */ photoId, /** @type {string | 
   if (alreadyOpen) Keymap.popEsc(lbState.escToken);
   lbState.escToken = Keymap.pushEsc(function() { closeLightbox(); });
   if (!alreadyOpen) beginLightboxInteraction();
-  var openToken = vireoLightboxSession.begin(photoId);
+  var token = vireoLightboxSession.begin(photoId);
   var viewportOpen = vireoLightboxViewport.beginPhoto(photoId, {
-    fallbackViewportState: fallbackViewportState,
+    fallbackViewportState: options.fallbackViewportState || null,
     preserveOneToOne: !!options.preserveOneToOne,
-    eyeTrackAnchor: eyeTrackAnchor
+    eyeTrackAnchor: options.eyeTrackAnchor || null
   });
-  var transitionZoom = viewportOpen.zoom;
-  var restoreWantsOneToOne = viewportOpen.oneToOne;
   // During arrow navigation the <img> still paints the outgoing bitmap until
   // the replacement has decoded. Keep its transform frozen too. The incoming
   // photo's dimensions, true 1:1 scale, and normalized viewport center are
@@ -181,76 +141,45 @@ export function openLightbox(/** @type {number} */ photoId, /** @type {string | 
   // draining that stale closure would render the previous photo's detections
   // and eye marker over the incoming bitmap.
   lbState.deferredOverlayApply = null;
-
   _lbApplyReadOnlyState();
+  return {
+    alreadyOpen: alreadyOpen, reopeningVisiblePhoto: reopeningVisiblePhoto, token: token,
+    transitionZoom: viewportOpen.zoom, restoreWantsOneToOne: viewportOpen.oneToOne
+  };
+}
+
+// Take what the page's navigation list already knows about the photo: its
+// RAW/JPEG pair, flag and wildlife exclusion. Returns the list's entry, if any.
+function adoptListedPhoto(/** @type {number} */ photoId, /** @type {LightboxPhoto[] | undefined} */ photoList, /** @type {boolean} */ alreadyOpen) {
   if (photoList) lbState.photoList = photoList;
   // Remember the photo being viewed so the Edit page (/edit with no id) can
   // resolve "the photo I was just looking at".
   if (vireoEditNav) vireoEditNav.setLastPhoto(photoId);
   _lbApplyEditButtonState();
-  var currentFromList = lbState.photoList.find(function(x) { return x.id === photoId; });
-  if (currentFromList && typeof vireoRememberPhotoPair === 'function') {
-    vireoRememberPhotoPair(currentFromList);
+  var listed = lbState.photoList.find(function(x) { return x.id === photoId; });
+  if (listed && typeof vireoRememberPhotoPair === 'function') {
+    vireoRememberPhotoPair(listed);
   }
   if (typeof vireoUpdatePairSourceControls === 'function') {
     vireoUpdatePairSourceControls(photoId);
   }
-  if (currentFromList && Object.prototype.hasOwnProperty.call(currentFromList, 'flag')) {
-    _lbRememberConfirmedFlag(photoId, currentFromList.flag);
+  if (listed && Object.prototype.hasOwnProperty.call(listed, 'flag')) {
+    _lbRememberConfirmedFlag(photoId, listed.flag);
   } else {
     // Flagless opens (e.g. review/misses/cull push only {id, filename}) must
     // not reuse a flag remembered from an earlier open; rely on the
     // /api/photos/:id fetch to repopulate the confirmed flag instead.
     _lbForgetConfirmedFlag(photoId);
   }
-  lbState.currentWildlifeExcluded = !!(currentFromList && currentFromList.wildlife_excluded);
+  lbState.currentWildlifeExcluded = !!(listed && listed.wildlife_excluded);
   if (!alreadyOpen) _lbSetFlagStatus(_lbDisplayedFlagFor(photoId));
+  return listed;
+}
 
-  var overlayCandidate = /** @type {HTMLElement | null} */ (document.getElementById('lightboxOverlay')); if (!overlayCandidate) return; const overlay = overlayCandidate;
-  var imgCandidate = /** @type {HTMLImageElement | null} */ (document.getElementById('lightboxImg')); if (!imgCandidate) return; const img = imgCandidate;
-  var labelCandidate = /** @type {HTMLElement | null} */ (document.getElementById('lightboxFilename')); if (!labelCandidate) return; const label = labelCandidate;
-  var inatBtnCandidate = /** @type {HTMLElement | null} */ (document.getElementById('lightboxInat')); if (!inatBtnCandidate) return; const inatBtn = inatBtnCandidate;
-  var wrapCandidate = /** @type {HTMLElement | null} */ (document.getElementById('lightboxWrap')); if (!wrapCandidate) return; const wrap = wrapCandidate;
-  /** @type {LightboxPhoto | null} */ var detailData = null;
-
-  // The browser keeps painting the outgoing bitmap while a newly assigned
-  // image source loads. Keep the visible filename and position paired with
-  // that bitmap, then advance all three in the image-load task before the next
-  // paint. Internal navigation state still advances immediately, so rapid
-  // arrow presses continue to target the right photo.
-  var visibleIdentityCommitted = false;
-  function commitVisiblePhotoIdentity() {
-    label.textContent = filename || '';
-    _lbRenderKeywords(
-      detailData && detailData.keywords || currentFromList && currentFromList.keywords || []
-    );
-    _lbSetFlagStatus(_lbDisplayedFlagFor(photoId));
-    var counterCandidate = /** @type {HTMLElement | null} */ (document.getElementById('lightboxCounter')); if (!counterCandidate) return; const counter = counterCandidate;
-    if (lbState.photoList.length > 1) {
-      var idx = lbState.photoList.findIndex(function(p) { return p.id === photoId; });
-      var counterFilename = filename || (currentFromList && currentFromList.filename) || '';
-      counter.textContent = (idx + 1) + ' / ' + lbState.photoList.length
-        + (counterFilename ? ' \u00b7 ' + counterFilename : '');
-      counter.title = counterFilename;
-      counter.style.display = '';
-    } else {
-      counter.title = '';
-      counter.style.display = 'none';
-    }
-    if (!visibleIdentityCommitted) {
-      visibleIdentityCommitted = true;
-      vireoLightboxSession.commit(openToken);
-      try {
-        document.dispatchEvent(new CustomEvent('lightbox:photochanged', {
-          detail: { photoId: photoId }
-        }));
-      } catch(_) {}
-    }
-  }
-
-  // Reset pan for the new photo, but keep a 1:1 transform during arrow
-  // navigation so the outgoing image does not visibly snap back to fit before
-  // the replacement finishes loading.
+// Reset pan for the new photo, but keep a 1:1 transform during arrow
+// navigation so the outgoing image does not visibly snap back to fit before
+// the replacement finishes loading.
+function clearOutgoingPhoto(/** @type {HTMLElement} */ wrap, /** @type {number} */ transitionZoom) {
   wrap.classList.toggle('zoomed', transitionZoom > 1.001);
   wrap.scrollTop = 0;
   wrap.scrollLeft = 0;
@@ -261,28 +190,38 @@ export function openLightbox(/** @type {number} */ photoId, /** @type {string | 
   // Clear previous eye crosshair; re-rendered when /api/photos/<id> resolves.
   var eyeContainer = document.getElementById('lightboxEye');
   if (eyeContainer) { eyeContainer.innerHTML = ''; eyeContainer.style.display = 'none'; }
+}
 
-  // Reset continuous zoom state for new photo
+// Pick the first source to show from what the catalog already says about the
+// photo, preferring a preview the session has decoded.
+function chooseInitialSource(/** @type {LightboxOpenContext} */ open, /** @type {boolean} */ restoreWantsOneToOne) {
+  var photoId = open.photoId;
+  var listed = open.listed;
   lbState.photoW = null;
   lbState.photoH = null;
   lbState.photoOrientation = null;
-  lbState.currentEditRecipe = currentFromList && currentFromList.edit_recipe || null;
-  if (currentFromList && Object.prototype.hasOwnProperty.call(currentFromList, 'edit_recipe')) {
-    _lbRememberEditRecipe(photoId, currentFromList.edit_recipe);
-    vireoRememberPhotoRenderKey(photoId, currentFromList.render_key);
+  lbState.currentEditRecipe = listed && listed.edit_recipe || null;
+  if (listed && Object.prototype.hasOwnProperty.call(listed, 'edit_recipe')) {
+    _lbRememberEditRecipe(photoId, listed.edit_recipe);
+    vireoRememberPhotoRenderKey(photoId, listed.render_key);
   }
-  /** @type {LightboxPhoto} */ var incomingPhoto = Object.assign({id: photoId}, _lbPhotoDataByPhoto[String(photoId)] || {}, currentFromList || {});
+  /** @type {LightboxPhoto} */ var incomingPhoto = Object.assign({id: photoId}, _lbPhotoDataByPhoto[String(photoId)] || {}, listed || {});
   // Catalog geometry lets us select a tier before the next image has loaded.
   // Never consult the outgoing bitmap for the incoming photo's dimensions.
   lbState.photoW = incomingPhoto.width || null;
   lbState.photoH = incomingPhoto.height || null;
   lbState.photoOrientation = _lbMetadataOrientation(incomingPhoto.metadata);
-  var initialTarget = _lbInitialSourceKey(incomingPhoto, transitionZoom, restoreWantsOneToOne);
+  var initialTarget = _lbInitialSourceKey(incomingPhoto, open.transitionZoom, restoreWantsOneToOne);
   var warmInitial = vireoLightboxSession.decodedPreview(photoId, initialTarget);
   lbState.currentSrcKey = warmInitial ? warmInitial.sourceKey : initialTarget;
   if (lbState.currentSrcKey !== initialTarget) lbState.progressiveTargetKey = initialTarget;
   lbState.fullLongEdge = null;
   vireoLightboxViewport.updateControls();
+}
+
+// Forget the outgoing photo's source availability and recipe. The adjustment
+// controls stay disabled until this photo's own recipe arrives.
+function resetEditState() {
   lbState.originalUnavailable = false;
   lbState.fullUsesOriginal = null;
   lbState.editRecipe = null;
@@ -297,310 +236,31 @@ export function openLightbox(/** @type {number} */ photoId, /** @type {string | 
   _lbRenderAdjustmentControls();
   _lbSetAdjustmentControlsDisabled(true);
   _lbSetAdjustmentStatus('');
-  vireoLightboxSession.cancelSwap();
-  lbState.desiredSrcKey = null;
-  if (!lbState.visualTransitionPending) {
-    vireoLightboxViewport.applyTransform();
-  }
+}
 
-  // Fetch original dimensions (async, non-blocking for image display)
-  var flagFetchSeq = lbState.flagEditSeq;
-  var editRecipeFetchSeq = _lbEditRecipeWriteSeqFor(photoId);
-  var editFetchSeq = lbState.adjustSeq;
-  fetch('/api/photos/' + photoId)
-    .then(function(r) { return r.ok ? r.json() : null; })
-    .then(function(/** @type {LightboxPhoto} */ data) {
-      if (!data || !vireoLightboxSession.isCurrent(openToken)) return;
-      var pairWasKnown = !!_vireoPairKnownByPhoto[String(photoId)];
-      if (typeof vireoRememberPhotoPair === 'function') {
-        vireoRememberPhotoPair(data);
-      }
-      if (typeof vireoUpdatePairSourceControls === 'function') {
-        vireoUpdatePairSourceControls(photoId);
-      }
-      if (!pairWasKnown && _vireoPairKnownByPhoto[String(photoId)]) {
-        var pairImgCandidate = /** @type {HTMLImageElement | null} */ (document.getElementById('lightboxImg')); if (!pairImgCandidate) return; const pairImg = pairImgCandidate;
-        vireoLightboxSession.watchImage(pairImg, function() {
-          _vireoPairSourceImageLoaded(photoId, 'jpeg', pairImg);
-        });
-        _vireoBumpRenderVersion(photoId);
-        vireoRefreshPhotoRenders([photoId]);
-      }
-      var editRecipeFresh = _lbEditRecipeWriteSeqFor(photoId) === editRecipeFetchSeq;
-      // Fingerprint the unclipped recipe on both sides of this comparison:
-      // ``data.edit_recipe`` arrives straight from the server, so reading the
-      // clipped ``_lbEditRecipeByPhoto`` view here would report a change on
-      // every refetch of any photo carrying a section the lightbox does not
-      // model (``local``), and bump the render version for nothing.
-      var recipeBefore = _lbRawEditRecipeByPhoto[String(photoId)];
-      if (recipeBefore === undefined) recipeBefore = _lbEditRecipeByPhoto[String(photoId)];
-      var recipeKeyBefore = _vireoEditRecipeCacheKey(recipeBefore);
-      if (!editRecipeFresh) {
-        var currentRecipe = _lbEditRecipeByPhoto[String(photoId)];
-        data.edit_recipe = _lbRecipeHasEdits(currentRecipe) ? _lbCloneEditRecipe(currentRecipe) : null;
-      }
-      _lbPhotoDataByPhoto[String(photoId)] = data;
-      detailData = data;
-      if (visibleIdentityCommitted) _lbRenderKeywords(data.keywords);
-      _lbRenderLifeListPanel(photoId);
-      if (editRecipeFresh) {
-        _lbRememberEditRecipe(photoId, data.edit_recipe);
-        if (typeof vireoRememberPhotoRenderKey === 'function') {
-          vireoRememberPhotoRenderKey(photoId, data.render_key);
-        }
-        if (_vireoEditRecipeCacheKey(data.edit_recipe) !== recipeKeyBefore) {
-          _vireoBumpRenderVersion(photoId);
-          if (typeof vireoRefreshPhotoRenders === 'function') {
-            vireoRefreshPhotoRenders([photoId]);
-          }
-          _lbReloadCurrentRenderAfterEdit(photoId);
-        }
-      }
-      _lbApplyMaskVisibility();
-      lbState.photoW = data.width || null;
-      lbState.photoH = data.height || null;
-      lbState.fullUsesOriginal = !!data.full_uses_original;
-      lbState.sessionFullUsesOriginal = lbState.fullUsesOriginal;
-      if (data.full_preview_max_size != null &&
-          Number.isFinite(Number(data.full_preview_max_size)) && Number(data.full_preview_max_size) >= 0) {
-        lbState.previewMaxSize = Number(data.full_preview_max_size);
-      }
-      lbState.photoOrientation = _lbMetadataOrientation(data.metadata);
-      var currentLayoutRecipe = _lbEditRecipeByPhoto[String(photoId)];
-      lbState.currentEditRecipe = _lbRecipeHasEdits(currentLayoutRecipe)
-        ? currentLayoutRecipe || null
-        : null;
-      if (!_lbSourceOverlaysAvailable()) {
-        var detContainer2 = document.getElementById('lightboxDetections');
-        if (detContainer2) detContainer2.innerHTML = '';
-        var eyeContainer2 = document.getElementById('lightboxEye');
-        if (eyeContainer2) eyeContainer2.innerHTML = '';
-        _lbResetMaskOverlay();
-      }
-      lbState.currentWildlifeExcluded = !!data.wildlife_excluded;
-      if (editFetchSeq === lbState.adjustSeq) {
-        lbState.editRecipe = _lbCloneRecipe(data.edit_recipe || {});
-        lbState.editRecipeLoaded = true;
-        _lbRenderAdjustmentControls();
-        _lbSetAdjustmentControlsDisabled(false);
-        _lbSetAdjustmentStatus('');
-      }
-      _lbRecordFetchedFlag(photoId, data.flag, flagFetchSeq);
-      // Metadata commonly wins the race with image decoding. Updating the
-      // transform here would lay out the still-visible outgoing bitmap using
-      // the incoming photo's dimensions, producing the navigation jerk. Let
-      // the image-load handler commit image + viewport atomically instead.
-      if (!lbState.visualTransitionPending) {
-        vireoLightboxViewport.recomputeNativeZoom();
-        if (!vireoLightboxViewport.applyPendingRestore()) vireoLightboxViewport.applyPendingOneToOne();
-        vireoLightboxViewport.applyPendingEye(data);
-        vireoLightboxSession.scheduleAdjacent(lbState.currentSrcKey);
-        if (lbState.currentSrcKey === 'full') vireoLightboxSession.scheduleOriginal(photoId);
-      }
-      // Detection boxes, the eye marker, and the mask overlay are children of
-      // lightboxTransform. While _lbVisualTransitionPending is true the
-      // transform is intentionally frozen on the outgoing bitmap, so painting
-      // the incoming photo's overlays now would layer them over the previous
-      // image until handleInitialImageLoad swaps in the new bitmap. Defer the
-      // render calls that actually inject DOM content until the transition
-      // clears; the visibility/toggle helpers are safe to run either way
-      // because they only touch empty containers or button labels.
-      var applyOverlays = function() {
-        _lbLoadDetections(photoId);
-        _lbRenderEyeCrosshair(data);
-      };
-      _lbApplyBoxesVisibility();
-      _lbApplyEyeVisibility();
-      _lbApplyMaskToggleButton();
-      _lbApplyMaskVisibility();
-      if (lbState.visualTransitionPending) {
-        lbState.deferredOverlayApply = applyOverlays;
-      } else {
-        lbState.deferredOverlayApply = null;
-        applyOverlays();
-      }
-      _lbApplyTrackEyeState();
-    })
-    .catch(function() {
-      if (!vireoLightboxSession.isCurrent(openToken)) return;
-      _lbSetAdjustmentStatus('Could not load recipe', true);
-    });
-
-  // Give up on ever displaying this photo, without leaving the lightbox frozen:
-  // while the transition is pending the metadata callback skips layout updates
-  // and vireoLightboxViewport.save treats the incoming photo as mid-flight. The
-  // identity commit comes first on purpose -- releasing the controls while the
-  // filename, counter and vireoLightboxSession.displayedPhotoId() still name the outgoing photo
-  // would let the user act on a photo the UI is not showing. The outgoing
-  // bitmap is dropped for the same reason: leaving it painted under the
-  // incoming filename would let a flag or delete land on a photo the user
-  // cannot see.
-  function abandonInitialLoad() {
-    if (!vireoLightboxSession.isCurrent(openToken)) return;
-    commitVisiblePhotoIdentity();
-    img.onload = null;
-    img.onerror = null;
-    img.removeAttribute('src');
-    lbState.initialDecodePending = false;
-    lbState.visualTransitionPending = false;
-    _lbSetPhotoTransitionPending(false);
-    vireoLightboxViewport.recomputeNativeZoom();
-    // Apply any deferred viewport state so the layout reflects the incoming
-    // photo instead of the frozen outgoing bitmap.
-    if (!vireoLightboxViewport.applyPendingRestore()) vireoLightboxViewport.applyPendingOneToOne();
-    vireoLightboxViewport.applyPendingEye();
-    vireoLightboxViewport.applyTransform();
-    _lbFlushDeferredOverlayApply();
-    vireoLightboxViewport.flushDeferredLayout();
-    _lbRenderDetailStatus();
-  }
-
-  function handleInitialImageLoad() {
-    if (!vireoLightboxSession.isCurrent(openToken)) return;
-    vireoLightboxSession.clearInitialLoad(handleInitialImageLoad);
-    // The commit below momentarily clears the transition before deciding whether
-    // a sharper tier is still needed. Paint once, at the end, so the chip does
-    // not blink off and restart its show delay between those two states.
-    lbState.detailStatusHold += 1;
-    try {
-      commitInitialImageLoad();
-    } finally {
-      lbState.detailStatusHold -= 1;
-      _lbRenderDetailStatus();
-    }
-  }
-  function commitInitialImageLoad() {
-    if (!vireoLightboxSession.isCurrent(openToken)) return;
-    img.onload = null;
-    img.onerror = null;
-    commitVisiblePhotoIdentity();
-    // Only record the /full tier size if the currently loaded source is still /full.
-    // A quick user zoom can trigger a debounced swap to a higher tier before /full
-    // finishes loading, which would otherwise make us record the swapped source's
-    // dimensions as the /full threshold.
-    if (vireoLightboxSession.requestedPhotoId() === photoId && lbState.currentSrcKey === 'full' && img.naturalWidth) {
-      lbState.fullLongEdge = Math.max(img.naturalWidth, img.naturalHeight);
-    }
-    if (vireoLightboxSession.requestedPhotoId() === photoId && lbState.currentSrcKey === 'original' && !lbState.photoW && img.naturalWidth) {
-      lbState.photoW = img.naturalWidth;
-      lbState.photoH = img.naturalHeight;
-    }
-    lbState.initialDecodePending = false;
-    lbState.visualTransitionPending = false;
-    _lbSetPhotoTransitionPending(false);
-    vireoLightboxViewport.recomputeNativeZoom();
-    if (lbState.progressiveTargetKey && vireoLightboxViewport.hasPendingRestore()) {
-      // A ready preview may be soft, but it must show the same crop/position
-      // immediately. Explicit zoom clicks still use the sharp-source deferral.
-      vireoLightboxViewport.applyPendingRestore();
-    } else if (
-      lbState.currentSrcKey === 'full' &&
-      vireoLightboxViewport.pendingOneToOne() &&
-      (
-        lbState.originalUnavailable
-          ? vireoLightboxViewport.deferOneToOneFallback()
-          : vireoLightboxViewport.deferOneToOne(vireoLightboxViewport.nativeZoom() || 4)
-      )
-    ) {
-      // The helper keeps 1:1 pending until the required source tier is current.
-    } else if (!vireoLightboxViewport.applyPendingRestore()) {
-      vireoLightboxViewport.applyPendingOneToOne();
-    }
-    vireoLightboxViewport.applyPendingEye();
-    vireoLightboxViewport.applyTransform();
-    _lbFlushDeferredOverlayApply();
-    vireoLightboxViewport.flushDeferredLayout();
-    if (lbState.progressiveTargetKey) {
-      _lbSetPreviewLoading(true);
-      _lbScheduleSourceSwap(vireoLightboxViewport.pendingOneToOne() ? (vireoLightboxViewport.nativeZoom() || transitionZoom) : vireoLightboxViewport.zoom(), true);
-    } else {
-      // No sharper tier is wanted for the current zoom, so what is on screen is
-      // everything this view can show. (vireoLightboxSession.scheduleOriginal only warms a
-      // background copy for a later 1:1 -- it does not change these pixels.)
-      // A user zoom during the initial /full load (e.g. clicking 1:1) can leave
-      // _lbDesiredSrcKey/_lbPreviewLoading describing an upgrade in flight even
-      // though _lbProgressiveTargetKey is null. Settling here would arm the fade
-      // timer and race the pending upgrade -- confirming a load whose pixels
-      // have not arrived yet. The upgrade's own preloader will settle when it
-      // lands, or clear the chip when it fails. Match the phase predicate so
-      // the chip stays on 'Sharpening…' until then.
-      if (!lbState.previewLoading && !_lbDetailSharpeningPending()) _lbMarkDetailSettled();
-      vireoLightboxSession.scheduleAdjacent(lbState.currentSrcKey);
-      if (lbState.currentSrcKey === 'full') vireoLightboxSession.scheduleOriginal(photoId);
-    }
-  }
-  function handleInitialImageError() {
-    if (!vireoLightboxSession.isCurrent(openToken)) return;
-    if (lbState.progressiveTargetKey) {
-      lbState.currentSrcKey = lbState.progressiveTargetKey;
-      lbState.progressiveTargetKey = null;
-      _lbSetPreviewLoading(false);
-      img.src = _lbSrcUrl(photoId, lbState.currentSrcKey || 'full');
-      return;
-    }
-    if (['1920', '2560', '3840'].indexOf(lbState.currentSrcKey || '') !== -1) {
-      // Sized tiers can now be the initial source. A failed render must not
-      // leave navigation on a broken image: try the original, whose existing
-      // error path falls back to /full if the original is unavailable too.
-      lbState.currentSrcKey = 'original';
-      lbState.desiredSrcKey = null;
-      img.src = _lbSrcUrl(photoId, 'original');
-      return;
-    }
-    if (lbState.currentSrcKey !== 'original') {
-      img.onload = null;
-      img.onerror = null;
-      vireoLightboxSession.clearInitialLoad(handleInitialImageLoad);
-      // No further fallback tier is available.
-      abandonInitialLoad();
-      return;
-    }
-    lbState.originalUnavailable = true;
-    lbState.currentSrcKey = 'full';
-    lbState.desiredSrcKey = null;
-    vireoLightboxSession.watchInitialImage(img, handleInitialImageLoad, handleInitialImageError);
-    img.src = _lbSrcUrl(photoId, 'full');
-  }
-  vireoLightboxSession.watchInitialImage(img, handleInitialImageLoad, handleInitialImageError);
-  var initialSrc = _lbSrcUrl(photoId, lbState.currentSrcKey || 'full');
-  // Reopening the photo already on screen at the same source starts no load:
-  // the bitmap is decoded and still displayed. Reassigning an identical src is
-  // not guaranteed to emit a fresh load event, so arming a pending decode here
-  // could leave a wait that nothing ever ends. A reopen that lands on a
-  // different tier -- restoring a 1:1 viewport, say -- really is loading.
-  var reusingVisibleBitmap = !!(
-    reopeningVisiblePhoto &&
-    img.getAttribute('src') === initialSrc &&
-    img.complete &&
-    img.naturalWidth > 0
-  );
-  if (!reusingVisibleBitmap) {
-    vireoLightboxSession.setInitialLoad(handleInitialImageLoad, abandonInitialLoad);
-    lbState.initialDecodePending = true;
-  }
-  _lbRenderDetailStatus();
-  img.src = initialSrc;
-  if (!lbState.visualTransitionPending) commitVisiblePhotoIdentity();
+function bindPhotoButtons(/** @type {number} */ photoId, /** @type {HTMLElement} */ inatBtn) {
   inatBtn.onclick = function() { submitToInat(photoId); };
   var editPhotoBtn = document.getElementById('lightboxEditPhoto');
-  if (editPhotoBtn) {
-    editPhotoBtn.onclick = function(e) {
-      if (e) e.stopPropagation();
-      if (_lbGuardReadOnly()) return false;
-      var editHint = _lbPageBrowseDisabledHint(photoId);
-      if (editHint) {
-        if (typeof showToast === 'function') showToast(editHint, 'warning');
-        return false;
-      }
-      // Hand the current ordered photo list to the editor so it can offer
-      // Prev/Next just like the lightbox does.
-      if (vireoEditNav) {
-        vireoEditNav.setList(lbState.photoList, photoId);
-        vireoEditNav.setLastPhoto(photoId);
-      }
-      window.location.href = '/edit/' + photoId;
-    };
-  }
+  if (!editPhotoBtn) return;
+  editPhotoBtn.onclick = function(e) {
+    if (e) e.stopPropagation();
+    if (_lbGuardReadOnly()) return false;
+    var editHint = _lbPageBrowseDisabledHint(photoId);
+    if (editHint) {
+      if (typeof showToast === 'function') showToast(editHint, 'warning');
+      return false;
+    }
+    // Hand the current ordered photo list to the editor so it can offer
+    // Prev/Next just like the lightbox does.
+    if (vireoEditNav) {
+      vireoEditNav.setList(lbState.photoList, photoId);
+      vireoEditNav.setLastPhoto(photoId);
+    }
+    window.location.href = '/edit/' + photoId;
+  };
+}
+
+function showLightbox(/** @type {HTMLElement} */ overlay, /** @type {number} */ photoId) {
   overlay.classList.add('active');
   _lbApplyInfoVisibility();
   _lbApplyChromeVisibility();
@@ -614,7 +274,44 @@ export function openLightbox(/** @type {number} */ photoId, /** @type {string | 
   // overlay-variant dropdown. Hidden when the photo has no masks, so
   // pages that don't run the pipeline still get the lightbox unchanged.
   _lbLoadMaskVariants(photoId);
+}
 
+// Open a photo, or move an open lightbox to another one. The session and
+// viewport requests begin at once, so rapid navigation always targets the
+// right photo; what the user sees changes only when the incoming image has
+// decoded (open-image.js), and the photo's detail arrives on its own schedule
+// (open-detail.js).
+export function openLightbox(/** @type {number} */ photoId, /** @type {string | null | undefined} */ filename, /** @type {LightboxPhoto[] | undefined} */ photoList = undefined, /** @type {LightboxOpenOptions | undefined} */ options = undefined) {
+  var begun = beginOpen(photoId, options || {});
+  var listed = adoptListedPhoto(photoId, photoList, begun.alreadyOpen);
+
+  var overlay = document.getElementById('lightboxOverlay');
+  var img = /** @type {HTMLImageElement | null} */ (document.getElementById('lightboxImg'));
+  var label = document.getElementById('lightboxFilename');
+  var inatBtn = document.getElementById('lightboxInat');
+  var wrap = document.getElementById('lightboxWrap');
+  if (!overlay || !img || !label || !inatBtn || !wrap) return;
+
+  /** @type {LightboxOpenContext} */ var open = {
+    photoId: photoId, filename: filename, token: begun.token, listed: listed, img: img, label: label,
+    transitionZoom: begun.transitionZoom, reopeningVisiblePhoto: begun.reopeningVisiblePhoto,
+    detail: null, identityCommitted: false,
+    onLoad: function() { handleInitialImageLoad(open); },
+    onError: function() { handleInitialImageError(open); },
+    onAbandon: function() { abandonInitialLoad(open); }
+  };
+  clearOutgoingPhoto(wrap, begun.transitionZoom);
+  chooseInitialSource(open, begun.restoreWantsOneToOne);
+  resetEditState();
+  vireoLightboxSession.cancelSwap();
+  lbState.desiredSrcKey = null;
+  if (!lbState.visualTransitionPending) {
+    vireoLightboxViewport.applyTransform();
+  }
+  loadPhotoDetail(open);
+  startInitialImage(open);
+  bindPhotoButtons(photoId, inatBtn);
+  showLightbox(overlay, photoId);
 }
 
 export function lightboxNav(/** @type {number} */ delta) {

@@ -226,11 +226,122 @@ export function _lbSrcUrl(/** @type {number | null} */ photoId, /** @type {strin
   return url;
 }
 
+/** @typedef {{photoId: number, token: LightboxSessionToken, key: string, url: string}} LightboxSourceSwap */
+
+// A swap's callbacks act only while the lightbox still shows the photo and
+// request the swap was started for.
+function sourceSwapIsCurrent(/** @type {LightboxSourceSwap} */ swap) {
+  return vireoLightboxSession.requestedPhotoId() === swap.photoId
+    && vireoLightboxSession.isCurrent(swap.token);
+}
+
+// The visible image now shows the swapped-in source.
+function sourceSwapDisplayed(/** @type {LightboxSourceSwap} */ swap, /** @type {HTMLImageElement} */ img) {
+  if (!sourceSwapIsCurrent(swap)) return;
+  var key = swap.key;
+  // A newer swap may have preempted us before this load fired — in that
+  // case img.naturalWidth belongs to a DIFFERENT source than this swap's
+  // `key`, so bail rather than record wrong dims or recalibrate stale state.
+  if (lbState.currentSrcKey !== key) return;
+  lbState.progressiveTargetKey = null;
+  _lbMarkDetailSettled();
+  _lbSetPreviewLoading(false);
+  // Keep the decoded background original alive until the visible image
+  // has adopted it; releasing it earlier can make some WebViews decode
+  // the same full-resolution bytes a second time on the first 100% click.
+  if (key === 'original') vireoLightboxSession.cancelOriginal();
+  if (!lbState.photoW && key === 'original' && img.naturalWidth) {
+    lbState.photoW = img.naturalWidth;
+    lbState.photoH = img.naturalHeight;
+  }
+  vireoLightboxViewport.recomputeNativeZoom();
+  // If the user pressed z/click when nativeZoom was unknown, upgrade to
+  // true 1:1 now. Route through the shared helper so the stored anchor is
+  // honored — completing with a recentered zoom would make a deferred 1:1
+  // jump away from the point the user clicked.
+  if (!vireoLightboxViewport.applyPendingRestore()) vireoLightboxViewport.applyPendingOneToOne();
+  // Track Eye alignment is deferred while vireoLightboxViewport.pendingOneToOne() is armed so it
+  // cannot cancel the deferred sharp-source fallback. Re-apply now that
+  // the source has landed and any pending 1:1 has snapped.
+  vireoLightboxViewport.applyPendingEye();
+  vireoLightboxViewport.applyTransform();
+  vireoLightboxSession.scheduleAdjacent(key);
+}
+
+// The swap's source has downloaded: hand it to the visible image.
+function sourceSwapLoaded(/** @type {LightboxSourceSwap} */ swap) {
+  // Ignore stale: different photo, or desired key changed to something else
+  if (!sourceSwapIsCurrent(swap)) return;
+  if (lbState.desiredSrcKey !== swap.key) return;
+  const img = /** @type {HTMLImageElement | null} */ (document.getElementById('lightboxImg'));
+  if (!img) return;
+  // After the new source loads, recompute nativeZoom — the aspect ratio is
+  // nominally identical across source tiers but subpixel rounding can shift
+  // fit dimensions slightly, and if API dims were missing the original's
+  // naturalWidth is now authoritative.
+  vireoLightboxSession.watchImage(img, function() { sourceSwapDisplayed(swap, img); });
+  img.src = swap.url;
+  lbState.currentSrcKey = swap.key;
+}
+
+// The swap's source could not be loaded. The current source stays on screen.
+function sourceSwapFailed(/** @type {LightboxSourceSwap} */ swap) {
+  if (!sourceSwapIsCurrent(swap)) return;
+  if (lbState.desiredSrcKey !== swap.key) return;
+  lbState.progressiveTargetKey = null;
+  // Record the failure BEFORE clearing the loading flag. The chip's
+  // sharpening state is derived from the desired/current tiers, so a tier
+  // that is never going to arrive has to stop counting as in flight first
+  // -- clearing the flag while lbState.desiredSrcKey still names the failed tier
+  // leaves the spinner up with no request behind it.
+  if (swap.key === 'original') {
+    var had1To1Pending = vireoLightboxViewport.pendingOneToOne();
+    lbState.originalUnavailable = true;
+    _lbSetPreviewLoading(false);
+    vireoLightboxViewport.recomputeNativeZoom();
+    if (had1To1Pending) {
+      vireoLightboxViewport.deferOneToOneFallback();
+    } else {
+      vireoLightboxViewport.applyPendingOneToOne();
+      vireoLightboxViewport.applyTransform();
+      // /original is gone, so re-pick the best remaining tier rather than
+      // staying stuck on the lower current source.
+      _lbScheduleSourceSwap();
+    }
+  } else {
+    // The failed request is no longer pending. Keep the usable bitmap
+    // and resume its neighbors without automatically retrying this tier.
+    lbState.desiredSrcKey = lbState.currentSrcKey;
+    _lbSetPreviewLoading(false);
+    if (vireoLightboxViewport.pendingOneToOne()) {
+      vireoLightboxViewport.cancelPendingZoom();
+      vireoLightboxViewport.updateControls();
+      vireoLightboxViewport.save(swap.photoId);
+    }
+    vireoLightboxSession.scheduleAdjacent(lbState.currentSrcKey);
+  }
+}
+
+// The debounce elapsed: start loading `desired` unless a newer request won.
+function startSourceSwap(/** @type {string} */ desired) {
+  if (lbState.desiredSrcKey !== desired) return;          // newer request won
+  if (lbState.desiredSrcKey === lbState.currentSrcKey) return; // already there
+  var photoId = vireoLightboxSession.requestedPhotoId();
+  var token = vireoLightboxSession.capture();
+  var key = lbState.desiredSrcKey; if (photoId == null || key == null) return;
+  /** @type {LightboxSourceSwap} */ var swap = {photoId: photoId, token: token, key: key, url: _lbSrcUrl(photoId, key)};
+  vireoLightboxSession.loadSource(
+    swap.url,
+    function() { sourceSwapLoaded(swap); },
+    function() { sourceSwapFailed(swap); }
+  );
+}
+
 export function _lbScheduleSourceSwap(/** @type {number | undefined} */ targetZoom = undefined, /** @type {boolean | undefined} */ immediate = undefined) {
   if (!vireoLightboxSession.requestedPhotoId()) return;
   // Was a sharper tier already requested for the displayed bitmap? Read this
   // before retargeting: if the new target is the tier already on screen, that
-  // request is being abandoned rather than fulfilled. _lbProgressiveTargetKey
+  // request is being abandoned rather than fulfilled. lbState.progressiveTargetKey
   // deliberately does not count -- it is the initial pick being evaluated for
   // the first time, not a request in flight.
   var abandoningRequest = !!lbState.desiredSrcKey
@@ -256,95 +367,5 @@ export function _lbScheduleSourceSwap(/** @type {number | undefined} */ targetZo
   }
 
   _lbSetPreviewLoading(_lbSrcRank(desired) > _lbSrcRank(lbState.currentSrcKey) || !!lbState.progressiveTargetKey);
-  vireoLightboxSession.scheduleSwap(function() {
-    if (lbState.desiredSrcKey !== desired) return;          // newer request won
-    if (lbState.desiredSrcKey === lbState.currentSrcKey) return; // already there
-    var photoId = vireoLightboxSession.requestedPhotoId();
-    var swapToken = vireoLightboxSession.capture();
-    var key = lbState.desiredSrcKey; if (photoId == null || key == null) return;
-    var url = _lbSrcUrl(photoId, key);
-
-    vireoLightboxSession.loadSource(url, function() {
-      // Ignore stale: different photo, or desired key changed to something else
-      if (vireoLightboxSession.requestedPhotoId() !== photoId) return;
-      if (!vireoLightboxSession.isCurrent(swapToken)) return;
-      if (lbState.desiredSrcKey !== key) return;
-      const img = /** @type {HTMLImageElement | null} */ (document.getElementById('lightboxImg'));
-      if (!img) return;
-      // After the new source loads, recompute nativeZoom — the aspect ratio is
-      // nominally identical across source tiers but subpixel rounding can shift
-      // fit dimensions slightly, and if API dims were missing the original's
-      // naturalWidth is now authoritative.
-      vireoLightboxSession.watchImage(img, function() {
-        if (vireoLightboxSession.requestedPhotoId() !== photoId) return;
-        if (!vireoLightboxSession.isCurrent(swapToken)) return;
-        // A newer swap may have preempted us before this load fired — in that
-        // case img.naturalWidth belongs to a DIFFERENT source than our closure's
-        // `key`, so bail rather than record wrong dims or recalibrate stale state.
-        if (lbState.currentSrcKey !== key) return;
-        lbState.progressiveTargetKey = null;
-        _lbMarkDetailSettled();
-        _lbSetPreviewLoading(false);
-        // Keep the decoded background original alive until the visible image
-        // has adopted it; releasing it earlier can make some WebViews decode
-        // the same full-resolution bytes a second time on the first 100% click.
-        if (key === 'original') vireoLightboxSession.cancelOriginal();
-        if (!lbState.photoW && key === 'original' && img.naturalWidth) {
-          lbState.photoW = img.naturalWidth;
-          lbState.photoH = img.naturalHeight;
-        }
-        vireoLightboxViewport.recomputeNativeZoom();
-        // If the user pressed z/click when nativeZoom was unknown, upgrade to
-        // true 1:1 now. Route through the shared helper so the stored anchor is
-        // honored — completing with a recentered zoom would make a deferred 1:1
-        // jump away from the point the user clicked.
-        if (!vireoLightboxViewport.applyPendingRestore()) vireoLightboxViewport.applyPendingOneToOne();
-        // Track Eye alignment is deferred while vireoLightboxViewport.pendingOneToOne() is armed so it
-        // cannot cancel the deferred sharp-source fallback. Re-apply now that
-        // the source has landed and any pending 1:1 has snapped.
-        vireoLightboxViewport.applyPendingEye();
-        vireoLightboxViewport.applyTransform();
-        vireoLightboxSession.scheduleAdjacent(key);
-      });
-      img.src = url;
-      lbState.currentSrcKey = key;
-    }, function() {
-      if (vireoLightboxSession.requestedPhotoId() !== photoId) return;
-      if (!vireoLightboxSession.isCurrent(swapToken)) return;
-      if (lbState.desiredSrcKey !== key) return;
-      lbState.progressiveTargetKey = null;
-      // Record the failure BEFORE clearing the loading flag. The chip's
-      // sharpening state is derived from the desired/current tiers, so a tier
-      // that is never going to arrive has to stop counting as in flight first
-      // -- clearing the flag while _lbDesiredSrcKey still names the failed tier
-      // leaves the spinner up with no request behind it.
-      if (key === 'original') {
-        var had1To1Pending = vireoLightboxViewport.pendingOneToOne();
-        lbState.originalUnavailable = true;
-        _lbSetPreviewLoading(false);
-        vireoLightboxViewport.recomputeNativeZoom();
-        if (had1To1Pending) {
-          vireoLightboxViewport.deferOneToOneFallback();
-        } else {
-          vireoLightboxViewport.applyPendingOneToOne();
-          vireoLightboxViewport.applyTransform();
-          // /original is gone, so re-pick the best remaining tier rather than
-          // staying stuck on the lower current source.
-          _lbScheduleSourceSwap();
-        }
-      } else {
-        // The failed request is no longer pending. Keep the usable bitmap
-        // and resume its neighbors without automatically retrying this tier.
-        lbState.desiredSrcKey = lbState.currentSrcKey;
-        _lbSetPreviewLoading(false);
-        if (vireoLightboxViewport.pendingOneToOne()) {
-          vireoLightboxViewport.cancelPendingZoom();
-          vireoLightboxViewport.updateControls();
-          vireoLightboxViewport.save(photoId);
-        }
-        vireoLightboxSession.scheduleAdjacent(lbState.currentSrcKey);
-      }
-      // Keep current source on failure
-    });
-  }, immediate ? 0 : 150);
+  vireoLightboxSession.scheduleSwap(function() { startSourceSwap(desired); }, immediate ? 0 : 150);
 }

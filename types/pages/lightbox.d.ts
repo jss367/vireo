@@ -140,6 +140,30 @@ interface LightboxViewportOptions {
   cancelProgressiveLoad(): void;
   handledClick(): void;
 }
+/** One openLightbox call: the photo being opened and what its image and detail callbacks share. */
+interface LightboxOpenContext {
+  readonly photoId: number;
+  readonly filename: string | null | undefined;
+  /** The session request this open began; callbacks check it before touching the page. */
+  readonly token: LightboxSessionToken;
+  /** The photo's entry in the page's navigation list, when it has one. */
+  readonly listed: LightboxPhoto | undefined;
+  readonly img: HTMLImageElement;
+  readonly label: HTMLElement;
+  /** The zoom the outgoing bitmap keeps until the incoming image is laid out. */
+  readonly transitionZoom: number;
+  /** The call reopened the photo already on screen, so no bitmap handoff is needed. */
+  readonly reopeningVisiblePhoto: boolean;
+  /** The /api/photos/<id> response, once it has arrived. */
+  detail: LightboxPhoto | null;
+  /** The filename, counter and displayed photo id name this photo. */
+  identityCommitted: boolean;
+  readonly onLoad: () => void;
+  readonly onError: () => void;
+  readonly onAbandon: () => void;
+}
+/** Edit sequence numbers captured when a photo's detail request starts. */
+interface LightboxDetailSeqs { flag: number; recipeWrite: number; adjust: number }
 interface LightboxViewportMetrics { w: number; h: number; wrapW: number; wrapH: number; scale: number }
 /** One viewport controller's state. viewport.js creates it and never hands it out; the viewport-*.js functions take it as their first argument. */
 interface LightboxViewportContext {

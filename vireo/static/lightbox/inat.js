@@ -453,47 +453,117 @@ function _inatApplyQuickChoicesToQueue() {
   });
 }
 
+/** @typedef {{status: HTMLElement, button: HTMLButtonElement, label: string, generation: number, itemCount: number}} InatExportRun */
+
+/** @param {unknown} e */ function _inatErrorMessage(e) {
+  return e instanceof Error ? e.message : String(e);
+}
+
+function _inatExportFailed(/** @type {InatExportRun} */ run, /** @type {string} */ message) {
+  run.status.className = 'inat-card-status error';
+  run.status.textContent = '✗ ' + message;
+  run.button.disabled = false;
+  run.button.textContent = run.label;
+}
+
+async function _inatPickExportFolder() {
+  if (typeof pickDirectory === 'function' && typeof isTauri === 'function' && isTauri()) {
+    return await pickDirectory('Export for iNaturalist');
+  }
+  return window.prompt('Export folder path:');
+}
+
+function _inatReportExportResult(/** @type {InatExportRun} */ run, /** @type {InatExportCompletion} */ done) {
+  var status = run.status;
+  var result = done.result || {};
+  var count = (result.exported || []).length;
+  var failed = (result.errors || []).length;
+  if (done.status === 'cancelled') {
+    status.className = 'inat-card-status warning';
+    status.textContent = 'Export cancelled after ' + count + ' JPEG' + (count === 1 ? '' : 's') + '.';
+  } else if (!count) {
+    status.className = 'inat-card-status error';
+    status.textContent = '✗ ' + (
+      failed ? (result.errors?.[0]?.error || 'Export failed') : 'No photos were exported.'
+    );
+  } else {
+    status.className = failed ? 'inat-card-status warning' : 'inat-card-status success';
+    status.textContent = '✓ Exported ' + count + ' JPEG' + (count === 1 ? '' : 's') +
+      (failed ? '; ' + failed + ' failed.' : '.') +
+      (result.revealed ? ' Revealed in the file manager.' : '');
+  }
+  run.button.disabled = false;
+  run.button.textContent = run.label;
+}
+
+// Follow the export job's progress in the modal that started it. A stream the
+// modal has since replaced or closed reports nothing.
+function _inatWatchExport(/** @type {InatExportRun} */ run, /** @type {number} */ jobId) {
+  _closeInatExportStream();
+  var exportStream = safeEventSource('/api/jobs/' + jobId + '/stream', {
+    onProgress: function(/** @type {InatExportProgress} */ progress) {
+      if (
+        run.generation !== _inatModalGeneration ||
+        _inatExportStream !== exportStream
+      ) return;
+      var current = progress.current || 0;
+      var total = progress.total || run.itemCount;
+      run.status.textContent = 'Exporting ' + current + ' of ' + total + '…';
+    },
+    onComplete: function(/** @type {InatExportCompletion} */ done) {
+      var isCurrentStream = _inatExportStream === exportStream;
+      if (!isCurrentStream || run.generation !== _inatModalGeneration) return;
+      try { exportStream.close(); } catch(e) {}
+      _inatExportStream = null;
+      _inatReportExportResult(run, done);
+    },
+    onError: function() {
+      var isCurrentStream = _inatExportStream === exportStream;
+      if (!isCurrentStream || run.generation !== _inatModalGeneration) return;
+      try { exportStream.close(); } catch(e) {}
+      _inatExportStream = null;
+      _inatExportFailed(run, 'Lost the export progress connection.');
+    },
+  });
+  _inatExportStream = exportStream;
+}
+
 export async function exportInatQuickPhotos() {
   var status = /** @type {HTMLElement} */ (document.getElementById('inatQuickExportStatus'));
   var button = /** @type {HTMLButtonElement} */ (document.getElementById('inatQuickExportBtn'));
   if (!button || button.disabled) return;
-  var generation = _inatModalGeneration;
   var queue = inatQueue;
   var itemCount = queue.length;
+  /** @type {InatExportRun} */ var run = {
+    status: status, button: button, generation: _inatModalGeneration, itemCount: itemCount,
+    label: itemCount === 1 ? 'Export JPEG…' : 'Export ' + itemCount + ' JPEGs…',
+  };
   var submissions = _inatQuickExportSubmissions();
-  var exportLabel = itemCount === 1 ? 'Export JPEG\u2026' : 'Export ' + itemCount + ' JPEGs\u2026';
   var destination;
   button.disabled = true;
-  button.textContent = 'Choosing folder\u2026';
+  button.textContent = 'Choosing folder…';
   try {
-    if (typeof pickDirectory === 'function' && typeof isTauri === 'function' && isTauri()) {
-      destination = await pickDirectory('Export for iNaturalist');
-    } else {
-      destination = window.prompt('Export folder path:');
-    }
-  } catch(e) { const failure = /** @type {Error & {body?: {partial?: boolean, observation_url?: string}}} */ (e instanceof Error ? e : new Error(String(e)));
-    if (generation !== _inatModalGeneration) return;
-    status.className = 'inat-card-status error';
-    status.textContent = '\u2717 Could not open the folder picker: ' + failure.message;
-    button.disabled = false;
-    button.textContent = exportLabel;
+    destination = await _inatPickExportFolder();
+  } catch(e) {
+    if (run.generation !== _inatModalGeneration) return;
+    _inatExportFailed(run, 'Could not open the folder picker: ' + _inatErrorMessage(e));
     return;
   }
   if (!destination) {
-    if (generation === _inatModalGeneration && inatQueue === queue) {
+    if (run.generation === _inatModalGeneration && inatQueue === queue) {
       button.disabled = false;
-      button.textContent = exportLabel;
+      button.textContent = run.label;
     }
     return;
   }
   if (
-    generation !== _inatModalGeneration ||
+    run.generation !== _inatModalGeneration ||
     inatQueue !== queue ||
     !/** @type {HTMLElement} */ (document.getElementById('inatModal')).classList.contains('open')
   ) return;
-  button.textContent = 'Exporting\u2026';
+  button.textContent = 'Exporting…';
   status.className = 'inat-card-status';
-  status.textContent = 'Rendering edited JPEG' + (itemCount === 1 ? '' : 's') + ' and writing metadata\u2026';
+  status.textContent = 'Rendering edited JPEG' + (itemCount === 1 ? '' : 's') + ' and writing metadata…';
   try {
     var started = await /** @type {Promise<{job_id: number}>} */ (safeFetch('/api/inat/export', {
       method: 'POST',
@@ -504,61 +574,11 @@ export async function exportInatQuickPhotos() {
         reveal: typeof isTauri === 'function' && isTauri(),
       }),
     }, { toast: false }));
-    if (generation !== _inatModalGeneration || inatQueue !== queue) return;
-    _closeInatExportStream();
-    var exportStream = safeEventSource('/api/jobs/' + started.job_id + '/stream', {
-      onProgress: function(/** @type {InatExportProgress} */ progress) {
-        if (
-          generation !== _inatModalGeneration ||
-          _inatExportStream !== exportStream
-        ) return;
-        var current = progress.current || 0;
-        var total = progress.total || itemCount;
-        status.textContent = 'Exporting ' + current + ' of ' + total + '\u2026';
-      },
-      onComplete: function(/** @type {InatExportCompletion} */ done) {
-        var isCurrentStream = _inatExportStream === exportStream;
-        if (!isCurrentStream || generation !== _inatModalGeneration) return;
-        try { exportStream.close(); } catch(e) {}
-        _inatExportStream = null;
-        var result = done.result || {};
-        var count = (result.exported || []).length;
-        var failed = (result.errors || []).length;
-        if (done.status === 'cancelled') {
-          status.className = 'inat-card-status warning';
-          status.textContent = 'Export cancelled after ' + count + ' JPEG' + (count === 1 ? '' : 's') + '.';
-        } else if (!count) {
-          status.className = 'inat-card-status error';
-          status.textContent = '\u2717 ' + (
-            failed ? (result.errors?.[0]?.error || 'Export failed') : 'No photos were exported.'
-          );
-        } else {
-          status.className = failed ? 'inat-card-status warning' : 'inat-card-status success';
-          status.textContent = '\u2713 Exported ' + count + ' JPEG' + (count === 1 ? '' : 's') +
-            (failed ? '; ' + failed + ' failed.' : '.') +
-            (result.revealed ? ' Revealed in the file manager.' : '');
-        }
-        button.disabled = false;
-        button.textContent = exportLabel;
-      },
-      onError: function() {
-        var isCurrentStream = _inatExportStream === exportStream;
-        if (!isCurrentStream || generation !== _inatModalGeneration) return;
-        try { exportStream.close(); } catch(e) {}
-        _inatExportStream = null;
-        status.className = 'inat-card-status error';
-        status.textContent = '\u2717 Lost the export progress connection.';
-        button.disabled = false;
-        button.textContent = exportLabel;
-      },
-    });
-    _inatExportStream = exportStream;
-  } catch(e) { const failure = /** @type {Error & {body?: {partial?: boolean, observation_url?: string}}} */ (e instanceof Error ? e : new Error(String(e)));
-    if (generation !== _inatModalGeneration) return;
-    status.className = 'inat-card-status error';
-    status.textContent = '\u2717 ' + failure.message;
-    button.disabled = false;
-    button.textContent = exportLabel;
+    if (run.generation !== _inatModalGeneration || inatQueue !== queue) return;
+    _inatWatchExport(run, started.job_id);
+  } catch(e) {
+    if (run.generation !== _inatModalGeneration) return;
+    _inatExportFailed(run, _inatErrorMessage(e));
   }
 }
 

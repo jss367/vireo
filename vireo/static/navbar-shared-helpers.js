@@ -5,9 +5,8 @@ import { vireoWorkspaceSwitcher } from './navbar-workspace-switcher-init.js';
 import { _lbPhotoDataByPhoto, vireoLightboxSession } from './lightbox/state.js';
 import { _lbRenderLifeListPanel } from './lightbox/curation.js';
 import { _lbApplyFlag, _lbRecordFlag } from './lightbox/flags.js';
-import {
-  _lbRefreshEditRecipeCache, _lbRenderKeywords, lightboxNav, openLightbox,
-} from './lightbox/navigation.js';
+import { _lbRefreshEditRecipeCache, lightboxNav, openLightbox } from './lightbox/navigation.js';
+import { _lbRenderKeywords } from './lightbox/open-image.js';
 import { closeLightbox } from './lightbox/controls.js';
 import { lightboxDelete } from './lightbox/delete.js';
 import { findSimilar } from './navbar-similar-photos.js';

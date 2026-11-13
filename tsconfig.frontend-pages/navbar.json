@@ -20,6 +20,8 @@
     "../vireo/static/lightbox/inat.js",
     "../vireo/static/lightbox/keyboard.js",
     "../vireo/static/lightbox/navigation.js",
+    "../vireo/static/lightbox/open-detail.js",
+    "../vireo/static/lightbox/open-image.js",
     "../vireo/static/lightbox/overlays.js",
     "../vireo/static/lightbox/session-preloads.js",
     "../vireo/static/lightbox/session-requests.js",

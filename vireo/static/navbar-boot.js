@@ -32,6 +32,8 @@ import './lightbox/edits.js';
 import './lightbox/flags.js';
 import './lightbox/overlays.js';
 import './lightbox/crop.js';
+import './lightbox/open-image.js';
+import './lightbox/open-detail.js';
 import './lightbox/navigation.js';
 import './lightbox/controls.js';
 import './lightbox/delete.js';
