@@ -1,5 +1,5 @@
-// Helpers every check shares: element lookup, relative times, the status
-// line's found/clean/error states, and posting an audit action.
+// Helpers every check shares: element lookup, the status line's
+// found/clean/error states, and posting an audit action.
 // ES module.
 
 import { safeFetch } from './shared.js';
@@ -7,16 +7,6 @@ import { safeFetch } from './shared.js';
 /** @param {string} id */
 export function byId(id) {
   return /** @type {HTMLElement} */ (document.getElementById(id));
-}
-
-/** @param {string} iso */
-export function timeAgo(iso) {
-  if (!iso) return '';
-  var secs = (Date.now() - new Date(iso).getTime()) / 1000;
-  if (secs < 60) return 'just now';
-  if (secs < 3600) return Math.floor(secs / 60) + 'm ago';
-  if (secs < 86400) return Math.floor(secs / 3600) + 'h ago';
-  return Math.floor(secs / 86400) + 'd ago';
 }
 
 /** @param {unknown} error */

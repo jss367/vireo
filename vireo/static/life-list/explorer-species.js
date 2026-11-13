@@ -1,10 +1,9 @@
 // Explorer: the species leaf for a genus.
 
 import { state } from './state.js';
-import { photoThumbnailUrl } from './cards.js';
 import { renderBreadcrumb } from './explorer-cards.js';
 import { renderSunburst } from './sunburst.js';
-import { escapeAttr, escapeHtml, safeFetch } from './shared.js';
+import { escapeAttr, escapeHtml, photoThumbnailUrl, safeFetch } from './shared.js';
 
 // ---------------- Explorer: species leaf (Task 12) ----------------
 

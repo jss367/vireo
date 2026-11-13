@@ -2,12 +2,12 @@
 
 import { jobsElement, state } from './state.js';
 import { renderHistoryOverview, renderMainPane } from './detail.js';
-import { activeProgress, formatElapsed, isLiveStatus, progressPct, timeAgo } from './format.js';
+import { activeProgress, formatElapsed, isLiveStatus, progressPct } from './format.js';
 import { jobCollectionText } from './job-card.js';
 import { findJob, followUpText, groupOperations, isSystemJob, matchesOriginFilter, repeatText } from './lineage.js';
 import { fetchHistory } from './polling.js';
 import { selectJob } from './selection.js';
-import { escapeHtml, formatJobType } from './shared.js';
+import { escapeHtml, formatJobType, timeAgo } from './shared.js';
 
 export function populateTypeFilter() {
   var sel = jobsElement('filterType', HTMLSelectElement);

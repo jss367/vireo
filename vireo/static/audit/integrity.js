@@ -4,8 +4,8 @@
 // ES module.
 
 import { HASH_STATUS_LABELS, state } from './state.js';
-import { byId, errorMessage, postAuditAction, timeAgo } from './helpers.js';
-import { escapeAttr, escapeHtml, safeFetch } from './shared.js';
+import { byId, errorMessage, postAuditAction } from './helpers.js';
+import { escapeAttr, escapeHtml, safeFetch, timeAgo } from './shared.js';
 import { loadSummary } from './summary.js';
 
 export async function loadIntegrity() {

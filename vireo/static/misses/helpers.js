@@ -1,16 +1,6 @@
-// Pure helpers: thumbnail URLs, detection_box parsing, photo sort order, and
-// the ?since= URL parameter.
+// Pure helpers: detection_box parsing, photo sort order, and the ?since= URL
+// parameter.
 // ES module.
-
-import { sharedThumbnailUrl } from './shared.js';
-
-/** @param {MissPhoto} p */ export function photoThumbnailUrl(p) {
-  if (!p || p.id == null) return '';
-  var shared = sharedThumbnailUrl();
-  return shared
-    ? shared(p)
-    : '/thumbnails/' + p.id + '.jpg';
-}
 
 /* ---------- detection_box parsing ----------
  * Stored as a JSON string: '{"x": 0.12, "y": 0.22, "w": 0.3, "h": 0.4}'

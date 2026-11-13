@@ -89,7 +89,6 @@ interface MapFilterController {
 }
 interface Window {
   VireoFilter?: MapFilterController;
-  vireoThumbnailUrl?: (photo: {id: number}) => string;
 }
 declare var VireoFilter: MapFilterController;
 
@@ -107,4 +106,5 @@ declare function showUnplottableFocusNotice(focus: MapPageUnplottableFocus | nul
 // vireo-utils.js and the navbar (navbar-globals.js)
 declare function escapeHtml(value: unknown): string;
 declare function escapeAttr(value: unknown): string;
+declare function photoThumbnailUrl(photo: MapPhoto | null | undefined): string;
 declare function safeFetch<T>(url: string, init?: RequestInit, options?: {toast?: boolean}): Promise<T>;

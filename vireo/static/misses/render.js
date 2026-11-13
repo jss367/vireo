@@ -4,8 +4,8 @@
 // ES module.
 
 import { state, CATEGORY_ORDER, CATEGORY_LABELS } from './state.js';
-import { escapeAttr, escapeHtml } from './shared.js';
-import { parseDetectionBox, photoThumbnailUrl } from './helpers.js';
+import { escapeAttr, escapeHtml, photoThumbnailUrl } from './shared.js';
+import { parseDetectionBox } from './helpers.js';
 import { updateSelectionBar } from './selection.js';
 
 export function render() {

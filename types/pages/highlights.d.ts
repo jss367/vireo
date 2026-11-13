@@ -42,6 +42,7 @@ interface HighlightsFlagChange {photoId?: number | null; flag?: string; previous
 interface HighlightsLightboxPhoto {id: number; filename?: string; flag?: string}
 interface Window {
   escapeAttr(value: unknown): string;
+  photoThumbnailUrl(photo: HighlightsPhoto | null | undefined): string;
   VireoTextSearch: {
     readOptions(namespace: string): Record<string, boolean | undefined>;
     appendParams(params: URLSearchParams, options: Record<string, boolean | undefined>, matchCaseKey?: string, wholeWordKey?: string): void;
@@ -58,7 +59,6 @@ interface Window {
   closeLightbox(): void;
   vireoLightboxSession?: {requestedPhotoId(): number | null};
   _lightboxPhotoList?: HighlightsLightboxPhoto[];
-  vireoThumbnailUrl?(photo: HighlightsPhoto): string;
   isAdvancedMode?(): boolean;
   Vireo: VireoPageHookRegistry;
 }

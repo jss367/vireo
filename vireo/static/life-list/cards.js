@@ -3,14 +3,9 @@
 import { state } from './state.js';
 import { sortedSpecies } from './filters.js';
 import { formatDate } from './list.js';
-import { escapeAttr, hasLightbox, openLightbox, safeFetch, thumbnailUrl, VireoTextSearch } from './shared.js';
+import { escapeAttr, hasLightbox, openLightbox, photoThumbnailUrl, safeFetch, VireoTextSearch } from './shared.js';
 
 export const LIFE_LIST_PAGE_SIZE = 100;
-
-/** @param {LifePhoto} photo */ export function photoThumbnailUrl(photo) {
-  if (!photo || photo.id == null) return '';
-  return thumbnailUrl(photo);
-}
 
 /** @param {LifeSpecies} entry @param {number} displayNumber */ export function renderCard(entry, displayNumber) {
   var best = entry.best;

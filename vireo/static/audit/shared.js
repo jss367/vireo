@@ -9,6 +9,7 @@
 
 export const escapeHtml = window.escapeHtml;
 export const escapeAttr = window.escapeAttr;
+export const timeAgo = window.timeAgo;
 
 /**
  * @template T
