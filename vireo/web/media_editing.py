@@ -84,7 +84,7 @@ def _requested_edit_recipe(db: Database, photo_id: int) -> JsonDict:
 
 
 class _RenderEditPreview(Protocol):
-    """``PreviewWorkers.render``: ``(status, body, source_kind)``."""
+    """``PreviewWorkers.render``: ``(status, body, source_origin)``."""
 
     def __call__(
         self, payload: JsonDict, session: str, sequence: int, *, guard: PreviewGuard | None = None,
@@ -506,6 +506,48 @@ class _EditPreviewRequest:
         )
 
 
+# Which file supplied an edit preview's pixels. ``raw`` is the only linear
+# source; every other origin is display-encoded (sRGB) pixels.
+SOURCE_ORIGIN_RAW = 'raw'
+SOURCE_ORIGIN_EMBEDDED = 'embedded'
+SOURCE_ORIGIN_COMPANION = 'companion'
+SOURCE_ORIGIN_WORKING_COPY = 'working_copy'
+SOURCE_ORIGIN_ORIGINAL = 'original'
+
+
+def _edit_source_origin(edit: _EditPreviewRequest, source: Image.Image | FloatImage) -> str:
+    """Name the file whose pixels ``edit.load()`` returned as ``source``.
+
+    ``raw``: sensor data demosaiced from the RAW original. ``embedded``: the
+    camera JPEG inside a RAW whose sensor data libraw could not decode.
+    ``working_copy``: Vireo's working-copy JPEG. ``companion``: the JPEG
+    paired with the original. ``original``: a non-RAW original.
+
+    Decided from the decoded result and the path the recovery steps ended
+    on, not from the file first selected: a RAW path yields ``raw`` only
+    when the decode came back linear.
+    """
+    from float_image import FloatImage
+    from image_loader import RAW_EXTENSIONS
+
+    if isinstance(source, FloatImage) and source.encoding == 'linear':
+        return SOURCE_ORIGIN_RAW
+    supplied = os.path.abspath(edit.canonical)
+    working_copy = edit.photo['working_copy_path']
+    if working_copy and supplied == os.path.abspath(os.path.join(edit.vireo_dir or '', working_copy)):
+        return SOURCE_ORIGIN_WORKING_COPY
+    if supplied != os.path.abspath(edit.original_abs):
+        return SOURCE_ORIGIN_COMPANION
+    if os.path.splitext(supplied)[1].lower() in RAW_EXTENSIONS:
+        return SOURCE_ORIGIN_EMBEDDED
+    return SOURCE_ORIGIN_ORIGINAL
+
+
+def _source_encoding(source_origin: str) -> str:
+    """``linear`` or ``srgb``: the pixel encoding an origin's decode has."""
+    return 'linear' if source_origin == SOURCE_ORIGIN_RAW else 'srgb'
+
+
 def render_edit_preview_job(payload: JsonDict, output_path: str) -> tuple[int, str, str]:
     """Child-process entry: all decode/render work, without constructing Flask."""
     import config as cfg
@@ -513,7 +555,6 @@ def render_edit_preview_job(payload: JsonDict, output_path: str) -> tuple[int, s
     from db import Database
     from detail_backend import detail_thread_budget
     from edit_recipe import RecipeError
-    from float_image import FloatImage
 
     cfg.CONFIG_PATH = payload['config_path']
     cv2.setNumThreads(payload.get('threads', 2))
@@ -530,7 +571,7 @@ def render_edit_preview_job(payload: JsonDict, output_path: str) -> tuple[int, s
         source = edit.load()
         if source is None:
             return 500, 'Could not load image', ''
-        source_kind = 'linear' if isinstance(source, FloatImage) and source.encoding == 'linear' else 'srgb'
+        source_origin = _edit_source_origin(edit, source)
         rendered = None
         try:
             with detail_thread_budget(payload.get("threads", 2)):
@@ -542,7 +583,7 @@ def render_edit_preview_job(payload: JsonDict, output_path: str) -> tuple[int, s
             if rendered is not None and rendered is not source:
                 rendered.close()
             source.close()
-    return 200, '', source_kind
+    return 200, '', source_origin
 
 
 @contextlib.contextmanager
@@ -637,24 +678,38 @@ class EditingRoutes:
         self._preview_sources: OrderedDict[tuple[str, str, int], str] = OrderedDict()
         self._preview_sources_lock = threading.Lock()
 
-    def _preview_response(self, photo_id: int, body: bytes | str, status: int, source_kind: str) -> Response:
+    def _preview_response(self, photo_id: int, body: bytes | str, status: int, source_origin: str) -> Response:
         response = Response(body, status=status, mimetype='image/jpeg' if status == 200 else 'text/plain')
         response.headers['Cache-Control'] = 'no-store'
-        if status == 200 and source_kind:
-            response.headers['X-Vireo-Preview-Source'] = source_kind
+        if status == 200 and source_origin:
+            response.headers['X-Vireo-Preview-Source'] = _source_encoding(source_origin)
+            response.headers['X-Vireo-Preview-Origin'] = source_origin
             session, sequence = request.args.get('preview_session'), request.args.get('preview_seq')
             if session and sequence:
                 with self._preview_sources_lock:
-                    self._preview_sources[session, sequence, photo_id] = source_kind
+                    self._preview_sources[session, sequence, photo_id] = source_origin
                     while len(self._preview_sources) > 128:
                         self._preview_sources.popitem(last=False)
         return response
 
-    def _preview_source_status(self, photo_id: int) -> Response:
+    def _preview_source_status(self, photo_id: int, filename: str) -> Response:
+        """The receipt for one rendered preview: where its pixels came from.
+
+        ``origin`` is the ``SOURCE_ORIGIN_*`` value recorded for that render
+        (``None`` once the bounded receipt store dropped it), ``source`` its
+        pixel encoding, and ``original_is_raw`` whether the photo's original
+        is a RAW file, so a JPEG origin can be told apart from a fallback.
+        """
+        from image_loader import RAW_EXTENSIONS
+
         key = (request.args.get('preview_session', ''), request.args.get('preview_seq', ''), photo_id)
         with self._preview_sources_lock:
-            source = self._preview_sources.get(key)
-        response = jsonify(source=source)
+            origin = self._preview_sources.get(key)
+        response = jsonify(
+            source=_source_encoding(origin) if origin else None,
+            origin=origin,
+            original_is_raw=os.path.splitext(filename)[1].lower() in RAW_EXTENSIONS,
+        )
         response.headers['Cache-Control'] = 'no-store'
         return response
 
@@ -779,7 +834,7 @@ class EditingRoutes:
         if not photo:
             return "Not found", 404
         if request.args.get('source_status') == '1':
-            return self._preview_source_status(photo_id)
+            return self._preview_source_status(photo_id, photo['filename'])
         try:
             size = int(request.args.get("size", "1920"))
         except ValueError:
@@ -827,19 +882,18 @@ class EditingRoutes:
                     'clear_source_cache': self._config.get('EDIT_PREVIEW_CLEAR_SOURCE_CACHE', False),
                     'threads': self._config.get('EDIT_PREVIEW_THREADS', 2),
                 }
-                status, body, source_kind = self._render_edit_preview(
+                status, body, source_origin = self._render_edit_preview(
                     payload, session, sequence,
                     guard=lambda cancelled: _edit_preview_source_guard(photo, folder_row, cancelled),
                 )
-                return self._preview_response(photo_id, body, status, source_kind)
+                return self._preview_response(photo_id, body, status, source_origin)
             # Explicit in-process test seam for source/fallback monkeypatches.
             edit = _EditPreviewRequest(db, photo_id, photo, folder_row, vireo_dir,
                                        recipe, display_recipe, size, apply_crop)
             img = edit.load()
             if img is None:
                 return "Could not load image", 500
-            from float_image import FloatImage
-            source_kind = 'linear' if isinstance(img, FloatImage) and img.encoding == 'linear' else 'srgb'
+            source_origin = _edit_source_origin(edit, img)
             img = edit.render(img)
         except RecipeError as e:
             return str(e), 400
@@ -847,7 +901,7 @@ class EditingRoutes:
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=config_value(cfg.load(), "preview_quality"))
         img.close()
-        return self._preview_response(photo_id, buf.getvalue(), 200, source_kind)
+        return self._preview_response(photo_id, buf.getvalue(), 200, source_origin)
 
     def api_auto_tone(self, photo_id: int) -> ResponseReturnValue:
         """Fit Auto Tone to the photo as framed by ``recipe``, in ``style``.

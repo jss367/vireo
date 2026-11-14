@@ -219,6 +219,8 @@ function retryEditorPreview() {
       if (attr.name !== 'src') image.setAttribute(attr.name, attr.value);
     });
     delete image.dataset.previewSourceKind;
+    delete image.dataset.previewSourceOrigin;
+    delete image.dataset.previewOriginalRaw;
     old.replaceWith(image);
   }
   image.dataset.previewUrl = request.url;
@@ -232,7 +234,7 @@ function retryEditorPreview() {
   updateHistogramFeedback();
   refreshMaskOverlay();
   syncLensProfileControls();
-  loadLensPreviewSource(request, image);
+  loadPreviewSource(request, image);
   // Bounded, in-memory timing samples for the browser benchmark. No photo
   // identifiers, recipes, or pixels are retained in the measurements.
   editorState.previewTimings.push({
@@ -311,7 +313,7 @@ function pumpEditorPreview() {
     // Reusing the displayed result also supersedes any slower in-flight tier.
     // Keep the timers: reusing a quick preview must still allow refinement.
     // The reused request carries the post-bump seq so a delayed source-status
-    // receipt (optics.js:42) still matches editorState.previewSeq when it
+    // receipt (loadPreviewSource) still matches editorState.previewSeq when it
     // lands; a newer edit after this point bumps the seq again and rejects it.
     editorState.previewSeq++;
     request.seq = editorState.previewSeq;

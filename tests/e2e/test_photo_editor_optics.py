@@ -138,12 +138,15 @@ def test_automatic_profile_raw_status_persistence_and_brush_geometry(page, live_
 
 
 def test_matched_profile_is_skipped_on_jpeg_fallback(page, live_server, profiled_raw, monkeypatch):
-    from web.media_editing import _EditPreviewRequest
+    import image_loader
 
+    # What a RAW libraw cannot demosaic decodes to: its embedded camera JPEG.
     live_server['app'].config['EDIT_PREVIEW_IN_PROCESS'] = True
-    monkeypatch.setattr(_EditPreviewRequest, 'load', lambda self: Image.new('RGB', (512, 64), (80, 90, 100)))
+    monkeypatch.setattr(image_loader, 'load_image', lambda path, *args, **kwargs: Image.new('RGB', (512, 64), (80, 90, 100)))
     page.goto(f"{live_server['url']}/edit/{profiled_raw}")
     page.wait_for_function('!editorState.loading && document.getElementById("editorImg").naturalWidth > 0')
+    expect(page.locator('#previewSource')).to_contain_text('camera JPEG embedded in the RAW')
+    expect(page.locator('#previewSource')).to_have_class('degraded')
     page.locator('#lensProfileEnabled').check()
     expect(page.locator('#lensProfileStatus')).to_contain_text('Skipped: the preview is using a rendered image fallback')
     assert page.evaluate('lensProfileWarp(editorState.recipe)') is None
@@ -195,3 +198,33 @@ def test_reused_preview_resolves_source_status_after_delay(page, live_server, pr
     page.unroute(pattern, _hold)
     page.wait_for_function('document.getElementById("editorImg").dataset.previewSourceKind === "linear"')
     assert page.evaluate('lensProfileSourcePending(editorState.recipe)') is False
+
+
+def test_footer_names_the_file_the_preview_was_rendered_from(page, live_server, optics_photo, profiled_raw):
+    source = page.locator("#previewSource")
+    page.goto(f"{live_server['url']}/edit/{optics_photo}")
+    expect(source).to_have_text("Source: original file")
+    expect(source).not_to_have_class("degraded")
+
+    page.goto(f"{live_server['url']}/edit/{profiled_raw}")
+    expect(source).to_have_text("Source: RAW sensor data")
+    expect(source).not_to_have_class("degraded")
+
+    # A RAW whose sensor data would not decode renders from a JPEG stand-in;
+    # the footer must say so instead of repeating the last good answer.
+    pattern = f"**/photos/{profiled_raw}/edit-preview?*source_status=1*"
+    page.route(pattern, lambda route: route.fulfill(
+        json={"source": "srgb", "origin": "embedded", "original_is_raw": True},
+    ))
+    page.locator("#exposureRange").fill("0.5")
+    page.locator("#exposureRange").dispatch_event("input")
+    expect(source).to_contain_text("camera JPEG embedded in the RAW")
+    expect(source).to_have_class("degraded")
+
+    page.route(pattern, lambda route: route.fulfill(
+        json={"source": None, "origin": None, "original_is_raw": True},
+    ))
+    page.locator("#exposureRange").fill("0.8")
+    page.locator("#exposureRange").dispatch_event("input")
+    expect(source).to_have_text("Source: could not be verified")
+    expect(source).not_to_have_class("degraded")
