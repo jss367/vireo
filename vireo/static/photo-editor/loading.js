@@ -29,6 +29,7 @@ function editorEmptyState() {
   cancelPointColorPicker();
   cancelMaskBrush();
   cancelEditorPreview({abortActive: true});
+  showPreviewSource(undefined);
   editorState.previewInputAt = performance.now();
   opts = opts || {};
   photoId = Number(photoId);

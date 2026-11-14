@@ -16,7 +16,7 @@ for the page's inline event handlers, and the editor's shared state lives on
 | `crop-ratio.js` | The remembered crop ratio, its revisions, and cross-tab sync through localStorage |
 | `crop-drag.js` | Pointer dragging of crop handles and panning the zoomed image |
 | `adjustments.js` | Basic, tone curve, color mixer, color grading, manual lens corrections, defringing, and detail (denoise) controls |
-| `optics.js` | Per-photo automatic lens-profile status, the rendered-source receipt, and calibrated inverse brush geometry |
+| `optics.js` | Per-photo automatic lens-profile status, the rendered-source receipt and the footer's source line, and calibrated inverse brush geometry |
 | `presets.js` | Edit presets: loading, applying, saving, and deleting |
 | `local-adjustments.js` | Subject/background adjustments, the mask snapshot, and the mask overlay |
 | `mask-brush.js` | Add/subtract mask painting, inverse geometry, and immutable correction requests |
@@ -105,6 +105,14 @@ python -m pytest -o addopts='' -o junit_family=xunit1 -q \
   tests/e2e/test_photo_editor_progressive_preview.py \
   --junitxml=.context/editor-preview-results.xml
 ```
+
+The footer's source line (`#previewSource`) names the file the displayed
+preview was rendered from: RAW sensor data, the camera JPEG embedded in a RAW
+that would not decode, the companion JPEG, Vireo's working copy, or a non-RAW
+original. It comes from the per-render receipt (`source_status=1`), which
+records the file that actually supplied the pixels after every fallback, so
+it never reports the file that was merely selected. Refined renders ask for
+it; quick renders keep the last answer, and a photo load clears it.
 
 Cold RAW decoding still uses the full-precision decoder. The quick tier reduces
 render/output work; it does not replace that decode with an embedded JPEG.

@@ -385,6 +385,7 @@ body {
   color: var(--text-muted);
   font-size: 12px;
 }
+#previewSource.degraded { color: var(--warning); }
 .editor-panel,
 .history-panel {
   min-width: 0;
@@ -705,6 +706,7 @@ body {
 
     <div class="editor-footer">
       <span id="recipeSummary">No edits</span>
+      <span id="previewSource" aria-live="polite"></span>
       <span id="previewStatus">Preview uses the current unsaved recipe</span>
       <button id="previewRetryBtn" class="editor-btn" type="button" onclick="retryEditorPreview()" hidden>Retry preview</button>
     </div>

@@ -356,8 +356,8 @@ def test_profile_metadata_flows_to_preview_export_thumbnails_and_source_receipt(
     assert preview.status_code == 200
     assert preview.data == buffer.getvalue()
     receipt = client.get(f"/photos/{pid}/edit-preview", query_string={**query, "source_status": "1"})
-    assert receipt.get_json() == {"source": "linear"}
-    assert client.get(f"/photos/{pid}/edit-preview", query_string={**query, "source_status": "1", "preview_seq": "2"}).get_json() == {"source": None}
+    assert receipt.get_json() == {"source": "linear", "origin": "raw", "original_is_raw": True}
+    assert client.get(f"/photos/{pid}/edit-preview", query_string={**query, "source_status": "1", "preview_seq": "2"}).get_json() == {"source": None, "origin": None, "original_is_raw": True}
     exported = load_export_image(photo, str(tmp_path), {fid: str(folder)}, recipe=recipe)
     np.testing.assert_array_equal(exported, expected)
     cached = io.BytesIO()
