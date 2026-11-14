@@ -418,43 +418,8 @@ function renderRuleValueInput(/** @type {BrowseRule} */ r, /** @type {string} */
         '<option value="rejected"' + (r.value==='rejected'?' selected':'') + '>Rejected</option>' +
       '</select>';
   }
-  if (r.field === 'extension') {
-    // Extension dropdown is sourced from /api/photos/extensions for the
-    // active workspace. If the current rule value isn't in that list
-    // (legacy rule, freshly switched field), include it as a sticky
-    // option so the user can see+keep it instead of having it silently
-    // snap to the first known extension on next render.
-    return '<select data-rule-path="' + p + '" data-rule-key="value" data-browse-on="change:updateRule" style="flex:1;">' +
-        (collectionExtensions.length === 0
-          ? '<option value="">(no extensions yet — scan a folder)</option>'
-          : '') +
-        (r.value && !collectionExtensions.some(function(ext) { return ext === r.value; })
-          ? '<option value="' + escapeAttr(String(r.value)) + '" selected>' + escapeHtml(String(r.value)) + '</option>'
-          : '') +
-        collectionExtensions.map(function(ext) {
-          return '<option value="' + escapeAttr(ext) + '"' + (r.value===ext?' selected':'') + '>' + escapeHtml(ext) + '</option>';
-        }).join('') +
-      '</select>';
-  }
-  if (r.field === 'folder') {
-    // Folder dropdown shows the path (full path is the value the
-    // backend matches with f.path LIKE ?). Display is the path too —
-    // basenames collide across folders and a smart-collection author
-    // can't disambiguate "January" between /2023/January and /2024.
-    var paths = collectionFolders.map(function(f){ return f.path; });
-    var stickyFolder = (r.value && !paths.some(function(path) { return path === r.value; }))
-      ? '<option value="' + escapeAttr(String(r.value)) + '" selected>' + escapeHtml(String(r.value)) + '</option>'
-      : '';
-    return '<select data-rule-path="' + p + '" data-rule-key="value" data-browse-on="change:updateRule" style="flex:1;">' +
-        (collectionFolders.length === 0
-          ? '<option value="">(no folders in this workspace)</option>'
-          : '') +
-        stickyFolder +
-        collectionFolders.map(function(f) {
-          return '<option value="' + escapeAttr(f.path) + '"' + (r.value===f.path?' selected':'') + '>' + escapeHtml(f.path) + '</option>';
-        }).join('') +
-      '</select>';
-  }
+  if (r.field === 'extension') return ruleExtensionSelect(r, p);
+  if (r.field === 'folder') return ruleFolderSelect(r, p);
   if (r.field === 'timestamp') {
     if (r.op === 'between') {
       var from = Array.isArray(r.value) ? (r.value[0] || '') : '';
@@ -489,6 +454,45 @@ function renderRuleValueInput(/** @type {BrowseRule} */ r, /** @type {string} */
     escapeAttr(String(r.value == null ? '' : r.value)) +
     '" data-rule-path="' + p + '" data-rule-key="value" data-browse-on="change:updateRule keydown:commitRuleOnEnter"' +
     ' placeholder="value" style="flex:1;">';
+}
+
+function ruleExtensionSelect(/** @type {BrowseRule} */ r, /** @type {string} */ p) {
+  // Extension dropdown is sourced from /api/photos/extensions for the
+  // active workspace. If the current rule value isn't in that list
+  // (legacy rule, freshly switched field), include it as a sticky
+  // option so the user can see+keep it instead of having it silently
+  // snap to the first known extension on next render.
+  return '<select data-rule-path="' + p + '" data-rule-key="value" data-browse-on="change:updateRule" style="flex:1;">' +
+      (collectionExtensions.length === 0
+        ? '<option value="">(no extensions yet — scan a folder)</option>'
+        : '') +
+      (r.value && !collectionExtensions.some(function(ext) { return ext === r.value; })
+        ? '<option value="' + escapeAttr(String(r.value)) + '" selected>' + escapeHtml(String(r.value)) + '</option>'
+        : '') +
+      collectionExtensions.map(function(ext) {
+        return '<option value="' + escapeAttr(ext) + '"' + (r.value===ext?' selected':'') + '>' + escapeHtml(ext) + '</option>';
+      }).join('') +
+    '</select>';
+}
+
+function ruleFolderSelect(/** @type {BrowseRule} */ r, /** @type {string} */ p) {
+  // Folder dropdown shows the path (full path is the value the
+  // backend matches with f.path LIKE ?). Display is the path too —
+  // basenames collide across folders and a smart-collection author
+  // can't disambiguate "January" between /2023/January and /2024.
+  var paths = collectionFolders.map(function(f){ return f.path; });
+  var stickyFolder = (r.value && !paths.some(function(path) { return path === r.value; }))
+    ? '<option value="' + escapeAttr(String(r.value)) + '" selected>' + escapeHtml(String(r.value)) + '</option>'
+    : '';
+  return '<select data-rule-path="' + p + '" data-rule-key="value" data-browse-on="change:updateRule" style="flex:1;">' +
+      (collectionFolders.length === 0
+        ? '<option value="">(no folders in this workspace)</option>'
+        : '') +
+      stickyFolder +
+      collectionFolders.map(function(f) {
+        return '<option value="' + escapeAttr(f.path) + '"' + (r.value===f.path?' selected':'') + '>' + escapeHtml(f.path) + '</option>';
+      }).join('') +
+    '</select>';
 }
 
 function renderFieldOptions(/** @type {string | undefined} */ selected) {
@@ -640,88 +644,94 @@ export async function saveCollection() {
     // existing rows (no innerHTML replacement), so it stays fire-and-forget.
     var refresh = loadCollections();
     loadCollectionCounts();
-    if (editedId != null) {
-      // Track user-initiated focus moves after hideCollectionModal
-      // restored focus to the opener. If the user navigates to another
-      // control (including another collection row that then gets detached
-      // by a superseding render) before the eventual render fires, don't
-      // clobber their choice — the row detachment silently moves
-      // activeElement to body (no focusin event), which the orphaned
-      // predicate below would otherwise mistake for the opener itself
-      // being detached and jerk focus back to the edited row.
-      var restoredOpener = document.activeElement;
-      var userMovedFocus = false;
-      var onFocusIn = function(/** @type {FocusEvent} */ e) {
-        if (e.target !== restoredOpener) userMovedFocus = true;
-      };
-      document.addEventListener('focusin', onFocusIn, true);
-      var removeFocusListener = function() {
-        document.removeEventListener('focusin', onFocusIn, true);
-      };
-      await refresh;
-      // If another loadCollections() (e.g. a concurrent folder-
-      // health refresh) is still pending when this one resolves,
-      // reconcileCollectionLoadRenders() defers our render until the newer
-      // generation settles — so the pre-save row stays connected past this
-      // await and the orphaned check below reads false. The later
-      // superseding render then detaches the row with no remaining
-      // restoration path. Watch #collectionList for child-list mutations
-      // and recheck orphaning after each render until the pre-save row is
-      // orphaned and the replacement row for editedId has been drawn.
-      var tryRestoreCollectionRowFocus = function() {
-        if (userMovedFocus) return true;
-        var active = document.activeElement;
-        var orphaned = !active || active === document.body ||
-            !(active instanceof HTMLElement) || !active.isConnected;
-        if (!orphaned) return false;
-        var replacement = /** @type {HTMLElement | null} */ (document.querySelector(
-          '#collectionList .tree-item[data-collection-id="' + editedId + '"]'));
-        if (replacement && typeof replacement.focus === 'function') {
-          replacement.focus({preventScroll: true});
-          return true;
-        }
-        return false;
-      };
-      if (tryRestoreCollectionRowFocus()) {
-        removeFocusListener();
-      } else {
-        var list = /** @type {HTMLElement} */ (document.getElementById('collectionList'));
-        if (list && typeof MutationObserver === 'function') {
-          /** @type {MutationObserver | undefined} */ var observer;
-          /** @type {number | undefined} */ var ticker;
-          var tornDown = false;
-          var teardown = function() {
-            if (tornDown) return;
-            tornDown = true;
-            if (observer) observer.disconnect();
-            if (ticker) clearInterval(ticker);
-            removeFocusListener();
-          };
-          observer = new MutationObserver(function() {
-            if (tryRestoreCollectionRowFocus()) teardown();
-          });
-          observer.observe(list, {childList: true});
-          // Anchor observer lifetime to load-state settlement
-          // rather than a fixed 5s wall-clock. Stay alive while any
-          // superseding collectionLoadGen render is still pending
-          // (reconcileCollectionLoadRenders() hasn't advanced the
-          // decision gen to the latest requested gen yet); disconnect
-          // once all have settled. A 30s hard cap guards against a
-          // pathologically never-settling load holding the observer
-          // past page interaction.
-          var hardCapAt = Date.now() + 30000;
-          ticker = setInterval(function() {
-            var pending = (
-              typeof state.collectionLoadGen === 'number' &&
-              typeof state.collectionRenderDecisionGen === 'number' &&
-              state.collectionLoadGen > state.collectionRenderDecisionGen
-            );
-            if (!pending || Date.now() > hardCapAt) teardown();
-          }, 500);
-        } else {
-          removeFocusListener();
-        }
-      }
-    }
+    if (editedId != null) await restoreCollectionRowFocus(editedId, refresh);
   } catch(e) {}
+}
+
+async function restoreCollectionRowFocus(/** @type {number} */ editedId, /** @type {Promise<unknown>} */ refresh) {
+  // Track user-initiated focus moves after hideCollectionModal
+  // restored focus to the opener. If the user navigates to another
+  // control (including another collection row that then gets detached
+  // by a superseding render) before the eventual render fires, don't
+  // clobber their choice — the row detachment silently moves
+  // activeElement to body (no focusin event), which the orphaned
+  // predicate below would otherwise mistake for the opener itself
+  // being detached and jerk focus back to the edited row.
+  var restoredOpener = document.activeElement;
+  var userMovedFocus = false;
+  var onFocusIn = function(/** @type {FocusEvent} */ e) {
+    if (e.target !== restoredOpener) userMovedFocus = true;
+  };
+  document.addEventListener('focusin', onFocusIn, true);
+  var removeFocusListener = function() {
+    document.removeEventListener('focusin', onFocusIn, true);
+  };
+  await refresh;
+  // If another loadCollections() (e.g. a concurrent folder-
+  // health refresh) is still pending when this one resolves,
+  // reconcileCollectionLoadRenders() defers our render until the newer
+  // generation settles — so the pre-save row stays connected past this
+  // await and the orphaned check below reads false. The later
+  // superseding render then detaches the row with no remaining
+  // restoration path. Watch #collectionList for child-list mutations
+  // and recheck orphaning after each render until the pre-save row is
+  // orphaned and the replacement row for editedId has been drawn.
+  var tryRestoreCollectionRowFocus = function() {
+    if (userMovedFocus) return true;
+    var active = document.activeElement;
+    var orphaned = !active || active === document.body ||
+        !(active instanceof HTMLElement) || !active.isConnected;
+    if (!orphaned) return false;
+    var replacement = /** @type {HTMLElement | null} */ (document.querySelector(
+      '#collectionList .tree-item[data-collection-id="' + editedId + '"]'));
+    if (replacement && typeof replacement.focus === 'function') {
+      replacement.focus({preventScroll: true});
+      return true;
+    }
+    return false;
+  };
+  if (tryRestoreCollectionRowFocus()) {
+    removeFocusListener();
+  } else {
+    watchCollectionListUntilRestored(tryRestoreCollectionRowFocus, removeFocusListener);
+  }
+}
+
+function watchCollectionListUntilRestored(/** @type {() => boolean} */ tryRestore, /** @type {() => void} */ removeFocusListener) {
+  var list = /** @type {HTMLElement} */ (document.getElementById('collectionList'));
+  if (list && typeof MutationObserver === 'function') {
+    /** @type {MutationObserver | undefined} */ var observer;
+    /** @type {number | undefined} */ var ticker;
+    var tornDown = false;
+    var teardown = function() {
+      if (tornDown) return;
+      tornDown = true;
+      if (observer) observer.disconnect();
+      if (ticker) clearInterval(ticker);
+      removeFocusListener();
+    };
+    observer = new MutationObserver(function() {
+      if (tryRestore()) teardown();
+    });
+    observer.observe(list, {childList: true});
+    // Anchor observer lifetime to load-state settlement
+    // rather than a fixed 5s wall-clock. Stay alive while any
+    // superseding collectionLoadGen render is still pending
+    // (reconcileCollectionLoadRenders() hasn't advanced the
+    // decision gen to the latest requested gen yet); disconnect
+    // once all have settled. A 30s hard cap guards against a
+    // pathologically never-settling load holding the observer
+    // past page interaction.
+    var hardCapAt = Date.now() + 30000;
+    ticker = setInterval(function() {
+      var pending = (
+        typeof state.collectionLoadGen === 'number' &&
+        typeof state.collectionRenderDecisionGen === 'number' &&
+        state.collectionLoadGen > state.collectionRenderDecisionGen
+      );
+      if (!pending || Date.now() > hardCapAt) teardown();
+    }, 500);
+  } else {
+    removeFocusListener();
+  }
 }

@@ -475,47 +475,51 @@ export async function batchDelete() {
     return;
   }
   showDeleteDialog(capturedIds, companionCount, function(data) {
-    // The server may have retained rows whose Trash step failed (and the
-    // user declined the permanent-delete fallback). Keep those rows visible
-    // — dropping them from ``photos`` would hide files still on disk until
-    // the next reload.
-    var retained = new Set((data && data.failed_photo_ids) || []);
-    var deletedSet = new Set(ids.filter(function(id) { return !retained.has(id); }));
-    // Removing one member can dissolve a stack or change its representative,
-    // so the logical item count cannot be updated arithmetically. Reload the
-    // current scope from the authoritative projection.
-    if (browseStacksEnabled()) {
-      selection.clear();
-      updateBatchBar();
-      resetAndLoad({preserveCollection: true});
-      loadSummary();
-      refreshBrowseSidebarCounts();
-      return;
-    }
-    state.photos = state.photos.filter(function(p) { return !deletedSet.has(p.id); });
-    pagination.removePhotos(data.deleted || 0);
-    selection.replaceBatch(Array.from(selection.batchIds).filter(function(id) {
-      return !deletedSet.has(id);
-    }));
-    if (selection.focusedPhotoId != null && deletedSet.has(selection.focusedPhotoId)) {
-      selection.focus(null);
-    }
-    // Re-sync the batch bar (count, compare/best/burst buttons, selection
-    // inspector) against the shrunk selection. Just hiding the bar when the
-    // set empties leaves stale state — the count and buttons stayed sized for
-    // the pre-delete IDs on a partial deletion.
+    applyBatchDeleteResult(ids, data);
+  });
+}
+
+function applyBatchDeleteResult(/** @type {number[]} */ ids, /** @type {{failed_photo_ids?: number[], deleted: number}} */ data) {
+  // The server may have retained rows whose Trash step failed (and the
+  // user declined the permanent-delete fallback). Keep those rows visible
+  // — dropping them from ``photos`` would hide files still on disk until
+  // the next reload.
+  var retained = new Set((data && data.failed_photo_ids) || []);
+  var deletedSet = new Set(ids.filter(function(id) { return !retained.has(id); }));
+  // Removing one member can dissolve a stack or change its representative,
+  // so the logical item count cannot be updated arithmetically. Reload the
+  // current scope from the authoritative projection.
+  if (browseStacksEnabled()) {
+    selection.clear();
     updateBatchBar();
-    renderGrid();
-    updateFilterSummary();
+    resetAndLoad({preserveCollection: true});
     loadSummary();
     refreshBrowseSidebarCounts();
-    // Update total count display
-    var countEl = document.getElementById('photoCount');
-    if (countEl) {
-      var current = parseInt(countEl.textContent) || 0;
-      countEl.textContent = String(Math.max(0, current - (data.deleted || 0)));
-    }
-  });
+    return;
+  }
+  state.photos = state.photos.filter(function(p) { return !deletedSet.has(p.id); });
+  pagination.removePhotos(data.deleted || 0);
+  selection.replaceBatch(Array.from(selection.batchIds).filter(function(id) {
+    return !deletedSet.has(id);
+  }));
+  if (selection.focusedPhotoId != null && deletedSet.has(selection.focusedPhotoId)) {
+    selection.focus(null);
+  }
+  // Re-sync the batch bar (count, compare/best/burst buttons, selection
+  // inspector) against the shrunk selection. Just hiding the bar when the
+  // set empties leaves stale state — the count and buttons stayed sized for
+  // the pre-delete IDs on a partial deletion.
+  updateBatchBar();
+  renderGrid();
+  updateFilterSummary();
+  loadSummary();
+  refreshBrowseSidebarCounts();
+  // Update total count display
+  var countEl = document.getElementById('photoCount');
+  if (countEl) {
+    var current = parseInt(countEl.textContent) || 0;
+    countEl.textContent = String(Math.max(0, current - (data.deleted || 0)));
+  }
 }
 
 /** @type {BrowseCollection[]} */ var _batchCollections = [];

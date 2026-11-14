@@ -94,34 +94,7 @@ export async function refreshBrowseAfterFolderHealthChange(/** @type {BrowseFold
   // schedule a retry via the same event listener rather than committing
   // to a decision from stale data.
   if (loaded[0] === null) {
-    var retryAttempt = detail && Number(detail.refreshRetryAttempt) || 0;
-    // Bound the short-term recovery loop. A prolonged/permanent endpoint
-    // outage must fall back to the normal ten-minute health poll instead of
-    // issuing folder/keyword/collection requests forever.
-    if (retryAttempt >= 3) {
-      // The navbar advanced ``_missingFoldersLastIds`` before dispatching
-      // this event, so its 10-minute poll will see unchanged IDs once
-      // ``/api/folders`` recovers and by default emits nothing — the page
-      // would then remain on pre-transition data indefinitely. Flag the
-      // navbar so the next successful poll fires a synthetic reconciliation
-      // event regardless of the ID diff, letting this handler re-attempt
-      // the refresh with a healthy endpoint.
-      markMissingFoldersReconciliationPending();
-      return;
-    }
-    var retryDetail = Object.assign({}, detail || {}, {
-      source: 'refresh-retry',
-      refreshRetryAttempt: retryAttempt + 1
-    });
-    setTimeout(function() {
-      document.dispatchEvent(new CustomEvent('vireo:folder-health-changed', {
-        // Preserve restored/wentMissing ids so the successful retry can still
-        // distinguish an unrelated sibling transition from one that affects
-        // the active folder scope. Dropping them makes the conservative
-        // no-id fallback reset an unaffected grid and selection.
-        detail: retryDetail
-      }));
-    }, 2000 * Math.pow(2, retryAttempt));
+    retryFolderHealthRefresh(detail);
     return;
   }
   // Folder health can change which visible ancestor represents a hidden
@@ -134,11 +107,59 @@ export async function refreshBrowseAfterFolderHealthChange(/** @type {BrowseFold
   if (local && typeof local.load === 'function') {
     local.load();
   }
-  // Use the health-owned response rather than the DOM. A later unrelated
-  // loadFolders() call may supersede this render while still being in flight;
-  // in that window the DOM is intentionally old even though this response
-  // already proves whether the selected folder is available.
   var currentFolderRows = loaded[0];
+  var activeScopeWasAffected = settleActiveFolderScope(detail, beforeFolderRows, currentFolderRows);
+
+  // A transition in an unrelated folder cannot change a leaf-folder result
+  // set. Keep its selection, detail panel, and scroll position intact while
+  // still refreshing workspace-wide sidebar and summary counts.
+  if (!activeScopeWasAffected && pagination.ready) {
+    refreshBrowseCounts();
+    return;
+  }
+  await reloadGridAfterFolderHealth(isCurrent);
+}
+
+function retryFolderHealthRefresh(/** @type {BrowseFolderHealthChange | undefined} */ detail) {
+  var retryAttempt = detail && Number(detail.refreshRetryAttempt) || 0;
+  // Bound the short-term recovery loop. A prolonged/permanent endpoint
+  // outage must fall back to the normal ten-minute health poll instead of
+  // issuing folder/keyword/collection requests forever.
+  if (retryAttempt >= 3) {
+    // The navbar advanced ``_missingFoldersLastIds`` before dispatching
+    // this event, so its 10-minute poll will see unchanged IDs once
+    // ``/api/folders`` recovers and by default emits nothing — the page
+    // would then remain on pre-transition data indefinitely. Flag the
+    // navbar so the next successful poll fires a synthetic reconciliation
+    // event regardless of the ID diff, letting this handler re-attempt
+    // the refresh with a healthy endpoint.
+    markMissingFoldersReconciliationPending();
+    return;
+  }
+  var retryDetail = Object.assign({}, detail || {}, {
+    source: 'refresh-retry',
+    refreshRetryAttempt: retryAttempt + 1
+  });
+  setTimeout(function() {
+    document.dispatchEvent(new CustomEvent('vireo:folder-health-changed', {
+      // Preserve restored/wentMissing ids so the successful retry can still
+      // distinguish an unrelated sibling transition from one that affects
+      // the active folder scope. Dropping them makes the conservative
+      // no-id fallback reset an unaffected grid and selection.
+      detail: retryDetail
+    }));
+  }, 2000 * Math.pow(2, retryAttempt));
+}
+
+// Use the health-owned response rather than the DOM. A later unrelated
+// loadFolders() call may supersede this render while still being in flight;
+// in that window the DOM is intentionally old even though this response
+// already proves whether the selected folder is available.
+function settleActiveFolderScope(
+  /** @type {BrowseFolderHealthChange | undefined} */ detail,
+  /** @type {BrowseFolder[]} */ beforeFolderRows,
+  /** @type {BrowseFolder[]} */ currentFolderRows
+) {
   var activeScopeWasAffected = folderHealthTouchesActiveScope(
     detail, beforeFolderRows, currentFolderRows);
   if (state.activeFolderId &&
@@ -146,17 +167,10 @@ export async function refreshBrowseAfterFolderHealthChange(/** @type {BrowseFold
     state.activeFolderId = null;
     activeScopeWasAffected = true;
   }
+  return activeScopeWasAffected;
+}
 
-  // A transition in an unrelated folder cannot change a leaf-folder result
-  // set. Keep its selection, detail panel, and scroll position intact while
-  // still refreshing workspace-wide sidebar and summary counts.
-  if (!activeScopeWasAffected && pagination.ready) {
-    loadCollectionCounts();
-    loadSummary();
-    if (state.timelineMode) loadCalendarData();
-    return;
-  }
-
+async function reloadGridAfterFolderHealth(/** @type {() => boolean} */ isCurrent) {
   // Preserve the active collection: resetAndLoad's default is to clear
   // ``activeCollectionId`` for non-dashboard scopes, which would kick a user
   // viewing a normal collection back to the unscoped workspace grid whenever
@@ -177,11 +191,14 @@ export async function refreshBrowseAfterFolderHealthChange(/** @type {BrowseFold
     markMissingFoldersReconciliationPending();
     return;
   }
+  refreshBrowseCounts();
+}
+
+function refreshBrowseCounts() {
   loadCollectionCounts();
   loadSummary();
   if (state.timelineMode) loadCalendarData();
 }
-
 
 export async function waitForFolderHealthRefreshesToSettle() {
   // A second event can replace the active promise while an awaiter is still

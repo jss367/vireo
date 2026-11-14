@@ -20757,6 +20757,20 @@ def test_batch_reject_skips_already_rejected_predictions(app_and_db):
     assert len(db.edit_history.list_recent(limit=50)) == edits_after_first
 
 
+def _browse_selection_prediction_renderers(html):
+    """``renderSelectionPredictions`` with the row builders it calls."""
+    return "\n".join(
+        _browse_js_function_body(html, signature)
+        for signature in (
+            "function renderSelectionPredictions(",
+            "function selectionPredictionRowHtml(",
+            "function selectionPredictionButtonsHtml(",
+            "function selectionPredictionWhy(",
+            "function selectionAcceptablePhotoCount(",
+        )
+    )
+
+
 def _browse_js_function_body(html, signature):
     """The source text of one inline Browse function, for structure asserts."""
     start = html.find(signature)
@@ -21048,7 +21062,7 @@ def test_selection_predictions_accept_on_all_renders_and_submits_full_selection(
         _browse_js_function_body(html, "function formatPredictionConfidence("),
         "var window = globalThis;",
         (Path(__file__).parent.parent / "static/browse/selection-panel-state.js").read_text(encoding="utf-8"),
-        _browse_js_function_body(html, "function renderSelectionPredictions("),
+        _browse_selection_prediction_renderers(html),
         _browse_js_function_body(html, "async function acceptSelectionPrediction("),
         """
 var requests = [], refreshes = [];
@@ -21136,7 +21150,7 @@ def test_selection_prediction_accept_on_all_leads_and_names_its_count(app_and_db
         _browse_js_function_body(html, "function formatPredictionConfidence("),
         "var window = globalThis;",
         (Path(__file__).parent.parent / "static/browse/selection-panel-state.js").read_text(encoding="utf-8"),
-        _browse_js_function_body(html, "function renderSelectionPredictions("),
+        _browse_selection_prediction_renderers(html),
         _browse_js_function_body(html, "async function acceptSelectionPrediction("),
         """
 selectionPanel.predictions.toggle();
@@ -21231,7 +21245,7 @@ def test_selection_prediction_show_button_opens_only_that_species_photos(app_and
         _browse_js_function_body(html, "function formatPredictionConfidence("),
         "var window = globalThis;",
         (Path(__file__).parent.parent / "static/browse/selection-panel-state.js").read_text(encoding="utf-8"),
-        _browse_js_function_body(html, "function renderSelectionPredictions("),
+        _browse_selection_prediction_renderers(html),
         (Path(__file__).parent.parent / "static/browse/panel-requests.js").read_text(encoding="utf-8"),
         _browse_js_function_body(html, "async function showSelectionPredictionPhotos("),
         """
@@ -21330,7 +21344,7 @@ def test_selection_prediction_show_button_drops_stale_interleaved_fetch(app_and_
         _browse_js_function_body(html, "function formatPredictionConfidence("),
         "var window = globalThis;",
         (Path(__file__).parent.parent / "static/browse/selection-panel-state.js").read_text(encoding="utf-8"),
-        _browse_js_function_body(html, "function renderSelectionPredictions("),
+        _browse_selection_prediction_renderers(html),
         (Path(__file__).parent.parent / "static/browse/panel-requests.js").read_text(encoding="utf-8"),
         _browse_js_function_body(html, "async function showSelectionPredictionPhotos("),
         """
@@ -22386,6 +22400,8 @@ global.document = {
 };
 """,
         handler_registration,
+        _browse_js_function_body(html, "function dropOrphanedStackSelection("),
+        _browse_js_function_body(html, "function pruneDeletedPhotoFromStacks("),
         """
 function snapshot(coverId) {
   var photo = photos.find(function(p) { return p.id === coverId; });
@@ -23569,12 +23585,15 @@ def test_browse_detail_panel_keeps_row_data_out_of_markup(app_and_db):
     html = _page_with_scripts(client, "/browse")
     body = _browse_js_function_body(html, "function renderDetailPredictions(")
     assert body, "renderDetailPredictions must exist in Browse's scripts"
-    assert "onclick" not in body, (
-        "the detail prediction panel must wire its buttons through the "
-        "delegated listener, not inline handlers built by concatenation"
-    )
-    assert "JSON.stringify(g.species)" not in body
-    assert 'data-prediction-action="accept"' in body
+    row = _browse_js_function_body(html, "function detailPredictionRowHtml(")
+    assert row, "detailPredictionRowHtml must exist in Browse's scripts"
+    for rendered in (body, row):
+        assert "onclick" not in rendered, (
+            "the detail prediction panel must wire its buttons through the "
+            "delegated listener, not inline handlers built by concatenation"
+        )
+        assert "JSON.stringify(g.species)" not in rendered
+    assert 'data-prediction-action="accept"' in row
     assert "detailPredictionGroups = shown;" in body
     handler = _browse_js_function_body(
         html, "function handleDetailPredictionClick(",

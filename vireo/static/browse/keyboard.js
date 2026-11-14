@@ -35,38 +35,7 @@ document.addEventListener('keydown', function(e) {
   // handler dismisses just that dialog and leaves the export modal open.
   if (/** @type {HTMLElement | null} */ (document.querySelector('.export-preset-dialog-overlay.open'))) return;
 
-  if (browseCompare.isOpen()) {
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      browseCompare.close();
-      return;
-    }
-    if (e.key === 'ArrowRight') {
-      e.preventDefault();
-      browseCompare.step(1);
-      return;
-    }
-    if (e.key === 'ArrowLeft') {
-      e.preventDefault();
-      browseCompare.step(-1);
-      return;
-    }
-    return;
-  }
-
-  // Suppress browse shortcuts while any modal is open
-  var openModal = /** @type {HTMLElement | null} */ (document.querySelector('.modal-overlay.open'));
-  if (openModal) {
-    if (e.key === 'Escape') {
-      if (openModal.id === 'batchKeywordModal') hideBatchKeywordModal();
-      else if (openModal.id === 'batchCollectionModal') hideBatchCollectionModal();
-      else if (openModal.id === 'collectionModal') hideCollectionModal();
-      else if (openModal.id === 'exportOverlay') closeExportModal();
-      else if (openModal.id === 'panoramaOverlay') closePanoramaModal();
-      else openModal.classList.remove('open');
-    }
-    return;
-  }
+  if (handleOverlayKey(e)) return;
 
   if (/** @type {HTMLElement} */ (document.getElementById('lightboxOverlay')).classList.contains('active')) return;
 
@@ -79,69 +48,113 @@ document.addEventListener('keydown', function(e) {
   }
 
   if (!_shortcuts) return;
+  if (handleBrowseCommandKey(e, _shortcuts)) return;
+  if (handleBrowseSelectionKey(e, _shortcuts)) return;
+  handleBrowseViewKey(e);
+});
 
+// Each handler below answers whether it consumed the key, which ends the
+// keydown handling above.
+function handleOverlayKey(/** @type {KeyboardEvent} */ e) {
+  if (browseCompare.isOpen()) {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      browseCompare.close();
+      return true;
+    }
+    if (e.key === 'ArrowRight') {
+      e.preventDefault();
+      browseCompare.step(1);
+      return true;
+    }
+    if (e.key === 'ArrowLeft') {
+      e.preventDefault();
+      browseCompare.step(-1);
+      return true;
+    }
+    return true;
+  }
+
+  // Suppress browse shortcuts while any modal is open
+  var openModal = /** @type {HTMLElement | null} */ (document.querySelector('.modal-overlay.open'));
+  if (!openModal) return false;
+  if (e.key === 'Escape') {
+    if (openModal.id === 'batchKeywordModal') hideBatchKeywordModal();
+    else if (openModal.id === 'batchCollectionModal') hideBatchCollectionModal();
+    else if (openModal.id === 'collectionModal') hideCollectionModal();
+    else if (openModal.id === 'exportOverlay') closeExportModal();
+    else if (openModal.id === 'panoramaOverlay') closePanoramaModal();
+    else openModal.classList.remove('open');
+  }
+  return true;
+}
+
+function handleBrowseCommandKey(/** @type {KeyboardEvent} */ e, /** @type {NonNullable<typeof _shortcuts>} */ shortcuts) {
   // Undo
-  if (matchesShortcut(e, _shortcuts.undo)) {
+  if (matchesShortcut(e, shortcuts.undo)) {
     e.preventDefault();
     undoLast();
-    return;
+    return true;
   }
 
   // Redo
-  if (matchesShortcut(e, _shortcuts.redo)) {
+  if (matchesShortcut(e, shortcuts.redo)) {
     e.preventDefault();
     redoLast();
-    return;
+    return true;
   }
 
   // Select all
-  if (matchesShortcut(e, _shortcuts.select_all)) {
+  if (matchesShortcut(e, shortcuts.select_all)) {
     e.preventDefault();
     selectAllMatchingPhotos();
-    return;
+    return true;
   }
 
   // Arrow keys: navigate grid (not configurable)
   if (e.key === 'ArrowRight') {
     e.preventDefault();
     moveBrowseSelection(1, e);
-    return;
+    return true;
   } else if (e.key === 'ArrowLeft') {
     e.preventDefault();
     moveBrowseSelection(-1, e);
-    return;
+    return true;
   } else if (e.key === 'ArrowDown') {
     e.preventDefault();
     moveBrowseSelection(getBrowseGridColumnCount(), e);
-    return;
+    return true;
   } else if (e.key === 'ArrowUp') {
     e.preventDefault();
     moveBrowseSelection(-getBrowseGridColumnCount(), e);
-    return;
+    return true;
   }
+  return false;
+}
 
+function handleBrowseSelectionKey(/** @type {KeyboardEvent} */ e, /** @type {NonNullable<typeof _shortcuts>} */ shortcuts) {
   // Must stay aligned with updateBatchBar(): any non-empty selectedPhotos is
   // actionable (size >= 1, not > 1), otherwise shortcuts silently no-op while
   // the bar advertises "1 selected" after cmd-click reduces the set to one.
   var useBatch = selection.batchIds.size >= 1;
   var hasActive = useBatch || selection.focusedPhotoId;
 
-  if (matchesShortcut(e, _shortcuts.compare || 'c')) {
+  if (matchesShortcut(e, shortcuts.compare || 'c')) {
     var compareIds = getActiveSelection();
     if (compareIds.length >= 2) {
       e.preventDefault();
       openBrowseCompare();
     }
-    return;
+    return true;
   }
 
   // Ratings: 0-5
   if (hasActive) {
     for (var r = 0; r <= 5; r++) {
-      if (matchesShortcut(e, _shortcuts['rate_' + r])) {
+      if (matchesShortcut(e, shortcuts['rate_' + r])) {
         if (useBatch) batchSetRating(r);
         else if (selection.focusedPhotoId != null) setRating(selection.focusedPhotoId, r);
-        return;
+        return true;
       }
     }
   }
@@ -150,17 +163,20 @@ document.addEventListener('keydown', function(e) {
   if (hasActive) {
     var applyFlag = useBatch ? batchSetFlag : setFlag;
     var applyColor = useBatch ? batchSetColorLabel : setColorLabel;
-    if (matchesShortcut(e, _shortcuts.flag)) { e.preventDefault(); applyFlag('flagged'); return; }
-    else if (matchesShortcut(e, _shortcuts.reject)) { e.preventDefault(); applyFlag('rejected'); return; }
-    else if (matchesShortcut(e, _shortcuts.unflag)) { e.preventDefault(); applyFlag('none'); return; }
+    if (matchesShortcut(e, shortcuts.flag)) { e.preventDefault(); applyFlag('flagged'); return true; }
+    else if (matchesShortcut(e, shortcuts.reject)) { e.preventDefault(); applyFlag('rejected'); return true; }
+    else if (matchesShortcut(e, shortcuts.unflag)) { e.preventDefault(); applyFlag('none'); return true; }
 
     // Color labels
-    if (matchesShortcut(e, _shortcuts.color_red)) { e.preventDefault(); applyColor('red'); return; }
-    else if (matchesShortcut(e, _shortcuts.color_yellow)) { e.preventDefault(); applyColor('yellow'); return; }
-    else if (matchesShortcut(e, _shortcuts.color_green)) { e.preventDefault(); applyColor('green'); return; }
-    else if (matchesShortcut(e, _shortcuts.color_blue)) { e.preventDefault(); applyColor('blue'); return; }
+    if (matchesShortcut(e, shortcuts.color_red)) { e.preventDefault(); applyColor('red'); return true; }
+    else if (matchesShortcut(e, shortcuts.color_yellow)) { e.preventDefault(); applyColor('yellow'); return true; }
+    else if (matchesShortcut(e, shortcuts.color_green)) { e.preventDefault(); applyColor('green'); return true; }
+    else if (matchesShortcut(e, shortcuts.color_blue)) { e.preventDefault(); applyColor('blue'); return true; }
   }
+  return false;
+}
 
+function handleBrowseViewKey(/** @type {KeyboardEvent} */ e) {
   if (!e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && !browseKeyMatchesConfiguredShortcut(e)) {
     var browseViewKey = e.key.toLowerCase();
     if (browseViewKey === 'e') {
@@ -178,7 +194,7 @@ document.addEventListener('keydown', function(e) {
       return;
     }
   }
-});
+}
 
 export function getBrowseGridColumnCount() {
   var grid = /** @type {HTMLElement} */ (document.getElementById('grid'));

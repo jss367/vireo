@@ -500,21 +500,7 @@ export async function reconcileBrowseStackCovers(/** @type {number[]} */ photoId
     changed = true;
   });
   if (changed) renderGrid();
-  if (unresolvedCovers.length) {
-    // The edit committed on the server but its cover recomputation did not, so
-    // the grid is knowingly showing a photo the stack may no longer lead with.
-    // Say so instead of leaving a silently wrong representative on screen, and
-    // mark the stacks so the notice survives the toast.
-    unresolvedCovers.forEach(refreshBrowseStackBadge);
-    var one = unresolvedCovers.length === 1;
-    showToast(
-      'Could not reload ' + (one ? 'a stack' : unresolvedCovers.length + ' stacks')
-      + ' after that edit — ' + (one ? 'its cover' : 'their covers')
-      + ' may still show the previous top photo. Expand '
-      + (one ? 'the stack' : 'a stack') + ' marked “!” to refresh it.',
-      'warning'
-    );
-  }
+  if (unresolvedCovers.length) reportUnresolvedStackCovers(unresolvedCovers);
   // Keep the inspector bound to the same visible grid focus. Call this after
   // renderGrid() so the promoted cover and its tray are already in place when
   // the async detail response paints.
@@ -522,6 +508,22 @@ export async function reconcileBrowseStackCovers(/** @type {number[]} */ photoId
     loadDetail(focusedReplacementId);
   }
   return changed;
+}
+
+// The edit committed on the server but its cover recomputation did not, so
+// the grid is knowingly showing a photo the stack may no longer lead with.
+// Say so instead of leaving a silently wrong representative on screen, and
+// mark the stacks so the notice survives the toast.
+function reportUnresolvedStackCovers(/** @type {number[]} */ unresolvedCovers) {
+  unresolvedCovers.forEach(refreshBrowseStackBadge);
+  var one = unresolvedCovers.length === 1;
+  showToast(
+    'Could not reload ' + (one ? 'a stack' : unresolvedCovers.length + ' stacks')
+    + ' after that edit — ' + (one ? 'its cover' : 'their covers')
+    + ' may still show the previous top photo. Expand '
+    + (one ? 'the stack' : 'a stack') + ' marked “!” to refresh it.',
+    'warning'
+  );
 }
 
 export function browsePhotoNavigationList(/** @type {number} */ photoId) {
@@ -582,51 +584,7 @@ export async function toggleBrowseStack(/** @type {MouseEvent | null} */ event, 
   if (!coverCandidate || !coverCandidate.browse_stack) return; const cover = coverCandidate;
   var badge = /** @type {HTMLElement | null} */ (document.querySelector('.grid-card[data-id="' + coverId + '"] .browse-stack-badge'));
   if (state.expandedBrowseStacks.has(coverId)) {
-    var members = state.browseStackMembers[String(coverId)] || [];
-    var selectedHiddenMember = selection.focusedPhotoId !== coverId && members.some(function(member) {
-      return member.id === selection.focusedPhotoId;
-    });
-    // A stack-wide Select all clears selectedPhotoId but leaves every member
-    // ID in selectedPhotos. Once the tray collapses, hidden members are gone
-    // from the navigation list, so a preview shortcut would fall through to
-    // the first hidden member and yield a 0/N lightbox. Detect that case so
-    // we can re-pin focus to the visible cover after removing the tray.
-    var batchHasHiddenMembers = selection.focusedPhotoId == null && selection.batchIds.size > 0
-      && members.some(function(member) {
-        return member.id !== coverId && selection.batchIds.has(member.id);
-      });
-    state.expandedBrowseStacks.delete(coverId);
-    var tray = /** @type {HTMLElement | null} */ (document.querySelector('.browse-stack-tray[data-stack-cover-id="' + coverId + '"]'));
-    if (tray) tray.remove();
-    if (badge) badge.setAttribute('aria-expanded', 'false');
-    // A collapsed tray cannot keep a single-photo focus on one of its hidden
-    // members: grid/lightbox navigation uses the top-level cover list.
-    // Hand that focus back to the visible cover while retaining the warm
-    // member cache for a cheap re-expand and for batch state reconciliation.
-    if (selectedHiddenMember) {
-      var coverIndex = state.photos.findIndex(function(photo) { return photo.id === coverId; });
-      if (selection.batchIds.size > 0) {
-        // Keep the exact multi-selection intact. The focused hidden member is
-        // still an active batch target, and getBrowseShortcutPhoto maps that
-        // focus to the collapsed cover solely for preview/navigation.
-        selection.reanchor(coverIndex);
-        refreshCardSelectionVisuals();
-      } else {
-        // stackAware: false — collapsing a tray is a view action. It hands
-        // the focus back to the visible cover; it does not turn one frame
-        // the user was looking at into a stack-wide selection. The cover
-        // card paints the partial mark for exactly this state.
-        selectPhoto({shiftKey: false, metaKey: false, ctrlKey: false},
-                    coverId, coverIndex, { stackAware: false });
-      }
-    } else if (batchHasHiddenMembers) {
-      // Preserve the batch (Select all) selection but pin single-photo focus
-      // to the visible cover so preview shortcuts, keyboard navigation, and
-      // the grid caret all resolve inside the top-level cover list.
-      selection.focus(coverId);
-      selection.reanchor(state.photos.findIndex(function(photo) { return photo.id === coverId; }));
-      refreshCardSelectionVisuals();
-    }
+    collapseBrowseStack(coverId, badge);
     return;
   }
 
@@ -640,8 +598,66 @@ export async function toggleBrowseStack(/** @type {MouseEvent | null} */ event, 
   // to its first failed request until the whole Browse dataset reloads.
   delete state.browseStackErrors[cacheKey];
   insertBrowseStackTray(coverId);
-  var memberIds = cover.browse_stack?.photo_ids || [];
   var windowIsCurrent = observeBrowseWindow();
+  if (!await loadBrowseStackMembers(cover, coverId, windowIsCurrent)) return;
+  await finishBrowseStackExpansion(coverId, windowIsCurrent);
+}
+
+function collapseBrowseStack(/** @type {number} */ coverId, /** @type {HTMLElement | null} */ badge) {
+  var members = state.browseStackMembers[String(coverId)] || [];
+  var selectedHiddenMember = selection.focusedPhotoId !== coverId && members.some(function(member) {
+    return member.id === selection.focusedPhotoId;
+  });
+  // A stack-wide Select all clears selectedPhotoId but leaves every member
+  // ID in selectedPhotos. Once the tray collapses, hidden members are gone
+  // from the navigation list, so a preview shortcut would fall through to
+  // the first hidden member and yield a 0/N lightbox. Detect that case so
+  // we can re-pin focus to the visible cover after removing the tray.
+  var batchHasHiddenMembers = selection.focusedPhotoId == null && selection.batchIds.size > 0
+    && members.some(function(member) {
+      return member.id !== coverId && selection.batchIds.has(member.id);
+    });
+  state.expandedBrowseStacks.delete(coverId);
+  var tray = /** @type {HTMLElement | null} */ (document.querySelector('.browse-stack-tray[data-stack-cover-id="' + coverId + '"]'));
+  if (tray) tray.remove();
+  if (badge) badge.setAttribute('aria-expanded', 'false');
+  // A collapsed tray cannot keep a single-photo focus on one of its hidden
+  // members: grid/lightbox navigation uses the top-level cover list.
+  // Hand that focus back to the visible cover while retaining the warm
+  // member cache for a cheap re-expand and for batch state reconciliation.
+  if (selectedHiddenMember) {
+    var coverIndex = state.photos.findIndex(function(photo) { return photo.id === coverId; });
+    if (selection.batchIds.size > 0) {
+      // Keep the exact multi-selection intact. The focused hidden member is
+      // still an active batch target, and getBrowseShortcutPhoto maps that
+      // focus to the collapsed cover solely for preview/navigation.
+      selection.reanchor(coverIndex);
+      refreshCardSelectionVisuals();
+    } else {
+      // stackAware: false — collapsing a tray is a view action. It hands
+      // the focus back to the visible cover; it does not turn one frame
+      // the user was looking at into a stack-wide selection. The cover
+      // card paints the partial mark for exactly this state.
+      selectPhoto({shiftKey: false, metaKey: false, ctrlKey: false},
+                  coverId, coverIndex, { stackAware: false });
+    }
+  } else if (batchHasHiddenMembers) {
+    // Preserve the batch (Select all) selection but pin single-photo focus
+    // to the visible cover so preview shortcuts, keyboard navigation, and
+    // the grid caret all resolve inside the top-level cover list.
+    selection.focus(coverId);
+    selection.reanchor(state.photos.findIndex(function(photo) { return photo.id === coverId; }));
+    refreshCardSelectionVisuals();
+  }
+}
+
+// Fetch an expanding stack's members into the cache. False when the tray
+// was handed to another owner or left showing an error.
+async function loadBrowseStackMembers(
+  /** @type {BrowsePhoto} */ cover, /** @type {number} */ coverId, /** @type {() => boolean} */ windowIsCurrent
+) {
+  var cacheKey = String(coverId);
+  var memberIds = cover.browse_stack?.photo_ids || [];
   function coverStillOwnsSlot() {
     // A cover-changing edit can hydrate and promote this stack while the
     // expansion request is in flight. The dataset epoch stays current in
@@ -691,14 +707,14 @@ export async function toggleBrowseStack(/** @type {MouseEvent | null} */ event, 
       }
     } catch (error) {
       _removeBrowseStackExpansionRequest(cacheKey, request);
-      if (!coverStillOwnsSlot()) return;
+      if (!coverStillOwnsSlot()) return false;
       state.browseStackErrors[cacheKey] = 'Could not load this stack.';
       insertBrowseStackTray(coverId);
-      return;
+      return false;
     }
-    if (abortedForRace) return;
+    if (abortedForRace) return false;
     _removeBrowseStackExpansionRequest(cacheKey, request);
-    if (!coverStillOwnsSlot()) return;
+    if (!coverStillOwnsSlot()) return false;
     if (state.browseStackMembers[cacheKey]) {
       // Cover reconciliation hydrated this key while we were in flight. It
       // issued its fetch after the edit that triggered it, so its cache is
@@ -715,7 +731,7 @@ export async function toggleBrowseStack(/** @type {MouseEvent | null} */ event, 
       state.browseStackErrors[cacheKey] =
         'This stack kept changing while it loaded. Collapse and expand it to see current state.';
       insertBrowseStackTray(coverId);
-      return;
+      return false;
     }
     // Reuse the top-level cover object inside the member cache. The cover is
     // rendered in both places; sharing one object keeps rating/flag/keyword/
@@ -726,6 +742,11 @@ export async function toggleBrowseStack(/** @type {MouseEvent | null} */ event, 
     });
     break;
   }
+  return true;
+}
+
+async function finishBrowseStackExpansion(/** @type {number} */ coverId, /** @type {() => boolean} */ windowIsCurrent) {
+  var cacheKey = String(coverId);
   insertBrowseStackTray(coverId);
   var loadedIds = (state.browseStackMembers[cacheKey] || []).map(function(photo) {
     return photo.id;

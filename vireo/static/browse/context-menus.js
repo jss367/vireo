@@ -296,52 +296,8 @@ export function buildPhotoContextMenu(/** @type {number[]} */ photoIds, /** @typ
   var nav = editNav();
   var copiedDevelopment = nav ? nav.getCopiedRecipe() : null;
 
-  var rateChip = function(/** @type {number} */ n) {
-    return {
-      label: n === 0 ? '\u2606' : String(n),
-      title: n === 0 ? 'No rating' : 'Rate ' + n,
-      onClick: function() {
-        batchSetRating(n, photoIds);
-      },
-    };
-  };
-  var colorChip = function(/** @type {string | null} */ c, /** @type {string} */ icon, /** @type {string} */ title) {
-    return {
-      label: icon,
-      title: c && VireoColorLabels
-        ? VireoColorLabels.title(c, title)
-        : title,
-      color: c,
-      colorBaseTitle: title,
-      onClick: function() {
-        batchSetColorLabel(c, photoIds);
-      },
-    };
-  };
-  var flagChip = function(/** @type {NonNullable<BrowsePhoto['flag']>} */ f, /** @type {string} */ icon, /** @type {string} */ title) {
-    return {
-      label: icon, title: title,
-      onClick: function() {
-        batchSetFlag(f, photoIds);
-      },
-    };
-  };
-
   return availablePhotoMenuItems(/** @type {BrowseMenuItem[]} */ ([
-    { chips: [0, 1, 2, 3, 4, 5].map(rateChip) },
-    { chips: [
-      colorChip(null, '\u25CB', 'No color'),
-      colorChip('red', '\u25CF', 'Red'),
-      colorChip('yellow', '\u25CF', 'Yellow'),
-      colorChip('green', '\u25CF', 'Green'),
-      colorChip('blue', '\u25CF', 'Blue'),
-      colorChip('purple', '\u25CF', 'Purple'),
-    ] },
-    { chips: [
-      flagChip('flagged', '\u2691', 'Flag as pick'),
-      flagChip('rejected', '\u2715', 'Reject'),
-      flagChip('none', '\u25CB', 'Unflag'),
-    ] },
+    ...photoMenuChipRows(photoIds),
     { separator: true },
     { label: 'Filter to This Burst',
       disabled: !groupStack || groupStack.kind !== 'burst',
@@ -394,7 +350,61 @@ export function buildPhotoContextMenu(/** @type {number[]} */ photoIds, /** @typ
     getPhoto: function(id) {
       return findBrowsePhoto(id);
     },
-  })).concat([
+  })).concat(photoOutputMenuItems(photoIds)));
+}
+
+function photoMenuChipRows(/** @type {number[]} */ photoIds) {
+  var rateChip = function(/** @type {number} */ n) {
+    return {
+      label: n === 0 ? '\u2606' : String(n),
+      title: n === 0 ? 'No rating' : 'Rate ' + n,
+      onClick: function() {
+        batchSetRating(n, photoIds);
+      },
+    };
+  };
+  var colorChip = function(/** @type {string | null} */ c, /** @type {string} */ icon, /** @type {string} */ title) {
+    return {
+      label: icon,
+      title: c && VireoColorLabels
+        ? VireoColorLabels.title(c, title)
+        : title,
+      color: c,
+      colorBaseTitle: title,
+      onClick: function() {
+        batchSetColorLabel(c, photoIds);
+      },
+    };
+  };
+  var flagChip = function(/** @type {NonNullable<BrowsePhoto['flag']>} */ f, /** @type {string} */ icon, /** @type {string} */ title) {
+    return {
+      label: icon, title: title,
+      onClick: function() {
+        batchSetFlag(f, photoIds);
+      },
+    };
+  };
+
+  return /** @type {BrowseMenuItem[]} */ ([
+    { chips: [0, 1, 2, 3, 4, 5].map(rateChip) },
+    { chips: [
+      colorChip(null, '\u25CB', 'No color'),
+      colorChip('red', '\u25CF', 'Red'),
+      colorChip('yellow', '\u25CF', 'Yellow'),
+      colorChip('green', '\u25CF', 'Green'),
+      colorChip('blue', '\u25CF', 'Blue'),
+      colorChip('purple', '\u25CF', 'Purple'),
+    ] },
+    { chips: [
+      flagChip('flagged', '\u2691', 'Flag as pick'),
+      flagChip('rejected', '\u2715', 'Reject'),
+      flagChip('none', '\u25CB', 'Unflag'),
+    ] },
+  ]);
+}
+
+function photoOutputMenuItems(/** @type {number[]} */ photoIds) {
+  return /** @type {BrowseMenuItem[]} */ ([
     { label: 'Adjust Capture Time\u2026', onClick: function() { openCaptureTimeModal(); } },
     { separator: true },
     { label: 'Send to iNaturalist', onClick: function() { batchSubmitInat(); } },
@@ -411,7 +421,7 @@ export function buildPhotoContextMenu(/** @type {number[]} */ photoIds, /** @typ
       onClick: function() { openPanoramaModal(photoIds); } },
     { separator: true },
     { label: 'Delete', onClick: function() { batchDelete(); } },
-  ]));
+  ]);
 }
 
 // The More button on the batch bar opens the same menu as right-click on a
@@ -702,29 +712,7 @@ async function removeWorkspaceRootFromBrowse(/** @type {number} */ fid) {
   // as well; without it, a subsequent reload restores the detached
   // descendant and loads an empty Browse view because the refreshed tree
   // no longer contains it.
-  var removedSubtreeIds = (function collectSubtreeIds() {
-    var childrenByParent = /** @type {Record<string, number[]>} */ ({});
-    state.browseFolderRows.forEach(function(row) {
-      var pid = row.parent_id;
-      if (pid == null) return;
-      var key = Number(pid);
-      if (!childrenByParent[key]) childrenByParent[key] = [];
-      childrenByParent[key]?.push(Number(row.id));
-    });
-    var ids = /** @type {Record<string, boolean>} */ ({});
-    ids[Number(fid)] = true;
-    var queue = [Number(fid)];
-    while (queue.length) {
-      var current = queue.shift(); if (current == null) continue;
-      (childrenByParent[current] || []).forEach(function(childId) {
-        if (!ids[childId]) {
-          ids[childId] = true;
-          queue.push(childId);
-        }
-      });
-    }
-    return ids;
-  })();
+  var removedSubtreeIds = folderSubtreeIds(fid);
 
   try {
     // Verify the workspace the tree was rendered against is still the
@@ -748,81 +736,111 @@ async function removeWorkspaceRootFromBrowse(/** @type {number} */ fid) {
     await safeFetch('/api/workspaces/' + wsId + '/folders/' + fid, {
       method: 'DELETE',
     });
-
-    // The DELETE succeeded, so strip any ``?folder_id=<id>`` from the
-    // current URL when it points at a folder that will not survive the
-    // removal. That includes the removed root, its visible descendants,
-    // and any descendant already flagged ``missing`` before the DELETE —
-    // ``browseFolderRows`` excludes missing rows, so a health refresh
-    // that removed the descendant before the click would leave it out of
-    // ``removedSubtreeIds`` and the URL would still restore an empty
-    // scope on any subsequent reload. Treating "not currently visible in
-    // ``browseFolderRows``" as also-strip covers the missing-descendant
-    // case without pulling in catalog ancestry.
-    try {
-      var urlParams = new URLSearchParams(window.location.search);
-      var urlFolderId = parseInt(urlParams.get('folder_id') || '', 10);
-      if (!isNaN(urlFolderId)) {
-        var stillVisible = !removedSubtreeIds[Number(urlFolderId)] &&
-          state.browseFolderRows.some(function(row) {
-            return Number(row.id) === Number(urlFolderId);
-          });
-        if (!stillVisible) {
-          urlParams.delete('folder_id');
-          var newSearch = urlParams.toString();
-          var newUrl = window.location.pathname +
-            (newSearch ? '?' + newSearch : '') +
-            window.location.hash;
-          window.history.replaceState({}, '', newUrl);
-        }
-      }
-    } catch (urlErr) {
-      console.warn('Could not strip folder_id from URL after removal', urlErr);
-    }
-
-    // Refresh the authoritative local-folder payload before rebuilding
-    // the tree. Without this, ``localFolderData()`` still
-    // carries the removed root when ``renderFolderTree`` runs, so
-    // ``folderLocalStatuses`` synthesizes a phantom top-level row for it
-    // and leaves the removed folder visible until the next blocker poll.
-    // ``load()`` swallows fetch failures and
-    // returns ``null``; rendering against the pre-DELETE
-    // ``localFolderData()`` in that case would resurrect the
-    // removed root as a phantom, so reload instead of rebuilding from
-    // stale local state.
-    var local = localFolders();
-    if (local && typeof local.load === 'function') {
-      var localRefreshed = await local.load();
-      if (localRefreshed === null) {
-        window.location.reload();
-        return;
-      }
-    }
-
-    var loaded = await Promise.all([
-      loadFolders(),
-      loadKeywords(),
-      loadCollections(),
-    ]);
-    // A transient folder-list failure leaves the old tree in place. Reloading
-    // is safer than showing a removed root until the next health transition.
-    if (loaded[0] === null) {
-      window.location.reload();
-      return;
-    }
-    if (state.activeFolderId && !loaded[0].some(function(/** @type {BrowseFolder} */ row) {
-      return Number(row.id) === Number(state.activeFolderId);
-    })) {
-      state.activeFolderId = null;
-    }
-    await resetAndLoad({ preserveCollection: !!state.activeCollectionId });
-    loadCollectionCounts();
-    loadSummary();
-    if (state.timelineMode) loadCalendarData();
-    showToast('Folder removed from this workspace.', 'success');
+    stripRemovedFolderFromUrl(removedSubtreeIds);
+    await reloadBrowseAfterRootRemoval();
   } catch (err) {
     console.error('removeWorkspaceRootFromBrowse failed', err);
   }
+}
+
+function folderSubtreeIds(/** @type {number} */ fid) {
+  var childrenByParent = /** @type {Record<string, number[]>} */ ({});
+  state.browseFolderRows.forEach(function(row) {
+    var pid = row.parent_id;
+    if (pid == null) return;
+    var key = Number(pid);
+    if (!childrenByParent[key]) childrenByParent[key] = [];
+    childrenByParent[key]?.push(Number(row.id));
+  });
+  var ids = /** @type {Record<string, boolean>} */ ({});
+  ids[Number(fid)] = true;
+  var queue = [Number(fid)];
+  while (queue.length) {
+    var current = queue.shift(); if (current == null) continue;
+    (childrenByParent[current] || []).forEach(function(childId) {
+      if (!ids[childId]) {
+        ids[childId] = true;
+        queue.push(childId);
+      }
+    });
+  }
+  return ids;
+}
+
+// The DELETE succeeded, so strip any ``?folder_id=<id>`` from the
+// current URL when it points at a folder that will not survive the
+// removal. That includes the removed root, its visible descendants,
+// and any descendant already flagged ``missing`` before the DELETE —
+// ``browseFolderRows`` excludes missing rows, so a health refresh
+// that removed the descendant before the click would leave it out of
+// ``removedSubtreeIds`` and the URL would still restore an empty
+// scope on any subsequent reload. Treating "not currently visible in
+// ``browseFolderRows``" as also-strip covers the missing-descendant
+// case without pulling in catalog ancestry.
+function stripRemovedFolderFromUrl(/** @type {Record<string, boolean>} */ removedSubtreeIds) {
+  try {
+    var urlParams = new URLSearchParams(window.location.search);
+    var urlFolderId = parseInt(urlParams.get('folder_id') || '', 10);
+    if (!isNaN(urlFolderId)) {
+      var stillVisible = !removedSubtreeIds[Number(urlFolderId)] &&
+        state.browseFolderRows.some(function(row) {
+          return Number(row.id) === Number(urlFolderId);
+        });
+      if (!stillVisible) {
+        urlParams.delete('folder_id');
+        var newSearch = urlParams.toString();
+        var newUrl = window.location.pathname +
+          (newSearch ? '?' + newSearch : '') +
+          window.location.hash;
+        window.history.replaceState({}, '', newUrl);
+      }
+    }
+  } catch (urlErr) {
+    console.warn('Could not strip folder_id from URL after removal', urlErr);
+  }
+}
+
+async function reloadBrowseAfterRootRemoval() {
+  // Refresh the authoritative local-folder payload before rebuilding
+  // the tree. Without this, ``localFolderData()`` still
+  // carries the removed root when ``renderFolderTree`` runs, so
+  // ``folderLocalStatuses`` synthesizes a phantom top-level row for it
+  // and leaves the removed folder visible until the next blocker poll.
+  // ``load()`` swallows fetch failures and
+  // returns ``null``; rendering against the pre-DELETE
+  // ``localFolderData()`` in that case would resurrect the
+  // removed root as a phantom, so reload instead of rebuilding from
+  // stale local state.
+  var local = localFolders();
+  if (local && typeof local.load === 'function') {
+    var localRefreshed = await local.load();
+    if (localRefreshed === null) {
+      window.location.reload();
+      return;
+    }
+  }
+
+  var loaded = await Promise.all([
+    loadFolders(),
+    loadKeywords(),
+    loadCollections(),
+  ]);
+  // A transient folder-list failure leaves the old tree in place. Reloading
+  // is safer than showing a removed root until the next health transition.
+  if (loaded[0] === null) {
+    window.location.reload();
+    return;
+  }
+  if (state.activeFolderId && !loaded[0].some(function(/** @type {BrowseFolder} */ row) {
+    return Number(row.id) === Number(state.activeFolderId);
+  })) {
+    state.activeFolderId = null;
+  }
+  await resetAndLoad({ preserveCollection: !!state.activeCollectionId });
+  loadCollectionCounts();
+  loadSummary();
+  if (state.timelineMode) loadCalendarData();
+  showToast('Folder removed from this workspace.', 'success');
 }
 
 document.addEventListener('contextmenu', function(e) {

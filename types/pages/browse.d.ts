@@ -223,3 +223,23 @@ interface BrowseSpeciesAssignment extends BrowseSpeciesNames {
   supporting_photo_ids?: number[]; detection_id?: number | null; subject_photo_id?: number | null;
   confidence?: number | null; confidence_meaning?: string;
 }
+interface BrowsePhotoDeepLink {
+  photoId: number; healthSeq: number; sort: string; loaded: boolean;
+  finishLoad: () => boolean; datasetIsCurrent: (() => boolean) | null;
+}
+interface BrowseWindowRefresh {
+  windowIsCurrent: () => boolean; firstPage: number; page: number;
+  nextPhotos: BrowsePhoto[]; data: BrowsePage | undefined;
+  nextMembers: Record<string, BrowsePhoto[]>; matchingIds: Set<number> | null;
+  scrollContainer: HTMLElement | null; previousOverflowAnchor: string | undefined;
+}
+interface BrowseReload {
+  preserveAnchor: boolean; preserveCollection: boolean; preserveScroll: boolean; focusAnchor: boolean;
+  anchor: BrowseAnchor | null; scrollAnchor: BrowseAnchor | null; restoreEpoch: number | null;
+  isCurrent: () => boolean;
+}
+interface BrowseLocalStatusScan {
+  rowsById: Record<string, BrowseFolder>; direct: Record<string, BrowseFolderStatus>;
+  visibleIdsByRoot: Record<string, {visibleId: number; fallback: boolean}[]>;
+  syntheticRoots: BrowseFolder[]; syntheticIds: Record<string, boolean>;
+}

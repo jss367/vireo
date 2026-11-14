@@ -19,9 +19,9 @@ is involved.
 | `state.js` | Photo data, scope, sidebar and panel load generations, stack caches, colour labels, `browseLimits`, `PREDICTION_COLLAPSE_AT`, and cache helpers |
 | `shared.js` | The boundary with shared code: every navbar, lightbox, filter-bar, sync-panel and classic-helper global the page uses, and `registerPageHooks()` |
 | `markup.js` | The `data-browse-on` handler table and `bindBrowseMarkup()` (see Markup below) |
-| `boot.js` | The entry module: composing the filter bar's row, binding the markup and the compare overlay, registering the page hooks, bootstrap, the folder-health subscription, infinite scroll, and the photo deep link |
+| `boot.js` | The entry module: composing the filter bar's row, binding the markup and the compare overlay, registering the page hooks, bootstrap, the folder-health subscription, infinite scroll, and the photo deep link (one `BrowsePhotoDeepLink` record per attempt; `deepLinkStop` says whether a folder-health refresh or a newer selection has taken the page over) |
 | `config.js` | The `/api/config` read (`_cfgPromise`), shortcut defaults, `applyBrowseConfig` |
-| `loading.js` | The loaded window, paging, `loadPhotos`, `resetAndLoad`, filter changes |
+| `loading.js` | The loaded window, paging, `loadPhotos`, `resetAndLoad`, filter changes. A reload and an in-place refresh each carry their working state in one record (`BrowseReload`, `BrowseWindowRefresh`) passed to the steps that run them |
 | `window-requests.js` | Private grid-request ownership; claims invalidate previous callbacks, observations follow the current dataset |
 | `grid.js` | Grid rendering, appending and prepending pages, card refreshes |
 | `cards.js` | Card markup: fields, badges, colour labels, detection boxes |
