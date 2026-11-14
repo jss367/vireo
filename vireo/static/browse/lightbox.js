@@ -338,41 +338,71 @@ document.addEventListener('lightbox:photodeleted', function(event) {
   // `photos` and nothing reprojects the stack. Selected frames have to go
   // with it, or the batch bar keeps counting photos no shortcut can show and
   // the next rating lands on them unseen.
-  if (represented) {
-    // Recorded while the deleted photo was on screen, and a stack can be
-    // reprojected in between: a rating or flag in the lightbox promotes
-    // another member, so deleting the demoted photo leaves the stack standing
-    // under its new cover. Drop only the ids that no card represents *now* —
-    // a bounded check, over this one stack's ids rather than the whole
-    // selection.
-    var representedNow = new Set();
-    state.photos.forEach(function(photo) {
-      representedNow.add(photo.id);
-      var stack = photo.browse_stack;
-      ((stack && stack.photo_ids) || []).forEach(function(id) {
-        representedNow.add(id);
-      });
-      (state.browseStackMembers[String(photo.id)] || []).forEach(function(member) {
-        representedNow.add(member.id);
-      });
-    });
-    var orphaned = represented.filter(function(id) {
-      return !representedNow.has(id);
-    });
-    var dropped = false;
-    orphaned.forEach(function(id) {
-      if (selection.removeFromBatch(id)) dropped = true;
-    });
-    if (selection.focusedPhotoId != null && orphaned.indexOf(selection.focusedPhotoId) !== -1) {
-      selection.focus(null);
-      selection.reanchor(-1);
-      dropped = true;
-    }
-    if (dropped) {
+  if (represented) dropOrphanedStackSelection(represented);
+  var badgesToRefresh = pruneDeletedPhotoFromStacks(deletedId);
+  if (badgesToRefresh.length && typeof refreshBrowseStackBadge === 'function') {
+    badgesToRefresh.forEach(refreshBrowseStackBadge);
+  }
+  // Pruning the cover metadata is only half of what the tray-member delete
+  // needs. ``lightboxDelete`` has already dropped the deleted id from
+  // ``selectedPhotos`` / ``selectedPhotoId`` and rendered the grid, but the
+  // batch bar's "N selected" text was written from the pre-delete count and
+  // never rewrites itself, and a cover whose remaining live members are all
+  // selected stays painted ``stack-partial`` from that same pre-delete
+  // state — because the deleted id was in the members list back then, the
+  // whole-stack check that would repaint it as ``selected`` said no. Refresh
+  // both from the surviving selection so the count and the paint match what
+  // the user can see.
+  if (badgesToRefresh.length) {
+    if (typeof refreshCardSelectionVisuals === 'function') {
       refreshCardSelectionVisuals();
+    }
+    if (typeof updateBatchBar === 'function') {
       updateBatchBar();
     }
   }
+  if (!spent) return;
+  if (spent.epoch !== state.anchorRestoreEpoch) return;
+  if (spent.ids.indexOf(deletedId) === -1) return;
+  browseLightboxStackGesture = spent;
+});
+
+function dropOrphanedStackSelection(/** @type {number[]} */ represented) {
+  // Recorded while the deleted photo was on screen, and a stack can be
+  // reprojected in between: a rating or flag in the lightbox promotes
+  // another member, so deleting the demoted photo leaves the stack standing
+  // under its new cover. Drop only the ids that no card represents *now* —
+  // a bounded check, over this one stack's ids rather than the whole
+  // selection.
+  var representedNow = new Set();
+  state.photos.forEach(function(photo) {
+    representedNow.add(photo.id);
+    var stack = photo.browse_stack;
+    ((stack && stack.photo_ids) || []).forEach(function(id) {
+      representedNow.add(id);
+    });
+    (state.browseStackMembers[String(photo.id)] || []).forEach(function(member) {
+      representedNow.add(member.id);
+    });
+  });
+  var orphaned = represented.filter(function(id) {
+    return !representedNow.has(id);
+  });
+  var dropped = false;
+  orphaned.forEach(function(id) {
+    if (selection.removeFromBatch(id)) dropped = true;
+  });
+  if (selection.focusedPhotoId != null && orphaned.indexOf(selection.focusedPhotoId) !== -1) {
+    selection.focus(null);
+    selection.reanchor(-1);
+    dropped = true;
+  }
+  if (dropped) {
+    refreshCardSelectionVisuals();
+    updateBatchBar();
+  }
+}
+
   // A hidden tray member deleted from its own lightbox is not in ``photos``,
   // so the splice in ``lightboxDelete`` never runs and nothing above updates
   // the cover: its ``browse_stack.photo_ids`` and ``count`` still carry the
@@ -386,6 +416,7 @@ document.addEventListener('lightbox:photodeleted', function(event) {
   // Prune the deleted id from each cover's stack metadata (and cached
   // members) so what the card stands for matches what still exists, then
   // repaint the affected badge so its count matches the pruned list.
+function pruneDeletedPhotoFromStacks(/** @type {number} */ deletedId) {
   /** @type {number[]} */ var badgesToRefresh = [];
   state.photos.forEach(function(photo) {
     var stack = photo.browse_stack;
@@ -430,32 +461,8 @@ document.addEventListener('lightbox:photodeleted', function(event) {
     }
     badgesToRefresh.push(photo.id);
   });
-  if (badgesToRefresh.length && typeof refreshBrowseStackBadge === 'function') {
-    badgesToRefresh.forEach(refreshBrowseStackBadge);
-  }
-  // Pruning the cover metadata is only half of what the tray-member delete
-  // needs. ``lightboxDelete`` has already dropped the deleted id from
-  // ``selectedPhotos`` / ``selectedPhotoId`` and rendered the grid, but the
-  // batch bar's "N selected" text was written from the pre-delete count and
-  // never rewrites itself, and a cover whose remaining live members are all
-  // selected stays painted ``stack-partial`` from that same pre-delete
-  // state — because the deleted id was in the members list back then, the
-  // whole-stack check that would repaint it as ``selected`` said no. Refresh
-  // both from the surviving selection so the count and the paint match what
-  // the user can see.
-  if (badgesToRefresh.length) {
-    if (typeof refreshCardSelectionVisuals === 'function') {
-      refreshCardSelectionVisuals();
-    }
-    if (typeof updateBatchBar === 'function') {
-      updateBatchBar();
-    }
-  }
-  if (!spent) return;
-  if (spent.epoch !== state.anchorRestoreEpoch) return;
-  if (spent.ids.indexOf(deletedId) === -1) return;
-  browseLightboxStackGesture = spent;
-});
+  return badgesToRefresh;
+}
 
 // Reconcile browse selection state for a null-photo close. The only caller
 // of ``closeLightbox(null)`` is ``lightboxDelete()`` after its splice emptied

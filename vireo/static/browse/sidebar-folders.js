@@ -162,150 +162,163 @@ function folderLocalStatuses(/** @type {BrowseFolder[]} */ folders, /** @type {R
     return wantsSynthetic ? {statuses: {}, synthetic: []} : {};
   }
 
-  var rowsById = /** @type {Record<string, BrowseFolder>} */ ({});
-  folders.forEach(function(/** @type {BrowseFolder} */ folder) { rowsById[Number(folder.id)] = folder; });
-  var direct = /** @type {Record<string, BrowseFolderStatus>} */ ({});
-  // Job payloads report their target as the local root_folder_id, but a
-  // visible workspace folder may be covered by a shared ancestor whose
-  // root_folder_id isn't itself in this workspace's tree. Map each covering
-  // root back to the visible requested_folder_id(s) so sync/discard badges
-  // update instead of freezing on LOCAL. Each entry carries ``fallback``
-  // so job status can inherit whether the visible id is the covering root
-  // itself (direct — spread through the subtree) or a fallback anchor
-  // standing in for a hidden session (do not spread).
-  var visibleIdsByRoot = /** @type {Record<string, {visibleId: number, fallback: boolean}[]>} */ ({});
-  var syntheticRoots = /** @type {BrowseFolder[]} */ ([]);
-  var syntheticIds = /** @type {Record<string, boolean>} */ ({});
-
-  function recordMapping(/** @type {number} */ rootId, /** @type {number} */ visibleId, /** @type {boolean} */ isFallback) {
-    if (!rootId) return;
-    if (!visibleIdsByRoot[rootId]) visibleIdsByRoot[rootId] = [];
-    for (var i = 0; i < visibleIdsByRoot[rootId].length; i++) {
-      if (visibleIdsByRoot[rootId][i]?.visibleId === visibleId) {
-        // A direct match on this visible id trumps a fallback mapping: a
-        // job on the covering root then propagates to the folder's own
-        // subtree instead of stopping at the fallback anchor.
-        if (!isFallback) Object.assign(visibleIdsByRoot[rootId][i] || {}, {fallback: false});
-        return;
-      }
-    }
-    visibleIdsByRoot[rootId].push({visibleId: visibleId, fallback: isFallback});
-  }
-
+  /** @type {BrowseLocalStatusScan} */
+  var scan = {rowsById: {}, direct: {}, visibleIdsByRoot: {}, syntheticRoots: [], syntheticIds: {}};
+  folders.forEach(function(/** @type {BrowseFolder} */ folder) { scan.rowsById[Number(folder.id)] = folder; });
   (localData.folders || []).forEach(function(item) {
-    if (!item) return;
-    var requestedId = Number(item.requested_folder_id || item.root_folder_id);
-    var visibleId = requestedId;
-    var isFallback = false;
-    if (!rowsById[visibleId]) {
-      // The requested folder isn't in the tree — commonly because
-      // check_folder_health flipped its rebased folders.path to 'missing'
-      // when the managed local directory was unmounted or deleted, so
-      // /api/folders now excludes it. Dropping the item here loses the
-      // LOCAL ISSUE / SYNCING badge exactly when the local copy needs
-      // attention. Fall back to the nearest visible ancestor so the
-      // status surfaces on the enclosing folder instead.
-      var ancestorId = Number(item.visible_ancestor_folder_id || 0);
-      if (ancestorId && rowsById[ancestorId]) {
-        visibleId = ancestorId;
-        isFallback = true;
-      } else if (item.state === 'remote') {
-        // A purely remote workspace root that /api/folders doesn't
-        // return (unmounted, never staged) has nothing local to badge.
-        // Synthesizing a phantom here would restore every such root as
-        // a clickable zero-count folder with no local-status badge,
-        // effectively resurrecting missing remote folders in Browse.
-        // Skip it entirely.
-        return;
-      } else {
-        // A top-level workspace root that has gone missing has no
-        // visible ancestor to attach the badge to. Without a synthesized
-        // entry the recovery state disappears entirely — the user loses
-        // the only signal that their local copy needs attention. Emit a
-        // phantom top-level row so renderFolderTree can inject a
-        // ``.tree-item`` that carries the LOCAL ISSUE / SYNCING badge.
-        if (!syntheticIds[requestedId]) {
-          syntheticIds[requestedId] = true;
-          var syntheticName = String(item.folder_name || '').trim() ||
-            'Missing local folder';
-          // Seed the synthesized row with the root's real workspace photo
-          // count from workspace_status(). Hard-coding 0 would make the only
-          // visible entry for a top-level missing local root read as an
-          // empty folder even when the recovery session covers hundreds of
-          // photos, which mis-cues users toward discarding it.
-          var syntheticCount = Number(item.workspace_photo_count || 0);
-          var syntheticRow = {path: '',
-            id: requestedId,
-            parent_id: null,
-            name: syntheticName,
-            photo_count: syntheticCount,
-            status: 'missing',
-            __synthetic_missing_local: true
-          };
-          syntheticRoots.push(syntheticRow);
-          rowsById[requestedId] = syntheticRow;
-        }
-        visibleId = requestedId;
-      }
-    }
-    var rootId = Number(item.root_folder_id || requestedId);
-    recordMapping(rootId, visibleId, isFallback);
-    if (item.state === 'remote') return;
-    var changes = item.changes || {};
-    var changeCount = Number(changes.created || 0) +
-      Number(changes.modified || 0) + Number(changes.deleted || 0);
-    if (item.state === 'recovery' || item.changes_error) {
-      direct[visibleId] = {
-        kind: 'recovery',
-        label: 'LOCAL ISSUE',
-        description: item.recovery_kind === 'sync'
-          ? 'Local sync needs attention'
-          : 'Local copy needs attention',
-        fallback: isFallback
-      };
+    if (item) recordLocalFolder(scan, item);
+  });
+  (localData.jobs || []).forEach(function(job) { recordLocalJob(scan, job); });
+  var result = spreadFolderStatuses(scan, byParent);
+  if (wantsSynthetic) {
+    return {statuses: result, synthetic: scan.syntheticRoots};
+  }
+  return result;
+}
+
+// Job payloads report their target as the local root_folder_id, but a
+// visible workspace folder may be covered by a shared ancestor whose
+// root_folder_id isn't itself in this workspace's tree. Map each covering
+// root back to the visible requested_folder_id(s) so sync/discard badges
+// update instead of freezing on LOCAL. Each entry carries ``fallback``
+// so job status can inherit whether the visible id is the covering root
+// itself (direct — spread through the subtree) or a fallback anchor
+// standing in for a hidden session (do not spread).
+function recordFolderMapping(
+  /** @type {Record<string, {visibleId: number, fallback: boolean}[]>} */ visibleIdsByRoot,
+  /** @type {number} */ rootId, /** @type {number} */ visibleId, /** @type {boolean} */ isFallback
+) {
+  if (!rootId) return;
+  if (!visibleIdsByRoot[rootId]) visibleIdsByRoot[rootId] = [];
+  for (var i = 0; i < visibleIdsByRoot[rootId].length; i++) {
+    if (visibleIdsByRoot[rootId][i]?.visibleId === visibleId) {
+      // A direct match on this visible id trumps a fallback mapping: a
+      // job on the covering root then propagates to the folder's own
+      // subtree instead of stopping at the fallback anchor.
+      if (!isFallback) Object.assign(visibleIdsByRoot[rootId][i] || {}, {fallback: false});
       return;
     }
-    direct[visibleId] = {
-      kind: item.state === 'staging' ? 'updating' : 'local',
-      label: item.state === 'staging' ? 'COPYING' : 'LOCAL',
-      description: changeCount
-        ? 'Working locally · ' + changeCount + ' unsynced change' + (changeCount === 1 ? '' : 's')
-        : 'Working locally',
+  }
+  visibleIdsByRoot[rootId].push({visibleId: visibleId, fallback: isFallback});
+}
+
+function recordLocalFolder(/** @type {BrowseLocalStatusScan} */ scan, /** @type {BrowseLocalFolder} */ item) {
+  var requestedId = Number(item.requested_folder_id || item.root_folder_id);
+  var visibleId = requestedId;
+  var isFallback = false;
+  if (!scan.rowsById[visibleId]) {
+    // The requested folder isn't in the tree — commonly because
+    // check_folder_health flipped its rebased folders.path to 'missing'
+    // when the managed local directory was unmounted or deleted, so
+    // /api/folders now excludes it. Dropping the item here loses the
+    // LOCAL ISSUE / SYNCING badge exactly when the local copy needs
+    // attention. Fall back to the nearest visible ancestor so the
+    // status surfaces on the enclosing folder instead.
+    var ancestorId = Number(item.visible_ancestor_folder_id || 0);
+    if (ancestorId && scan.rowsById[ancestorId]) {
+      visibleId = ancestorId;
+      isFallback = true;
+    } else if (item.state === 'remote') {
+      // A purely remote workspace root that /api/folders doesn't
+      // return (unmounted, never staged) has nothing local to badge.
+      // Synthesizing a phantom here would restore every such root as
+      // a clickable zero-count folder with no local-status badge,
+      // effectively resurrecting missing remote folders in Browse.
+      // Skip it entirely.
+      return;
+    } else {
+      // A top-level workspace root that has gone missing has no
+      // visible ancestor to attach the badge to. Without a synthesized
+      // entry the recovery state disappears entirely — the user loses
+      // the only signal that their local copy needs attention. Emit a
+      // phantom top-level row so renderFolderTree can inject a
+      // ``.tree-item`` that carries the LOCAL ISSUE / SYNCING badge.
+      if (!scan.syntheticIds[requestedId]) {
+        scan.syntheticIds[requestedId] = true;
+        var syntheticName = String(item.folder_name || '').trim() ||
+          'Missing local folder';
+        // Seed the synthesized row with the root's real workspace photo
+        // count from workspace_status(). Hard-coding 0 would make the only
+        // visible entry for a top-level missing local root read as an
+        // empty folder even when the recovery session covers hundreds of
+        // photos, which mis-cues users toward discarding it.
+        var syntheticCount = Number(item.workspace_photo_count || 0);
+        var syntheticRow = {path: '',
+          id: requestedId,
+          parent_id: null,
+          name: syntheticName,
+          photo_count: syntheticCount,
+          status: 'missing',
+          __synthetic_missing_local: true
+        };
+        scan.syntheticRoots.push(syntheticRow);
+        scan.rowsById[requestedId] = syntheticRow;
+      }
+      visibleId = requestedId;
+    }
+  }
+  var rootId = Number(item.root_folder_id || requestedId);
+  recordFolderMapping(scan.visibleIdsByRoot, rootId, visibleId, isFallback);
+  if (item.state === 'remote') return;
+  scan.direct[visibleId] = localFolderStatus(item, isFallback);
+}
+
+function localFolderStatus(/** @type {BrowseLocalFolder} */ item, /** @type {boolean} */ isFallback) {
+  var changes = item.changes || {};
+  var changeCount = Number(changes.created || 0) +
+    Number(changes.modified || 0) + Number(changes.deleted || 0);
+  if (item.state === 'recovery' || item.changes_error) {
+    return {
+      kind: 'recovery',
+      label: 'LOCAL ISSUE',
+      description: item.recovery_kind === 'sync'
+        ? 'Local sync needs attention'
+        : 'Local copy needs attention',
       fallback: isFallback
     };
-  });
+  }
+  return {
+    kind: item.state === 'staging' ? 'updating' : 'local',
+    label: item.state === 'staging' ? 'COPYING' : 'LOCAL',
+    description: changeCount
+      ? 'Working locally · ' + changeCount + ' unsynced change' + (changeCount === 1 ? '' : 's')
+      : 'Working locally',
+    fallback: isFallback
+  };
+}
 
-  (localData.jobs || []).forEach(function(job) {
-    const jobStatus = /** @type {Record<string, [string, string]>} */ ({
-      'work-locally-folder-stage': ['COPYING', 'Copying locally'],
-      'work-locally-folder-sync': ['SYNCING', 'Syncing local changes to source storage'],
-      'work-locally-folder-discard': ['REMOVING', 'Removing the local copy']
-    })[job.type];
-    if (!jobStatus) return;
-    (job.folder_ids || []).forEach(function(rawId) {
-      var id = Number(rawId);
-      var targets = /** @type {{visibleId: number, fallback: boolean}[]} */ ([]);
-      if (rowsById[id]) targets.push({visibleId: id, fallback: false});
-      (visibleIdsByRoot[id] || []).forEach(function(mapping) {
-        for (var ti = 0; ti < targets.length; ti++) {
-          if (targets[ti]?.visibleId === mapping.visibleId) {
-            if (!mapping.fallback) Object.assign(targets[ti] || {}, {fallback: false});
-            return;
-          }
+function recordLocalJob(/** @type {BrowseLocalStatusScan} */ scan, /** @type {BrowseFolderJob} */ job) {
+  const jobStatus = /** @type {Record<string, [string, string]>} */ ({
+    'work-locally-folder-stage': ['COPYING', 'Copying locally'],
+    'work-locally-folder-sync': ['SYNCING', 'Syncing local changes to source storage'],
+    'work-locally-folder-discard': ['REMOVING', 'Removing the local copy']
+  })[job.type];
+  if (!jobStatus) return;
+  (job.folder_ids || []).forEach(function(rawId) {
+    var id = Number(rawId);
+    var targets = /** @type {{visibleId: number, fallback: boolean}[]} */ ([]);
+    if (scan.rowsById[id]) targets.push({visibleId: id, fallback: false});
+    (scan.visibleIdsByRoot[id] || []).forEach(function(mapping) {
+      for (var ti = 0; ti < targets.length; ti++) {
+        if (targets[ti]?.visibleId === mapping.visibleId) {
+          if (!mapping.fallback) Object.assign(targets[ti] || {}, {fallback: false});
+          return;
         }
-        targets.push({visibleId: mapping.visibleId, fallback: mapping.fallback});
-      });
-      targets.forEach(function(target) {
-        direct[target.visibleId] = {
-          kind: 'updating',
-          label: jobStatus[0],
-          description: jobStatus[1],
-          fallback: target.fallback
-        };
-      });
+      }
+      targets.push({visibleId: mapping.visibleId, fallback: mapping.fallback});
+    });
+    targets.forEach(function(target) {
+      scan.direct[target.visibleId] = {
+        kind: 'updating',
+        label: jobStatus[0],
+        description: jobStatus[1],
+        fallback: target.fallback
+      };
     });
   });
+}
 
+function spreadFolderStatuses(/** @type {BrowseLocalStatusScan} */ scan, /** @type {Record<string, BrowseFolder[]>} */ byParent) {
   var result = /** @type {Record<string, BrowseFolderStatus>} */ ({});
   function markDescendants(/** @type {number} */ folderId, /** @type {BrowseFolderStatus | undefined} */ status) {
     if (!status) return; result[folderId] = status;
@@ -318,30 +331,27 @@ function folderLocalStatuses(/** @type {BrowseFolder[]} */ folders, /** @type {R
       markDescendants(Number(child.id), status);
     });
   }
-  Object.keys(direct).forEach(function(rawId) {
-    markDescendants(Number(rawId), direct[rawId]);
+  Object.keys(scan.direct).forEach(function(rawId) {
+    markDescendants(Number(rawId), scan.direct[rawId]);
   });
 
-  Object.keys(direct).forEach(function(rawId) {
-    var current = rowsById[Number(rawId)];
+  Object.keys(scan.direct).forEach(function(rawId) {
+    var current = scan.rowsById[Number(rawId)];
     var parentId = current ? current.parent_id : null;
     var seen = /** @type {Record<string, boolean>} */ ({});
     while (parentId != null && !seen[parentId]) {
       seen[parentId] = true;
-      if (!direct[parentId]) {
+      if (!scan.direct[parentId]) {
         result[parentId] = {
           kind: 'mixed',
           label: 'SOME LOCAL',
           description: 'Contains folders that are working locally'
         };
       }
-      current = rowsById[Number(parentId)];
+      current = scan.rowsById[Number(parentId)];
       parentId = current ? current.parent_id : null;
     }
   });
-  if (wantsSynthetic) {
-    return {statuses: result, synthetic: syntheticRoots};
-  }
   return result;
 }
 

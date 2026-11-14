@@ -165,7 +165,20 @@ function renderDetail(/** @type {BrowsePhoto} */ photo) {
     maybeShowExifSuggestion(photo);
   }
 
-  // XMP sidecar
+  renderDetailXmp(photo);
+  /** @type {HTMLElement} */ (document.getElementById('detailSummary')).innerHTML = detailSummaryHtml(photo);
+
+  // Path
+  /** @type {HTMLElement} */ (document.getElementById('detailPath')).textContent = photo.filename;
+
+  // Clear search and render metadata groups
+  var searchInput = /** @type {HTMLInputElement} */ (document.getElementById('metadataSearch'));
+  if (searchInput) searchInput.value = '';
+  renderMetadataGroups(photo.metadata);
+}
+
+// XMP sidecar
+function renderDetailXmp(/** @type {BrowsePhoto} */ photo) {
   var xmpEl = /** @type {HTMLElement} */ (document.getElementById('detailXmp'));
   if (photo.xmp_exists === false) {
     xmpEl.innerHTML = '<span style="color:var(--text-ghost);">No .xmp sidecar file</span>';
@@ -193,8 +206,10 @@ function renderDetail(/** @type {BrowsePhoto} */ photo) {
   } else if (photo.xmp_exists) {
     xmpEl.innerHTML = '<span style="color:var(--text-ghost);">XMP file exists but has no keywords</span>';
   }
+}
 
-  // Quick summary
+// Quick summary
+function detailSummaryHtml(/** @type {BrowsePhoto} */ photo) {
   var summary = '';
   var meta = photo.metadata;
   if (meta) {
@@ -233,15 +248,7 @@ function renderDetail(/** @type {BrowsePhoto} */ photo) {
     var sz = photo.file_size;
     summary += 'File: ' + (sz >= 1048576 ? (sz / 1048576).toFixed(1) + ' MB' : Math.round(sz / 1024) + ' KB') + '<br>';
   }
-  /** @type {HTMLElement} */ (document.getElementById('detailSummary')).innerHTML = summary;
-
-  // Path
-  /** @type {HTMLElement} */ (document.getElementById('detailPath')).textContent = photo.filename;
-
-  // Clear search and render metadata groups
-  var searchInput = /** @type {HTMLInputElement} */ (document.getElementById('metadataSearch'));
-  if (searchInput) searchInput.value = '';
-  renderMetadataGroups(photo.metadata);
+  return summary;
 }
 
 // Also renders the note under the buttons saying who set the flag and why,

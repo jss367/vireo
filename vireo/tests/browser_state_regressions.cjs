@@ -541,7 +541,8 @@ async function testSavedCollectionPreviewScope() {
 }
 
 async function testDeepLinkFailureReleasesLoading() {
-  const source = fn('vireo/static/browse/boot.js', '_runPhotoDeepLink');
+  const source = ['_runPhotoDeepLink', 'deepLinkStop', 'loadDeepLinkedPhoto']
+    .map(name => fn('vireo/static/browse/boot.js', name)).join('\n');
   for (const failure of ['config', 'photo', 'superseded']) {
     const context = vm.createContext({
       document: {getElementById: () => ({checked: true})},

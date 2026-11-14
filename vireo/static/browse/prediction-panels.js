@@ -327,17 +327,34 @@ export function renderDetailPredictions(/** @type {DetailPredictionsResponse} */
     return;
   }
 
-  // One prediction row per detection means a photo with a dozen boxes of the
-  // same bird lists that bird a dozen times. Group by species+status: the
-  // question the panel answers is "what species is in this photo", and the
-  // detection count is the interesting detail, not a reason to repeat.
-  //
-  // The species used for grouping and display is the one accept_prediction()
-  // will actually apply — the backend exposes it as `consensus_species`. For
-  // a non-grouped prediction that's just `p.species`; for a burst whose
-  // frames disagree it's the individual-vote consensus. Grouping by the raw
-  // per-frame `p.species` here would let a minority Sparrow frame surface
-  // its own row with an Accept button that tags Robin.
+  var groups = groupDetailPredictions(visible, unlistedRuns);
+  var shown = state.detailPredictionsExpanded
+    ? groups
+    : groups.slice(0, PREDICTION_COLLAPSE_AT);
+
+  // The rows the markup will index into. Set before the loop so the index
+  // each button carries is the index the handler resolves.
+  state.detailPredictionGroups = shown;
+
+  var html = shown.map(function(g, idx) {
+    return detailPredictionRowHtml(g, idx, photoId);
+  }).join('');
+  list.innerHTML = matchBanner + html +
+    detailPredictionFooterHtml(groups, shown.length, hidden, threshold);
+}
+
+// One prediction row per detection means a photo with a dozen boxes of the
+// same bird lists that bird a dozen times. Group by species+status: the
+// question the panel answers is "what species is in this photo", and the
+// detection count is the interesting detail, not a reason to repeat.
+//
+// The species used for grouping and display is the one accept_prediction()
+// will actually apply — the backend exposes it as `consensus_species`. For
+// a non-grouped prediction that's just `p.species`; for a burst whose
+// frames disagree it's the individual-vote consensus. Grouping by the raw
+// per-frame `p.species` here would let a minority Sparrow frame surface
+// its own row with an Accept button that tags Robin.
+function groupDetailPredictions(/** @type {BrowsePrediction[]} */ visible, /** @type {Record<string, BrowseMatchRun>} */ unlistedRuns) {
   var groups = /** @type {BrowsePredictionGroup[]} */ ([]);
   var groupByKey = /** @type {Record<string, BrowsePredictionGroup>} */ ({});
   visible.forEach(function(p) {
@@ -412,68 +429,69 @@ export function renderDetailPredictions(/** @type {DetailPredictionsResponse} */
   // confidence is null or zero, so there is no second route to a null
   // bucket here.) The credit gate stays: it is what keeps the number honest
   // if that invariant is ever broken again.
+  return groups;
+}
 
-  var shown = state.detailPredictionsExpanded
-    ? groups
-    : groups.slice(0, PREDICTION_COLLAPSE_AT);
-  var collapsed = groups.length - shown.length;
+function detailPredictionRowHtml(/** @type {BrowsePredictionGroup} */ g, /** @type {number} */ idx, /** @type {number} */ photoId) {
+  // A group is only safely acceptable if none of its rows is ambiguous —
+  // otherwise one Accept would silently swallow a decision the user should
+  // be making in Review.
+  var ambiguous = !g.decided && g.ambiguous.length > 0;
+  var cls = 'prediction-row' + (g.decided ? ' decided' : '') + (ambiguous ? ' ambiguous' : '');
+  var meta = formatPredictionConfidence(g.confidence) +
+    ' · ' + Object.keys(g.models).join(', ');
+  if (g.count > 1) meta += ' · on ' + g.count + ' detections';
+  var actions;
+  if (g.decided) {
+    // Decided rows stay listed rather than disappearing, and say which
+    // decision they carry — "reviewed" is a real answer to "what happened
+    // to this prediction", not a row worth hiding.
+    actions = '<span class="prediction-status-tag" title="' +
+      escapeAttr(predictionStatusExplanation(g.status)) + '">' +
+      escapeHtml(g.status) + '</span>';
+  } else if (ambiguous) {
+    actions = '<button class="prediction-review-link"' +
+      ' data-prediction-action="review" data-photo-id="' + photoId + '"' +
+      ' title="This prediction needs Review\'s full decision UI">Open in Review</button>';
+  } else {
+    // Only the row index reaches the markup. The ids and the species the
+    // Accept will apply — passed to the server as `expected_species` so it
+    // can refuse a row whose grouping drifted after this render — are read
+    // back out of `detailPredictionGroups[idx]` by the click handler, so no
+    // species name is ever parsed as HTML.
+    actions =
+      '<button class="prediction-accept" data-prediction-action="accept"' +
+      ' data-prediction-group="' + idx + '"' +
+      ' title="Accept this species and add the keyword">Accept</button>' +
+      '<button class="prediction-reject" data-prediction-action="reject"' +
+      ' data-prediction-group="' + idx + '"' +
+      ' title="Reject this prediction">Reject</button>';
+  }
+  return '<div class="' + cls + '">' +
+    '<div style="min-width:0;">' +
+      '<div class="prediction-species">' + escapeHtml(g.species) + '</div>' +
+      '<div class="prediction-meta">' + escapeHtml(meta) + '</div>' +
+      (ambiguous ? '<div class="prediction-why">' +
+        escapeHtml(predictionAmbiguityReason(g.ambiguous[0] || g.ambiguous.find(Boolean))) + '</div>' : '') +
+      (g.unlisted.length ? '<div class="prediction-why">' +
+        escapeHtml(unlistedGroupReason(g)) + '</div>' : '') +
+    '</div>' +
+    '<div class="prediction-actions">' + actions + '</div>' +
+  '</div>';
+}
 
-  // The rows the markup will index into. Set before the loop so the index
-  // each button carries is the index the handler resolves.
-  state.detailPredictionGroups = shown;
-
+function detailPredictionFooterHtml(
+  /** @type {BrowsePredictionGroup[]} */ groups,
+  /** @type {number} */ shownCount,
+  /** @type {number} */ hidden,
+  /** @type {number} */ threshold
+) {
+  var collapsed = groups.length - shownCount;
   var html = '';
-  shown.forEach(function(g, idx) {
-    // A group is only safely acceptable if none of its rows is ambiguous —
-    // otherwise one Accept would silently swallow a decision the user should
-    // be making in Review.
-    var ambiguous = !g.decided && g.ambiguous.length > 0;
-    var cls = 'prediction-row' + (g.decided ? ' decided' : '') + (ambiguous ? ' ambiguous' : '');
-    var meta = formatPredictionConfidence(g.confidence) +
-      ' · ' + Object.keys(g.models).join(', ');
-    if (g.count > 1) meta += ' · on ' + g.count + ' detections';
-    var actions;
-    if (g.decided) {
-      // Decided rows stay listed rather than disappearing, and say which
-      // decision they carry — "reviewed" is a real answer to "what happened
-      // to this prediction", not a row worth hiding.
-      actions = '<span class="prediction-status-tag" title="' +
-        escapeAttr(predictionStatusExplanation(g.status)) + '">' +
-        escapeHtml(g.status) + '</span>';
-    } else if (ambiguous) {
-      actions = '<button class="prediction-review-link"' +
-        ' data-prediction-action="review" data-photo-id="' + photoId + '"' +
-        ' title="This prediction needs Review\'s full decision UI">Open in Review</button>';
-    } else {
-      // Only the row index reaches the markup. The ids and the species the
-      // Accept will apply — passed to the server as `expected_species` so it
-      // can refuse a row whose grouping drifted after this render — are read
-      // back out of `detailPredictionGroups[idx]` by the click handler, so no
-      // species name is ever parsed as HTML.
-      actions =
-        '<button class="prediction-accept" data-prediction-action="accept"' +
-        ' data-prediction-group="' + idx + '"' +
-        ' title="Accept this species and add the keyword">Accept</button>' +
-        '<button class="prediction-reject" data-prediction-action="reject"' +
-        ' data-prediction-group="' + idx + '"' +
-        ' title="Reject this prediction">Reject</button>';
-    }
-    html += '<div class="' + cls + '">' +
-      '<div style="min-width:0;">' +
-        '<div class="prediction-species">' + escapeHtml(g.species) + '</div>' +
-        '<div class="prediction-meta">' + escapeHtml(meta) + '</div>' +
-        (ambiguous ? '<div class="prediction-why">' +
-          escapeHtml(predictionAmbiguityReason(g.ambiguous[0] || g.ambiguous.find(Boolean))) + '</div>' : '') +
-        (g.unlisted.length ? '<div class="prediction-why">' +
-          escapeHtml(unlistedGroupReason(g)) + '</div>' : '') +
-      '</div>' +
-      '<div class="prediction-actions">' + actions + '</div>' +
-    '</div>';
-  });
   // Name what is collapsed and how weak it is, so the shortened list can never
   // be mistaken for the whole answer.
   if (collapsed > 0) {
-    var weakest = groups[shown.length]?.confidence;
+    var weakest = groups[shownCount]?.confidence;
     // "N weaker species (X% and below)" is only truthful when the first
     // collapsed bucket carries evidence of its own species. Legacy burst
     // groups whose only rows are minority-frame borrowers land here with
@@ -493,7 +511,7 @@ export function renderDetailPredictions(/** @type {DetailPredictionsResponse} */
       (hidden === 1 ? ' more prediction is' : ' more predictions are') +
       ' below your confidence threshold (' + formatPredictionConfidence(threshold) + ').</div>';
   }
-  list.innerHTML = matchBanner + html;
+  return html;
 }
 
 export function openPredictionInReview(/** @type {number} */ photoId) {
@@ -884,107 +902,9 @@ export function renderSelectionPredictions(/** @type {SelectionPredictionSuggest
   selectionPanel.predictions.replaceRows(shown);
   var collapsed = predictions.length - shown.length;
 
-  var html = '';
-  shown.forEach(function(p, /** @type {number} */ idx) {
-    var acceptable = p.acceptable_prediction_ids || [];
-    var ambiguousPhotos = p.ambiguous_photo_ids || [];
-    // Distinct photos, not distinct prediction rows: a photo can have several
-    // matching detections and each contributes a prediction id, so `acceptable`
-    // overcounts the photos that would actually be keyworded. Fall back to
-    // acceptable.length for older backend payloads.
-    var acceptablePhotoCount = (typeof p.acceptable_photo_count === 'number')
-      ? p.acceptable_photo_count
-      : acceptable.length;
-    // The private row store retains the species and distinct photo ids for
-    // actions, independently of the prediction ids eligible for acceptance.
-    var predictedPhotos = p.predicted_photo_ids || [];
-
-    var rowMeta = 'Predicted on ' + p.predicted_count + ' of ' + selectedCount;
-    if (p.keyworded_count) rowMeta += ', already keyworded on ' + p.keyworded_count;
-    var range = p.min_confidence === p.max_confidence
-      ? formatPredictionConfidence(p.max_confidence)
-      : formatPredictionConfidence(p.min_confidence) + '–' + formatPredictionConfidence(p.max_confidence);
-    rowMeta += ' · ' + range;
-
-    // Each Accept button names the photo count it will actually act on.
-    // "Accept on 38" that silently accepts 35 is exactly what
-    // CORE_PHILOSOPHY.md forbids, so the ambiguous remainder is called out
-    // beside it rather than folded in — and "Accept on all" carries the
-    // selection size for the same reason. It is the primary, top button, so
-    // its own number is what has to tell the user whether "all" is a
-    // rounding error on the prediction or a species claim about 68 photos
-    // that never predicted it.
-    var actions = '';
-    var allTitle = acceptablePhotoCount === selectedCount
-      ? 'Accept this species on all ' + selectedCount + ' selected photos'
-      : 'Add this species to all ' + selectedCount +
-        ' selected photos, including those without this prediction. ' +
-        'Existing keywords are kept; conflicts still need review.';
-    actions += '<button class="prediction-accept prediction-accept-all"' +
-      ' data-selection-action="prediction-accept-all" data-prediction-row="' + idx +
-      '" title="' + allTitle + '">Accept on all ' + selectedCount + '</button>';
-    // The narrower accept is only a second *action* when it would touch
-    // fewer photos. When every selected photo already predicts this species
-    // unambiguously, the two buttons submit the same work and land the same
-    // undo entry, so the second one is a decision the user has to stop and
-    // make for no difference in outcome.
-    if (acceptablePhotoCount && acceptablePhotoCount !== selectedCount) {
-      actions += '<button class="prediction-accept prediction-accept-subset"' +
-        ' data-selection-action="prediction-accept" data-prediction-row="' + idx +
-        '" title="Accept this species only on the ' + acceptablePhotoCount +
-        ' selected photos that predict it and are unambiguous">Accept on ' +
-        acceptablePhotoCount + '</button>';
-    }
-    // Look before you accept. "Blue-breasted Quail on 2 of 70" is either a
-    // real find or a bad detection, and no count in this row can tell the
-    // user which — only the pixels can. Opens exactly the photos the row's
-    // "Predicted on N" counts, in the lightbox, where 1:1 zoom lives. The
-    // selection is left alone on purpose: the decision this button feeds is
-    // usually "accept the OTHER species on all 70", and narrowing to 2 would
-    // repaint this panel for 2 photos and take that button away.
-    if (predictedPhotos.length) {
-      actions += '<button class="prediction-show" data-selection-action="prediction-show"' +
-        ' data-prediction-row="' + idx + '" title="Open the ' + predictedPhotos.length +
-        ' photo' + (predictedPhotos.length === 1 ? '' : 's') +
-        ' predicting this species in the lightbox. Your selection of ' + selectedCount +
-        ' stays as it is.">Show ' + predictedPhotos.length + ' photo' +
-        (predictedPhotos.length === 1 ? '' : 's') + '</button>';
-    }
-    var why = '';
-    if (ambiguousPhotos.length) {
-      why = ambiguousPhotos.length + (ambiguousPhotos.length === 1 ? ' photo needs' : ' photos need') +
-        ' review — alternatives or a conflict with existing keywords';
-      var firstAmbiguousPhoto = ambiguousPhotos[0];
-      if (!acceptablePhotoCount && firstAmbiguousPhoto != null) {
-        actions += '<button class="prediction-review-link" data-selection-action="prediction-review"' +
-          ' data-prediction-row="' + idx + '">Open in Review</button>';
-      }
-    } else if (!acceptablePhotoCount) {
-      why = 'Already keyworded on every photo that predicts it';
-    }
-    // "Accept on 38" now covers photos that already carry the keyword — for
-    // those, accepting only clears the still-pending prediction out of Review
-    // and writes no tag. One number must not silently mean two outcomes, so
-    // the split is named. `acceptable_keyworded_count` is the backend's own
-    // intersection, so the panel never recomputes it and drifts.
-    var keywordedInAccept = p.acceptable_keyworded_count || 0;
-    if (acceptablePhotoCount && keywordedInAccept) {
-      var alreadyNote = keywordedInAccept +
-        (keywordedInAccept === 1 ? ' already carries' : ' already carry') +
-        ' the keyword — accepting only clears ' +
-        (keywordedInAccept === 1 ? 'it' : 'them') + ' from Review';
-      why = why ? why + ' · ' + alreadyNote : alreadyNote;
-    }
-
-    html += '<div class="prediction-row' + (ambiguousPhotos.length ? ' ambiguous' : '') + '">' +
-      '<div style="min-width:0;">' +
-        '<div class="prediction-species">' + escapeHtml(p.species) + '</div>' +
-        '<div class="prediction-meta">' + escapeHtml(rowMeta) + '</div>' +
-        (why ? '<div class="prediction-why">' + escapeHtml(why) + '</div>' : '') +
-      '</div>' +
-      '<div class="prediction-actions">' + actions + '</div>' +
-    '</div>';
-  });
+  var html = shown.map(function(p, /** @type {number} */ idx) {
+    return selectionPredictionRowHtml(p, idx, selectedCount);
+  }).join('');
   if (collapsed > 0) {
     html += '<button class="prediction-toggle" data-selection-action="prediction-toggle">Show ' +
       collapsed + ' more predicted species</button>';
@@ -992,6 +912,121 @@ export function renderSelectionPredictions(/** @type {SelectionPredictionSuggest
     html += '<button class="prediction-toggle" data-selection-action="prediction-toggle">Show fewer</button>';
   }
   list.innerHTML = html + hiddenNote;
+}
+
+function selectionAcceptablePhotoCount(/** @type {SelectionPredictionSuggestion} */ p) {
+  var acceptable = p.acceptable_prediction_ids || [];
+  // Distinct photos, not distinct prediction rows: a photo can have several
+  // matching detections and each contributes a prediction id, so `acceptable`
+  // overcounts the photos that would actually be keyworded. Fall back to
+  // acceptable.length for older backend payloads.
+  return (typeof p.acceptable_photo_count === 'number')
+    ? p.acceptable_photo_count
+    : acceptable.length;
+}
+
+function selectionPredictionButtonsHtml(/** @type {SelectionPredictionSuggestion} */ p, /** @type {number} */ idx, /** @type {number} */ selectedCount) {
+  var acceptablePhotoCount = selectionAcceptablePhotoCount(p);
+  // The private row store retains the species and distinct photo ids for
+  // actions, independently of the prediction ids eligible for acceptance.
+  var predictedPhotos = p.predicted_photo_ids || [];
+
+  // Each Accept button names the photo count it will actually act on.
+  // "Accept on 38" that silently accepts 35 is exactly what
+  // CORE_PHILOSOPHY.md forbids, so the ambiguous remainder is called out
+  // beside it rather than folded in — and "Accept on all" carries the
+  // selection size for the same reason. It is the primary, top button, so
+  // its own number is what has to tell the user whether "all" is a
+  // rounding error on the prediction or a species claim about 68 photos
+  // that never predicted it.
+  var actions = '';
+  var allTitle = acceptablePhotoCount === selectedCount
+    ? 'Accept this species on all ' + selectedCount + ' selected photos'
+    : 'Add this species to all ' + selectedCount +
+      ' selected photos, including those without this prediction. ' +
+      'Existing keywords are kept; conflicts still need review.';
+  actions += '<button class="prediction-accept prediction-accept-all"' +
+    ' data-selection-action="prediction-accept-all" data-prediction-row="' + idx +
+    '" title="' + allTitle + '">Accept on all ' + selectedCount + '</button>';
+  // The narrower accept is only a second *action* when it would touch
+  // fewer photos. When every selected photo already predicts this species
+  // unambiguously, the two buttons submit the same work and land the same
+  // undo entry, so the second one is a decision the user has to stop and
+  // make for no difference in outcome.
+  if (acceptablePhotoCount && acceptablePhotoCount !== selectedCount) {
+    actions += '<button class="prediction-accept prediction-accept-subset"' +
+      ' data-selection-action="prediction-accept" data-prediction-row="' + idx +
+      '" title="Accept this species only on the ' + acceptablePhotoCount +
+      ' selected photos that predict it and are unambiguous">Accept on ' +
+      acceptablePhotoCount + '</button>';
+  }
+  // Look before you accept. "Blue-breasted Quail on 2 of 70" is either a
+  // real find or a bad detection, and no count in this row can tell the
+  // user which — only the pixels can. Opens exactly the photos the row's
+  // "Predicted on N" counts, in the lightbox, where 1:1 zoom lives. The
+  // selection is left alone on purpose: the decision this button feeds is
+  // usually "accept the OTHER species on all 70", and narrowing to 2 would
+  // repaint this panel for 2 photos and take that button away.
+  if (predictedPhotos.length) {
+    actions += '<button class="prediction-show" data-selection-action="prediction-show"' +
+      ' data-prediction-row="' + idx + '" title="Open the ' + predictedPhotos.length +
+      ' photo' + (predictedPhotos.length === 1 ? '' : 's') +
+      ' predicting this species in the lightbox. Your selection of ' + selectedCount +
+      ' stays as it is.">Show ' + predictedPhotos.length + ' photo' +
+      (predictedPhotos.length === 1 ? '' : 's') + '</button>';
+  }
+  var firstAmbiguousPhoto = (p.ambiguous_photo_ids || [])[0];
+  if (!acceptablePhotoCount && firstAmbiguousPhoto != null) {
+    actions += '<button class="prediction-review-link" data-selection-action="prediction-review"' +
+      ' data-prediction-row="' + idx + '">Open in Review</button>';
+  }
+  return actions;
+}
+
+function selectionPredictionWhy(/** @type {SelectionPredictionSuggestion} */ p) {
+  var acceptablePhotoCount = selectionAcceptablePhotoCount(p);
+  var ambiguousPhotos = p.ambiguous_photo_ids || [];
+  var why = '';
+  if (ambiguousPhotos.length) {
+    why = ambiguousPhotos.length + (ambiguousPhotos.length === 1 ? ' photo needs' : ' photos need') +
+      ' review — alternatives or a conflict with existing keywords';
+  } else if (!acceptablePhotoCount) {
+    why = 'Already keyworded on every photo that predicts it';
+  }
+  // "Accept on 38" now covers photos that already carry the keyword — for
+  // those, accepting only clears the still-pending prediction out of Review
+  // and writes no tag. One number must not silently mean two outcomes, so
+  // the split is named. `acceptable_keyworded_count` is the backend's own
+  // intersection, so the panel never recomputes it and drifts.
+  var keywordedInAccept = p.acceptable_keyworded_count || 0;
+  if (acceptablePhotoCount && keywordedInAccept) {
+    var alreadyNote = keywordedInAccept +
+      (keywordedInAccept === 1 ? ' already carries' : ' already carry') +
+      ' the keyword — accepting only clears ' +
+      (keywordedInAccept === 1 ? 'it' : 'them') + ' from Review';
+    why = why ? why + ' · ' + alreadyNote : alreadyNote;
+  }
+  return why;
+}
+
+function selectionPredictionRowHtml(/** @type {SelectionPredictionSuggestion} */ p, /** @type {number} */ idx, /** @type {number} */ selectedCount) {
+  var ambiguousPhotos = p.ambiguous_photo_ids || [];
+  var rowMeta = 'Predicted on ' + p.predicted_count + ' of ' + selectedCount;
+  if (p.keyworded_count) rowMeta += ', already keyworded on ' + p.keyworded_count;
+  var range = p.min_confidence === p.max_confidence
+    ? formatPredictionConfidence(p.max_confidence)
+    : formatPredictionConfidence(p.min_confidence) + '–' + formatPredictionConfidence(p.max_confidence);
+  rowMeta += ' · ' + range;
+  var actions = selectionPredictionButtonsHtml(p, idx, selectedCount);
+  var why = selectionPredictionWhy(p);
+  return '<div class="prediction-row' + (ambiguousPhotos.length ? ' ambiguous' : '') + '">' +
+    '<div style="min-width:0;">' +
+      '<div class="prediction-species">' + escapeHtml(p.species) + '</div>' +
+      '<div class="prediction-meta">' + escapeHtml(rowMeta) + '</div>' +
+      (why ? '<div class="prediction-why">' + escapeHtml(why) + '</div>' : '') +
+    '</div>' +
+    '<div class="prediction-actions">' + actions + '</div>' +
+  '</div>';
 }
 
 // "Show N photos" — open just the photos a prediction row counts, so the

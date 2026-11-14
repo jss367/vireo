@@ -104,7 +104,7 @@ function page(){
   functions(c,'sidebar-keywords.js',['filterByKeyword','renderKeywordTree']);
   functions(c,'loading.js',['buildBrowsePageRequest','browseFilterReloadOptions','onBrowseFilterChange','settleSidebarScopeForReload']);
   const boot=source('boot.js');
-  const bootstrap=declarations(boot).find(n=>n.type==='FunctionDeclaration'&&n.id.name==='bootstrapBrowse');
+  const bootstrap=declarations(boot).find(n=>n.type==='FunctionDeclaration'&&n.id.name==='startBrowseFilterBar');
   let onChange;
   walk(bootstrap,n=>{
     if(n.type==='Property'&&n.key.name==='onChange'&&!onChange)onChange=n.value;
@@ -274,7 +274,7 @@ test('photo deep-link executes with invented init data and repaints all trees',a
       };
     }
   });
-  functions(c,'boot.js',['_runPhotoDeepLink']);
+  functions(c,'boot.js',['_runPhotoDeepLink','deepLinkStop','loadDeepLinkedPhoto','enterDeepLinkFolder','loadDeepLinkFolderPage','paintDeepLinkPage','revealDeepLinkedPhoto','flashDeepLinkedCard','startDeepLinkFilterBar','browseFilterScope','missingSnapshotVersionNow','renderInitSidebars']);
   await c._runPhotoDeepLink(999);
   assert.equal(reads,2);
   assert.equal(c.activeFolderId,2);
@@ -314,7 +314,7 @@ test('deep-link-installed callback drops opened collection after chip edits and 
     };
     c.VireoFilter.setResultTotal=no;
     c.VireoFilter.hasFilters=()=>false;
-    functions(c,'boot.js',['_runPhotoDeepLink']);
+    functions(c,'boot.js',['_runPhotoDeepLink','deepLinkStop','loadDeepLinkedPhoto','enterDeepLinkFolder','loadDeepLinkFolderPage','paintDeepLinkPage','revealDeepLinkedPhoto','flashDeepLinkedCard','startDeepLinkFilterBar','browseFilterScope','missingSnapshotVersionNow','renderInitSidebars']);
     await c._runPhotoDeepLink(999);
     assert.equal(typeof installed,'function');
     c.testOnChange=installed;

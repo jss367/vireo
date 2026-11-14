@@ -43,202 +43,19 @@ async function refreshBrowseWindowInPlace() {
   var windowIsCurrent = claimBrowseWindow();
   selection.invalidate();
   var finishLoad = pagination.beginLoad();
-  var firstPage = pagination.earliestPage;
-  /** @type {BrowsePhoto[]} */ var nextPhotos = [];
-  /** @type {BrowsePage | undefined} */ var data;
-  var page = firstPage;
+  /** @type {BrowseWindowRefresh} */
+  var refresh = {
+    windowIsCurrent: windowIsCurrent, firstPage: pagination.earliestPage, page: pagination.earliestPage,
+    nextPhotos: [], data: undefined, nextMembers: {}, matchingIds: null,
+    scrollContainer: null, previousOverflowAnchor: undefined,
+  };
   var succeeded = false;
-  var scrollContainer = null;
-  /** @type {string | undefined} */ var previousOverflowAnchor;
-
-  function neededEndPage() {
-    var viewport = /** @type {HTMLElement} */ (document.getElementById('gridContainer')).getBoundingClientRect();
-    var anchor = captureBrowseViewportAnchor();
-    // No real card on screen means the user reached the placeholder tail;
-    // retain the loaded prefix beneath that position rather than truncating it.
-    var lastIndex = anchor ? Math.max(0, anchor.index) : Math.max(0, state.photos.length - 1);
-    var cards = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('#grid > .grid-card'));
-    for (var i = lastIndex; i < cards.length; i++) {
-      var card = cards[i]; if (!card) continue; if (card.getBoundingClientRect().top >= viewport.bottom) break;
-      lastIndex = i;
-    }
-    // Keep selected photos too, including selected members of a stack. The
-    // rest of the historical tail can return through ordinary lazy loading.
-    state.photos.forEach(function(photo, index) {
-      if (photo.id === selection.focusedPhotoId || selection.batchIds.has(photo.id)
-          || (photo.browse_stack && photo.browse_stack.photo_ids.some(function(id) {
-            return id === selection.focusedPhotoId || selection.batchIds.has(id);
-          }))) lastIndex = Math.max(lastIndex, index);
-    });
-    // One extra page provides room for rows to fill the gaps after removals.
-    return Math.max(firstPage, Math.min(pagination.currentPage - 1,
-      firstPage + Math.floor(lastIndex / pagination.perPage) + 1));
-  }
-
-  async function stageNeededPages() {
-    // Re-evaluate the live viewport after every await. A user can scroll
-    // farther while either pages or expanded stack members are being fetched.
-    while (windowIsCurrent() && page <= neededEndPage()
-        && (!data || (page - 1) * pagination.perPage < data.total)) {
-      var chunk = Math.max(1, Math.min(Math.floor(500 / pagination.perPage), neededEndPage() - page + 1));
-      while ((page - 1) % chunk !== 0) chunk--;
-      var request = buildBrowsePageRequest((page - 1) / chunk + 1, pagination.perPage * chunk);
-      data = await /** @type {Promise<BrowsePage>} */ (safeFetch(request.url, request.options));
-      if (!windowIsCurrent()) return false;
-      if (data.total === 0) {
-        firstPage = 1;
-        page = 1;
-        nextPhotos = [];
-        break;
-      }
-      // A batch removal may have eliminated the entire focused window.
-      // Fetch the new last page instead of leaving a nonempty library blank.
-      if (page === firstPage && page > 1 && !data.photos.length && data.total > 0) {
-        firstPage = Math.max(1, Math.ceil(data.total / pagination.perPage));
-        page = firstPage;
-        continue;
-      }
-      nextPhotos = nextPhotos.concat(data.photos);
-      page += chunk;
-      if ((page - 1) * pagination.perPage >= data.total || !data.photos.length) break;
-    }
-    return windowIsCurrent();
-  }
-
   try {
     // Keep expanded stacks open when their surviving members still form a
     // stack, even if its cover changed. Hydrate them before the atomic paint
     // so a loading tray cannot temporarily shrink the grid under the user.
-    function expandedMemberIds() {
-      /** @type {Set<number>} */ var ids = new Set();
-      state.photos.forEach(function(photo) {
-        if (state.expandedBrowseStacks.has(photo.id) && photo.browse_stack) {
-          photo.browse_stack.photo_ids.forEach(function(id) { ids.add(id); });
-        }
-      });
-      return ids;
-    }
-    /** @type {Record<string, BrowsePhoto[]>} */ var nextMembers = {};
-    /** @type {Set<number> | null} */ var matchingIds = null;
-    while (true) {
-      if (await stageNeededPages() !== true || !windowIsCurrent()) return null;
-      // Recheck after each request so opening another stack while waiting
-      // doesn't cause that newly opened tray to collapse on commit.
-      var expandedIds = expandedMemberIds();
-      const photo = nextPhotos.find(function(candidate) {
-        return candidate.browse_stack && !nextMembers[candidate.id]
-          && candidate.browse_stack.photo_ids.some(function(id) { return expandedIds.has(id); });
-      });
-      if (!photo) {
-        // Selected IDs outside this page may still match: Select all includes
-        // unloaded photos, and a confidence change can move a selected photo
-        // to another page. Check membership without loading the whole grid.
-        /** @type {Set<number>} */ var stagedIds = new Set();
-        nextPhotos.forEach(function(candidate) {
-          if (!browsePhotoIsAvailable(candidate)) return;
-          stagedIds.add(candidate.id);
-          if (candidate.browse_stack) candidate.browse_stack.photo_ids.forEach(function(id) {
-            stagedIds.add(id);
-          });
-        });
-        if (matchingIds === null && data && data.total > 0 && Array.from(selection.batchIds).some(function(id) {
-          return !stagedIds.has(id);
-        })) {
-          var idsRequest = buildBrowseIdsRequest();
-          /** @type {BrowseIdsResponse} */ var idsData = await safeFetch(idsRequest.url, idsRequest.options);
-          if (!windowIsCurrent()) return null;
-          matchingIds = new Set(idsData.photo_ids || idsData.ids || []);
-          // Scrolling, selection, or stack expansion may have changed while
-          // waiting. Stage any newly needed pages before the atomic paint.
-          continue;
-        }
-        break;
-      }
-      var memberIds = photo.browse_stack?.photo_ids || [];
-      /** @type {BrowsePhoto[]} */ var members = [];
-      for (var offset = 0; offset < memberIds.length; offset += 500) {
-        var memberData = await safeFetch('/api/photos/by-ids', {
-          method: 'POST', headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({photo_ids: memberIds.slice(offset, offset + 500)}),
-        });
-        if (!windowIsCurrent()) return null;
-        members = members.concat(memberData.photos || []);
-      }
-      nextMembers[photo.id] = members.map(function(member) {
-        return member.id === photo.id ? photo : member;
-      });
-    }
-
-    // Capture position and selection at commit time: scrolling or clicking
-    // during the request must not be undone by its eventual response.
-    var container = /** @type {HTMLElement} */ (document.getElementById('gridContainer'));
-    var scrollTop = container.scrollTop;
-    // Only the synchronous replacement owns scroll position. Other updates,
-    // such as a stack finishing loading above the viewport, still need the
-    // browser's normal scroll anchoring.
-    scrollContainer = container;
-    previousOverflowAnchor = container.style.overflowAnchor;
-    container.style.overflowAnchor = 'none';
-    var stillExpandedIds = expandedMemberIds();
-    state.expandedBrowseStacks.clear();
-    nextPhotos.forEach(function(photo) {
-      if (photo.similarity != null) photo._similarity = photo.similarity;
-      if (nextMembers[photo.id] && photo.browse_stack?.photo_ids.some(function(id) {
-        return stillExpandedIds.has(id);
-      })) state.expandedBrowseStacks.add(photo.id);
-    });
-    state.browseStackMembers = nextMembers;
-    state.browseStackErrors = {};
-    state.browseStackHydrationRequests = {};
-    state.browseStackExpansionRequests = {};
-    state.browseStackCoverRecheck.clear();
-    // The lightbox shares this array; retain its identity across the refresh.
-    state.photos.length = 0;
-    nextPhotos.forEach(function(photo) { state.photos.push(photo); });
-    if (!data) return null;
-    pagination.setTotals(data);
-    pagination.place(firstPage, page, state.photos.length);
-    syncBrowseAvailableLightboxPhotos();
-
-    var availableIds = matchingIds || new Set();
-    if (matchingIds === null) state.photos.forEach(function(photo) {
-      if (!browsePhotoIsAvailable(photo)) return;
-      availableIds.add(photo.id);
-      if (photo.browse_stack) photo.browse_stack.photo_ids.forEach(function(id) {
-        availableIds.add(id);
-      });
-    });
-    selection.batchIds.forEach(function(id) {
-      if (!availableIds.has(id)) selection.removeFromBatch(id);
-    });
-    if (selection.focusedPhotoId != null && !availableIds.has(selection.focusedPhotoId)) closeDetail();
-    const selectedCover = loadedBrowseStackCoverForPhoto(selection.focusedPhotoId);
-    selection.reanchor(state.photos.findIndex(function(photo) {
-      return photo.id === selection.focusedPhotoId || (selectedCover && photo.id === selectedCover.id);
-    }));
-    if (selection.focusedPhotoId == null && selection.batchIds.size === 0) hideDetailPanel();
-
-    renderGrid({ preserveThumbnails: true });
-    updateGridTail();
-    updatePreviousPhotosButton();
-    updateOfflineCollectionState(data);
-    if (VireoFilter && VireoFilter.setResultTotal) VireoFilter.setResultTotal(pagination.underlyingTotal);
-    if (VireoFilter && VireoFilter.setVisualInfo) VireoFilter.setVisualInfo(data.visual || null);
-    updateFilterSummary();
-    updateBatchBar();
-    _refreshBatchInspectorIfActive();
-    refreshBrowseLightboxCounter();
-    // Setting this synchronously prevents an intermediate frame at the top.
-    // The browser only clamps it when the remaining results are too short.
-    container.scrollTop = scrollTop;
-    updateScrollPosition();
-    var refreshIds = state.photos.map(function(photo) { return photo.id; });
-    loadInatStatus(refreshIds).then(function() {
-      if (windowIsCurrent()) refreshGridCards(refreshIds);
-    });
-    fetchColorLabels(refreshIds).then(function() {
-      if (windowIsCurrent()) refreshGridCards(refreshIds);
-    });
+    if (!await stageExpandedStacks(refresh)) return null;
+    if (!commitRefreshedWindow(refresh)) return null;
     succeeded = true;
     return true;
   } catch (e) {
@@ -246,7 +63,7 @@ async function refreshBrowseWindowInPlace() {
     // usable rather than replacing them with a partial response.
     return windowIsCurrent() ? false : null;
   } finally {
-    if (scrollContainer) scrollContainer.style.overflowAnchor = previousOverflowAnchor || '';
+    if (refresh.scrollContainer) refresh.scrollContainer.style.overflowAnchor = refresh.previousOverflowAnchor || '';
     if (windowIsCurrent()) {
       finishLoad();
       if (succeeded) {
@@ -255,6 +72,203 @@ async function refreshBrowseWindowInPlace() {
       }
     }
   }
+}
+
+// The last page the refreshed window must hold to cover what is on screen
+// and what is selected.
+function refreshNeededEndPage(/** @type {number} */ firstPage) {
+  var viewport = /** @type {HTMLElement} */ (document.getElementById('gridContainer')).getBoundingClientRect();
+  var anchor = captureBrowseViewportAnchor();
+  // No real card on screen means the user reached the placeholder tail;
+  // retain the loaded prefix beneath that position rather than truncating it.
+  var lastIndex = anchor ? Math.max(0, anchor.index) : Math.max(0, state.photos.length - 1);
+  var cards = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('#grid > .grid-card'));
+  for (var i = lastIndex; i < cards.length; i++) {
+    var card = cards[i]; if (!card) continue; if (card.getBoundingClientRect().top >= viewport.bottom) break;
+    lastIndex = i;
+  }
+  // Keep selected photos too, including selected members of a stack. The
+  // rest of the historical tail can return through ordinary lazy loading.
+  state.photos.forEach(function(photo, index) {
+    if (photo.id === selection.focusedPhotoId || selection.batchIds.has(photo.id)
+        || (photo.browse_stack && photo.browse_stack.photo_ids.some(function(id) {
+          return id === selection.focusedPhotoId || selection.batchIds.has(id);
+        }))) lastIndex = Math.max(lastIndex, index);
+  });
+  // One extra page provides room for rows to fill the gaps after removals.
+  return Math.max(firstPage, Math.min(pagination.currentPage - 1,
+    firstPage + Math.floor(lastIndex / pagination.perPage) + 1));
+}
+
+async function stageNeededPages(/** @type {BrowseWindowRefresh} */ refresh) {
+  // Re-evaluate the live viewport after every await. A user can scroll
+  // farther while either pages or expanded stack members are being fetched.
+  while (refresh.windowIsCurrent() && refresh.page <= refreshNeededEndPage(refresh.firstPage)
+      && (!refresh.data || (refresh.page - 1) * pagination.perPage < refresh.data.total)) {
+    var chunk = Math.max(1, Math.min(Math.floor(500 / pagination.perPage), refreshNeededEndPage(refresh.firstPage) - refresh.page + 1));
+    while ((refresh.page - 1) % chunk !== 0) chunk--;
+    var request = buildBrowsePageRequest((refresh.page - 1) / chunk + 1, pagination.perPage * chunk);
+    refresh.data = await /** @type {Promise<BrowsePage>} */ (safeFetch(request.url, request.options));
+    if (!refresh.windowIsCurrent()) return false;
+    if (refresh.data.total === 0) {
+      refresh.firstPage = 1;
+      refresh.page = 1;
+      refresh.nextPhotos = [];
+      break;
+    }
+    // A batch removal may have eliminated the entire focused window.
+    // Fetch the new last page instead of leaving a nonempty library blank.
+    if (refresh.page === refresh.firstPage && refresh.page > 1 && !refresh.data.photos.length && refresh.data.total > 0) {
+      refresh.firstPage = Math.max(1, Math.ceil(refresh.data.total / pagination.perPage));
+      refresh.page = refresh.firstPage;
+      continue;
+    }
+    refresh.nextPhotos = refresh.nextPhotos.concat(refresh.data.photos);
+    refresh.page += chunk;
+    if ((refresh.page - 1) * pagination.perPage >= refresh.data.total || !refresh.data.photos.length) break;
+  }
+  return refresh.windowIsCurrent();
+}
+
+function expandedStackMemberIds() {
+  /** @type {Set<number>} */ var ids = new Set();
+  state.photos.forEach(function(photo) {
+    if (state.expandedBrowseStacks.has(photo.id) && photo.browse_stack) {
+      photo.browse_stack.photo_ids.forEach(function(id) { ids.add(id); });
+    }
+  });
+  return ids;
+}
+
+// Stage the pages the refresh needs, the members of every stack that stays
+// open, and the selected ids that still match. False when a newer window
+// took over.
+async function stageExpandedStacks(/** @type {BrowseWindowRefresh} */ refresh) {
+  while (true) {
+    if (await stageNeededPages(refresh) !== true || !refresh.windowIsCurrent()) return false;
+    // Recheck after each request so opening another stack while waiting
+    // doesn't cause that newly opened tray to collapse on commit.
+    var expandedIds = expandedStackMemberIds();
+    const photo = refresh.nextPhotos.find(function(candidate) {
+      return candidate.browse_stack && !refresh.nextMembers[candidate.id]
+        && candidate.browse_stack.photo_ids.some(function(id) { return expandedIds.has(id); });
+    });
+    if (!photo) {
+      // Selected IDs outside this page may still match: Select all includes
+      // unloaded photos, and a confidence change can move a selected photo
+      // to another page. Check membership without loading the whole grid.
+      /** @type {Set<number>} */ var stagedIds = new Set();
+      refresh.nextPhotos.forEach(function(candidate) {
+        if (!browsePhotoIsAvailable(candidate)) return;
+        stagedIds.add(candidate.id);
+        if (candidate.browse_stack) candidate.browse_stack.photo_ids.forEach(function(id) {
+          stagedIds.add(id);
+        });
+      });
+      if (refresh.matchingIds === null && refresh.data && refresh.data.total > 0 && Array.from(selection.batchIds).some(function(id) {
+        return !stagedIds.has(id);
+      })) {
+        var idsRequest = buildBrowseIdsRequest();
+        /** @type {BrowseIdsResponse} */ var idsData = await safeFetch(idsRequest.url, idsRequest.options);
+        if (!refresh.windowIsCurrent()) return false;
+        refresh.matchingIds = new Set(idsData.photo_ids || idsData.ids || []);
+        // Scrolling, selection, or stack expansion may have changed while
+        // waiting. Stage any newly needed pages before the atomic paint.
+        continue;
+      }
+      break;
+    }
+    var memberIds = photo.browse_stack?.photo_ids || [];
+    /** @type {BrowsePhoto[]} */ var members = [];
+    for (var offset = 0; offset < memberIds.length; offset += 500) {
+      var memberData = await safeFetch('/api/photos/by-ids', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({photo_ids: memberIds.slice(offset, offset + 500)}),
+      });
+      if (!refresh.windowIsCurrent()) return false;
+      members = members.concat(memberData.photos || []);
+    }
+    refresh.nextMembers[photo.id] = members.map(function(member) {
+      return member.id === photo.id ? photo : member;
+    });
+  }
+  return true;
+}
+
+// Replace the grid with the staged window in one synchronous step. False
+// when nothing was staged.
+function commitRefreshedWindow(/** @type {BrowseWindowRefresh} */ refresh) {
+  // Capture position and selection at commit time: scrolling or clicking
+  // during the request must not be undone by its eventual response.
+  var container = /** @type {HTMLElement} */ (document.getElementById('gridContainer'));
+  var scrollTop = container.scrollTop;
+  // Only the synchronous replacement owns scroll position. Other updates,
+  // such as a stack finishing loading above the viewport, still need the
+  // browser's normal scroll anchoring.
+  refresh.scrollContainer = container;
+  refresh.previousOverflowAnchor = container.style.overflowAnchor;
+  container.style.overflowAnchor = 'none';
+  var stillExpandedIds = expandedStackMemberIds();
+  state.expandedBrowseStacks.clear();
+  refresh.nextPhotos.forEach(function(photo) {
+    if (photo.similarity != null) photo._similarity = photo.similarity;
+    if (refresh.nextMembers[photo.id] && photo.browse_stack?.photo_ids.some(function(id) {
+      return stillExpandedIds.has(id);
+    })) state.expandedBrowseStacks.add(photo.id);
+  });
+  state.browseStackMembers = refresh.nextMembers;
+  state.browseStackErrors = {};
+  state.browseStackHydrationRequests = {};
+  state.browseStackExpansionRequests = {};
+  state.browseStackCoverRecheck.clear();
+  // The lightbox shares this array; retain its identity across the refresh.
+  state.photos.length = 0;
+  refresh.nextPhotos.forEach(function(photo) { state.photos.push(photo); });
+  if (!refresh.data) return false;
+  pagination.setTotals(refresh.data);
+  pagination.place(refresh.firstPage, refresh.page, state.photos.length);
+  syncBrowseAvailableLightboxPhotos();
+
+  var availableIds = refresh.matchingIds || new Set();
+  if (refresh.matchingIds === null) state.photos.forEach(function(photo) {
+    if (!browsePhotoIsAvailable(photo)) return;
+    availableIds.add(photo.id);
+    if (photo.browse_stack) photo.browse_stack.photo_ids.forEach(function(id) {
+      availableIds.add(id);
+    });
+  });
+  selection.batchIds.forEach(function(id) {
+    if (!availableIds.has(id)) selection.removeFromBatch(id);
+  });
+  if (selection.focusedPhotoId != null && !availableIds.has(selection.focusedPhotoId)) closeDetail();
+  const selectedCover = loadedBrowseStackCoverForPhoto(selection.focusedPhotoId);
+  selection.reanchor(state.photos.findIndex(function(photo) {
+    return photo.id === selection.focusedPhotoId || (selectedCover && photo.id === selectedCover.id);
+  }));
+  if (selection.focusedPhotoId == null && selection.batchIds.size === 0) hideDetailPanel();
+
+  renderGrid({ preserveThumbnails: true });
+  updateGridTail();
+  updatePreviousPhotosButton();
+  updateOfflineCollectionState(refresh.data);
+  if (VireoFilter && VireoFilter.setResultTotal) VireoFilter.setResultTotal(pagination.underlyingTotal);
+  if (VireoFilter && VireoFilter.setVisualInfo) VireoFilter.setVisualInfo(refresh.data.visual || null);
+  updateFilterSummary();
+  updateBatchBar();
+  _refreshBatchInspectorIfActive();
+  refreshBrowseLightboxCounter();
+  // Setting this synchronously prevents an intermediate frame at the top.
+  // The browser only clamps it when the remaining results are too short.
+  container.scrollTop = scrollTop;
+  updateScrollPosition();
+  var refreshIds = state.photos.map(function(photo) { return photo.id; });
+  loadInatStatus(refreshIds).then(function() {
+    if (refresh.windowIsCurrent()) refreshGridCards(refreshIds);
+  });
+  fetchColorLabels(refreshIds).then(function() {
+    if (refresh.windowIsCurrent()) refreshGridCards(refreshIds);
+  });
+  return true;
 }
 
 // Both normal Browse and photo deep links initialize the shared filter bar.
@@ -360,17 +374,96 @@ export async function resetAndLoad(/** @type {BrowseReloadOptions} */ options = 
   if (options && options.preserveScroll && state.photos.length && pagination.ready) {
     return refreshBrowseWindowInPlace();
   }
-  var preserveAnchor = !!(options && options.preserveAnchor);
-  // Callers that need the current collection scope to survive a reset
-  // (folder-health refresh) pass ``preserveCollection: true``. Without it
-  // the default clear below would drop a normal (non-dashboard) collection
-  // and send the user back to the unscoped workspace grid.
-  var preserveCollection = !!(options && options.preserveCollection);
-  var preserveScroll = !!(options && options.preserveScroll);
-  // ``focusAnchor``: resolve the anchor's new position server-side instead of
-  // paging forward until it shows up. Re-sorts and filter removals can move
-  // the photo far from its old index, or remove it from the results entirely.
-  var focusAnchor = !!(options && options.focusAnchor);
+  var reload = beginBrowseReload(options);
+  if (reload.anchor || reload.scrollAnchor) state.anchorScanDepth++;
+  try {
+    var status = await loadReloadWindow(reload);
+    if (status !== true) return status;
+    var anchor = reload.anchor;
+    if (!anchor) {
+      if (reload.scrollAnchor) {
+        await restoreBrowseViewportAnchor(reload.scrollAnchor, reload.isCurrent);
+      }
+      return true;
+    }
+    return await restoreReloadAnchor(reload, anchor);
+  } finally {
+    if (reload.focusAnchor) {
+      state.focusReloadInFlight = Math.max(0, state.focusReloadInFlight - 1);
+      // Only clear the shared anchor once no focused reload is still in
+      // flight — otherwise the first reload's ``finally`` (it exits early
+      // when a newer reload has invalidated its window) would drop the
+      // anchor the newer reload is still relying on.
+      if (state.focusReloadInFlight === 0) state.pendingFocusAnchor = null;
+    }
+    if (reload.anchor || reload.scrollAnchor) {
+      state.anchorScanDepth = Math.max(0, state.anchorScanDepth - 1);
+      if (state.anchorScanDepth === 0) {
+        rearmInfiniteScrollObserver();
+        requestAnimationFrame(ensureViewportHydrated);
+      }
+    }
+  }
+}
+
+// Clear the grid for a reload and record what it should put back: the
+// anchors to restore and the test for whether this reload is still wanted.
+function beginBrowseReload(/** @type {BrowseReloadOptions} */ options) {
+  /** @type {BrowseReload} */
+  var reload = {
+    preserveAnchor: !!(options && options.preserveAnchor),
+    // Callers that need the current collection scope to survive a reset
+    // (folder-health refresh) pass ``preserveCollection: true``. Without it
+    // the default clear below would drop a normal (non-dashboard) collection
+    // and send the user back to the unscoped workspace grid.
+    preserveCollection: !!(options && options.preserveCollection),
+    preserveScroll: !!(options && options.preserveScroll),
+    // ``focusAnchor``: resolve the anchor's new position server-side instead of
+    // paging forward until it shows up. Re-sorts and filter removals can move
+    // the photo far from its old index, or remove it from the results entirely.
+    focusAnchor: !!(options && options.focusAnchor),
+    anchor: null, scrollAnchor: null, restoreEpoch: null,
+    isCurrent: function() { return false; },
+  };
+  reload.anchor = captureReloadAnchor(reload, options);
+  reload.restoreEpoch = reload.anchor ? ++state.anchorRestoreEpoch : null;
+  // Membership-change reloads (``preserveScroll``) can arrive after an edit
+  // that removed the selected photo from the filter — untagging its only
+  // matching keyword, say. Capture the viewport anchor alongside the
+  // selected-photo one so that when the paged scan below runs out of
+  // budget without finding the id, we can still hold position instead of
+  // resetting to ``scrollTop = 0``.
+  reload.scrollAnchor = reload.preserveScroll
+    ? captureBrowseViewportAnchor()
+    : null;
+  clearBrowseLoadedWindow();
+  var resetWindowIsCurrent = claimBrowseWindow();
+  selection.invalidate();
+  pagination.cancelLoad();
+  // Dataset is about to change; any prior selection (multi-select Set or
+  // single-focus id) points at photos that may not exist in the new view.
+  // Leaving them set would let updateBatchBar() keep showing "N selected"
+  // and arm batch actions (delete/export/develop) against stale ids.
+  selection.clear();
+  settleSidebarScopeForReload(reload.preserveCollection);
+  var preservedCollectionId = reload.preserveCollection ? state.activeCollectionId : null;
+  if (reload.anchor) hideDetailPanel();
+  else closeDetail();
+  /** @type {HTMLElement} */ (document.getElementById('grid')).innerHTML = '';
+  /** @type {HTMLElement} */ (document.getElementById('gridContainer')).scrollTop = 0;
+  reload.isCurrent = function() {
+    if (!resetWindowIsCurrent()) return false;
+    if (state.activeCollectionId == null) return true;
+    if (state.dashboardCollectionScope) return true;
+    // Explicitly preserved collection: the reset is still current as long as
+    // the caller-chosen scope hasn't been replaced by a newer sidebar click.
+    if (reload.preserveCollection && state.activeCollectionId === preservedCollectionId) return true;
+    return false;
+  };
+  return reload;
+}
+
+function captureReloadAnchor(/** @type {BrowseReload} */ reload, /** @type {BrowseReloadOptions} */ options) {
   // Try the single-photo anchor whenever a caller has asked us to keep the
   // user's place — ``preserveAnchor`` (explicit) or ``preserveScroll`` (the
   // membership-change fallback that has no photo of its own to focus on).
@@ -379,7 +472,7 @@ export async function resetAndLoad(/** @type {BrowseReloadOptions} */ options = 
   // anchor below; when a single photo is selected and the edit did not
   // remove it, restoring the selection and detail panel matches the
   // documented fallback behavior.
-  var anchor = (preserveAnchor || preserveScroll)
+  var anchor = (reload.preserveAnchor || reload.preserveScroll)
     ? captureSelectedPhotoAnchor()
     : null;
   // A reload arriving while a focused one is still in flight has nothing to
@@ -406,10 +499,10 @@ export async function resetAndLoad(/** @type {BrowseReloadOptions} */ options = 
   // holder here, a following focused sort would adopt the stale anchor and
   // resurrect a selection the intervening reset just cleared, whenever the
   // photo still matched the new filter.
-  if (!focusAnchor && !preserveAnchor && !preserveScroll) {
+  if (!reload.focusAnchor && !reload.preserveAnchor && !reload.preserveScroll) {
     state.pendingFocusAnchor = null;
   }
-  if (!anchor && (focusAnchor || preserveAnchor) && state.pendingFocusAnchor) {
+  if (!anchor && (reload.focusAnchor || reload.preserveAnchor) && state.pendingFocusAnchor) {
     anchor = state.pendingFocusAnchor;
   }
   // A person browsing without a single selection still has a place in the
@@ -418,229 +511,181 @@ export async function resetAndLoad(/** @type {BrowseReloadOptions} */ options = 
     anchor = captureBrowseViewportAnchor();
     if (anchor) anchor.viewportOnly = true;
   }
-  if (focusAnchor) {
+  if (reload.focusAnchor) {
     state.pendingFocusAnchor = anchor;
     state.pendingFocusAnchorScopeGen = state.browseScopeGen;
     state.focusReloadInFlight++;
   }
-  var restoreEpoch = anchor ? ++state.anchorRestoreEpoch : null;
-  // Membership-change reloads (``preserveScroll``) can arrive after an edit
-  // that removed the selected photo from the filter — untagging its only
-  // matching keyword, say. Capture the viewport anchor alongside the
-  // selected-photo one so that when the paged scan below runs out of
-  // budget without finding the id, we can still hold position instead of
-  // resetting to ``scrollTop = 0``.
-  var scrollAnchor = preserveScroll
-    ? captureBrowseViewportAnchor()
-    : null;
-  clearBrowseLoadedWindow();
-  var resetWindowIsCurrent = claimBrowseWindow();
-  selection.invalidate();
-  pagination.cancelLoad();
-  // Dataset is about to change; any prior selection (multi-select Set or
-  // single-focus id) points at photos that may not exist in the new view.
-  // Leaving them set would let updateBatchBar() keep showing "N selected"
-  // and arm batch actions (delete/export/develop) against stale ids.
-  selection.clear();
-  settleSidebarScopeForReload(preserveCollection);
-  var preservedCollectionId = preserveCollection ? state.activeCollectionId : null;
-  if (anchor) hideDetailPanel();
-  else closeDetail();
-  /** @type {HTMLElement} */ (document.getElementById('grid')).innerHTML = '';
-  /** @type {HTMLElement} */ (document.getElementById('gridContainer')).scrollTop = 0;
+  return anchor;
+}
 
-  function resetRequestIsCurrent() {
-    if (!resetWindowIsCurrent()) return false;
-    if (state.activeCollectionId == null) return true;
-    if (state.dashboardCollectionScope) return true;
-    // Explicitly preserved collection: the reset is still current as long as
-    // the caller-chosen scope hasn't been replaced by a newer sidebar click.
-    if (preserveCollection && state.activeCollectionId === preservedCollectionId) return true;
-    return false;
-  }
-  function anchorScanShouldContinue() {
-    return resetRequestIsCurrent() && state.anchorRestoreEpoch === restoreEpoch;
-  }
-
-  if (anchor || scrollAnchor) state.anchorScanDepth++;
-  try {
-    // A stack anchor offers every frame the user picked, so the reload can
-    // be placed by one it kept even when the frame we aimed at is gone.
-    // One lookup takes a bounded number of
-    // candidates — they become bound parameters in one ``IN`` clause — and
-    // nothing bounds how many frames a burst holds, so the frames past that
-    // are asked about in a further lookup rather than dropped: a saved
-    // expression can keep exactly the tail of a long burst (the few frames
-    // the user rated, say) and that is still the selection it should
-    // restore. Only a chunk that places nothing costs another request, so
-    // every stack short enough to ask about at once — which is all of them,
-    // in practice — is one request.
-    var focusChunks = browseFocusCandidateChunks(anchor, /** @type {boolean} */ focusAnchor);
-    var initialLoadStatus;
-    for (var chunkAt = 0; chunkAt < Math.max(1, focusChunks.length); chunkAt++) {
-      var chunk = focusChunks[chunkAt];
-      if (chunkAt > 0) {
-        // Start the replacement window clean, exactly as this reset did.
-        clearBrowseLoadedWindow();
-        /** @type {HTMLElement} */ (document.getElementById('grid')).innerHTML = '';
-      }
-      initialLoadStatus = await loadPhotos(
-        chunk ? { focusPhotoId: chunk[0], focusPhotoIds: chunk.slice(1) } : undefined
-      );
-      if (initialLoadStatus !== true) return initialLoadStatus;
-      if (!resetRequestIsCurrent()) return null;
-      if (!chunk || state.browseResolvedFocusPhotoId != null) break;
+// Load the reset window's first page. Resolves to true when the reload
+// should go on, otherwise to the status resetAndLoad returns.
+async function loadReloadWindow(/** @type {BrowseReload} */ reload) {
+  var anchor = reload.anchor;
+  // A stack anchor offers every frame the user picked, so the reload can
+  // be placed by one it kept even when the frame we aimed at is gone.
+  // One lookup takes a bounded number of
+  // candidates — they become bound parameters in one ``IN`` clause — and
+  // nothing bounds how many frames a burst holds, so the frames past that
+  // are asked about in a further lookup rather than dropped: a saved
+  // expression can keep exactly the tail of a long burst (the few frames
+  // the user rated, say) and that is still the selection it should
+  // restore. Only a chunk that places nothing costs another request, so
+  // every stack short enough to ask about at once — which is all of them,
+  // in practice — is one request.
+  var focusChunks = browseFocusCandidateChunks(anchor, /** @type {boolean} */ reload.focusAnchor);
+  var initialLoadStatus;
+  for (var chunkAt = 0; chunkAt < Math.max(1, focusChunks.length); chunkAt++) {
+    var chunk = focusChunks[chunkAt];
+    if (chunkAt > 0) {
+      // Start the replacement window clean, exactly as this reset did.
+      clearBrowseLoadedWindow();
+      /** @type {HTMLElement} */ (document.getElementById('grid')).innerHTML = '';
     }
-    // The frame the server placed the page by becomes the anchor: it is the
-    // card the restore selects around and the one the scroll holds onto.
-    // Resolved to the top-level card it is part of, because the anchor is a
-    // lookup target as well as a selection: handed a hidden frame,
-    // ``loadUntilPhotoRendered`` would expand that stack's tray to reach it,
-    // so a plain re-sort would leave the collapsed stack the user selected
-    // standing open.
-    if (anchor && focusAnchor && state.browseResolvedFocusPhotoId != null) {
-      var resolvedCover = anchor.stackSelection
-        ? loadedBrowseStackCoverForPhoto(state.browseResolvedFocusPhotoId)
-        : null;
-      anchor.photoId = resolvedCover
-        ? resolvedCover.id
-        : state.browseResolvedFocusPhotoId;
-    }
-    if (!anchor) {
-      if (scrollAnchor) {
-        await restoreBrowseViewportAnchor(scrollAnchor, resetRequestIsCurrent);
-      }
-      return true;
-    }
-
-    // A focused load has already been served the anchor's page: the server
-    // resolved its position under the same grouping the page fetch uses, so
-    // there is nothing left to search for. Budget 0 confines the lookup to
-    // the pages in hand — still enough to expand a stack tray around a
-    // hidden member — instead of paging towards a photo that is either
-    // already here or not in this result set at all.
-    //
-    // ``preserveScroll`` membership refreshes are the one anchored reload
-    // that still pages: they re-run the query already on screen after an
-    // edit that may have moved the anchor out of it, so the anchor's old
-    // position plus a page is a sound bound — and a bound there must be, or
-    // a 60k-photo result set that no longer contains the photo costs ~1,200
-    // sequential requests to find that out.
-    var anchorScanBudget = focusAnchor
-      ? 0
-      : Math.max(anchor.index || 0, 0) + pagination.perPage;
-    var card = await loadUntilPhotoRendered(
-      anchor.photoId,
-      anchorScanShouldContinue,
-      { resolveStackMember: true, budget: anchorScanBudget }
+    initialLoadStatus = await loadPhotos(
+      chunk ? { focusPhotoId: chunk[0], focusPhotoIds: chunk.slice(1) } : undefined
     );
-    if (!resetRequestIsCurrent()) return null;
-
-    if (!anchorRestoreIsPending(anchor, restoreEpoch)) return true;
-    if (!card) {
-      clearActiveSelectionAndDetail();
-      if (scrollAnchor) {
-        await restoreBrowseViewportAnchor(scrollAnchor, resetRequestIsCurrent);
-      }
-      return true;
-    }
-
-    // Offline placeholders can hold the viewport without becoming a
-    // selection or enabling any photo actions.
-    if (anchor.viewportOnly) {
-      requestAnimationFrame(function() {
-        if (!resetRequestIsCurrent() || !anchorRestoreIsPending(anchor, restoreEpoch)) return;
-        restorePhotoAnchor(anchor);
-        updateScrollPosition();
-      });
-      return true;
-    }
-
-    // The anchor may have been rendered as an offline placeholder — e.g. a
-    // folder-health refresh with ``showOfflineCollectionPhotos`` on keeps the
-    // just-went-missing photo in the reloaded dataset with ``folder_status``
-    // set to a non-``ok``/``partial`` value. Restoring the selection there
-    // would let updateBatchBar() expose Develop/Export/Delete against a
-    // supposedly read-only photo.
-    var anchorPhoto = findBrowsePhoto(anchor.photoId);
-    var anchorCoverId = browseStackCoverIdForPhoto(anchor.photoId);
-    var anchorGridId = anchorCoverId == null ? anchor.photoId : anchorCoverId;
-    var anchorIndex = state.photos.findIndex(function(p) { return p.id === anchorGridId; });
-    if (anchorIndex < 0 || !anchorPhoto || !browsePhotoIsAvailable(anchorPhoto)) {
-      clearActiveSelectionAndDetail();
-      if (scrollAnchor) {
-        await restoreBrowseViewportAnchor(scrollAnchor, resetRequestIsCurrent);
-      }
-      return true;
-    }
-
-    // A selected stack comes back as a selected stack — as the frames the
-    // user actually picked, intersected with the group the reload came back
-    // with. Adopting the reloaded group's membership wholesale would widen
-    // the selection whenever an edit merged a neighbouring frame into the
-    // burst: undo/redo re-runs the query and ``afterHistoryChange`` folds the
-    // pre-action ids back in on top, so a later batch export or delete would
-    // act on a frame the user never selected. The
-    // intersection is also why the ids cannot simply be replayed: a frame
-    // this reload dropped from the group is no longer part of the card the
-    // user is looking at, and a stack with only some of its frames selected
-    // paints the partial mark that says exactly that.
-    var currentStackIds = anchor.stackSelection
-      ? browseStackMemberIds(anchorGridId)
+    if (initialLoadStatus !== true) return initialLoadStatus;
+    if (!reload.isCurrent()) return null;
+    if (!chunk || state.browseResolvedFocusPhotoId != null) break;
+  }
+  // The frame the server placed the page by becomes the anchor: it is the
+  // card the restore selects around and the one the scroll holds onto.
+  // Resolved to the top-level card it is part of, because the anchor is a
+  // lookup target as well as a selection: handed a hidden frame,
+  // ``loadUntilPhotoRendered`` would expand that stack's tray to reach it,
+  // so a plain re-sort would leave the collapsed stack the user selected
+  // standing open.
+  if (anchor && reload.focusAnchor && state.browseResolvedFocusPhotoId != null) {
+    var resolvedCover = anchor.stackSelection
+      ? loadedBrowseStackCoverForPhoto(state.browseResolvedFocusPhotoId)
       : null;
-    var restoredStackIds = currentStackIds
-      ? currentStackIds.filter(function(id) {
-          return !!anchor?.stackIds?.includes(id);
-        })
-      : null;
-    if (restoredStackIds && !restoredStackIds.length) restoredStackIds = null;
-    if (anchor.stackSelection && !restoredStackIds) {
-      // The group did not survive the reload — Stacks switched off
-      // mid-flight, or the frames no longer group. Hold the position
-      // without inventing a single-photo selection the user never made:
-      // Delete/Export/Develop act on whatever is selected.
-      requestAnimationFrame(function() {
-        if (!resetRequestIsCurrent()) return;
-        if (!anchorRestoreIsPending(anchor, restoreEpoch)) return;
-        restorePhotoAnchor(anchor);
-        updateScrollPosition();
-      });
-      return true;
-    }
+    anchor.photoId = resolvedCover
+      ? resolvedCover.id
+      : state.browseResolvedFocusPhotoId;
+  }
+  return true;
+}
 
-    if (restoredStackIds) {
-      selection.selectBatch(restoredStackIds, anchorIndex);
-      abandonDetailFocusForBatch();
-    } else {
-      selection.focus(anchor.photoId, anchorIndex);
+async function restoreReloadAnchor(/** @type {BrowseReload} */ reload, /** @type {BrowseAnchor} */ anchor) {
+  function anchorScanShouldContinue() {
+    return reload.isCurrent() && state.anchorRestoreEpoch === reload.restoreEpoch;
+  }
+  // A focused load has already been served the anchor's page: the server
+  // resolved its position under the same grouping the page fetch uses, so
+  // there is nothing left to search for. Budget 0 confines the lookup to
+  // the pages in hand — still enough to expand a stack tray around a
+  // hidden member — instead of paging towards a photo that is either
+  // already here or not in this result set at all.
+  //
+  // ``preserveScroll`` membership refreshes are the one anchored reload
+  // that still pages: they re-run the query already on screen after an
+  // edit that may have moved the anchor out of it, so the anchor's old
+  // position plus a page is a sound bound — and a bound there must be, or
+  // a 60k-photo result set that no longer contains the photo costs ~1,200
+  // sequential requests to find that out.
+  var anchorScanBudget = reload.focusAnchor
+    ? 0
+    : Math.max(anchor.index || 0, 0) + pagination.perPage;
+  var card = await loadUntilPhotoRendered(
+    anchor.photoId,
+    anchorScanShouldContinue,
+    { resolveStackMember: true, budget: anchorScanBudget }
+  );
+  if (!reload.isCurrent()) return null;
+
+  if (!anchorRestoreIsPending(anchor, reload.restoreEpoch)) return true;
+  if (!card) {
+    clearActiveSelectionAndDetail();
+    if (reload.scrollAnchor) {
+      await restoreBrowseViewportAnchor(reload.scrollAnchor, reload.isCurrent);
     }
-    refreshCardSelectionVisuals();
-    updateBatchBar();
-    if (anchor.detailVisible) loadDetail(anchor.photoId);
+    return true;
+  }
+  return restoreReloadSelection(reload, anchor);
+}
+
+async function restoreReloadSelection(/** @type {BrowseReload} */ reload, /** @type {BrowseAnchor} */ anchor) {
+  // Offline placeholders can hold the viewport without becoming a
+  // selection or enabling any photo actions.
+  if (anchor.viewportOnly) {
     requestAnimationFrame(function() {
-      if (!resetRequestIsCurrent()) return;
-      if (!anchorSelectionIsCurrent(anchor, restoreEpoch)) return;
+      if (!reload.isCurrent() || !anchorRestoreIsPending(anchor, reload.restoreEpoch)) return;
       restorePhotoAnchor(anchor);
       updateScrollPosition();
     });
     return true;
-  } finally {
-    if (focusAnchor) {
-      state.focusReloadInFlight = Math.max(0, state.focusReloadInFlight - 1);
-      // Only clear the shared anchor once no focused reload is still in
-      // flight — otherwise the first reload's ``finally`` (it exits early
-      // when a newer reload has invalidated its window) would drop the
-      // anchor the newer reload is still relying on.
-      if (state.focusReloadInFlight === 0) state.pendingFocusAnchor = null;
-    }
-    if (anchor || scrollAnchor) {
-      state.anchorScanDepth = Math.max(0, state.anchorScanDepth - 1);
-      if (state.anchorScanDepth === 0) {
-        rearmInfiniteScrollObserver();
-        requestAnimationFrame(ensureViewportHydrated);
-      }
-    }
   }
+
+  // The anchor may have been rendered as an offline placeholder — e.g. a
+  // folder-health refresh with ``showOfflineCollectionPhotos`` on keeps the
+  // just-went-missing photo in the reloaded dataset with ``folder_status``
+  // set to a non-``ok``/``partial`` value. Restoring the selection there
+  // would let updateBatchBar() expose Develop/Export/Delete against a
+  // supposedly read-only photo.
+  var anchorPhoto = findBrowsePhoto(anchor.photoId);
+  var anchorCoverId = browseStackCoverIdForPhoto(anchor.photoId);
+  var anchorGridId = anchorCoverId == null ? anchor.photoId : anchorCoverId;
+  var anchorIndex = state.photos.findIndex(function(p) { return p.id === anchorGridId; });
+  if (anchorIndex < 0 || !anchorPhoto || !browsePhotoIsAvailable(anchorPhoto)) {
+    clearActiveSelectionAndDetail();
+    if (reload.scrollAnchor) {
+      await restoreBrowseViewportAnchor(reload.scrollAnchor, reload.isCurrent);
+    }
+    return true;
+  }
+
+  // A selected stack comes back as a selected stack — as the frames the
+  // user actually picked, intersected with the group the reload came back
+  // with. Adopting the reloaded group's membership wholesale would widen
+  // the selection whenever an edit merged a neighbouring frame into the
+  // burst: undo/redo re-runs the query and ``afterHistoryChange`` folds the
+  // pre-action ids back in on top, so a later batch export or delete would
+  // act on a frame the user never selected. The
+  // intersection is also why the ids cannot simply be replayed: a frame
+  // this reload dropped from the group is no longer part of the card the
+  // user is looking at, and a stack with only some of its frames selected
+  // paints the partial mark that says exactly that.
+  var currentStackIds = anchor.stackSelection
+    ? browseStackMemberIds(anchorGridId)
+    : null;
+  var restoredStackIds = currentStackIds
+    ? currentStackIds.filter(function(id) {
+        return !!anchor?.stackIds?.includes(id);
+      })
+    : null;
+  if (restoredStackIds && !restoredStackIds.length) restoredStackIds = null;
+  if (anchor.stackSelection && !restoredStackIds) {
+    // The group did not survive the reload — Stacks switched off
+    // mid-flight, or the frames no longer group. Hold the position
+    // without inventing a single-photo selection the user never made:
+    // Delete/Export/Develop act on whatever is selected.
+    requestAnimationFrame(function() {
+      if (!reload.isCurrent()) return;
+      if (!anchorRestoreIsPending(anchor, reload.restoreEpoch)) return;
+      restorePhotoAnchor(anchor);
+      updateScrollPosition();
+    });
+    return true;
+  }
+
+  if (restoredStackIds) {
+    selection.selectBatch(restoredStackIds, anchorIndex);
+    abandonDetailFocusForBatch();
+  } else {
+    selection.focus(anchor.photoId, anchorIndex);
+  }
+  refreshCardSelectionVisuals();
+  updateBatchBar();
+  if (anchor.detailVisible) loadDetail(anchor.photoId);
+  requestAnimationFrame(function() {
+    if (!reload.isCurrent()) return;
+    if (!anchorSelectionIsCurrent(anchor, reload.restoreEpoch)) return;
+    restorePhotoAnchor(anchor);
+    updateScrollPosition();
+  });
+  return true;
 }
 
 /** @returns {BrowseRuleGroup | null} */
@@ -895,20 +940,7 @@ export async function loadPhotos(/** @type {BrowseLoadOptions} */ options = {}) 
     : null;
   var focusPhotoIds = (options && options.focusPhotoIds) || null;
   if (focusPhotoId != null) state.browseResolvedFocusPhotoId = null;
-  // When placeholder cells are already visible, the user is actively
-  // waiting on this load — fetch several pages in one request. Chunks must
-  // stay aligned to perPage-sized pages so page/per_page arithmetic holds
-  // (server caps per_page at 500).
-  var chunk = 1;
-  var tailEl = document.getElementById('gridTail');
-  if (focusPhotoId == null && tailEl && tailEl.firstElementChild) {
-    var contRect = /** @type {HTMLElement} */ (document.getElementById('gridContainer')).getBoundingClientRect();
-    if (tailEl.firstElementChild.getBoundingClientRect().top < contRect.bottom) {
-      var pagesLoaded = pagination.currentPage - 1;
-      if (pagination.perPage * 4 <= 500 && pagesLoaded % 4 === 0) chunk = 4;
-      else if (pagination.perPage * 2 <= 500 && pagesLoaded % 2 === 0) chunk = 2;
-    }
-  }
+  var chunk = tailLoadChunk(focusPhotoId);
   var reqPage = (pagination.currentPage - 1) / chunk + 1;
   var reqPerPage = pagination.perPage * chunk;
 
@@ -922,68 +954,7 @@ export async function loadPhotos(/** @type {BrowseLoadOptions} */ options = {}) 
   try {
     /** @type {BrowsePage} */ var data = await /** @type {Promise<BrowsePage>} */ (safeFetch(request.url, request.options));
     if (!windowIsCurrent()) return null;  // grid was reset mid-flight; drop stale response
-    pagination.setTotals(data);
-    // Availability totals are photo counts, so they are read from the same
-    // response that feeds ``totalUnderlyingPhotos`` — never from the
-    // stack-collapsed ``data.total``.
-    updateOfflineCollectionState(data);
-    if (VireoFilter && VireoFilter.setResultTotal) VireoFilter.setResultTotal(pagination.underlyingTotal);
-    if (VireoFilter && VireoFilter.setVisualInfo) {
-      VireoFilter.setVisualInfo(data.visual || null);
-    }
-    (data.photos || []).forEach(function(p) {
-      if (p.similarity != null) p._similarity = p.similarity;
-    });
-    // A focused load can come back from the middle of the dataset. Anchor
-    // the loaded window on that page — the same shape a ?photo_id deep link
-    // produces — so ``loadedWindowOffset`` keeps reporting how much of the
-    // result set sits above the grid and the "N earlier photos aren't
-    // loaded" banner says so out loud. Without a resolved position the
-    // server served the page we asked for, so leave the window alone.
-    var focusedPage = null;
-    if (request.focusPhotoId != null && (data.photos || []).length > 0
-        && typeof data.focus_index === 'number' && Number.isInteger(data.focus_index) && data.focus_index >= 0
-        && typeof data.focus_page === 'number' && Number.isInteger(data.focus_page) && data.focus_page >= 1) {
-      focusedPage = data.focus_page;
-      // Which candidate the server placed the page by. Usually the one we
-      // asked about first; a stack whose leading frames this result set
-      // dropped answers with a frame it kept.
-      state.browseResolvedFocusPhotoId = typeof data.focus_photo_id === 'number' && Number.isInteger(data.focus_photo_id)
-        ? data.focus_photo_id
-        : request.focusPhotoId;
-    }
-    var firstNewIdx = state.photos.length;
-
-    if (data.photos.length > 0) {
-      // Keep the array identity stable. The shared lightbox navigates the
-      // same object and can therefore continue into this newly loaded page.
-      Array.prototype.push.apply(state.photos, data.photos);
-      syncBrowseAvailableLightboxPhotos();
-      // A deep-link window starts partway in, so it is exhausted when it
-      // reaches the end of the dataset — not when it holds ``totalPhotos``
-      // rows, which it never would.
-    }
-    pagination.append(state.photos.length, chunk, focusedPage, data.photos.length === 0);
-    if (focusedPage !== null) updatePreviousPhotosButton();
-
-    if (firstNewIdx === 0) renderGrid();
-    else appendGridPhotos(data.photos, firstNewIdx);
-    updateGridTail();
-    updateFilterSummary();
-    refreshBrowseLightboxCounter();
-
-    // Refresh appended cards once async metadata resolves — appendGridPhotos
-    // only renders each page once, so badges/labels would otherwise stay
-    // missing until an unrelated full grid render.
-    if (data.photos.length > 0) {
-      var refreshIds = data.photos.map(function(p) { return p.id; });
-      loadInatStatus(refreshIds).then(function() {
-        if (windowIsCurrent()) refreshGridCards(refreshIds);
-      });
-      fetchColorLabels(refreshIds).then(function() {
-        if (windowIsCurrent()) refreshGridCards(refreshIds);
-      });
-    }
+    applyLoadedPage(data, request, chunk, windowIsCurrent);
     loadSucceeded = true;
   } catch(e) {
     if (!windowIsCurrent()) return null;
@@ -1007,4 +978,92 @@ export async function loadPhotos(/** @type {BrowseLoadOptions} */ options = {}) 
     }
   }
   return loadSucceeded;
+}
+
+// When placeholder cells are already visible, the user is actively
+// waiting on this load — fetch several pages in one request. Chunks must
+// stay aligned to perPage-sized pages so page/per_page arithmetic holds
+// (server caps per_page at 500).
+function tailLoadChunk(/** @type {number | null} */ focusPhotoId) {
+  var chunk = 1;
+  var tailEl = document.getElementById('gridTail');
+  if (focusPhotoId == null && tailEl && tailEl.firstElementChild) {
+    var contRect = /** @type {HTMLElement} */ (document.getElementById('gridContainer')).getBoundingClientRect();
+    if (tailEl.firstElementChild.getBoundingClientRect().top < contRect.bottom) {
+      var pagesLoaded = pagination.currentPage - 1;
+      if (pagination.perPage * 4 <= 500 && pagesLoaded % 4 === 0) chunk = 4;
+      else if (pagination.perPage * 2 <= 500 && pagesLoaded % 2 === 0) chunk = 2;
+    }
+  }
+  return chunk;
+}
+
+function applyLoadedPage(
+  /** @type {BrowsePage} */ data,
+  /** @type {ReturnType<typeof buildBrowsePageRequest>} */ request,
+  /** @type {number} */ chunk,
+  /** @type {() => boolean} */ windowIsCurrent
+) {
+  pagination.setTotals(data);
+  // Availability totals are photo counts, so they are read from the same
+  // response that feeds ``totalUnderlyingPhotos`` — never from the
+  // stack-collapsed ``data.total``.
+  updateOfflineCollectionState(data);
+  if (VireoFilter && VireoFilter.setResultTotal) VireoFilter.setResultTotal(pagination.underlyingTotal);
+  if (VireoFilter && VireoFilter.setVisualInfo) {
+    VireoFilter.setVisualInfo(data.visual || null);
+  }
+  (data.photos || []).forEach(function(p) {
+    if (p.similarity != null) p._similarity = p.similarity;
+  });
+  // A focused load can come back from the middle of the dataset. Anchor
+  // the loaded window on that page — the same shape a ?photo_id deep link
+  // produces — so ``loadedWindowOffset`` keeps reporting how much of the
+  // result set sits above the grid and the "N earlier photos aren't
+  // loaded" banner says so out loud. Without a resolved position the
+  // server served the page we asked for, so leave the window alone.
+  var focusedPage = null;
+  if (request.focusPhotoId != null && (data.photos || []).length > 0
+      && typeof data.focus_index === 'number' && Number.isInteger(data.focus_index) && data.focus_index >= 0
+      && typeof data.focus_page === 'number' && Number.isInteger(data.focus_page) && data.focus_page >= 1) {
+    focusedPage = data.focus_page;
+    // Which candidate the server placed the page by. Usually the one we
+    // asked about first; a stack whose leading frames this result set
+    // dropped answers with a frame it kept.
+    state.browseResolvedFocusPhotoId = typeof data.focus_photo_id === 'number' && Number.isInteger(data.focus_photo_id)
+      ? data.focus_photo_id
+      : request.focusPhotoId;
+  }
+  var firstNewIdx = state.photos.length;
+
+  if (data.photos.length > 0) {
+    // Keep the array identity stable. The shared lightbox navigates the
+    // same object and can therefore continue into this newly loaded page.
+    Array.prototype.push.apply(state.photos, data.photos);
+    syncBrowseAvailableLightboxPhotos();
+    // A deep-link window starts partway in, so it is exhausted when it
+    // reaches the end of the dataset — not when it holds ``totalPhotos``
+    // rows, which it never would.
+  }
+  pagination.append(state.photos.length, chunk, focusedPage, data.photos.length === 0);
+  if (focusedPage !== null) updatePreviousPhotosButton();
+
+  if (firstNewIdx === 0) renderGrid();
+  else appendGridPhotos(data.photos, firstNewIdx);
+  updateGridTail();
+  updateFilterSummary();
+  refreshBrowseLightboxCounter();
+
+  // Refresh appended cards once async metadata resolves — appendGridPhotos
+  // only renders each page once, so badges/labels would otherwise stay
+  // missing until an unrelated full grid render.
+  if (data.photos.length > 0) {
+    var refreshIds = data.photos.map(function(p) { return p.id; });
+    loadInatStatus(refreshIds).then(function() {
+      if (windowIsCurrent()) refreshGridCards(refreshIds);
+    });
+    fetchColorLabels(refreshIds).then(function() {
+      if (windowIsCurrent()) refreshGridCards(refreshIds);
+    });
+  }
 }
