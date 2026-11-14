@@ -1,9 +1,11 @@
 # Frontend state ownership
 
-The browse page and shared navbar are being split by responsibility. The first
-controllers keep mutable state in factory closures and expose frozen method
-objects. Loading a controller script defines its factory without registering
-listeners or starting requests. No build tool or framework is required.
+The browse page and shared navbar are being split by responsibility. Each
+controller's factory builds one state record, never hands it out, and exposes
+frozen methods bound to it; the functions that read and write the record sit
+beside the factory and take it as their first argument. Loading a controller
+script defines its factory without registering listeners or starting requests.
+No build tool or framework is required.
 
 | Controller | Owns | Receives from its host |
 | --- | --- | --- |

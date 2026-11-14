@@ -176,19 +176,9 @@ window.VireoBatchEdits = (function() {
       : (current === null ? 'Current values differ. Changing this control sets the same value on every selected photo.' : 'Sets this setting on every selected photo.');
   }
 
-  /** @param {number[]} ids */
-  async function open(ids) {
-    ids = Array.from(new Set(ids));
-    if (!ids.length) return;
-    if (opening || activeDialog) return;
-    opening = true;
-    /** @type {BatchEditField[]} */
-    var defs;
-    try { defs = await fields(); } finally { opening = false; }
-    var modal = dialog('Edit ' + ids.length.toLocaleString() + ' selected photos');
-    activeDialog = modal;
-    element('p', 'Changes save to this selection when you release a slider or finish entering a value. Each change can be undone from Edit History. Other settings stay unchanged.', modal);
-    var preview = selectionPreview(ids, modal);
+  // The setting and mode pickers and the slider/number pair they configure.
+  /** @param {HTMLDialogElement} modal @param {BatchEditField[]} defs */
+  function adjustmentControls(modal, defs) {
     var controls = element('fieldset', null, modal);
     element('legend', 'Adjust the selection', controls);
     var row = element('div', null, controls); row.className = 'development-control';
@@ -204,11 +194,64 @@ window.VireoBatchEdits = (function() {
     var sliderRow = element('div', null, controls); sliderRow.className = 'development-control';
     var slider = element('input', null, sliderRow); slider.type = 'range'; slider.setAttribute('aria-label', 'Adjustment value');
     var number = element('input', null, sliderRow); number.type = 'number'; number.style.width = '90px'; number.setAttribute('aria-label', 'Numeric adjustment value');
+    return {controls: controls, setting: setting, mode: mode, note: note, slider: slider, number: number};
+  }
+
+  // The "Reusable settings" group with its preset picker, disabled until
+  // loadPresetOptions fills it. The caller adds the group's buttons.
+  /** @param {HTMLDialogElement} modal */
+  function presetControls(modal) {
     var more = element('fieldset', null, modal); element('legend', 'Reusable settings', more);
-    var presetSelect = element('select', null, more); presetSelect.setAttribute('aria-label', 'Batch preset');
-    var presetPlaceholder = element('option', 'Loading presets…', presetSelect); presetPlaceholder.value = '';
-    presetSelect.disabled = true;
-    var presetNote = element('p', '', more); presetNote.setAttribute('aria-live', 'polite');
+    var select = element('select', null, more); select.setAttribute('aria-label', 'Batch preset');
+    var placeholder = element('option', 'Loading presets…', select); placeholder.value = '';
+    select.disabled = true;
+    var note = element('p', '', more); note.setAttribute('aria-live', 'polite');
+    return {more: more, select: select, placeholder: placeholder, note: note};
+  }
+
+  // Presets are optional: a slow or failed request must not prevent
+  // adjustments and clipboard paste once the selection summary is ready.
+  /** @param {HTMLDialogElement} modal @param {ReturnType<typeof presetControls>} ui @param {(presets: BatchEditPreset[]) => void} onLoaded */
+  function loadPresetOptions(modal, ui, onLoaded) {
+    (/** @type {Promise<{presets?: BatchEditPreset[]}>} */ (safeFetch('/api/edit-presets', {}, {toast: false}))).then(function(data) {
+      if (!modal.isConnected) return;
+      var presets = data.presets || [];
+      onLoaded(presets);
+      presets.forEach(function(preset) { element('option', preset.name, ui.select).value = String(preset.id); });
+      ui.placeholder.textContent = presets.length ? 'Select a preset…' : 'No presets saved';
+      ui.select.disabled = !presets.length;
+    }).catch(function() {
+      if (!modal.isConnected) return;
+      ui.placeholder.textContent = 'Presets unavailable';
+      ui.note.textContent = 'Presets could not load. You can still adjust photos or paste settings.';
+    });
+  }
+
+  /** @param {BatchEditField[]} defs @param {string} path */
+  function numericField(defs, path) {
+    var def = defs.find(function(f) { return f.path === path; });
+    if (!def || def.min == null || def.max == null || def.step == null || def.default == null) {
+      throw new Error('No numeric adjustment selected');
+    }
+    return /** @type {NumericBatchEditField} */ (def);
+  }
+
+  /** @param {number[]} ids */
+  async function open(ids) {
+    ids = Array.from(new Set(ids));
+    if (!ids.length) return;
+    if (opening || activeDialog) return;
+    opening = true;
+    /** @type {BatchEditField[]} */
+    var defs;
+    try { defs = await fields(); } finally { opening = false; }
+    var modal = dialog('Edit ' + ids.length.toLocaleString() + ' selected photos');
+    activeDialog = modal;
+    element('p', 'Changes save to this selection when you release a slider or finish entering a value. Each change can be undone from Edit History. Other settings stay unchanged.', modal);
+    var preview = selectionPreview(ids, modal);
+    var {controls, setting, mode, note, slider, number} = adjustmentControls(modal, defs);
+    var presetUi = presetControls(modal);
+    var more = presetUi.more, presetSelect = presetUi.select;
     var presetButton = button('Apply preset…', more, applyPreset); presetButton.disabled = true;
     button('Paste settings…', more, function() { perform(function() { return paste(ids); }); });
     var status = element('div', null, modal); status.className = 'development-status'; status.setAttribute('role', 'status');
@@ -219,13 +262,7 @@ window.VireoBatchEdits = (function() {
     var summary = {};
     /** @type {BatchEditPreset[]} */
     var presets = [];
-    function selectedDef() {
-      var def = defs.find(function(f) { return f.path === setting.value; });
-      if (!def || def.min == null || def.max == null || def.step == null || def.default == null) {
-        throw new Error('No numeric adjustment selected');
-      }
-      return /** @type {NumericBatchEditField} */ (def);
-    }
+    function selectedDef() { return numericField(defs, setting.value); }
     function configure() { configureAdjustment(selectedDef(), mode.value === 'relative', summary, slider, number, note); }
 
     async function reloadSummary() {
@@ -283,19 +320,7 @@ window.VireoBatchEdits = (function() {
     modal.addEventListener('cancel', function(event) { if (busy) event.preventDefault(); });
     modal.addEventListener('close', function() { activeDialog = null; modal.remove(); }, {once: true});
     modal.showModal(); setBusy(true);
-    // Presets are optional: a slow or failed request must not prevent
-    // adjustments and clipboard paste once the selection summary is ready.
-    (/** @type {Promise<{presets?: BatchEditPreset[]}>} */ (safeFetch('/api/edit-presets', {}, {toast: false}))).then(function(data) {
-      if (!modal.isConnected) return;
-      presets = data.presets || [];
-      presets.forEach(function(preset) { element('option', preset.name, presetSelect).value = String(preset.id); });
-      presetPlaceholder.textContent = presets.length ? 'Select a preset…' : 'No presets saved';
-      presetSelect.disabled = !presets.length;
-    }).catch(function() {
-      if (!modal.isConnected) return;
-      presetPlaceholder.textContent = 'Presets unavailable';
-      presetNote.textContent = 'Presets could not load. You can still adjust photos or paste settings.';
-    });
+    loadPresetOptions(modal, presetUi, function(loaded) { presets = loaded; });
     try {
       await reloadSummary();
       setBusy(false);

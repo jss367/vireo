@@ -65,6 +65,20 @@ interface WorkspaceSwitcherOptions {
   navigate(path: string): void;
   clearWorkspaceCursors(): void;
 }
+/** One switcher's state. create() builds it and never hands it out. */
+interface WorkspaceSwitcherContext {
+  readonly window: Window & typeof globalThis;
+  readonly document: Document;
+  readonly options: WorkspaceSwitcherOptions;
+  /** The menu is open. */
+  open: boolean;
+  activeId: number | null;
+  /** Bumped by every menu load and by close; a response from an earlier value is dropped. */
+  generation: number;
+  outsideClickTimer: number | null;
+  /** The document click listener that closes the menu, one function so it can be removed. */
+  readonly onOutsideClick: (event: MouseEvent) => void;
+}
 interface WorkspaceSwitcher {
   loadCurrentName(): Promise<void>;
   toggle(): Promise<void> | undefined;
@@ -143,6 +157,24 @@ interface CompareOptions {
   findPhoto(id: number): ComparePhoto | null | undefined;
   fetch<T>(url: string, init?: RequestInit, options?: {toast?: boolean}): Promise<T>;
   showToast(message: string, type?: string): void;
+}
+/** One comparison's state. create() builds it and never hands it out. */
+interface CompareContext {
+  readonly window: NonNullable<CompareOptions['window']>;
+  readonly document: Document;
+  readonly keymap: CompareOptions['keymap'];
+  readonly options: CompareOptions;
+  ids: number[];
+  offset: number;
+  /** Bumped by every render and by close; a response from an earlier value is dropped. */
+  seq: number;
+  escToken: number | null;
+  views: Record<ComparePane, {zoom: number; panX: number; panY: number}>;
+  pointer: ComparePointer | null;
+  /** Removers for the listeners added while open. */
+  listeners: (() => void)[];
+  /** Full-resolution loads in flight, one per pane. */
+  originalProbes: Partial<Record<ComparePane, HTMLImageElement>>;
 }
 interface CompareController {
   open(ids: number[]): Promise<void> | undefined;

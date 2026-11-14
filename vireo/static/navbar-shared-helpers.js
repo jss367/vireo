@@ -1009,8 +1009,7 @@ export function toggleAdvancedMode() {
   window.dispatchEvent(new Event('devmodechange'));
 }
 
-function init() {
-  // Restore panel state and height
+function restoreBottomPanel() {
   if (localStorage.getItem('vireo_panel_open') === 'true') {
     var savedH = parseInt(localStorage.getItem('vireo_panel_height') || '') || 240;
     var panel = /** @type {HTMLElement} */ (document.getElementById('bottomPanel'));
@@ -1020,20 +1019,11 @@ function init() {
     document.body.style.paddingBottom = (savedH + 28) + 'px';
     document.body.style.setProperty('--bottom-offset', (savedH + 28) + 'px');
   }
-  var savedTab = localStorage.getItem('vireo_panel_tab') || 'jobs';
-  switchBpTab(savedTab);
+}
 
-  // Infinite scroll for history pane
-  /** @type {HTMLElement} */ (document.getElementById('bpHistoryList')).addEventListener('scroll', function() {
-    var el = this;
-    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 20) {
-      loadEditHistory(true);
-    }
-  });
-
-  // SSE for logs — only connect when panel is open
-  var panelOpen = localStorage.getItem('vireo_panel_open') === 'true';
-  if (panelOpen) { startLogStream(); }
+// Free the server's threads for the next page as soon as a link is clicked,
+// and warn before a tab close that would abandon running work.
+function bindNavigationTeardown() {
   // Close SSE and stop polling immediately on link click (before unload)
   var isInternalNav = false;
   document.addEventListener('click', function(e) {
@@ -1066,34 +1056,48 @@ function init() {
       e.returnValue = '';
     }
   });
+}
 
-  // Restore logs from sessionStorage (persisted across page navigations)
+// The log pane's lines survive page navigation in sessionStorage; show those
+// first, then add what the server logged since the last of them.
+function restoreLogLines() {
   /** @type {NavLogRecord[]} */ var savedLogs = [];
   try {
     var raw = sessionStorage.getItem('vireo_logs');
     if (raw) savedLogs = JSON.parse(raw);
   } catch(ex) {}
 
-  if (savedLogs.length > 0) {
-    // Use saved logs and merge with any newer server logs
-    savedLogs.forEach(function(l) { addLpLine(l, true); });
-    var lastTime = savedLogs[savedLogs.length - 1]?.time || 0;
-    fetch('/api/logs/recent?count=200')
-      .then(function(r) { return r.json(); })
-      .then(function(/** @type {NavLogRecord[]} */ logs) {
-        logs.forEach(function(l) {
-          if (l.time > lastTime) addLpLine(l, true);
-        });
-        lpApplyFilter();
+  savedLogs.forEach(function(l) { addLpLine(l, true); });
+  /** @type {number | null} */ var lastTime = savedLogs.length ? (savedLogs[savedLogs.length - 1]?.time || 0) : null;
+  fetch('/api/logs/recent?count=200')
+    .then(function(r) { return r.json(); })
+    .then(function(/** @type {NavLogRecord[]} */ logs) {
+      logs.forEach(function(l) {
+        if (lastTime === null || l.time > lastTime) addLpLine(l, true);
       });
-  } else {
-    fetch('/api/logs/recent?count=200')
-      .then(function(r) { return r.json(); })
-      .then(function(/** @type {NavLogRecord[]} */ logs) {
-        logs.forEach(function(l) { addLpLine(l, true); });
-        lpApplyFilter();
-      });
-  }
+      lpApplyFilter();
+    });
+}
+
+function init() {
+  // Restore panel state and height
+  restoreBottomPanel();
+  var savedTab = localStorage.getItem('vireo_panel_tab') || 'jobs';
+  switchBpTab(savedTab);
+
+  // Infinite scroll for history pane
+  /** @type {HTMLElement} */ (document.getElementById('bpHistoryList')).addEventListener('scroll', function() {
+    var el = this;
+    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 20) {
+      loadEditHistory(true);
+    }
+  });
+
+  // SSE for logs — only connect when panel is open
+  var panelOpen = localStorage.getItem('vireo_panel_open') === 'true';
+  if (panelOpen) { startLogStream(); }
+  bindNavigationTeardown();
+  restoreLogLines();
 
   refreshHistoryControls();
 

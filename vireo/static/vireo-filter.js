@@ -1983,7 +1983,7 @@
     });
   }
 
-  function installEvents() {
+  function installSearchEvents() {
     const searchInput = /** @type {HTMLInputElement} */ ($('.vf-search input'));
     searchInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
@@ -2023,7 +2023,21 @@
         else applyQuickSearch(value);
       });
     }
+  }
 
+  function clearAllFilters() {
+    mutate(() => {
+      state.root = { mode: 'all', rules: [] };
+      state.muted = false;
+      state.visual = null;
+      state.visualInfo = null;
+    }, { reason: 'filtersCleared' });
+    toast('Filters cleared', true);
+  }
+
+  // The bar's buttons: the popover, mute, hand-off, the two clears, undo and
+  // Save as collection.
+  function installBarEvents() {
     /** @type {HTMLButtonElement} */ ($('.vf-filters-btn')).addEventListener('click', () => openPopover());
     /** @type {HTMLElement} */ ($('.vf-popover-close')).addEventListener('click', () => openPopover(false));
     /** @type {HTMLElement} */ ($('.vf-done')).addEventListener('click', () => openPopover(false));
@@ -2050,13 +2064,7 @@
       // Kill any pending live-search debounce so it can't silently reinstate
       // the just-typed text after "Filters cleared".
       cancelQuickSearchTimer();
-      mutate(() => {
-        state.root = { mode: 'all', rules: [] };
-        state.muted = false;
-        state.visual = null;
-        state.visualInfo = null;
-      }, { reason: 'filtersCleared' });
-      toast('Filters cleared', true);
+      clearAllFilters();
     });
     /** @type {HTMLElement} */ ($('.vf-clear-rules')).addEventListener('click', () => {
       clearUnappliedQuickSearchText();
@@ -2068,13 +2076,7 @@
         clearUnappliedQuickSearchText();
         return;
       }
-      mutate(() => {
-        state.root = { mode: 'all', rules: [] };
-        state.muted = false;
-        state.visual = null;
-        state.visualInfo = null;
-      }, { reason: 'filtersCleared' });
-      toast('Filters cleared', true);
+      clearAllFilters();
     });
     /** @type {HTMLButtonElement} */ ($('.vf-toast button')).addEventListener('click', () => { undo(); /** @type {HTMLElement} */ ($('.vf-toast')).hidden = true; });
     const saveCollectionBtn = /** @type {HTMLElement} */ ($('.vf-save-collection'));
@@ -2088,7 +2090,9 @@
         else if (e.key === 'Escape') closeSaveModal();
       });
     }
+  }
 
+  function installChipEvents() {
     /** @type {HTMLElement} */ ($('.vf-chip-row')).addEventListener('click', (e) => { const eventTarget = e.target; if (!(eventTarget instanceof HTMLElement)) return;
       const x = /** @type {HTMLElement | null} */ (eventTarget.closest('[data-chip-x]'));
       if (x) {
@@ -2115,7 +2119,9 @@
       }
       if (/** @type {HTMLElement | null} */ (eventTarget.closest('[data-chip]'))) openPopover(true);
     });
+  }
 
+  function installQuickFilterEvents() {
     // Quick filters
     /** @type {HTMLElement} */ ($('.vf-shortcuts')).addEventListener('click', (e) => { const eventTarget = e.target; if (!(eventTarget instanceof HTMLElement)) return;
       const btn = /** @type {HTMLElement | null} */ (eventTarget.closest('[data-shortcut]'));
@@ -2145,7 +2151,9 @@
       const btn = /** @type {HTMLElement | null} */ (eventTarget.closest('[data-color]'));
       if (btn) toggleQuickEnum('color_label', btn.dataset.color || '');
     });
+  }
 
+  function installRuleBuilderEvents() {
     /** @type {HTMLInputElement} */ ($('.vf-advanced input')).addEventListener('change', (e) => { const eventTarget = e.target; if (!(eventTarget instanceof HTMLInputElement || eventTarget instanceof HTMLSelectElement)) return;
       // Only controls whether group tooling is offered — never rewrites
       // the rule tree (hard requirement from the prototype review).
@@ -2172,174 +2180,203 @@
       mutate(() => state.root.rules.push(makeRule(btn.dataset.addField || '')));
       /** @type {HTMLElement} */ ($('.vf-field-picker')).hidden = true;
     });
+  }
 
+  /** @param {Event} e */
+  function onRuleTreeToggle(e) {
+    const eventTarget = e.target; if (!(eventTarget instanceof HTMLDetailsElement)) return;
+    if (!eventTarget.matches('.vf-value-picker details') || !document.contains(eventTarget)) return;
+    const wrap = /** @type {HTMLElement | null} */ (eventTarget.closest('.vf-value-picker')); if (!wrap) return;
+    const node = getNodeAtPath(wrap.dataset.path); if (!node || isGroup(node)) return;
+    valuePickerState(node).open = eventTarget.open;
+    if (eventTarget.open) loadValuePickers();
+  }
+
+  /** @param {Event} e */
+  function onRuleTreeChange(e) {
+    const eventTarget = e.target; if (!(eventTarget instanceof HTMLInputElement || eventTarget instanceof HTMLSelectElement)) return;
+    // Typed inputs commit through the debounced input path; their blur
+    // 'change' would re-render mid-click and destroy a suggest option
+    // before its pick lands (blur fires before click).
+    const action = eventTarget.dataset.action || '';
+    if (['value-input', 'between-lo', 'between-hi', 'recent-n', 'multi-text'].includes(action)) return;
+    if (action === 'choice-search') return;
+    if (action === 'choice-pick') {
+      const node = getNodeAtPath(eventTarget.dataset.path); if (!node || isGroup(node)) return;
+      const value = eventTarget.dataset.value || '';
+      const checked = (eventTarget instanceof HTMLInputElement && eventTarget.checked);
+      mutate(() => {
+        if (node.op === 'in' || node.op === 'not_in') {
+          const values = extensionValues(node).filter((v) => pickerValueKey(node, v) !== pickerValueKey(node, value));
+          node.value = checked ? values.concat(value) : values;
+        } else node.value = value;
+      }, { reason: checked ? undefined : 'filterRemoved' });
+      return;
+    }
+    if (action === 'extension-pick') {
+      const node = getNodeAtPath(eventTarget.dataset.path); if (!node || isGroup(node)) return;
+      if (!node || node.field !== 'extension') return;
+      const value = eventTarget.dataset.value || '';
+      const checked = (eventTarget instanceof HTMLInputElement && eventTarget.checked);
+      mutate(() => {
+        if (node.op === 'in' || node.op === 'not_in') {
+          const values = extensionValues(node).filter((v) => String(v).toLowerCase() !== value.toLowerCase());
+          node.value = checked ? values.concat(value) : values;
+        } else node.value = value;
+      }, { reason: checked ? undefined : 'filterRemoved' });
+      return;
+    }
+    handleRuleEdit(eventTarget);
+  }
+
+  /** @param {Event} e */
+  function onRuleTreeInput(e) {
+    const eventTarget = e.target; if (!(eventTarget instanceof HTMLInputElement || eventTarget instanceof HTMLSelectElement)) return;
+    const action = eventTarget.dataset.action || '';
+    if (action === 'choice-search') {
+      const node = getNodeAtPath(eventTarget.dataset.path); if (!node || isGroup(node)) return;
+      const picker = valuePickerState(node);
+      picker.query = eventTarget.value;
+      clearTimeout(picker.timer);
+      picker.request++;
+      if (node.field === 'folder' && picker.values !== null) refreshPickerOptions(node, picker);
+      else {
+        picker.pending = true;
+        picker.timer = setTimeout(() => requestPickerValues(node, picker), 150);
+      }
+      return;
+    }
+    if (['value-input', 'between-lo', 'between-hi', 'recent-n', 'multi-text'].includes(action)) {
+      clearTimeout(editDebounce ?? undefined);
+      const target = eventTarget;
+      editDebounce = setTimeout(() => {
+        editDebounce = null;
+        if (document.contains(target)) handleRuleEdit(target, true);
+      }, 250);
+    }
+    if (eventTarget instanceof HTMLInputElement && eventTarget.dataset.suggest) scheduleValueSuggest(eventTarget);
+  }
+
+  // A click on a control inside a rule: the rule's own remove and add buttons,
+  // its value picker, and the visual clause's strength and remove.
+  /** @param {HTMLElement} target */
+  function handleRuleTreeAction(target) {
+    const action = target.dataset.action;
+    const path = target.dataset.path;
+    if (action === 'visual-strength') {
+      mutate(() => { if (state.visual) state.visual.strength = target.dataset.strength || 'balanced'; });
+      return;
+    }
+    if (action === 'visual-remove') {
+      clearVisual();
+      toast('Visual search removed', true);
+      return;
+    }
+    if (action === 'choice-retry') {
+      const node = getNodeAtPath(path); if (!node || isGroup(node)) return;
+      requestPickerValues(node, valuePickerState(node));
+      return;
+    }
+    if (action === 'choice-folder-toggle') {
+      const node = getNodeAtPath(path); if (!node || isGroup(node)) return;
+      const picker = valuePickerState(node);
+      const folderId = Number(target.dataset.folder);
+      if (picker.collapsed.has(folderId)) picker.collapsed.delete(folderId);
+      else picker.collapsed.add(folderId);
+      renderRules();
+      return;
+    }
+    if (action === 'choice-remove') {
+      const node = getNodeAtPath(path); if (!node || isGroup(node)) return;
+      mutate(() => {
+        if (node.op === 'in' || node.op === 'not_in') node.value = extensionValues(node).filter((v) => v !== target.dataset.value);
+        else removeByReference(state.root, node);
+      }, { reason: 'filterRemoved' });
+      return;
+    }
+    if (action === 'extension-retry') {
+      const picker = /** @type {HTMLElement | null} */ (target.closest('.vf-extension-picker')); if (!picker) return;
+      const restoreFocus = picker.contains(document.activeElement);
+      extensionRequest = null;
+      /** @type {HTMLElement[]} */ ($$('.vf-extension-status')).forEach((status) => { status.textContent = 'Loading formats…'; });
+      if (restoreFocus) /** @type {HTMLElement} */ (picker.querySelector('.vf-extension-status')).focus({ preventScroll: true });
+      loadExtensionPickers();
+      return;
+    }
+    if (action === 'extension-remove') {
+      const node = getNodeAtPath(path); if (!node || isGroup(node)) return;
+      mutate(() => {
+        node.value = extensionValues(node).filter((v) => v !== target.dataset.value);
+      }, { reason: 'filterRemoved' });
+      return;
+    }
+    if (action === 'multi') {
+      const node = getNodeAtPath(path);
+      if (!node || isGroup(node)) return;
+      const values = enumClauseValues(node);
+      const removing = values.includes(target.dataset.value || '');
+      mutate(() => {
+        node.value = removing
+          ? values.filter((v) => v !== target.dataset.value)
+          : values.concat([target.dataset.value || '']);
+      }, { reason: removing ? 'filterRemoved' : undefined });
+      return;
+    }
+    if (action === 'remove') {
+      clearTimeout(editDebounce ?? undefined);
+      if (getNodeAtPath(path)?._qs) {
+        cancelQuickSearchTimer();
+        clearUnappliedQuickSearchText();
+      }
+      mutate(() => {
+        const ref = getParentAtPath(path || ''); if (!ref.parent) return;
+        const container = ref.parent === state.root ? state.root.rules : ref.parent.rules;
+        container.splice(ref.index, 1);
+      }, { reason: 'filterRemoved' });
+      toast('Rule removed', true);
+    } else if (action === 'add-child') {
+      mutate(() => { const group = getNodeAtPath(path); if (isGroup(group)) group.rules.push(makeRule('keyword')); });
+    } else if (action === 'add-subgroup') {
+      mutate(() => { const group = getNodeAtPath(path); if (isGroup(group)) group.rules.push({ mode: 'all', rules: [makeRule('rating', '>=', 3)] }); });
+    }
+  }
+
+  /** @param {Event} e */
+  function onRuleTreeClick(e) {
+    const eventTarget = e.target; if (!(eventTarget instanceof HTMLElement)) return;
+    const suggestion = /** @type {HTMLElement | null} */ (eventTarget.closest('[data-suggest-value]'));
+    if (suggestion) {
+      mutate(() => {
+        const node = getNodeAtPath(suggestion.dataset.path);
+        if (!node || isGroup(node)) return;
+        if (node.op === 'in' || node.op === 'not_in') {
+          const values = Array.isArray(node.value) ? node.value.slice() : [];
+          if (!values.includes((suggestion.dataset.suggestValue || ''))) values.push((suggestion.dataset.suggestValue || ''));
+          node.value = values;
+        } else node.value = (suggestion.dataset.suggestValue || '');
+      });
+      hideSuggests();
+      return;
+    }
+    const target = /** @type {HTMLElement | null} */ (eventTarget.closest('[data-action]'));
+    if (!target) return;
+    handleRuleTreeAction(target);
+  }
+
+  function installRuleTreeEvents() {
     const tree = /** @type {HTMLElement} */ ($('.vf-rule-tree'));
-    tree.addEventListener('toggle', (e) => { const eventTarget = e.target; if (!(eventTarget instanceof HTMLDetailsElement)) return;
-      if (!eventTarget.matches('.vf-value-picker details') || !document.contains(eventTarget)) return;
-      const wrap = /** @type {HTMLElement | null} */ (eventTarget.closest('.vf-value-picker')); if (!wrap) return;
-      const node = getNodeAtPath(wrap.dataset.path); if (!node || isGroup(node)) return;
-      valuePickerState(node).open = eventTarget.open;
-      if (eventTarget.open) loadValuePickers();
-    }, true);
-    tree.addEventListener('change', (e) => { const eventTarget = e.target; if (!(eventTarget instanceof HTMLInputElement || eventTarget instanceof HTMLSelectElement)) return;
-      // Typed inputs commit through the debounced input path; their blur
-      // 'change' would re-render mid-click and destroy a suggest option
-      // before its pick lands (blur fires before click).
-      const action = eventTarget.dataset.action || '';
-      if (['value-input', 'between-lo', 'between-hi', 'recent-n', 'multi-text'].includes(action)) return;
-      if (action === 'choice-search') return;
-      if (action === 'choice-pick') {
-        const node = getNodeAtPath(eventTarget.dataset.path); if (!node || isGroup(node)) return;
-        const value = eventTarget.dataset.value || '';
-        const checked = (eventTarget instanceof HTMLInputElement && eventTarget.checked);
-        mutate(() => {
-          if (node.op === 'in' || node.op === 'not_in') {
-            const values = extensionValues(node).filter((v) => pickerValueKey(node, v) !== pickerValueKey(node, value));
-            node.value = checked ? values.concat(value) : values;
-          } else node.value = value;
-        }, { reason: checked ? undefined : 'filterRemoved' });
-        return;
-      }
-      if (action === 'extension-pick') {
-        const node = getNodeAtPath(eventTarget.dataset.path); if (!node || isGroup(node)) return;
-        if (!node || node.field !== 'extension') return;
-        const value = eventTarget.dataset.value || '';
-        const checked = (eventTarget instanceof HTMLInputElement && eventTarget.checked);
-        mutate(() => {
-          if (node.op === 'in' || node.op === 'not_in') {
-            const values = extensionValues(node).filter((v) => String(v).toLowerCase() !== value.toLowerCase());
-            node.value = checked ? values.concat(value) : values;
-          } else node.value = value;
-        }, { reason: checked ? undefined : 'filterRemoved' });
-        return;
-      }
-      handleRuleEdit(eventTarget);
-    });
-    tree.addEventListener('input', (e) => { const eventTarget = e.target; if (!(eventTarget instanceof HTMLInputElement || eventTarget instanceof HTMLSelectElement)) return;
-      const action = eventTarget.dataset.action || '';
-      if (action === 'choice-search') {
-        const node = getNodeAtPath(eventTarget.dataset.path); if (!node || isGroup(node)) return;
-        const picker = valuePickerState(node);
-        picker.query = eventTarget.value;
-        clearTimeout(picker.timer);
-        picker.request++;
-        if (node.field === 'folder' && picker.values !== null) refreshPickerOptions(node, picker);
-        else {
-          picker.pending = true;
-          picker.timer = setTimeout(() => requestPickerValues(node, picker), 150);
-        }
-        return;
-      }
-      if (['value-input', 'between-lo', 'between-hi', 'recent-n', 'multi-text'].includes(action)) {
-        clearTimeout(editDebounce ?? undefined);
-        const target = eventTarget;
-        editDebounce = setTimeout(() => {
-          editDebounce = null;
-          if (document.contains(target)) handleRuleEdit(target, true);
-        }, 250);
-      }
-      if (eventTarget instanceof HTMLInputElement && eventTarget.dataset.suggest) scheduleValueSuggest(eventTarget);
-    });
+    tree.addEventListener('toggle', onRuleTreeToggle, true);
+    tree.addEventListener('change', onRuleTreeChange);
+    tree.addEventListener('input', onRuleTreeInput);
     tree.addEventListener('focusin', (e) => { const eventTarget = e.target; if (!(eventTarget instanceof HTMLInputElement)) return;
       if (eventTarget.dataset && eventTarget.dataset.suggest) showValueSuggest(eventTarget);
     });
-    tree.addEventListener('click', (e) => { const eventTarget = e.target; if (!(eventTarget instanceof HTMLElement)) return;
-      const suggestion = /** @type {HTMLElement | null} */ (eventTarget.closest('[data-suggest-value]'));
-      if (suggestion) {
-        mutate(() => {
-          const node = getNodeAtPath(suggestion.dataset.path);
-          if (!node || isGroup(node)) return;
-          if (node.op === 'in' || node.op === 'not_in') {
-            const values = Array.isArray(node.value) ? node.value.slice() : [];
-            if (!values.includes((suggestion.dataset.suggestValue || ''))) values.push((suggestion.dataset.suggestValue || ''));
-            node.value = values;
-          } else node.value = (suggestion.dataset.suggestValue || '');
-        });
-        hideSuggests();
-        return;
-      }
-      const target = /** @type {HTMLElement | null} */ (eventTarget.closest('[data-action]'));
-      if (!target) return;
-      const action = target.dataset.action;
-      const path = target.dataset.path;
-      if (action === 'visual-strength') {
-        mutate(() => { if (state.visual) state.visual.strength = target.dataset.strength || 'balanced'; });
-        return;
-      }
-      if (action === 'visual-remove') {
-        clearVisual();
-        toast('Visual search removed', true);
-        return;
-      }
-      if (action === 'choice-retry') {
-        const node = getNodeAtPath(path); if (!node || isGroup(node)) return;
-        requestPickerValues(node, valuePickerState(node));
-        return;
-      }
-      if (action === 'choice-folder-toggle') {
-        const node = getNodeAtPath(path); if (!node || isGroup(node)) return;
-        const picker = valuePickerState(node);
-        const folderId = Number(target.dataset.folder);
-        if (picker.collapsed.has(folderId)) picker.collapsed.delete(folderId);
-        else picker.collapsed.add(folderId);
-        renderRules();
-        return;
-      }
-      if (action === 'choice-remove') {
-        const node = getNodeAtPath(path); if (!node || isGroup(node)) return;
-        mutate(() => {
-          if (node.op === 'in' || node.op === 'not_in') node.value = extensionValues(node).filter((v) => v !== target.dataset.value);
-          else removeByReference(state.root, node);
-        }, { reason: 'filterRemoved' });
-        return;
-      }
-      if (action === 'extension-retry') {
-        const picker = /** @type {HTMLElement | null} */ (target.closest('.vf-extension-picker')); if (!picker) return;
-        const restoreFocus = picker.contains(document.activeElement);
-        extensionRequest = null;
-        /** @type {HTMLElement[]} */ ($$('.vf-extension-status')).forEach((status) => { status.textContent = 'Loading formats…'; });
-        if (restoreFocus) /** @type {HTMLElement} */ (picker.querySelector('.vf-extension-status')).focus({ preventScroll: true });
-        loadExtensionPickers();
-        return;
-      }
-      if (action === 'extension-remove') {
-        const node = getNodeAtPath(path); if (!node || isGroup(node)) return;
-        mutate(() => {
-          node.value = extensionValues(node).filter((v) => v !== target.dataset.value);
-        }, { reason: 'filterRemoved' });
-        return;
-      }
-      if (action === 'multi') {
-        const node = getNodeAtPath(path);
-        if (!node || isGroup(node)) return;
-        const values = enumClauseValues(node);
-        const removing = values.includes(target.dataset.value || '');
-        mutate(() => {
-          node.value = removing
-            ? values.filter((v) => v !== target.dataset.value)
-            : values.concat([target.dataset.value || '']);
-        }, { reason: removing ? 'filterRemoved' : undefined });
-        return;
-      }
-      if (action === 'remove') {
-        clearTimeout(editDebounce ?? undefined);
-        if (getNodeAtPath(path)?._qs) {
-          cancelQuickSearchTimer();
-          clearUnappliedQuickSearchText();
-        }
-        mutate(() => {
-          const ref = getParentAtPath(path || ''); if (!ref.parent) return;
-          const container = ref.parent === state.root ? state.root.rules : ref.parent.rules;
-          container.splice(ref.index, 1);
-        }, { reason: 'filterRemoved' });
-        toast('Rule removed', true);
-      } else if (action === 'add-child') {
-        mutate(() => { const group = getNodeAtPath(path); if (isGroup(group)) group.rules.push(makeRule('keyword')); });
-      } else if (action === 'add-subgroup') {
-        mutate(() => { const group = getNodeAtPath(path); if (isGroup(group)) group.rules.push({ mode: 'all', rules: [makeRule('rating', '>=', 3)] }); });
-      }
-    });
+    tree.addEventListener('click', onRuleTreeClick);
+  }
 
+  // Shortcuts and outside clicks, which close whatever the bar has open.
+  function installDocumentEvents() {
+    const searchInput = /** @type {HTMLInputElement} */ ($('.vf-search input'));
     document.addEventListener('keydown', (e) => { const eventTarget = e.target; if (!(eventTarget instanceof HTMLElement)) return;
       const typing = ['INPUT', 'SELECT', 'TEXTAREA'].includes(eventTarget.tagName) || eventTarget.isContentEditable;
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'f' && !e.shiftKey && !e.altKey) {
@@ -2380,6 +2417,16 @@
     });
     window.addEventListener('resize', updateChipOverflow);
     if (rootEl) new ResizeObserver(updateChipOverflow).observe(rootEl);
+  }
+
+  function installEvents() {
+    installSearchEvents();
+    installBarEvents();
+    installChipEvents();
+    installQuickFilterEvents();
+    installRuleBuilderEvents();
+    installRuleTreeEvents();
+    installDocumentEvents();
   }
 
   function expressionSummary() {

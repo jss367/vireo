@@ -43,6 +43,34 @@
       .sort(function(a, b) { return (a.tabIndex || Infinity) - (b.tabIndex || Infinity); });
   }
 
+  // Move focus to the dialog's next or previous control for a Tab press,
+  // wrapping at the ends.
+  /** @param {HTMLElement} overlay @param {KeyboardEvent} event */
+  function moveTabFocus(overlay, event) {
+    // Recompute on each press: rule controls may be added, hidden or disabled.
+    const elements = focusableElements(overlay);
+    const active = document.activeElement;
+    const index = active instanceof HTMLElement ? elements.indexOf(active) : -1;
+    const next = index < 0 ? (event.shiftKey ? elements.length - 1 : 0)
+      : (index + (event.shiftKey ? -1 : 1) + elements.length) % elements.length;
+    // Own every Tab step: WebKit's default keyboard preference can skip
+    // buttons and move focus into browser chrome even with an inert page.
+    event.preventDefault();
+    const target = elements[next] || overlay;
+    target.focus({preventScroll: true});
+    // A dialog's own scrollable list (e.g. the batch
+    // Add-to-Collection chooser's max-height:200px overflow-y:auto area)
+    // would otherwise hide the newly focused button when Tab lands below
+    // the fold, since preventScroll suppresses the browser's default
+    // focus-scroll. block/inline 'nearest' only scrolls the nearest
+    // scrollable ancestor that already needs to scroll to show the
+    // element, so visible controls are untouched and the page-level
+    // scroll (already locked while a dialog is open) is unaffected.
+    if (typeof target.scrollIntoView === 'function') {
+      target.scrollIntoView({block: 'nearest', inline: 'nearest'});
+    }
+  }
+
   /**
    * @param {HTMLElement} overlay
    * @param {VireoDialogOptions} [options]
@@ -65,28 +93,7 @@
     function trapTab(event) {
       if (!session || stack.at(-1) !== session || event.key !== 'Tab' ||
           event.ctrlKey || event.metaKey || event.altKey) return;
-      // Recompute on each press: rule controls may be added, hidden or disabled.
-      const elements = focusableElements(overlay);
-      const active = document.activeElement;
-      const index = active instanceof HTMLElement ? elements.indexOf(active) : -1;
-      const next = index < 0 ? (event.shiftKey ? elements.length - 1 : 0)
-        : (index + (event.shiftKey ? -1 : 1) + elements.length) % elements.length;
-      // Own every Tab step: WebKit's default keyboard preference can skip
-      // buttons and move focus into browser chrome even with an inert page.
-      event.preventDefault();
-      const target = elements[next] || overlay;
-      target.focus({preventScroll: true});
-      // A dialog's own scrollable list (e.g. the batch
-      // Add-to-Collection chooser's max-height:200px overflow-y:auto area)
-      // would otherwise hide the newly focused button when Tab lands below
-      // the fold, since preventScroll suppresses the browser's default
-      // focus-scroll. block/inline 'nearest' only scrolls the nearest
-      // scrollable ancestor that already needs to scroll to show the
-      // element, so visible controls are untouched and the page-level
-      // scroll (already locked while a dialog is open) is unaffected.
-      if (typeof target.scrollIntoView === 'function') {
-        target.scrollIntoView({block: 'nearest', inline: 'nearest'});
-      }
+      moveTabFocus(overlay, event);
     }
 
     /** @param {FocusEvent} event */
