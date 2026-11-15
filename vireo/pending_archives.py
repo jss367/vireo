@@ -35,11 +35,21 @@ def active_archive_jobs(runner, workspace_id):
 
 
 def _check_archive_mount_confirmation(identities, confirmed_identities):
-    """A caller's explicit confirmation must still describe the live mount."""
+    """A caller's explicit confirmation must match saved evidence and the live mount.
+
+    Matching only the live snapshot is not enough: another tab may have recorded
+    different identities between proposal and submission, and the mount may have
+    since reverted to the one named on the original prompt. Reject when the
+    confirmation names an identity that already differs from what is saved, so
+    the stale tab never dispatches a transfer that the worker would reject.
+    """
     from import_staging import _archive_mount_identities
 
     if (not isinstance(confirmed_identities, dict) or not confirmed_identities
             or not confirmed_identities.keys() <= identities.keys()):
+        raise ValueError("The NAS destination changed since confirmation. Try Send to NAS again to review it.")
+    saved = json.loads(json.dumps({root: identities[root] for root in confirmed_identities}))
+    if confirmed_identities != saved:
         raise ValueError("The NAS destination changed since confirmation. Try Send to NAS again to review it.")
     current = _archive_mount_identities({root: True for root in confirmed_identities})
     if (any(identity is None for identity in current.values())

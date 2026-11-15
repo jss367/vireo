@@ -112,6 +112,45 @@ def test_confirmation_is_rechecked_after_another_tab_records_evidence(recovery, 
         assert (source / relative).read_bytes() == content
 
 
+def test_stale_confirmation_matching_live_mount_still_rejects_when_saved_differs(recovery, monkeypatch):
+    """Another tab saved B; the mount later reverts to A. Tab A's stale confirmation
+    must be rejected before dispatch instead of matching the live snapshot while the
+    saved evidence disagrees."""
+    from unittest.mock import Mock
+
+    import pending_archives
+
+    client, db, archive, root, state = recovery
+    source = Path(archive['staging_destination'])
+    originals = {str(p.relative_to(source)): p.read_bytes() for p in source.rglob('*') if p.is_file()}
+    assert originals
+    url = f"/api/import/pending-archives/{archive['id']}/send"
+
+    proposal_a = client.post(url).get_json()['mount_confirmation']
+    state['identity'] = ('network-share', 'smb://replacement/photos', '/')
+    proposal_b = client.post(url).get_json()['mount_confirmation']
+    transfer = Mock(side_effect=ValueError('Simulated transfer failure; no files moved'))
+    monkeypatch.setattr(pending_archives, 'send_pending_archive', transfer)
+    response = client.post(url, json={'confirmed_mount_identities': proposal_b})
+    assert response.status_code == 200
+    assert wait_for_job_via_client(client, response.get_json()['job_id'])['status'] == 'failed'
+    transfer.assert_called_once()
+    saved = db.pending_archives.get(archive['id'])['target_json']
+    assert json.loads(saved)['mount_identities'] == proposal_b
+
+    # Mount reverts to A, so Tab A's stale confirmation now matches the live snapshot.
+    state['identity'] = ('network-share', 'smb://nas/photos', '/')
+    transfer.reset_mock()
+    response = client.post(url, json={'confirmed_mount_identities': proposal_a})
+    assert response.status_code == 409
+    assert 'changed since confirmation' in response.get_json()['error']
+    assert 'job_id' not in response.get_json()
+    transfer.assert_not_called()
+    assert db.pending_archives.get(archive['id'])['target_json'] == saved
+    for relative, content in originals.items():
+        assert (source / relative).read_bytes() == content
+
+
 def test_recovery_cannot_replace_known_mount_evidence(recovery):
     from pending_archives import prepare_archive_mount
 
