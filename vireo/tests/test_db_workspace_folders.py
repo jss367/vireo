@@ -593,6 +593,40 @@ def test_get_workspace_folder_roots_counts_linked_subtree_photos(db, tree):
     assert [(r["id"], r["workspace_photo_count"]) for r in other_rows] == [(a, 3)]
 
 
+def test_get_workspace_folder_roots_counts_a_photo_granted_on_its_own(db, tree):
+    ws, p, a, b, q = tree
+    workspace_folders.add_workspace_folder(db, ws, p)
+    workspace_folders.remove_workspace_folder(db, ws, b)
+    kept = _photo(db, b, "kept.jpg")
+    _photo(db, b, "hidden.jpg")
+    db.photo_visibility.grant(ws, [kept])
+    db.commit()
+    rows = workspace_folders.get_workspace_folder_roots(db, ws)
+    assert [(r["path"], r["workspace_photo_count"]) for r in rows] == [("/p", 1)]
+
+
+def test_workspace_roots_read_one_workspace_s_photos(db, tree):
+    """The count reads the photos of the workspace asked for, once.
+
+    Most pages load the active workspace with its roots. A count that
+    correlates the view to each root builds the visibility of every workspace
+    in the catalog: three seconds for fifteen roots of an 80,000-photo one.
+    """
+    ws, p, a, b, q = tree
+    workspace_folders.add_workspace_folder(db, ws, p)
+    _photo(db, a, "a1.jpg")
+    statements = []
+    db.conn.set_trace_callback(statements.append)
+    try:
+        assert [r["workspace_photo_count"] for r in db.workspace_folders.roots(ws)] == [1]
+    finally:
+        db.conn.set_trace_callback(None)
+    (read,) = [s for s in statements if "workspace_photo_count" in s]
+    plan = [row[3] for row in db.conn.execute("EXPLAIN QUERY PLAN " + read)]
+    assert "MATERIALIZE visible_folder" in plan
+    assert not [step for step in plan if step.startswith(("SCAN wf", "SCAN wp"))]
+
+
 def test_get_workspace_folder_roots_hides_non_root_links(db, tree):
     ws, p, a, b, q = tree
     workspace_folders.add_workspace_folder(db, ws, p, is_root=False)

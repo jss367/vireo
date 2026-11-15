@@ -58,6 +58,18 @@ def _photo(db, folder_id, filename, **cols):
     return pid
 
 
+def _count_plan(db, rules):
+    """The query plan of a collection count over ``rules``."""
+    statements = []
+    db.conn.set_trace_callback(statements.append)
+    try:
+        db.collections.count_photos_for_rules(rules)
+    finally:
+        db.conn.set_trace_callback(None)
+    (count,) = [s for s in statements if "FROM photos p" in s]
+    return [row[3] for row in db.conn.execute("EXPLAIN QUERY PLAN " + count)]
+
+
 def _ids(db, rules, **kwargs):
     return db.collections.query_photo_ids(rules, sort="name", **kwargs)
 
@@ -1272,3 +1284,81 @@ def test_top_predicted_species_matches_summary(db, folder):
     review_decisions.update_prediction_status(db, pred_id, "rejected")
     assert _ids(db, rule("Robin")) == []
     assert _ids(db, rule("Runner-up")) == [robin]
+
+
+# -- query shape ----------------------------------------------------------------
+
+
+def test_static_collection_holds_only_photos_the_workspace_can_see(db, folder, tmp_path):
+    """A linked folder or a grant on the photo itself, exactly as the view decides."""
+    ws = db.require_workspace_id()
+    linked = _photo(db, folder, "linked.jpg", rating=5)
+    granted = _photo(db, folder, "granted.jpg")
+    other = db.create_workspace("Other")
+    db.commit()
+    foreign = workspace_folders.add_folder(
+        db, str(tmp_path / "foreign"), name="foreign", link_to_workspace=False,
+    )
+    workspace_folders.add_workspace_folder(db, other, foreign)
+    unseen = _photo(db, foreign, "unseen.jpg", rating=5)
+    db.photo_visibility.grant(other, [granted])
+    db.commit()
+    named = [{"field": "photo_ids", "value": [linked, granted, unseen, 10**9]}]
+    rated = [*named, {"field": "rating", "op": ">=", "value": 5}]
+    assert set(_ids(db, named)) == {linked, granted}
+    assert _ids(db, rated) == [linked]
+    assert db.collections.count_photos_for_rules(named, include_offline_folders=True) == 2
+    db.set_active_workspace(other)
+    assert set(_ids(db, named)) == {granted, unseen}
+    assert _ids(db, rated) == [unseen]
+    assert db.collections.count_photos_for_rules(named, include_offline_folders=True) == 2
+    db.set_active_workspace(ws)
+
+
+def test_static_collection_never_builds_the_workspace_photo_set(db, folder):
+    """A list of photo ids costs its own photos, not the workspace's.
+
+    Every page lists the collections with their counts, and each import
+    leaves one static collection behind. A count that joins the visibility
+    view builds every photo the workspace can see to check the few it names.
+    """
+    photo = _photo(db, folder, "a.jpg")
+    named = {"field": "photo_ids", "value": [photo]}
+    for rules in ([named], [named, {"field": "rating", "op": ">=", "value": 0}]):
+        plan = _count_plan(db, rules)
+        assert not [step for step in plan if "CO-ROUTINE" in step]
+        assert "SEARCH p USING INTEGER PRIMARY KEY (rowid=?)" in plan
+
+
+@pytest.mark.parametrize("rules", [
+    [{"field": "all"}],
+    [{"field": "rating", "op": ">=", "value": 0}],
+    {"mode": "any", "rules": [{"field": "photo_ids", "value": [1]}, {"field": "rating", "op": ">=", "value": 5}]},
+    {"mode": "none", "rules": [{"field": "photo_ids", "value": [1]}]},
+    {"mode": "all", "rules": [{"mode": "any", "rules": [{"field": "photo_ids", "value": [1]}]}]},
+])
+def test_rules_that_range_over_the_workspace_start_from_its_photos(db, folder, rules):
+    """Only a tree that every match must satisfy by id is read id by id."""
+    folder_join, _join, _where, params = db.collections.build_query_from_rules(rules)
+    assert "photo_workspace_visibility" in folder_join
+    assert params[0] == db.require_workspace_id()
+
+
+@pytest.mark.parametrize("rule", [
+    {"field": "has_location_keyword", "op": "equals", "value": 0},
+    {"field": "has_coord_location_keyword", "op": "equals", "value": 0},
+    {"field": "location_keyword_missing", "op": "equals", "value": 1},
+])
+def test_location_rules_read_each_photo_s_own_keywords(db, folder, rule):
+    """The test costs a photo's few keywords, not every place in the catalog.
+
+    A plan that starts from the keyword side probes each photo once per
+    location keyword: a second per count on an 80,000-photo workspace with
+    200 places.
+    """
+    _photo(db, folder, "a.jpg")
+    plan = _count_plan(db, [rule])
+    probes = [step for step in plan if " pk_location " in step or " k_location " in step]
+    assert [step.split(" USING ")[0] for step in probes] == ["SEARCH pk_location", "SEARCH k_location"]
+    assert "(photo_id=?)" in probes[0]
+    assert "rowid=?" in probes[1]

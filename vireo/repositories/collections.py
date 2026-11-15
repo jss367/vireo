@@ -50,7 +50,9 @@ from repositories.photo_sql import (
     PHOTO_DATE_DESC_ORDER,
     TOP_PREDICTION_CONFIDENCE_EXPR,
     inclusive_date_to,
+    location_keyword_exists_sql,
 )
+from repositories.photo_visibility import photo_visible_in_workspace_sql
 from repositories.prediction_review import prediction_review_join, prediction_review_status
 from repositories.top_species import TOP_SPECIES_RANKING_SQL
 from settings_source import config_value
@@ -622,13 +624,22 @@ class CollectionRepository:
         # move still participates in /api/photos/query, saved collections,
         # select-all, and site export even though its new folder is not linked
         # to the workspace.
-        folder_join += (
-            " JOIN photo_workspace_visibility wf"
-            " ON wf.photo_id = p.id AND wf.workspace_id = ?"
-        )
-
-        # folder_join comes before join_clause in the query, so its param goes first
-        params.insert(0, self.workspace_id)
+        if _names_photos_by_id(root):
+            # A static collection is a list of photo ids. Joining the
+            # visibility view would build every photo the workspace can see
+            # to check the few the list names, on each query against the
+            # collection; test the named photos one by one instead. The
+            # condition leads the WHERE clause, which every caller places
+            # straight after the joins, so its workspace ids still bind first.
+            condition = f"{photo_visible_in_workspace_sql('p.id')} AND ({condition})"
+            params[0:0] = [self.workspace_id, self.workspace_id]
+        else:
+            folder_join += (
+                " JOIN photo_workspace_visibility wf"
+                " ON wf.photo_id = p.id AND wf.workspace_id = ?"
+            )
+            # folder_join comes before join_clause in the query, so its param goes first
+            params.insert(0, self.workspace_id)
 
         where = f"WHERE {condition}" if condition else ""
 
@@ -2304,6 +2315,18 @@ def _is_scalar(value):
     return value is None or isinstance(value, str | int | float | bool)
 
 
+def _names_photos_by_id(root):
+    """True when every match of a validated rule tree is in a ``photo_ids`` list.
+
+    That holds when the root requires all of its rules and one of them is a
+    ``photo_ids`` rule: whatever the others say, the result is a subset of
+    those ids.
+    """
+    return root.get("mode", "all") == "all" and any(
+        child.get("field") == "photo_ids" for child in root["rules"]
+    )
+
+
 def _validate_node(node):
     if not isinstance(node, dict):
         raise ValueError("each rule must be an object")
@@ -3328,12 +3351,7 @@ class _RuleQueryBuilder:
         return _boolean_predicate(has, op, value)
 
     def _has_location_keyword_rule(self, field, op, value, rule):
-        has = (
-            "EXISTS (SELECT 1 FROM photo_keywords pk "
-            "JOIN keywords k ON k.id = pk.keyword_id "
-            "WHERE pk.photo_id = p.id AND k.type = 'location')"
-        )
-        return _boolean_predicate(has, op, value)
+        return _boolean_predicate(location_keyword_exists_sql(), op, value)
 
     def _has_coord_location_keyword_rule(self, field, op, value, rule):
         """A structured location supplies coordinates the map can
@@ -3342,22 +3360,12 @@ class _RuleQueryBuilder:
         depends on this being distinct from ``has_location_keyword``
         (which also matches free-text locations without lat/lng).
         """
-        has = (
-            "EXISTS (SELECT 1 FROM photo_keywords pk "
-            "JOIN keywords k ON k.id = pk.keyword_id "
-            "WHERE pk.photo_id = p.id AND k.type = 'location' "
-            "AND k.latitude IS NOT NULL AND k.longitude IS NOT NULL)"
-        )
+        has = location_keyword_exists_sql(with_coordinates=True)
         return _boolean_predicate(has, op, value)
 
     def _location_keyword_missing_rule(self, field, op, value, rule):
         gps = "p.latitude IS NOT NULL AND p.longitude IS NOT NULL"
-        no_loc = (
-            "NOT EXISTS (SELECT 1 FROM photo_keywords pk "
-            "JOIN keywords k ON k.id = pk.keyword_id "
-            "WHERE pk.photo_id = p.id AND k.type = 'location')"
-        )
-        cond = f"({gps}) AND ({no_loc})"
+        cond = f"({gps}) AND (NOT {location_keyword_exists_sql()})"
         return (cond if _truthy(value) else f"NOT ({cond})"), []
 
     def _inat_submitted_rule(self, field, op, value, rule):

@@ -506,13 +506,16 @@ class WorkspaceFolderRepository:
         whole-directory scanning or local workspace copying.
         """
         return self.conn.execute(
-            """SELECT f.*, (
-                   SELECT COUNT(*)
-                   FROM photos p
-                   JOIN folders cf ON cf.id = p.folder_id
-                   JOIN photo_workspace_visibility cwf
-                     ON cwf.photo_id = p.id
-                    AND cwf.workspace_id = wf.workspace_id
+            """WITH visible_folder AS MATERIALIZED (
+                   SELECT v.folder_id, COUNT(*) AS photos
+                   FROM photo_workspace_visibility v
+                   WHERE v.workspace_id = ?
+                   GROUP BY v.folder_id
+               )
+               SELECT f.*, (
+                   SELECT COALESCE(SUM(vf.photos), 0)
+                   FROM visible_folder vf
+                   JOIN folders cf ON cf.id = vf.folder_id
                    LEFT JOIN local_folder_mappings lfm
                      ON lfm.folder_id = cf.id
                    WHERE cf.path = f.path
@@ -532,7 +535,7 @@ class WorkspaceFolderRepository:
                JOIN workspace_folders wf ON wf.folder_id = f.id
                WHERE wf.workspace_id = ? AND wf.is_root = 1
                ORDER BY f.path""",
-            (workspace_id,),
+            (workspace_id, workspace_id),
         ).fetchall()
 
     def audit_root_paths(self, workspace_id: int) -> list[str]:
