@@ -34,6 +34,39 @@ def active_archive_jobs(runner, workspace_id):
             and j.get("blocks_local_transitions", True)]
 
 
+def prepare_archive_mount(db, archive, confirmed_identities=None):
+    """Offer explicit recovery of missing evidence, never replace known evidence.
+
+    Confirmation is bound to the live identities shown to the caller. The
+    transfer will check the persisted identities again before copying and
+    before committing the move.
+    """
+    from import_staging import _archive_mount_identities, check_staged_mount
+
+    target = json.loads(archive["target_json"])
+    if target.get("transport") != "mounted":
+        return None
+    identities = target.get("mount_identities") or {}
+    missing = [root for root, identity in identities.items() if identity is None]
+    if not missing:
+        return None
+    baseline = target.get("mount_baseline") or {}
+    current = _archive_mount_identities({root: True for root in missing})
+    proposed = {**identities, **current}
+    # Check availability and all known identities before offering recovery.
+    check_staged_mount(archive["destination"], baseline, proposed)
+    proposal = json.loads(json.dumps(current))
+    if confirmed_identities is None:
+        return proposal
+    if confirmed_identities != proposal:
+        raise ValueError("The NAS destination changed since confirmation. Try Send to NAS again to review it.")
+    target["mount_identities"] = proposed
+    with db.transaction():
+        db.pending_archives.update_target(archive["id"], target)
+    archive["target_json"] = json.dumps(target)
+    return None
+
+
 def send_pending_archive(db, archive, *, vireo_dir, guard_folder, progress_cb, control=None):
     """Move the remaining directory through the verified move implementation.
 

@@ -132,11 +132,21 @@
     error.textContent = '';
     actionError = '';
     try {
-      const response = await fetch('/api/import/pending-archives/' + encodeURIComponent(String(item.id)) + '/send', {
-        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({sync_first: syncFirst}),
+      const url = '/api/import/pending-archives/' + encodeURIComponent(String(item.id)) + '/send';
+      const send = (/** @type {object} */ body) => fetch(url, {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body),
       });
-      /** @type {{error?: string}} */
-      const result = await response.json();
+      let response = await send({sync_first: syncFirst});
+      /** @type {{error?: string, mount_confirmation?: Record<string, unknown[]>}} */
+      let result = await response.json();
+      if (response.status === 409 && result.mount_confirmation) {
+        const mounts = Object.keys(result.mount_confirmation).join('\n');
+        if (!window.confirm('Vireo did not record the original NAS identity. Verify that this is the intended destination:\n\n'
+          + item.destination + '\nMounted at: ' + mounts
+          + '\n\nTrust this mounted destination and send the photos? Local originals are removed only after a verified transfer.')) return;
+        response = await send({sync_first: syncFirst, confirmed_mount_identities: result.mount_confirmation});
+        result = await response.json();
+      }
       if (!response.ok) throw new Error(result.error || 'Could not start the NAS transfer.');
     } catch (e) {
       actionError = e instanceof Error ? e.message : String(e);

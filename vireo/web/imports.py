@@ -1056,6 +1056,22 @@ def _send_request_body(raw: str) -> tuple[JsonDict, str | None]:
     return body, None
 
 
+def _archive_mount_confirmation(db: Database, archive: JsonDict, body: JsonDict) -> ResponseReturnValue | None:
+    """Pause a send for missing destination evidence; never silently trust it."""
+    from pending_archives import prepare_archive_mount
+
+    try:
+        proposal = prepare_archive_mount(db, archive, body.get("confirmed_mount_identities"))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 409
+    if proposal is not None:
+        return jsonify({
+            "error": "The NAS identity was not recorded when this import was created. Confirm the currently mounted destination before sending.",
+            "mount_confirmation": proposal,
+        }), 409
+    return None
+
+
 def _send_archive_steps(runner: JobRunner, job: JobDict, archive: JsonDict, sync_first: bool) -> MoveSteps:
     """The send-to-NAS job's step tree (with the metadata sync step first)."""
     remote = json.loads(archive["target_json"]).get("transport") != "mounted"
@@ -1518,6 +1534,10 @@ def create_imports_blueprint(
             if active:
                 return json_error(
                     f"Wait for {describe_jobs(active)} to finish before sending these photos to NAS", 409)
+
+            confirmation = _archive_mount_confirmation(db, archive, body)
+            if confirmation is not None:
+                return confirmation
 
             # Canonical like the trees jobs declare (an SSH target's mount
             # mirror may be reached through a symlink), resolved before the
