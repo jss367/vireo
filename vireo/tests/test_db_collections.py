@@ -377,8 +377,8 @@ def test_photo_ids_rule_binds_non_integer_ids(db, folder):
     assert _ids(db, [{"field": "photo_ids", "value": [str(b)]}]) == [b]
     assert _ids(db, [{"field": "photo_ids", "value": [a, str(b)]}]) == [a, b]
     sql = db.collections.build_query_from_rules([{"field": "photo_ids", "value": [a, str(b)]}])
-    assert sql[2] == f"WHERE ((p.id IN ({a}) OR p.id IN (?)))"
-    assert sql[3] == [db._active_workspace_id, str(b)]
+    assert sql[2].endswith(f" AND (((p.id IN ({a}) OR p.id IN (?))))")
+    assert sql[3] == [db._active_workspace_id, db._active_workspace_id, str(b)]
 
 
 def test_empty_in_lists_become_constants(db, folder):
