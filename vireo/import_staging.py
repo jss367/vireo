@@ -83,15 +83,19 @@ def check_staged_mount(destination, baseline, identities):
         _unmounted_since_baseline,
     )
 
-    # JSON persistence turns the helper's tuple identities into lists.
-    identities = {root: tuple(value) if isinstance(value, list) else value
-                  for root, value in (identities or {}).items()}
-    current = _archive_mount_identities({root: True for root in identities})
-    changed = next((root for root, prior in identities.items()
-                    if prior is None or current.get(root) != prior), None)
-    if changed:
-        raise ValueError(f"NAS volume changed: {changed}. Local originals are preserved; restore the original volume before retrying.")
     offline = (_unmounted_since_baseline(baseline or {})
                or _missing_archive_mount_root(destination))
     if offline:
         raise ValueError(f"NAS volume unavailable: {offline}. Local originals are preserved; reconnect it and retry.")
+
+    # JSON persistence turns the helper's tuple identities into lists.
+    identities = {root: tuple(value) if isinstance(value, list) else value
+                  for root, value in (identities or {}).items()}
+    current = _archive_mount_identities({root: True for root in identities})
+    unknown = next((root for root, prior in identities.items() if prior is None), None)
+    if unknown:
+        raise ValueError(f"NAS identity was not recorded: {unknown}. Local originals are preserved; use Send to NAS to confirm the destination.")
+    changed = next((root for root, prior in identities.items()
+                    if current.get(root) != prior), None)
+    if changed:
+        raise ValueError(f"NAS volume changed: {changed}. Local originals are preserved; restore the original volume before retrying.")
