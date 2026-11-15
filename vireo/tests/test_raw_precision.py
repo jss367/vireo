@@ -54,6 +54,52 @@ def test_real_raw_decode_retains_above_white_and_sub_byte_detail(dng):
     assert np.isfinite(pixels).all()
 
 
+def test_linear_decode_is_as_bright_as_a_clipped_decode(dng):
+    """Keeping highlights unclipped must not darken the rest of the frame."""
+    image = load_image(dng, max_size=None, raw_decode=RAW_DECODE_LINEAR)
+    with rawpy.imread(str(dng)) as raw:
+        clipped = raw.postprocess(
+            output_bps=16, gamma=(1, 1), use_camera_wb=True, no_auto_bright=True,
+            output_color=rawpy.ColorSpace.sRGB,
+        ).astype(np.float32) / 65535
+    # Compare where the clipped decode clipped nothing: below each channel's
+    # ceiling, and above the floor where it zeroes out-of-gamut negatives.
+    unclipped = (clipped.max(axis=-1) < 0.9) & (clipped.min(axis=-1) > 0.01)
+    assert unclipped.mean() > 0.1
+    np.testing.assert_allclose(
+        np.asarray(image)[unclipped], clipped[unclipped], rtol=0.02,
+    )
+
+
+class _Balance:
+    """The white-balance fields of an open rawpy image."""
+
+    def __init__(self, camera, daylight=(2.0, 1.0, 1.5, 0.0), num_colors=3):
+        self.camera_whitebalance = list(camera)
+        self.daylight_whitebalance = list(daylight)
+        self.num_colors = num_colors
+
+
+@pytest.mark.parametrize(('raw', 'gain'), [
+    # Daylight: red is the most amplified channel, green the least.
+    (_Balance([1.947, 1.0, 1.498, 1.0]), 1.947),
+    # Tungsten: blue is.
+    (_Balance([1.3, 1.0, 3.2, 1.0]), 3.2),
+    # Unnormalized multipliers; a zero fourth entry repeats green.
+    (_Balance([2048.0, 1024.0, 1536.0, 0.0]), 2.0),
+    # A multiplier below green's lowers the smallest.
+    (_Balance([0.8, 1.0, 2.0, 1.0]), 2.5),
+    # No as-shot balance: LibRaw applies the daylight one.
+    (_Balance([0.0, 0.0, 0.0, 0.0], daylight=(2.4, 1.0, 1.2, 0.0)), 2.4),
+    # A four-color sensor's missing fourth multiplier is 1, not green's.
+    (_Balance([2.0, 4.0, 3.0, 0.0], num_colors=4), 4.0),
+    # Nothing usable: leave the decode's scale alone.
+    (_Balance([0.0, 0.0, 0.0, 0.0], daylight=(0.0, 0.0, 0.0, 0.0)), 1.0),
+])
+def test_unclipped_white_balance_gain_is_largest_over_smallest_multiplier(raw, gain):
+    assert image_loader._unclipped_white_balance_gain(raw) == pytest.approx(gain)
+
+
 def test_negative_exposure_recovers_distinct_highlights_before_display_mapping():
     source = np.array([[[1.2] * 3, [1.8] * 3, [2.4] * 3]], dtype=np.float32)
     output = apply_adjustments(source, ToneAdjustments(exposure=-2), input_linear=True)
@@ -117,7 +163,9 @@ def test_tiff_export_has_real_16_bit_samples_and_correct_profile(dng):
     from export import _OUTPUT_FORMATS, _save_export_image
 
     source = load_image(dng, max_size=None, raw_decode=RAW_DECODE_LINEAR)
-    result = apply_recipe_to_loaded_image(source, {'adjustments': {'exposure': -1}})
+    # Two stops down brings the ramp's red channel, amplified to twice the
+    # green ceiling, under display white, so its samples stay distinct.
+    result = apply_recipe_to_loaded_image(source, {'adjustments': {'exposure': -2}})
     stream = io.BytesIO()
     _save_export_image(result, stream, _OUTPUT_FORMATS['tiff'], 92)
     stream.seek(0)

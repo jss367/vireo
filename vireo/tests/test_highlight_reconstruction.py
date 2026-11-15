@@ -202,8 +202,9 @@ def test_linear_decode_of_a_blown_area_is_neutral(tmp_path):
     # Unreconstructed, each channel stops at its own white-balanced ceiling
     # (green at half of red here), so the area decodes strongly colored.
     assert blown.max() / blown.min() == pytest.approx(1.0, abs=0.03)
-    # LibRaw scales the highest ceiling to white; the rebuilt area sits there.
-    assert blown.min() == pytest.approx(1.0, abs=0.02)
+    # The rebuilt area sits at the highest white-balanced ceiling: red's, a
+    # stop above the green ceiling that the decode scales to 1.0.
+    assert blown.min() == pytest.approx(2.0, abs=0.04)
 
 
 def test_linear_decode_leaves_unclipped_pixels_unchanged(tmp_path, monkeypatch):
