@@ -349,9 +349,10 @@ def _migrate_edit_math_render_caches(app):
       * every ``preview_cache`` row plus its on-disk JPEG
       * every per-photo thumbnail file plus its ``photos.thumb_path``
 
-    for photos with an edit recipe and every RAW photo, whose default look
-    can change even without a recipe. Recipe-free display-referred photos
-    retain their camera-rendered bytes. Then we
+    for photos with an edit recipe. Recipe-free RAWs only lose their RAW
+    pair thumbnail: their ordinary previews and thumbnails use a JPEG-first
+    decode, and paired previews already key their filename by math version.
+    Camera-rendered disk bytes and ``thumb_path`` remain intact. Then we
     write the new version so the migration is a no-op next boot.
 
     On a fresh DB with no recipes, the walk does nothing and we still bump
@@ -374,6 +375,7 @@ def _migrate_edit_math_render_caches(app):
             return
 
         photo_ids = db.edits.render_cache_photo_ids(RAW_EXTENSIONS)
+        edited_ids = set(db.edits.edited_photo_ids())
 
         invalidated_previews = 0
         invalidated_thumbs = 0
@@ -383,13 +385,16 @@ def _migrate_edit_math_render_caches(app):
         # next boot skip the migration and never retry. Leaving the version
         # behind makes the migration idempotent and self-retrying.
         untracked_previews_by_pid, purge_failed = _untracked_previews_by_photo(
-            preview_dir, set(photo_ids), stored_version,
+            preview_dir, edited_ids, stored_version,
         )
         for pid in photo_ids:
-            previews, thumbs, failed = _purge_edited_photo_renders(
-                db, pid, preview_dir, thumb_dir,
-                untracked_previews_by_pid.get(pid, ()),
-            )
+            if pid in edited_ids:
+                previews, thumbs, failed = _purge_edited_photo_renders(
+                    db, pid, preview_dir, thumb_dir,
+                    untracked_previews_by_pid.get(pid, ()),
+                )
+            else:
+                previews, thumbs, failed = _purge_recipe_free_raw_thumbnail(pid, thumb_dir)
             invalidated_previews += previews
             invalidated_thumbs += thumbs
             purge_failed = purge_failed or failed
@@ -472,6 +477,19 @@ def _untracked_previews_by_photo(preview_dir, edited_set, stored_version):
         if file_pid in edited_set:
             untracked_previews_by_pid.setdefault(file_pid, []).append(name)
     return untracked_previews_by_pid, purge_failed
+
+
+def _purge_recipe_free_raw_thumbnail(pid, thumb_dir):
+    """Only the scene-linear pair thumbnail changes without an edit recipe."""
+    path = os.path.join(thumb_dir, f"{pid}_raw.jpg")
+    try:
+        if not os.path.exists(path):
+            return 0, 0, False
+        os.remove(path)
+    except OSError:
+        log.warning("Failed to remove RAW pair thumbnail %s during edit-math migration", path, exc_info=True)
+        return 0, 0, True
+    return 0, 1, False
 
 
 def _purge_edited_photo_renders(db, pid, preview_dir, thumb_dir, untracked_names):
