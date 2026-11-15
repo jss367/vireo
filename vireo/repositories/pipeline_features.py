@@ -28,6 +28,8 @@ import sqlite3
 from collections.abc import Iterable, Sequence
 from typing import Any
 
+from repositories.photo_visibility import photo_visible_in_workspace_sql
+
 # Photo columns the pipeline stages read for each workspace photo.
 PIPELINE_PHOTO_COLS = """
     p.id, p.folder_id, p.filename, p.timestamp,
@@ -207,6 +209,26 @@ class PipelineFeaturesRepository:
             floor_sql = "AND d.id IN (SELECT id FROM pipeline_continuity_detections)"
             floor_params = ()
         scope_sql = _SCOPE_SQL if scoped else ""
+        if scoped or continuity_only:
+            # These rows are already held by staged ids, so test each photo's
+            # visibility directly. Joining the view builds every photo the
+            # workspace can see first, and SQLite then walks the staged photo
+            # ids against the staged detection ids as a cross product.
+            visible_join = ""
+            visible_sql = photo_visible_in_workspace_sql("d.photo_id")
+            visible_params = (workspace_id, workspace_id)
+            # Equal confidences get an explicit order, so which species make a
+            # photo's top five never depends on the query plan. Stronger
+            # detections lead, matching ``subject_order.primary_order_sql``:
+            # the top-k truncation in ``pipeline.load_predictions`` must not
+            # let a weak box displace an equally scored prediction from the
+            # primary, higher-confidence box.
+            tie_order = ", d.id, pr.id" if continuity_only else ", d.detector_confidence DESC, d.id, pr.id"
+        else:
+            visible_join = "JOIN photo_workspace_visibility wf ON wf.photo_id = p.id"
+            visible_sql = "wf.workspace_id = ?"
+            visible_params = (workspace_id,)
+            tie_order = ""
         if labels_fingerprint is not None:
             return self.conn.execute(
                 f"""SELECT d.photo_id, d.id AS detection_id,
@@ -216,13 +238,13 @@ class PipelineFeaturesRepository:
                    FROM predictions pr
                    JOIN detections d ON d.id = pr.detection_id
                    JOIN photos p ON p.id = d.photo_id
-                   JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-                   WHERE wf.workspace_id = ?
+                   {visible_join}
+                   WHERE {visible_sql}
                      {floor_sql}
                      AND pr.labels_fingerprint = ?
                      {scope_sql}
-                   ORDER BY d.photo_id, pr.confidence DESC""",
-                (workspace_id, *floor_params, labels_fingerprint),
+                   ORDER BY d.photo_id, pr.confidence DESC{tie_order}""",
+                (*visible_params, *floor_params, labels_fingerprint),
             ).fetchall()
         return self.conn.execute(
             f"""SELECT d.photo_id, d.id AS detection_id,
@@ -232,8 +254,8 @@ class PipelineFeaturesRepository:
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
                JOIN photos p ON p.id = d.photo_id
-               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-               WHERE wf.workspace_id = ?
+               {visible_join}
+               WHERE {visible_sql}
                  {floor_sql}
                  {scope_sql}
                  AND pr.labels_fingerprint = (
@@ -243,8 +265,8 @@ class PipelineFeaturesRepository:
                      ORDER BY pr2.created_at DESC, pr2.id DESC
                      LIMIT 1
                  )
-               ORDER BY d.photo_id, pr.confidence DESC""",
-            (workspace_id, *floor_params),
+               ORDER BY d.photo_id, pr.confidence DESC{tie_order}""",
+            (*visible_params, *floor_params),
         ).fetchall()
 
     def analysis_provenance_rows(self, workspace_id: int, *, scoped: bool) -> list[sqlite3.Row]:

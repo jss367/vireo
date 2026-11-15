@@ -25,6 +25,7 @@ import os
 from repositories.collections import CollectionRepository
 from repositories.folder_subtrees import folder_subtree_ids
 from repositories.photo_row_deletion import photo_row_deletion
+from repositories.photo_sql import location_keyword_exists_sql
 from repositories.top_species import TOP_SPECIES_RANKING_SQL
 from sql_chunks import chunked
 
@@ -39,15 +40,7 @@ def append_location_status_filter(conditions: list[str], location_status: str | 
     """
     if location_status is None:
         return
-    assigned_exists = """EXISTS (
-        SELECT 1 FROM photo_keywords pk_location_status
-        JOIN keywords k_location_status
-          ON k_location_status.id = pk_location_status.keyword_id
-        WHERE pk_location_status.photo_id = p.id
-          AND k_location_status.type = 'location'
-          AND k_location_status.latitude IS NOT NULL
-          AND k_location_status.longitude IS NOT NULL
-    )"""
+    assigned_exists = location_keyword_exists_sql(with_coordinates=True)
     no_exif = "(p.latitude IS NULL OR p.longitude IS NULL)"
     if location_status == "exif":
         conditions.append(
@@ -1106,8 +1099,14 @@ class PhotoRepository:
         # (detection, classifier_model) so a workspace that rotated label
         # sets doesn't have stale higher-confidence rows from an old
         # fingerprint dominating the top-species ranking.
+        # The ranking is computed per photo, so limiting it to the filtered
+        # ids changes no rank; without the limit it ranks every prediction
+        # in the catalog before the join discards the photos out of scope.
         top_species = self.conn.execute(
-            f"""WITH best_pred AS ({TOP_SPECIES_RANKING_SQL})
+            f"""WITH best_pred AS (
+                    {TOP_SPECIES_RANKING_SQL}
+                    AND det.photo_id IN (SELECT id FROM _browse_summary_ids)
+                )
                 SELECT bp.species, COUNT(DISTINCT s.id) as count
                 FROM _browse_summary_ids s
                 JOIN best_pred bp ON bp.photo_id = s.id AND bp.rn = 1

@@ -112,6 +112,86 @@ def test_prediction_rows_latest_or_pinned_label_set_and_continuity(db, catalog):
     assert species(continuity_only=True) == ["Wren"]
 
 
+def _staged_species(db, workspace_id, **kw):
+    args = {"min_conf": .2, "weak_confidence": None, "scoped": False,
+            "labels_fingerprint": None, **kw}
+    return [r["species"] for r in db.pipeline_features.prediction_rows(workspace_id, **args)]
+
+
+def test_staged_prediction_rows_cover_exactly_the_workspace_photos(db, catalog):
+    """A photo granted on its own is read; one the workspace cannot see is not."""
+    ws, photos, dets = catalog
+    granted, unseen = dets[photos[0]][0], dets[photos[1]][0]
+    db.predictions.add(granted, "Robin", 0.9, "m", labels_fingerprint="fp")
+    db.predictions.add(unseen, "Wren", 0.8, "m", labels_fingerprint="fp")
+    other = db.create_workspace("Other")
+    db.photo_visibility.grant(other, [photos[0]])
+    db.commit()
+    features = db.pipeline_features
+    with db.transaction(join=True):
+        features.stage_scope_photo_ids(photos)
+        features.stage_continuity_detection_ids([granted, unseen])
+    for staged in ({"scoped": True}, {"continuity_only": True}, {"scoped": True, "continuity_only": True}):
+        assert _staged_species(db, ws, min_conf=0, **staged) == ["Robin", "Wren"]
+        assert _staged_species(db, other, min_conf=0, **staged) == ["Robin"]
+        assert _staged_species(db, other, min_conf=0, labels_fingerprint="fp", **staged) == ["Robin"]
+
+
+def test_staged_prediction_rows_order_equal_confidences(db, catalog):
+    """Which species lead a photo's list must not depend on the query plan.
+
+    Equal classifier confidences break stronger-detection-first, matching
+    ``subject_order.primary_order_sql``: ``pipeline.load_predictions``
+    truncates these rows at ``top_k_predictions``, so a weak box must not
+    displace the equally scored prediction from the primary, higher-confidence
+    box.
+    """
+    ws, photos, dets = catalog
+    strong, weak = dets[photos[0]]
+    db.predictions.add(strong, "Strong box", 0.7, "m", labels_fingerprint="fp")
+    db.predictions.add(weak, "Weak box", 0.7, "m", labels_fingerprint="fp")
+    db.predictions.add(weak, "Weak box, second model", 0.7, "n", labels_fingerprint="fp")
+    db.commit()
+    features = db.pipeline_features
+    with db.transaction(join=True):
+        features.stage_scope_photo_ids(photos)
+        features.stage_continuity_detection_ids([weak, strong])
+    assert _staged_species(db, ws, min_conf=0, scoped=True) == [
+        "Strong box", "Weak box", "Weak box, second model",
+    ]
+    by_detection_id = {strong: ["Strong box"], weak: ["Weak box", "Weak box, second model"]}
+    assert _staged_species(db, ws, continuity_only=True) == [
+        species for detection_id in sorted(by_detection_id) for species in by_detection_id[detection_id]
+    ]
+
+
+def test_staged_prediction_rows_never_build_the_workspace_photo_set(db, catalog):
+    """A staged read costs its own rows, however many photos the workspace holds.
+
+    Opening Process Review reads the saved run's predictions through these
+    queries. A plan that joins the visibility view builds every photo the
+    workspace can see on each read, and walks staged photos against staged
+    detections: seconds on an 80,000-photo workspace.
+    """
+    ws, photos, dets = catalog
+    db.predictions.add(dets[photos[0]][0], "Robin", 0.9, "m", labels_fingerprint="fp")
+    db.commit()
+    features = db.pipeline_features
+    with db.transaction(join=True):
+        features.stage_scope_photo_ids(photos)
+        features.stage_continuity_detection_ids(dets[photos[0]])
+    for staged in ({"scoped": True}, {"scoped": True, "continuity_only": True}):
+        statements = []
+        db.conn.set_trace_callback(statements.append)
+        try:
+            assert _staged_species(db, ws, **staged) == ["Robin"]
+        finally:
+            db.conn.set_trace_callback(None)
+        (read,) = [s for s in statements if "FROM predictions pr" in s]
+        plan = [row[3] for row in db.conn.execute("EXPLAIN QUERY PLAN " + read)]
+        assert not [step for step in plan if "CO-ROUTINE" in step or "photo_workspace_visibility" in step]
+
+
 def test_readiness_counts(db, catalog):
     ws, photos, dets = catalog
     features = db.pipeline_features

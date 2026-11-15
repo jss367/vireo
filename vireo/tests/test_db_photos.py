@@ -791,6 +791,26 @@ def test_get_browse_summary(db, lib, isolated_config):
     assert ruled["top_species"] == [{"species": "Heron", "count": 1}]
 
 
+def test_browse_summary_ranks_species_for_the_filtered_photos_only(db, lib, isolated_config):
+    """The top-species ranking costs the photos in scope, not the catalog.
+
+    Ranking every prediction before the join discards most of them takes a
+    second for a 4,000-photo collection in a catalog of 240,000 predictions.
+    """
+    _detect(db, lib["a"], 0.9, "Heron")
+    _detect(db, lib["c"], 0.9, "Egret")
+    _detect(db, lib["f"], 0.9, "Crane")
+    statements = []
+    db.conn.set_trace_callback(statements.append)
+    try:
+        summary = browse_queries.get_browse_summary(db, folder_id=lib["child"])
+    finally:
+        db.conn.set_trace_callback(None)
+    assert summary["top_species"] == [{"species": "Egret", "count": 1}]
+    (ranking,) = [s for s in statements if "best_pred" in s]
+    assert "det.photo_id IN (SELECT id FROM _browse_summary_ids)" in " ".join(ranking.split())
+
+
 def test_get_browse_summary_reads_detector_floor_from_effective_config(
     db, lib, isolated_config, monkeypatch,
 ):

@@ -3,9 +3,10 @@
 The column lists a photo row is read with (``PHOTO_COLS``, and
 ``PHOTO_DETAIL_COLS`` for the detail view), the date orderings, the
 Life List ancestor suppression clause, the displayed-prediction confidence
-expression and the inclusive date bound. ``CollectionRepository``,
-``PhotoRepository``, ``LocationRepository``, ``PredictionRepository`` and
-``SpeciesCurationRepository`` import them from here.
+expression, the location-keyword test and the inclusive date bound.
+``CollectionRepository``, ``PhotoRepository``, ``LocationRepository``,
+``PredictionRepository`` and ``SpeciesCurationRepository`` import them from
+here.
 """
 
 from repositories.prediction_review import prediction_review_join, prediction_review_status
@@ -27,6 +28,31 @@ PHOTO_DETAIL_COLS = (
     + " working_copy_failed_at, working_copy_failed_mtime,"
     + " working_copy_failed_source"
 )
+
+
+def location_keyword_exists_sql(*, with_coordinates: bool = False) -> str:
+    """``EXISTS`` test: the photo aliased ``p`` carries a location keyword.
+
+    ``with_coordinates`` keeps only a structured location, one that supplies a
+    latitude and longitude the map can place.
+
+    ``CROSS JOIN`` fixes the join order: read the photo's own keywords, then
+    look each one up by id. Both sides offer an index, and with no table
+    statistics SQLite starts from the keyword side, walking every location
+    keyword in the catalog and probing the photo for each one. A count over a
+    workspace then costs photos times places instead of photos times the few
+    keywords a photo carries.
+    """
+    coordinates = (
+        " AND k_location.latitude IS NOT NULL AND k_location.longitude IS NOT NULL"
+        if with_coordinates else ""
+    )
+    return (
+        "EXISTS (SELECT 1 FROM photo_keywords pk_location"
+        " CROSS JOIN keywords k_location ON k_location.id = pk_location.keyword_id"
+        " WHERE pk_location.photo_id = p.id AND k_location.type = 'location'"
+        f"{coordinates})"
+    )
 
 
 # Life-list ancestor suppression. Broadening the identification-keyword
