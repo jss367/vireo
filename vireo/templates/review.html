@@ -9,29 +9,26 @@
 <link rel="stylesheet" href="/static/review/identity-alternatives.css">
 <link rel="stylesheet" href="/static/review/queue.css">
 <link rel="stylesheet" href="/static/review/evidence.css">
-<title>Vireo - Classify</title>
+<title>Vireo - Review</title>
 <style>
   /* ---------- Header ---------- */
   .header {
     background: var(--bg-secondary, #0E2A3D);
-    padding: 14px 24px;
+    padding: 0 24px;
+    min-height: 44px;
     display: flex;
+    flex-wrap: wrap;
     justify-content: space-between;
     align-items: center;
+    gap: 0 24px;
     border-bottom: 1px solid var(--border-primary, #14374E);
+    /* Sticks under the navbar, which is itself sticky and 48px tall. */
     position: sticky;
-    top: 0;
+    top: 48px;
     z-index: 100;
   }
   .header h1 { font-size: 18px; font-weight: 600; white-space: nowrap; }
   .header-left { display: flex; align-items: center; gap: 16px; }
-  .header-right { display: flex; align-items: center; gap: 8px; }
-  .stats { font-size: 13px; color: var(--text-muted); display: flex; gap: 14px; }
-  .stats .stat { white-space: nowrap; }
-  .stats .new-count { color: var(--accent, #24E5CA); }
-  .stats .ref-count { color: var(--warning, #f0c040); }
-  .stats .dis-count { color: var(--danger, #e74c3c); }
-  .stats .accepted-count { color: var(--info); }
 
   /* Model selector */
   .model-selector {
@@ -62,7 +59,7 @@
   .settings-panel {
     display: none;
     background: var(--bg-secondary, #0E2A3D);
-    padding: 14px 24px;
+    padding: 8px 24px;
     border-bottom: 1px solid var(--border-primary, #14374E);
   }
   .settings-panel.open {
@@ -73,6 +70,10 @@
   }
   .setting-group { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .setting-group label { font-size: 13px; color: var(--text-muted); white-space: nowrap; }
+  /* A select is as wide as its longest option; cap it so the controls fit
+     one row on a laptop window. The chosen option still shows in full when
+     the list is open. */
+  .setting-group select { max-width: 180px; }
   .setting-group input[type=range] {
     width: 180px;
     accent-color: var(--accent, #24E5CA);
@@ -105,13 +106,13 @@
   /* ---------- Category Tabs ---------- */
   .tabs {
     display: flex;
-    background: var(--bg-secondary, #0E2A3D);
-    padding: 0 24px;
-    border-bottom: 1px solid var(--border-primary, #14374E);
+    align-self: stretch;
     overflow-x: auto;
   }
   .tab {
-    padding: 11px 18px;
+    display: flex;
+    align-items: center;
+    padding: 11px 14px;
     cursor: pointer;
     font-size: 13px;
     color: var(--text-muted);
@@ -382,6 +383,29 @@
     margin-left: auto;
     white-space: nowrap;
   }
+
+  /* ---------- Filter bar and review tools ---------- */
+  /* The quick filters and the scope/active-filter chips share one row here;
+     the search row and the notes keep their own. */
+  .review-filterbar { padding: 8px 24px 0; }
+  .review-filterbar .vf-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 0 14px; }
+  .review-filterbar .vf-bar > .vf-primary,
+  .review-filterbar .vf-bar > .vf-search-error,
+  .review-filterbar .vf-bar > .vf-paused-note,
+  .review-filterbar .vf-bar > .vf-visual-note { flex: 0 0 100%; }
+  .review-filterbar .vf-bar > .vf-shortcuts { flex: 0 1 auto; }
+  .review-filterbar .vf-bar > .vf-secondary { flex: 1 1 220px; margin: 7px 0; }
+
+  .review-tools {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 24px;
+    padding: 6px 24px;
+    font-size: 13px;
+  }
+  .review-tools > details[open],
+  .review-tools > .review-queue:has(#rqEnabled:checked) { flex: 0 0 100%; box-sizing: border-box; }
 
   /* ---------- Group Review Modal ---------- */
   .grm-overlay {
@@ -808,18 +832,17 @@
   <div class="header-left">
     <h1 id="title">Review Predictions</h1>
   </div>
-  <div class="header-right">
-    <div class="stats" id="stats"></div>
-  </div>
+  <!-- Category tabs. Each carries its card count, and the header stays in
+       view while the grid scrolls, so the tabs do too. -->
+  <div class="tabs" id="tabs"></div>
 </div>
 
 <!-- Universal filter bar -->
-<div class="review-filterbar" style="padding: 8px 20px 0;">
+<div class="review-filterbar">
   {% include '_filterbar.html' %}
 </div>
 
 <!-- Action Bar -->
-<p class="evidence-explanation">Species scores are softmax shares within each model’s candidate list, not calibrated probabilities of correct identification. Scores from different models or label lists are not directly comparable. Inspect the subject before confirming its name.</p>
 <div class="settings-panel open" id="reviewBar">
   <div class="setting-group">
     <select class="model-selector" id="collectionFilter" onchange="switchCollection(this.value)">
@@ -864,10 +887,6 @@
       <span id="confFilterVal" style="min-width:28px;">0%</span>
     </label>
   </div>
-  <span class="kbd-hint" id="kbdHintReview">Keyboard: A = accept, S = skip</span>
-  <span style="margin-left:auto;">
-    <a href="/classify" style="color:var(--text-ghost);font-size:12px;text-decoration:none;">Back to Classify</a>
-  </span>
 </div>
 
 <!-- Deep-link filter pills (?labels_fingerprint=, ?photo_id=), filled by
@@ -875,14 +894,19 @@
      narrowing reads as part of the controls, not a footnote under the grid. -->
 <div class="review-filter-pills" id="reviewFilterPills"></div>
 
-{% include '_identity_alternatives.html' %}
+<!-- Review tools: each is one line until opened, and an open one takes the
+     full width below the others. -->
+<div class="review-tools">
+  {% include '_identity_alternatives.html' %}
+  {% include '_review_queue.html' %}
+  <details class="evidence-explanation">
+    <summary>Scores are relative shares, not probabilities</summary>
+    <p>Species scores are softmax shares within each model’s candidate list, not calibrated probabilities of correct identification. Scores from different models or label lists are not directly comparable. Inspect the subject before confirming its name.</p>
+  </details>
+  <span class="kbd-hint" id="kbdHintReview">Keyboard: A = accept, S = skip</span>
+</div>
 
 {% include '_sync_panel.html' %}
-
-<!-- Category Tabs -->
-<div class="tabs" id="tabs"></div>
-
-{% include '_review_queue.html' %}
 
 <!-- Photo Grid -->
 <div class="grid" id="grid"></div>

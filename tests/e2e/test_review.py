@@ -67,6 +67,50 @@ def test_review_page_title_shows_pending_count(live_server, page):
     expect(title).to_contain_text("pending")
 
 
+def test_review_header_leaves_most_of_the_window_to_the_cards(live_server, page):
+    """The first card starts in the top 40% of a laptop window, the review
+    tools take one line until opened, and the category tabs stay in view
+    while the grid scrolls."""
+    page.set_viewport_size({"width": 1440, "height": 900})
+    page.goto(f"{live_server['url']}/review", timeout=5000)
+    first_card = page.locator("[data-pred-id]").first
+    first_card.wait_for(state="visible", timeout=5000)
+
+    tools = page.locator(".review-tools").bounding_box()
+    assert tools["height"] <= 44, f"closed review tools should be one line: {tools}"
+    assert first_card.bounding_box()["y"] <= 360, first_card.bounding_box()
+
+    # Each count lives on its tab; the heading names what is left to do.
+    expect(page.locator('#tabs [data-tab="pending"] .count')).to_have_text(
+        re.compile(r"^[1-9]\d*$")
+    )
+    expect(page.locator("#title")).to_contain_text("pending cards")
+
+    # An opened tool takes the row below the others instead of squeezing them.
+    explanation = page.locator(".evidence-explanation")
+    explanation.locator("summary").click()
+    expect(explanation.locator("p")).to_contain_text("not calibrated probabilities")
+    assert explanation.bounding_box()["width"] >= 1300
+    explanation.locator("summary").click()
+
+    page.locator("#rqEnabled").check()
+    expect(page.locator("#rqStorageStatus")).to_be_visible()
+    page.locator("#rqEnabled").uncheck()
+    expect(page.locator("#rqStorageStatus")).to_be_hidden()
+
+    # Scrolled, the header sits under the navbar rather than behind it.
+    page.mouse.wheel(0, 600)
+    page.wait_for_function("window.scrollY > 300")
+    assert page.evaluate(
+        """() => {
+          const tab = document.querySelector('#tabs [data-tab="pending"]');
+          const box = tab.getBoundingClientRect();
+          const top = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
+          return tab.contains(top);
+        }"""
+    )
+
+
 def test_review_photo_size_slider_resizes_and_persists(live_server, page):
     """Review cards follow the photo-size control and retain its value."""
     url = live_server["url"]

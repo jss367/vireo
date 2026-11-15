@@ -1,15 +1,19 @@
+/* Closed, the panel is one line among the review tools; open, it is a card. */
 #identityAlternativesPanel {
-  margin: 12px 24px;
-  padding: 14px 16px;
-  border: 1px solid var(--border-primary);
-  border-radius: 8px;
-  background: var(--bg-secondary);
   font-size: 13px;
   line-height: 1.5;
   scroll-margin-top: 110px;
 }
+#identityAlternativesPanel[open] {
+  margin: 6px 0;
+  padding: 14px 16px;
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+}
 #identityAlternativesPanel summary { cursor: pointer; font-weight: 600; }
-#identityAlternativesPanel > summary { font-size: 14px; }
+#identityAlternativesPanel > summary { font-weight: 500; }
+#identityAlternativesPanel[open] > summary { font-size: 14px; font-weight: 600; }
 #identityAlternativesPanel p { margin: 10px 0; max-width: 900px; }
 #identityAlternativesCount { color: var(--text-muted); font-weight: 400; }
 #identityAlternativesEditor { margin: 12px 0; }

@@ -45,21 +45,12 @@ function renderModelFilter() {
 }
 
 function renderStats() {
-  var el = /** @type {HTMLElement} */ (document.getElementById('stats'));
-  if (mode === 'review') {
-    var counts = reviewCardCounts();
-    var title = 'Review Predictions (' + (counts.pending || 0) + ' pending cards)';
-    /** @type {HTMLElement} */ (document.getElementById('title')).textContent = title;
-    document.title = 'Vireo - ' + title;
-    el.innerHTML =
-      '<span class="stat new-count">' + (counts.pending || 0) + ' Pending cards</span>' +
-      '<span class="stat accepted-count">' + (counts.accepted || 0) + ' Accepted cards</span>' +
-      '<span class="stat">' + (counts.all || 0) + ' Total cards</span>';
-  } else {
-    // Browse mode means zero predictions loaded — the grid's empty state
-    // explains the situation, so there's no count worth showing here.
-    el.textContent = '';
-  }
+  if (mode !== 'review') return;
+  // The tabs carry every count; the heading and the window title name the
+  // one that says how much is left to do.
+  var title = 'Review Predictions (' + (reviewCardCounts().pending || 0) + ' pending cards)';
+  /** @type {HTMLElement} */ (document.getElementById('title')).textContent = title;
+  document.title = 'Vireo - ' + title;
 }
 
 function renderTabs() {
@@ -78,8 +69,9 @@ function renderTabs() {
   ];
   tabsEl.innerHTML = tabs.map(function(t) {
     var cls = currentTab === t.id ? 'tab active' : 'tab';
-    return '<div class="' + cls + '" onclick="switchTab(\'' + t.id + '\')">' +
-      t.label + '<span class="count">' + (counts[t.id] || 0) + '</span></div>';
+    var count = counts[t.id] || 0;
+    return '<div class="' + cls + '" data-tab="' + t.id + '" title="' + count + ' cards" onclick="switchTab(\'' + t.id + '\')">' +
+      t.label + '<span class="count">' + count + '</span></div>';
   }).join('');
 }
 

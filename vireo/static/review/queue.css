@@ -1,4 +1,6 @@
-.review-queue {margin:16px 24px;padding:16px;border:1px solid var(--border-primary);border-radius:8px;background:var(--bg-secondary)}
+/* Off, the queue is its checkbox on one line among the review tools; on, it is a card. */
+.review-queue:has(#rqEnabled:checked) {margin:6px 0;padding:16px;border:1px solid var(--border-primary);border-radius:8px;background:var(--bg-secondary)}
+.review-queue:not(:has(#rqEnabled:checked)) #rqStorageStatus {display:none}
 .review-queue p {font-size:13px;color:var(--text-muted);margin:8px 0;line-height:1.5}
 .review-queue h2 {font-size:16px;margin:12px 0;overflow-wrap:anywhere}
 .rq-toolbar {display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin:10px 0}
@@ -15,4 +17,4 @@
 .rq-crop-wrap {overflow:auto;max-height:600px;background:var(--bg-primary);min-height:128px}
 .rq-crop-wrap img {width:auto;height:auto;max-width:none;display:block}
 #rqCrop[hidden],#rqCenter[hidden],#rqSubjectBox[hidden] {display:none}
-@media(max-width:650px) {.review-queue {margin:12px 8px;padding:10px}.rq-images {gap:8px}.rq-crop-wrap {max-height:350px}}
+@media(max-width:650px) {.review-queue:has(#rqEnabled:checked) {padding:10px}.rq-images {gap:8px}.rq-crop-wrap {max-height:350px}}
