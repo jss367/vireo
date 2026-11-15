@@ -26,6 +26,7 @@
     "../vireo/static/review/state.js",
     "../vireo/static/review/queue-state.js",
     "../vireo/static/review/queue-focus.js",
-    "../vireo/static/review/queue.js"
+    "../vireo/static/review/queue.js",
+    "../vireo/static/review/tool-reorder.js"
   ]
 }

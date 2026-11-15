@@ -41,17 +41,17 @@ def test_merged_card_decides_both_models_and_undo_restores(page, live_server, de
         assert chip_box['x'] + chip_box['width'] <= card_box['x'] + card_box['width']
     expect(cards).to_contain_text('BioCLIP-2.5')
     expect(cards).to_contain_text('iNat21')
-    expect(page.locator('#stats')).to_contain_text('1 Pending cards')
+    expect(page.locator('#tabs [data-tab="pending"] .count')).to_have_text('1')
     expect(cards.locator('.btn-accept')).to_have_text('Tag 3 photos as "Blue Tit"')
     with page.expect_response(lambda r: r.url.endswith('/' + decision) and r.request.method == 'POST') as response:
         cards.locator('.btn-accept' if decision == 'accept' else '.btn-skip').click()
     assert response.value.status == 200
-    expect(page.locator('#stats')).to_contain_text('0 Pending cards')
+    expect(page.locator('#tabs [data-tab="pending"] .count')).to_have_text('0')
     assert [db.predictions.current_status(pid) for pid in ids] == [
         'accepted' if decision == 'accept' else 'rejected'
     ] * len(ids)
     page.evaluate('window.doUndo()')
-    expect(page.locator('#stats')).to_contain_text('1 Pending cards')
+    expect(page.locator('#tabs [data-tab="pending"] .count')).to_have_text('1')
     expect(cards).to_have_count(1)
     assert [db.predictions.current_status(pid) for pid in ids] == ['pending'] * len(ids)
 
@@ -66,10 +66,10 @@ def test_model_filter_limits_the_decision_and_clearing_it_reveals_pending_siblin
     expect(page.locator('#grid .btn-accept')).to_have_text('Tag 2 photos as "Blue Tit"')
     with page.expect_response(lambda r: r.url.endswith('/accept') and r.request.method == 'POST'):
         page.locator('#grid .btn-accept').click()
-    expect(page.locator('#stats')).to_contain_text('0 Pending cards')
+    expect(page.locator('#tabs [data-tab="pending"] .count')).to_have_text('0')
     assert [db.predictions.current_status(pid) for pid in ids] == ['accepted', 'accepted', 'pending', 'pending']
     page.locator('#modelFilter').select_option('all')
-    expect(page.locator('#stats')).to_contain_text('1 Pending cards')
+    expect(page.locator('#tabs [data-tab="pending"] .count')).to_have_text('1')
     page.locator('#tabs .tab').filter(has_text='Pending').click()
     expect(page.locator('#grid .card')).to_have_count(1)
     expect(page.locator('#grid .card')).to_contain_text('iNat21')

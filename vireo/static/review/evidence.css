@@ -1,4 +1,6 @@
-.evidence-explanation {margin:12px 24px;font-size:13px;line-height:1.5;color:var(--text-secondary)}
+.evidence-explanation {font-size:13px;line-height:1.5;color:var(--text-secondary)}
+.evidence-explanation summary {cursor:pointer}
+.evidence-explanation p {margin:6px 0;max-width:900px}
 .species-evidence {font-size:12px;line-height:1.5;border-top:1px solid var(--border-primary);margin-top:8px;padding-top:8px;overflow-wrap:anywhere}
 .species-evidence ul {padding-left:18px;margin:6px 0}
 .species-evidence summary {cursor:pointer;color:var(--text-secondary)}

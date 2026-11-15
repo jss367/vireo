@@ -68,6 +68,7 @@ async function initializeReviewPage() {
   rqRestoreFilters();
   await switchCollection(currentCollection);
   bindReviewQueue();
+  bindReviewToolReorder();
 }
 initializeReviewPage().catch(function(error) {
   showToast('Could not initialize Review: ' + reviewErrorMessage(error, 'Reload to retry.'), 'error');

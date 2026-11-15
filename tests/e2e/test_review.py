@@ -67,6 +67,120 @@ def test_review_page_title_shows_pending_count(live_server, page):
     expect(title).to_contain_text("pending")
 
 
+def test_review_header_leaves_most_of_the_window_to_the_cards(live_server, page):
+    """The first card starts in the top 40% of a laptop window, the review
+    tools take one line until opened, and the category tabs stay in view
+    while the grid scrolls."""
+    page.set_viewport_size({"width": 1440, "height": 900})
+    page.goto(f"{live_server['url']}/review", timeout=5000)
+    first_card = page.locator("[data-pred-id]").first
+    first_card.wait_for(state="visible", timeout=5000)
+
+    tools = page.locator(".review-tools").bounding_box()
+    assert tools["height"] <= 44, f"closed review tools should be one line: {tools}"
+    assert first_card.bounding_box()["y"] <= 360, first_card.bounding_box()
+
+    # Each count lives on its tab; the heading names what is left to do.
+    expect(page.locator('#tabs [data-tab="pending"] .count')).to_have_text(
+        re.compile(r"^[1-9]\d*$")
+    )
+    expect(page.locator("#title")).to_contain_text("pending cards")
+
+    # An opened tool takes the row below the others instead of squeezing them.
+    explanation = page.locator(".evidence-explanation")
+    explanation.locator("summary").click()
+    expect(explanation.locator("p")).to_contain_text("not calibrated probabilities")
+    assert explanation.bounding_box()["width"] >= 1300
+    explanation.locator("summary").click()
+
+    page.locator("#rqEnabled").check()
+    expect(page.locator("#rqStorageStatus")).to_be_visible()
+    page.locator("#rqEnabled").uncheck()
+    expect(page.locator("#rqStorageStatus")).to_be_hidden()
+
+    # Scrolled, the header sits under the navbar rather than behind it.
+    page.mouse.wheel(0, 600)
+    page.wait_for_function("window.scrollY > 300")
+    assert page.evaluate(
+        """() => {
+          const tab = document.querySelector('#tabs [data-tab="pending"]');
+          const box = tab.getBoundingClientRect();
+          const top = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
+          return tab.contains(top);
+        }"""
+    )
+
+
+@pytest.mark.parametrize('tool', ['alternatives', 'queue', 'scores'])
+def test_expanded_review_tools_follow_the_compact_controls(live_server, page, tool):
+    page.set_viewport_size({'width': 1440, 'height': 900})
+    page.goto(f"{live_server['url']}/review")
+    page.locator('[data-pred-id]').first.wait_for(state='visible')
+    selector = {
+        'alternatives': '#identityAlternativesPanel',
+        'queue': '#reviewQueue',
+        'scores': '.evidence-explanation',
+    }[tool]
+    expanded = page.locator(selector)
+    if tool == 'queue':
+        expanded.locator('#rqEnabled').check()
+    else:
+        expanded.locator(':scope > summary').click()
+    assert page.evaluate('''selector => {
+      const expanded = document.querySelector(selector).getBoundingClientRect();
+      const compact = Array.from(document.querySelector('.review-tools').children)
+        .filter(node => !node.matches('details[open], .review-queue:has(#rqEnabled:checked)'));
+      return compact.every(node => node.getBoundingClientRect().bottom <= expanded.top);
+    }''', selector), 'expanded tools must follow every compact control'
+
+
+@pytest.mark.parametrize('width', [1440, 768])
+@pytest.mark.parametrize('tool', ['alternatives', 'queue', 'scores'])
+def test_review_tool_tab_order_matches_visual_order(live_server, page, width, tool):
+    page.set_viewport_size({'width': width, 'height': 900})
+    page.goto(f"{live_server['url']}/review")
+    page.locator('[data-pred-id]').first.wait_for(state='visible')
+    selectors = {
+        'alternatives': '#identityAlternativesPanel > summary',
+        'queue': '#rqEnabled',
+        'scores': '.evidence-explanation > summary',
+    }
+    entry = page.locator(selectors[tool])
+    entry.focus()
+    page.keyboard.press('Space' if tool == 'queue' else 'Enter')
+    expect(entry).to_be_focused()
+    ordered = page.evaluate('''selectors => Object.values(selectors).sort((a, b) => {
+      const left = document.querySelector(a).getBoundingClientRect();
+      const right = document.querySelector(b).getBoundingClientRect();
+      return Math.abs(left.y - right.y) > 5 ? left.y - right.y : left.x - right.x;
+    })''', selectors)
+    page.locator(ordered[0]).focus()
+    for selector in ordered[1:]:
+        page.keyboard.press('Tab')
+        expect(page.locator(selector)).to_be_focused()
+
+
+@pytest.mark.parametrize('width', [1440, 768])
+def test_restored_queue_and_closing_tool_keep_focus_order(live_server, page, width):
+    page.set_viewport_size({'width': width, 'height': 900})
+    page.goto(f"{live_server['url']}/review")
+    page.locator('[data-pred-id]').first.wait_for(state='visible')
+    page.locator('#rqEnabled').check()
+    page.reload()
+    expect(page.locator('#rqEnabled')).to_be_checked()
+    page.locator('[data-pred-id]').first.wait_for(state='visible')
+    page.locator('#identityAlternativesPanel > summary').focus()
+    page.keyboard.press('Tab')
+    expect(page.locator('.evidence-explanation > summary')).to_be_focused()
+    page.keyboard.press('Tab')
+    expect(page.locator('#rqEnabled')).to_be_focused()
+    page.keyboard.press('Space')
+    expect(page.locator('#rqEnabled')).not_to_be_checked()
+    expect(page.locator('#rqEnabled')).to_be_focused()
+    page.keyboard.press('Tab')
+    expect(page.locator('.evidence-explanation > summary')).to_be_focused()
+
+
 def test_review_photo_size_slider_resizes_and_persists(live_server, page):
     """Review cards follow the photo-size control and retain its value."""
     url = live_server["url"]

@@ -17,7 +17,7 @@ separate implementations: a fix in one does not reach the other.
 | `collections.js` | The collection picker and `switchCollection()` |
 | `loading.js` | `loadPredictions()`, its sequence guard, and the reload flag that gates decisions |
 | `deep-links.js` | `?model=`, `?labels_fingerprint=` and `?photo_id=` deep links and their filter pills |
-| `controls.js` | `renderAll()`, the toolbar (confidence, model, sort, photo size), stats, status tabs, and Accept All |
+| `controls.js` | `renderAll()`, the toolbar (confidence, model, sort, photo size), the heading's pending count, the status tabs in the sticky header, and Accept All |
 | `grid.js` | Filtering and sorting the grid, prediction cards, burst-group buttons, and grid clicks |
 | `evidence.js` | Relative score explanations, subject-specific disagreement, geographic context, questionable-detection filters and durable subject assessments |
 | `decisions.js` | Accept, reject, accept an alternative, and Accept All |
