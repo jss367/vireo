@@ -18,6 +18,7 @@ function reviewToolIsOpen(el) {
 function reorderReviewTools() {
   var container = /** @type {HTMLElement|null} */ (document.querySelector('.review-tools'));
   if (!container) return;
+  var active = document.activeElement;
   var children = /** @type {Element[]} */ (Array.prototype.slice.call(container.children));
   children.forEach(function(/** @type {Element} */ el, /** @type {number} */ i) {
     if (!el.hasAttribute('data-review-tool-order')) {
@@ -37,19 +38,25 @@ function reorderReviewTools() {
   closed.sort(byOriginal);
   open.sort(byOriginal);
   var host = container;
-  closed.concat(open).forEach(function(/** @type {Element} */ el) { host.appendChild(el); });
+  closed.concat(open).forEach(function(/** @type {Element} */ el, /** @type {number} */ index) {
+    if (host.children[index] !== el) host.insertBefore(el, host.children[index] || null);
+  });
+  // A necessary DOM move can blur a focused descendant. Preserve the user's
+  // active summary, checkbox or editor without scrolling it to a new position.
+  if (active instanceof HTMLElement && host.contains(active) && document.activeElement !== active) {
+    active.focus({preventScroll: true});
+  }
 }
 
 function bindReviewToolReorder() {
   var container = /** @type {HTMLElement|null} */ (document.querySelector('.review-tools'));
   if (!container) return;
   reorderReviewTools();
-  var children = /** @type {Element[]} */ (Array.prototype.slice.call(container.children));
-  children.forEach(function(/** @type {Element} */ el) {
-    if (el.tagName === 'DETAILS') el.addEventListener('toggle', reorderReviewTools);
+  // Details' native toggle event is queued later; reorder at the attribute
+  // change so the next Tab step already follows the displayed controls.
+  new MutationObserver(reorderReviewTools).observe(container, {
+    subtree: true, attributes: true, attributeFilter: ['open'],
   });
   var rqEnabled = document.getElementById('rqEnabled');
   if (rqEnabled) rqEnabled.addEventListener('change', reorderReviewTools);
 }
-
-document.addEventListener('DOMContentLoaded', bindReviewToolReorder);
