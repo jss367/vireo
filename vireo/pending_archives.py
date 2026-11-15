@@ -34,6 +34,19 @@ def active_archive_jobs(runner, workspace_id):
             and j.get("blocks_local_transitions", True)]
 
 
+def _check_archive_mount_confirmation(identities, confirmed_identities):
+    """A caller's explicit confirmation must still describe the live mount."""
+    from import_staging import _archive_mount_identities
+
+    if (not isinstance(confirmed_identities, dict) or not confirmed_identities
+            or not confirmed_identities.keys() <= identities.keys()):
+        raise ValueError("The NAS destination changed since confirmation. Try Send to NAS again to review it.")
+    current = _archive_mount_identities({root: True for root in confirmed_identities})
+    if (any(identity is None for identity in current.values())
+            or confirmed_identities != json.loads(json.dumps(current))):
+        raise ValueError("The NAS destination changed since confirmation. Try Send to NAS again to review it.")
+
+
 def prepare_archive_mount(db, archive, confirmed_identities=None):
     """Offer explicit recovery of missing evidence, never replace known evidence.
 
@@ -49,6 +62,8 @@ def prepare_archive_mount(db, archive, confirmed_identities=None):
     identities = target.get("mount_identities") or {}
     missing = [root for root, identity in identities.items() if identity is None]
     if not missing:
+        if confirmed_identities is not None:
+            _check_archive_mount_confirmation(identities, confirmed_identities)
         return None
     baseline = target.get("mount_baseline") or {}
     current = _archive_mount_identities({root: True for root in missing})

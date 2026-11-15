@@ -71,6 +71,47 @@ def test_confirmation_rechecks_mount_and_preserves_missing_record(recovery, chan
     assert Path(archive['staging_destination']).is_dir()
 
 
+@pytest.mark.parametrize('stale_confirmation', [True, False])
+def test_confirmation_is_rechecked_after_another_tab_records_evidence(recovery, monkeypatch, stale_confirmation):
+    from unittest.mock import Mock
+
+    import pending_archives
+
+    client, db, archive, root, state = recovery
+    source = Path(archive['staging_destination'])
+    originals = {str(p.relative_to(source)): p.read_bytes() for p in source.rglob('*') if p.is_file()}
+    assert originals
+    url = f"/api/import/pending-archives/{archive['id']}/send"
+    proposal_a = client.post(url).get_json()['mount_confirmation']
+    state['identity'] = ('network-share', 'smb://replacement/photos', '/')
+    proposal_b = client.post(url).get_json()['mount_confirmation']
+    transfer = Mock(side_effect=ValueError('Simulated transfer failure; no files moved'))
+    monkeypatch.setattr(pending_archives, 'send_pending_archive', transfer)
+    response = client.post(url, json={'confirmed_mount_identities': proposal_b})
+    assert response.status_code == 200
+    assert wait_for_job_via_client(client, response.get_json()['job_id'])['status'] == 'failed'
+    transfer.assert_called_once()
+    saved = db.pending_archives.get(archive['id'])['target_json']
+    assert json.loads(saved)['mount_identities'] == proposal_b
+
+    # Tab A's open prompt must not authorize B, even though B is now saved.
+    transfer.reset_mock()
+    supplied = proposal_a if stale_confirmation else proposal_b
+    response = client.post(url, json={'confirmed_mount_identities': supplied})
+    if stale_confirmation:
+        assert response.status_code == 409
+        assert 'changed since confirmation' in response.get_json()['error']
+        assert 'job_id' not in response.get_json()
+        transfer.assert_not_called()
+    else:
+        assert response.status_code == 200
+        assert wait_for_job_via_client(client, response.get_json()['job_id'])['status'] == 'failed'
+        transfer.assert_called_once()
+    assert db.pending_archives.get(archive['id'])['target_json'] == saved
+    for relative, content in originals.items():
+        assert (source / relative).read_bytes() == content
+
+
 def test_recovery_cannot_replace_known_mount_evidence(recovery):
     from pending_archives import prepare_archive_mount
 
@@ -80,6 +121,38 @@ def test_recovery_cannot_replace_known_mount_evidence(recovery):
     archive['target_json'] = json.dumps(target)
     with pytest.raises(ValueError, match='NAS volume changed'):
         prepare_archive_mount(db, archive, {root: list(state['identity'])})
+
+
+@pytest.mark.parametrize('confirmation', [{}, [], {'/unrelated/mount': ['other']}])
+def test_invalid_confirmation_does_not_probe_unrelated_roots(recovery, monkeypatch, confirmation):
+    from unittest.mock import Mock
+
+    import import_staging
+    from pending_archives import prepare_archive_mount
+
+    _client, db, archive, root, state = recovery
+    target = json.loads(archive['target_json'])
+    target['mount_identities'][root] = list(state['identity'])
+    archive['target_json'] = json.dumps(target)
+    snapshot = Mock()
+    monkeypatch.setattr(import_staging, '_archive_mount_identities', snapshot)
+    with pytest.raises(ValueError, match='changed since confirmation'):
+        prepare_archive_mount(db, archive, confirmation)
+    snapshot.assert_not_called()
+    assert json.loads(archive['target_json']) == target
+
+
+def test_unreadable_confirmation_cannot_match_absent_live_evidence(recovery):
+    from pending_archives import prepare_archive_mount
+
+    _client, db, archive, root, state = recovery
+    target = json.loads(archive['target_json'])
+    target['mount_identities'][root] = list(state['identity'])
+    archive['target_json'] = json.dumps(target)
+    state['identity'] = None
+    with pytest.raises(ValueError, match='changed since confirmation'):
+        prepare_archive_mount(db, archive, {root: None})
+    assert json.loads(archive['target_json']) == target
 
 
 def test_offline_missing_identity_reports_unavailable(recovery):
