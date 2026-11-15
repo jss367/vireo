@@ -22,6 +22,7 @@ import pytest
 from PIL import Image
 from playwright.sync_api import expect
 
+from e2e.notices import open_notices
 from e2e.threaded_server import start_server, stop_server
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "vireo"))
@@ -143,6 +144,9 @@ def test_new_images_banner_drives_import(fresh_server, page):
 
     # --- Step 2: visit any Vireo page; banner should appear. ---
     page.goto(f"{url}/browse")
+    # The bell counts the notice before the panel is opened.
+    expect(page.locator("#notificationBadge")).to_have_text("1", timeout=5000)
+    open_notices(page)
     banner = page.locator("#newImagesBanner")
     expect(banner).to_be_visible(timeout=5000)
     msg = page.locator("#newImagesMsg")
@@ -202,6 +206,7 @@ def test_banner_click_during_walk_shows_preparing_state(fresh_server, page, monk
     _clear_new_images_cache()
 
     page.goto(f"{url}/browse")
+    open_notices(page)
     banner = page.locator("#newImagesBanner")
     expect(banner).to_be_visible(timeout=5000)
 
@@ -277,6 +282,7 @@ def test_banner_reports_offline_folder_instead_of_failing(fresh_server, page, mo
     _clear_new_images_cache()
 
     page.goto(f"{url}/browse")
+    open_notices(page)
     banner = page.locator("#newImagesBanner")
     expect(banner).to_be_visible(timeout=5000)
     msg = page.locator("#newImagesMsg")
@@ -292,10 +298,10 @@ def test_banner_reports_offline_folder_instead_of_failing(fresh_server, page, mo
 
     # Dismissing sticks for this exact offline set across a reload.
     page.locator("#newImagesBanner .banner-dismiss").click()
-    expect(banner).to_be_hidden()
+    expect(banner).to_have_css("display", "none")
     page.reload()
     page.wait_for_load_state("networkidle")
-    expect(banner).to_be_hidden()
+    expect(banner).to_have_css("display", "none")
 
 
 def test_banner_count_discloses_unchecked_offline_folder(fresh_server, page, monkeypatch):
@@ -321,6 +327,7 @@ def test_banner_count_discloses_unchecked_offline_folder(fresh_server, page, mon
     _clear_new_images_cache()
 
     page.goto(f"{url}/browse")
+    open_notices(page)
     banner = page.locator("#newImagesBanner")
     expect(banner).to_be_visible(timeout=5000)
     msg = page.locator("#newImagesMsg")
@@ -331,10 +338,10 @@ def test_banner_count_discloses_unchecked_offline_folder(fresh_server, page, mon
     # Dismissing the mixed banner keeps it dismissed: it must not come back
     # as the offline-only notice on the next poll.
     page.locator("#newImagesBanner .banner-dismiss").click()
-    expect(banner).to_be_hidden()
+    expect(banner).to_have_css("display", "none")
     page.reload()
     page.wait_for_load_state("networkidle")
-    expect(banner).to_be_hidden()
+    expect(banner).to_have_css("display", "none")
 
 
 def test_dismissed_count_rearms_when_a_folder_goes_offline(fresh_server, page, monkeypatch):
@@ -354,11 +361,12 @@ def test_dismissed_count_rearms_when_a_folder_goes_offline(fresh_server, page, m
     _clear_new_images_cache()
 
     page.goto(f"{url}/browse")
+    open_notices(page)
     banner = page.locator("#newImagesBanner")
     expect(banner).to_be_visible(timeout=5000)
     expect(page.locator("#newImagesMsg")).to_contain_text("1 new image detected")
     page.locator("#newImagesBanner .banner-dismiss").click()
-    expect(banner).to_be_hidden()
+    expect(banner).to_have_css("display", "none")
 
     # Same reachable count, but the second folder's volume drops.
     monkeypatch.setattr(
@@ -366,6 +374,7 @@ def test_dismissed_count_rearms_when_a_folder_goes_offline(fresh_server, page, m
     )
     _clear_new_images_cache()
     page.reload()
+    open_notices(page)
     expect(banner).to_be_visible(timeout=5000)
     expect(page.locator("#newImagesMsg")).to_contain_text("offline and not checked")
 
@@ -397,6 +406,7 @@ def test_offline_banner_offers_a_manual_recheck(fresh_server, page, monkeypatch)
     _clear_new_images_cache()
 
     page.goto(f"{url}/browse")
+    open_notices(page)
     expect(page.locator("#newImagesBanner")).to_be_visible(timeout=5000)
     msg = page.locator("#newImagesMsg")
     expect(msg).to_contain_text("Couldn't check for new images")
@@ -432,6 +442,7 @@ def test_check_again_is_not_swallowed_by_an_in_flight_poll(fresh_server, page, m
     _clear_new_images_cache()
 
     page.goto(f"{url}/browse")
+    open_notices(page)
     msg = page.locator("#newImagesMsg")
     expect(msg).to_contain_text("Couldn't check for new images", timeout=5000)
 
@@ -482,6 +493,7 @@ def test_check_again_releases_the_button_when_the_recheck_fails(
     _clear_new_images_cache()
 
     page.goto(f"{url}/browse")
+    open_notices(page)
     msg = page.locator("#newImagesMsg")
     expect(msg).to_contain_text("Couldn't check for new images", timeout=5000)
 
@@ -518,6 +530,7 @@ def test_check_again_releases_the_button_when_the_follow_up_poll_fails(
     _clear_new_images_cache()
 
     page.goto(f"{url}/browse")
+    open_notices(page)
     msg = page.locator("#newImagesMsg")
     expect(msg).to_contain_text("Couldn't check for new images", timeout=5000)
 
@@ -553,6 +566,7 @@ def test_a_poll_landing_mid_recheck_does_not_release_the_button(
     _clear_new_images_cache()
 
     page.goto(f"{url}/browse")
+    open_notices(page)
     msg = page.locator("#newImagesMsg")
     expect(msg).to_contain_text("Couldn't check for new images", timeout=5000)
 

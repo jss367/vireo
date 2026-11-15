@@ -35,6 +35,7 @@ declare var Keymap: {pushEsc(handler: () => void): number; popEsc(token: number 
 declare var VireoViewPreferences: {restore(input: HTMLInputElement): void; save?(input: HTMLInputElement): void};
 declare var vireoLightboxSession: {requestedPhotoId(): number | null};
 declare function safeFetch<T = unknown>(url: string, init?: RequestInit, options?: {toast?: boolean}): Promise<T>;
+declare function showToast(message: string, type?: string, options?: {details?: string; jobId?: string}): void;
 declare function safeEventSource(url: string, callbacks: {
   onProgress?(progress: SyncProgress): void; onComplete?(event: SyncJobEvent): void; onError?(): void;
 }): EventSource;

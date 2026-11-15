@@ -2065,8 +2065,9 @@ def test_location_review_actions_stay_above_open_bottom_panel(live_server, page)
     expect(page.locator("#locationReviewAssign")).to_be_in_viewport()
 
 
-def test_location_review_actions_stay_visible_below_top_banner(live_server, page):
-    """Shared notification banners must resize rather than clip the review page."""
+def test_location_review_keeps_its_height_when_a_notice_appears(live_server, page):
+    """A standing notice is a row behind the bell, so it takes no room from
+    the review page and the actions stay above the bottom bar."""
     photo_id = live_server["data"]["photos"][0]
     with live_server["db"].conn:
         live_server["db"].conn.execute(
@@ -2085,17 +2086,25 @@ def test_location_review_actions_stay_visible_below_top_banner(live_server, page
     page.goto(f"{live_server['url']}/locations/review?source=selection")
     expect(page.locator("#locationReviewGroupTitle")).to_have_text("1 photo")
 
+    review_top = "document.querySelector('.location-review-page').getBoundingClientRect().top"
+    top_before = page.evaluate(review_top)
+    navbar_bottom = page.evaluate("document.querySelector('.navbar').getBoundingClientRect().bottom")
+    assert top_before == navbar_bottom
+    # The seeded folders are not on disk, so a missing-folders notice may
+    # already be counted.
+    showing = "[...document.getElementById('standingNotices').children].filter(e => e.style.display === 'flex').length"
+    notices_before = page.evaluate(showing)
+
     page.evaluate(
         """() => {
           document.getElementById('newImagesMsg').textContent = '7 new images';
           document.getElementById('newImagesBanner').style.display = 'flex';
         }"""
     )
+    expect(page.locator("#notificationBadge")).to_have_text(str(notices_before + 1))
 
     positions = page.evaluate(
         """() => ({
-          bannerBottom: document.getElementById('newImagesBanner')
-            .getBoundingClientRect().bottom,
           reviewTop: document.querySelector('.location-review-page')
             .getBoundingClientRect().top,
           actionsBottom: document.querySelector('.location-review-actions')
@@ -2104,7 +2113,7 @@ def test_location_review_actions_stay_visible_below_top_banner(live_server, page
             .getBoundingClientRect().top
         })"""
     )
-    assert positions["reviewTop"] >= positions["bannerBottom"]
+    assert positions["reviewTop"] == top_before
     assert positions["actionsBottom"] <= positions["bottomBarTop"]
     expect(page.locator("#locationReviewAssign")).to_be_in_viewport()
 

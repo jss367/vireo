@@ -1776,22 +1776,6 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   border-left: 3px solid var(--accent, #4a9eff);
   padding-left: 7px; /* 10px original minus 3px border */
 }
-.missing-folders-banner {
-  background: var(--warning-bg, #fff3cd);
-  color: var(--warning-text, #856404);
-  padding: 6px 16px;
-  font-size: 13px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  border-bottom: 1px solid var(--warning-border, #ffc107);
-}
-.missing-folders-banner a {
-  color: var(--warning-text, #856404);
-  font-weight: 600;
-  text-decoration: underline;
-}
-
 /* ---------- Missing Originals (per-photo) ---------- */
 .missing-photo-row {
   display: flex;
@@ -1870,100 +1854,6 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   font-size: 12px;
 }
 .missing-photos-action-status.error { color: var(--danger); }
-.banner-dismiss {
-  margin-left: auto;
-  background: none;
-  border: none;
-  color: var(--warning-text, #856404);
-  font-size: 16px;
-  cursor: pointer;
-  padding: 0 4px;
-}
-.new-images-banner {
-  background: var(--bg-tertiary, #153D55);
-  color: var(--text-primary, #E6F1F5);
-  padding: 6px 16px;
-  font-size: 13px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  border-bottom: 1px solid var(--border-primary, #14374E);
-}
-.new-images-banner a,
-.new-images-banner .banner-cta,
-.new-images-banner .banner-recheck {
-  color: var(--accent, #24E5CA);
-  font-weight: 600;
-  text-decoration: underline;
-}
-.new-images-banner .banner-cta,
-.new-images-banner .banner-recheck {
-  background: none;
-  border: none;
-  padding: 0;
-  font: inherit;
-  cursor: pointer;
-}
-.new-images-banner a:hover,
-.new-images-banner .banner-cta:hover,
-.new-images-banner .banner-recheck:hover { opacity: 0.85; }
-.new-images-banner .banner-recheck:disabled {
-  color: var(--text-secondary, #9fb3bd);
-  cursor: default;
-  text-decoration: none;
-}
-/* Timestamp of the walk behind an offline notice — secondary information,
-   so it reads as a footnote rather than competing with the sentence. */
-.new-images-banner .banner-meta {
-  color: var(--text-secondary, #9fb3bd);
-  font-size: 12px;
-}
-.new-images-banner .banner-dismiss {
-  color: var(--text-secondary, #9fb3bd);
-}
-/* When the missing-folders banner is visible above, new-images stacks
-   naturally in document flow — both are non-fixed block-level elements. */
-
-.runtime-warning-banner {
-  background: color-mix(in srgb, var(--warning, #ffb020) 18%, var(--bg-secondary));
-  color: var(--text-primary, #E6F1F5);
-  padding: 8px 16px;
-  font-size: 13px;
-  display: none;
-  align-items: center;
-  gap: 10px;
-  border-bottom: 1px solid var(--warning, #ffb020);
-}
-.runtime-warning-banner strong { color: var(--warning, #ffb020); }
-.runtime-warning-banner .runtime-warning-text {
-  flex: 1;
-  min-width: 0;
-  line-height: 1.4;
-}
-.runtime-warning-banner .banner-dismiss {
-  color: var(--text-secondary, #9fb3bd);
-}
-
-.dup-cleanup-banner {
-  background: var(--bg-tertiary, #153D55);
-  color: var(--text-primary, #E6F1F5);
-  padding: 6px 16px;
-  font-size: 13px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  border-bottom: 1px solid var(--border-primary, #14374E);
-}
-.dup-cleanup-banner a {
-  color: var(--accent, #24E5CA);
-  font-weight: 600;
-  text-decoration: underline;
-}
-.dup-cleanup-banner a:hover { opacity: 0.85; }
-.dup-cleanup-banner .banner-dismiss {
-  color: var(--text-secondary, #9fb3bd);
-}
-
 /* Shared right-click context menu */
 .vireo-ctx-menu {
   position: fixed; z-index: 99999;
@@ -2165,16 +2055,95 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 
 /* Notification history and transient feedback share semantic colors. */
 .notification-toggle { position: relative; background: none; border: 0; color: inherit; }
-#notificationBadge { font-size: 10px; background: var(--warning); color: var(--warning-text); border-radius: 8px; padding: 1px 4px; }
+#notificationBadge { font-size: 10px; font-weight: 600; background: var(--accent); color: var(--accent-text); border-radius: 8px; padding: 1px 5px; margin-left: 2px; }
+#notificationBadge[data-level="warning"] { background: var(--warning); color: var(--warning-text); }
 .notification-history { position: fixed; top: 52px; right: 12px; z-index: 100001; width: min(460px, calc(100vw - 24px)); max-height: calc(100vh - 72px); overflow: auto; box-sizing: border-box; padding: 16px; background: var(--bg-panel); color: var(--text-primary); border: 1px solid var(--border-primary); border-radius: 8px; box-shadow: 0 4px 24px #0005; }
 .notification-history[hidden] { display: none; }
 .notification-toolbar { display: flex; justify-content: space-between; gap: 12px; }
+.notification-heading { margin: 16px 0 8px; font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-muted); }
 .notification-history ol { padding: 0; list-style: none; }
 .notification-history li { border-bottom: 1px solid var(--border-primary); padding: 12px 0; overflow-wrap: anywhere; }
 .notification-meta { color: var(--text-muted); font-size: 12px; text-transform: capitalize; }
 .notification-history p { margin: 8px 0; }
 .notification-history button, .notification-toast button { cursor: pointer; padding: 4px 8px; }
 .notification-history a { display: inline-block; margin-right: 12px; color: var(--accent); }
+
+/* Standing notices: one row per condition that holds until the user acts.
+   A row's owner shows it with an inline display: flex. */
+.standing-notices { display: flex; flex-direction: column; gap: 8px; }
+.standing-notices-empty { color: var(--text-muted); font-size: 13px; }
+.standing-notices-empty[hidden] { display: none; }
+.standing-notice {
+  position: relative;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  padding: 10px 32px 10px 12px;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  overflow-wrap: anywhere;
+}
+.standing-notice[data-notice-level="warning"] { border-left-color: var(--warning); }
+.standing-notice-text { flex: 1 1 100%; min-width: 0; }
+.standing-notice-text strong { color: var(--warning); }
+.standing-notice a,
+.standing-notice .banner-cta,
+.standing-notice .banner-recheck {
+  margin: 0;
+  padding: 0;
+  background: none;
+  border: none;
+  font: inherit;
+  font-weight: 600;
+  color: var(--accent);
+  text-decoration: underline;
+  cursor: pointer;
+}
+.standing-notice a:hover,
+.standing-notice .banner-cta:hover,
+.standing-notice .banner-recheck:hover { opacity: 0.85; }
+.standing-notice .banner-recheck:disabled {
+  color: var(--text-secondary);
+  cursor: default;
+  text-decoration: none;
+}
+/* When a walk last ran, and a sync's progress or result: secondary to the
+   notice's sentence. */
+.standing-notice .banner-meta,
+.standing-notice-status { color: var(--text-secondary); font-size: 12px; }
+.standing-notice-status:empty { display: none; }
+.standing-notice .banner-dismiss {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  padding: 2px 6px;
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.standing-notice .standing-notice-button {
+  padding: 5px 14px;
+  font-size: 12px;
+  color: var(--text-primary);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-secondary);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.standing-notice .standing-notice-primary {
+  font-weight: 500;
+  color: var(--accent-text);
+  background: var(--accent);
+  border-color: var(--accent);
+}
 #toastContainer { position: fixed; top: 56px; right: 16px; z-index: 100000; display: flex; flex-direction: column; gap: 8px; pointer-events: none; max-height: calc(100vh - 72px); overflow-y: auto; }
 .notification-toast { pointer-events: auto; padding: 10px 16px; border-radius: 6px; font-size: 14px; max-width: min(400px, calc(100vw - 64px)); overflow-wrap: anywhere; background: var(--info); color: var(--info-text); box-shadow: 0 2px 8px #0005; }
 .notification-toast[data-type="success"] { background: var(--success); color: var(--success-text); }

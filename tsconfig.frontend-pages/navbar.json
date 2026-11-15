@@ -50,6 +50,7 @@
     "../vireo/static/navbar-notifications.js",
     "../vireo/static/navbar-notification-store.js",
     "../vireo/static/navbar-similar-photos.js",
+    "../vireo/static/navbar-standing-notices.js",
     "../vireo/static/navbar-state.js",
     "../vireo/static/navbar-tab-reorder-hotkeys.js",
     "../vireo/static/navbar-tabs.js",

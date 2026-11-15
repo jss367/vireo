@@ -32,11 +32,33 @@ function appendJobLink(element, jobId) {
   element.appendChild(link);
 }
 
+// Standing notices showing in the panel (navbar-standing-notices.js reports
+// them). They count toward the badge until their condition clears, so
+// marking history read never hides one.
+let standing = {count: 0, urgent: false, summary: ''};
+
 function updateBadge() {
-  const count = store.read().filter(entry => !entry.read && ['warning', 'error'].includes(entry.type)).length;
+  const unread = store.read().filter(entry => !entry.read && ['warning', 'error'].includes(entry.type)).length;
+  const count = unread + standing.count;
   const badge = document.getElementById('notificationBadge');
-  if (badge) { badge.textContent = String(count); badge.hidden = !count; }
-  button?.setAttribute('aria-label', 'Notifications' + (count ? ', ' + count + ' unread warnings or errors' : ''));
+  if (badge) {
+    badge.textContent = String(count);
+    badge.hidden = !count;
+    badge.dataset.level = unread || standing.urgent ? 'warning' : 'notice';
+  }
+  const parts = [];
+  if (standing.count) parts.push(standing.count + (standing.count === 1 ? ' needs attention' : ' need attention'));
+  if (unread) parts.push(unread + ' unread warnings or errors');
+  button?.setAttribute('aria-label', ['Notifications'].concat(parts).join(', '));
+  if (button) button.title = standing.summary || 'Notifications';
+}
+
+/** Report the standing notices now showing: how many, whether any is a
+ * warning, and their messages for the bell's tooltip.
+ * @param {{count: number, urgent: boolean, summary: string}} next */
+export function setStandingNotices(next) {
+  standing = next;
+  updateBadge();
 }
 
 function renderHistory() {
@@ -82,11 +104,18 @@ function expandEntry(id) {
   details.scrollIntoView?.({block: 'nearest'});
 }
 
-function closeHistory() {
+/** @param {{restoreFocus?: boolean}} [options] */
+function closeHistory(options = {}) {
   if (panel) panel.hidden = true;
   button?.setAttribute('aria-expanded', 'false');
   if (escapeToken) { Keymap.popEsc(escapeToken); escapeToken = 0; }
-  button?.focus();
+  if (options.restoreFocus !== false) button?.focus();
+}
+
+/** Close the panel for an action that opens another surface (a dialog, a
+ * page). Focus stays where that surface put it. */
+export function closeNotificationsForAction() {
+  if (panel && !panel.hidden) closeHistory({restoreFocus: false});
 }
 
 function openHistory() {
@@ -94,12 +123,12 @@ function openHistory() {
   panel.hidden = false;
   button?.setAttribute('aria-expanded', 'true');
   renderHistory();
-  escapeToken = Keymap.pushEsc(closeHistory);
+  escapeToken = Keymap.pushEsc(() => closeHistory());
   document.getElementById('notificationClose')?.focus();
 }
 
 button?.addEventListener('click', () => panel?.hidden ? openHistory() : closeHistory());
-document.getElementById('notificationClose')?.addEventListener('click', closeHistory);
+document.getElementById('notificationClose')?.addEventListener('click', () => closeHistory());
 document.getElementById('notificationReadAll')?.addEventListener('click', () => {
   store.markRead(store.read().map(entry => entry.id)); renderHistory(); updateBadge();
 });

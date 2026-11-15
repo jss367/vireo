@@ -1,5 +1,5 @@
-// The pending-changes banner: progress text, the running sync job, and
-// polling /api/sync/status.
+// The pending-changes notice (a row in the navbar's notifications panel):
+// its text, the running sync job, and polling /api/sync/status.
 // Classic script.
 
 /** @param {SyncProgress | null | undefined} p */

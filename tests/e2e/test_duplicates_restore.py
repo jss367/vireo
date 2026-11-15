@@ -12,6 +12,7 @@ from playwright.sync_api import expect
 from services import photo_ingest, workspace_folders
 
 from e2e.module_pages import install_page_module_exposure
+from e2e.notices import open_notices
 
 
 @pytest.fixture
@@ -230,6 +231,7 @@ def test_cleanup_banner_opens_current_copies_without_a_saved_scan(live_server, p
     _seed_catalog_cleanup(live_server["db"])
     page.goto(f"{live_server['url']}/browse")
     expect(page.locator("#dupCleanupMsg")).to_contain_text("1 duplicate file copy could be cleaned up")
+    open_notices(page)
     page.locator("#dupCleanupBanner a").click()
 
     expect(page.locator("#catalogBanner")).to_be_visible()

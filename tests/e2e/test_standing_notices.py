@@ -1,0 +1,63 @@
+"""Standing notices sit behind the navbar's bell instead of in rows above the
+page: the bell counts them, and the panel lists them with their actions."""
+
+from playwright.sync_api import expect
+
+from e2e.notices import open_notices
+
+
+def _pending_sync(route):
+    route.fulfill(json={"pending_count": 3, "pending_photo_count": 2, "active_job": None})
+
+
+def _duplicate_copies(route):
+    route.fulfill(json={"count": 4, "total_size": 9_600_000})
+
+
+def test_a_page_without_notices_has_a_quiet_bell(live_server, page):
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.wait_for(state="visible")
+    expect(page.locator("#notificationBadge")).to_be_hidden()
+    open_notices(page)
+    expect(page.locator("#standingNoticesEmpty")).to_have_text("Nothing needs attention.")
+    expect(page.locator("#notificationList")).to_have_text("No notifications yet.")
+
+
+def test_notices_are_counted_on_the_bell_and_take_no_row_above_the_photos(live_server, page):
+    page.goto(f"{live_server['url']}/browse")
+    first_card = page.locator(".grid-card").first
+    first_card.wait_for(state="visible")
+    top_without_notices = first_card.bounding_box()["y"]
+
+    page.route("**/api/sync/status", _pending_sync)
+    page.route("**/api/duplicates/disk-cleanup-summary", _duplicate_copies)
+    page.goto(f"{live_server['url']}/browse")
+    badge = page.locator("#notificationBadge")
+    expect(badge).to_have_text("2")
+    first_card.wait_for(state="visible")
+    assert first_card.bounding_box()["y"] == top_without_notices
+
+    # The page's own notice (pending XMP changes) joins the navbar's.
+    assert page.evaluate("document.getElementById('syncBanner').parentElement.id") == "standingNotices"
+    expect(page.locator("#syncBanner")).to_be_hidden()
+    bell = page.locator("#notificationsToggle")
+    expect(bell).to_have_attribute("aria-label", "Notifications, 2 need attention")
+    title = bell.get_attribute("title")
+    assert "4 duplicate file copies could be cleaned up" in title
+    assert "3 changes across 2 photos" in title
+
+    open_notices(page)
+    expect(page.locator("#standingNoticesEmpty")).to_be_hidden()
+    expect(page.locator("#dupCleanupBanner")).to_be_visible()
+    expect(page.locator("#syncBannerText")).to_contain_text("3 changes across 2 photos")
+
+    page.locator("#dupCleanupBanner .banner-dismiss").click()
+    expect(page.locator("#dupCleanupBanner")).to_be_hidden()
+    expect(badge).to_have_text("1")
+    expect(page.locator("#notificationHistory")).to_be_visible()
+
+    # An action that opens a dialog gets out of the dialog's way.
+    page.locator("#syncBannerReviewButton").click()
+    expect(page.locator("#syncPreviewOverlay")).to_be_visible()
+    expect(page.locator("#notificationHistory")).to_be_hidden()
+    expect(badge).to_have_text("1")

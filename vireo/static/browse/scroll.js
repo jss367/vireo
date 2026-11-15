@@ -139,7 +139,6 @@ function focusedCardBox() {
 }
 
 var gridViewportSize = gridContainer.clientWidth + 'x' + gridContainer.clientHeight;
-var gridSyncBannerHeight = (document.getElementById('syncBanner')?.offsetHeight || 0);
 export var focusedCardWasOnScreen = false;
 
 // Whether the focused card was on screen *before* the reflow. A ResizeObserver
@@ -174,22 +173,11 @@ if (window.ResizeObserver) {
   // in the same frame as the reflow — the card never visibly jumps away.
   new ResizeObserver(function() {
     var size = gridContainer.clientWidth + 'x' + gridContainer.clientHeight;
-    var bannerHeight = (document.getElementById('syncBanner')?.offsetHeight || 0);
-    var previousSize = gridViewportSize.split('x').map(Number);
-    // Saving the first edit reveals the sync banner. That reduces the
-    // viewport height, but must not recenter a partly visible selected photo
-    // while its filter membership is being refreshed. Actual window/sidebar
-    // resizes still keep the focused photo visible.
-    var onlySyncBannerChanged = bannerHeight !== gridSyncBannerHeight
-      && gridContainer.clientWidth === previousSize[0]
-      && Math.abs(gridContainer.clientHeight + bannerHeight
-        - (previousSize[1] || 0) - gridSyncBannerHeight) <= 1;
-    gridSyncBannerHeight = bannerHeight;
     // A scrollbar appearing counts (it reflows the columns); anything that
     // leaves the viewport box alone cannot have moved the card out of view.
     if (size === gridViewportSize) return;
     gridViewportSize = size;
-    if (!onlySyncBannerChanged) keepFocusedCardVisible();
+    keepFocusedCardVisible();
     noteFocusedCardVisibility();
   }).observe(gridContainer);
 
