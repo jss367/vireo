@@ -1320,24 +1320,22 @@ def _unclipped_white_balance_gain(raw):
     reserves its own headroom with ``exp_shift``, so multiplying by this
     ratio loses nothing.
 
-    The multipliers are the ones LibRaw applies for ``use_camera_wb``: the
-    as-shot balance when the file carries one, else the daylight balance,
-    with a missing green or fourth multiplier filled in LibRaw's way.
+    Call this after ``raw.postprocess``: it reads the multipliers LibRaw
+    applied, whichever balance it chose (as-shot, daylight, its own estimate,
+    or none for a file whose balance is already in the sensor data), with the
+    missing entries already filled in. Reading the as-shot metadata instead
+    would brighten a file LibRaw balanced some other way.
     """
     import math
 
-    balance = [float(value) for value in raw.camera_whitebalance][:4]
-    if len(balance) < 3 or not (balance[0] > 0 and balance[2] > 0):
-        balance = [float(value) for value in raw.daylight_whitebalance][:4]
-    balance += [0.0] * (4 - len(balance))
-    if balance[1] == 0:
-        balance[1] = 1.0
-    if balance[3] == 0:
-        balance[3] = balance[1] if raw.num_colors < 4 else 1.0
-    lowest, highest = min(balance), max(balance)
-    if not (lowest > 0 and math.isfinite(highest)):
+    applied = raw.auto_whitebalance or ()
+    multipliers = [
+        float(value) for value in applied
+        if value > 0 and math.isfinite(value)
+    ]
+    if not multipliers:
         return 1.0
-    return highest / lowest
+    return max(multipliers) / min(multipliers)
 
 
 def _postprocess_raw_linear(raw):
