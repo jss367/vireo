@@ -15,7 +15,7 @@ from image_edits import apply_recipe_to_loaded_image
 from image_loader import RAW_DECODE_LINEAR, load_image
 from PIL import Image
 from testing.waits import synchronization_timeout
-from tone import ToneAdjustments, apply_adjustments, linear_to_srgb
+from tone import ToneAdjustments, apply_adjustments, linear_to_srgb, raw_look_curve
 
 
 def write_dng(path):
@@ -113,8 +113,12 @@ def test_linear_decode_gain_uses_the_balance_libraw_applied(dng, monkeypatch):
 def test_negative_exposure_recovers_distinct_highlights_before_display_mapping():
     source = np.array([[[1.2] * 3, [1.8] * 3, [2.4] * 3]], dtype=np.float32)
     output = apply_adjustments(source, ToneAdjustments(exposure=-2), input_linear=True)
-    np.testing.assert_allclose(output, linear_to_srgb(source / 4), atol=1e-6)
-    assert np.all(np.diff(output[0, :, 0]) > 0.09)
+    np.testing.assert_allclose(
+        output, linear_to_srgb(raw_look_curve(source / 4)), atol=1e-6,
+    )
+    # Two stops down, the three levels sit on the look's shoulder at least
+    # five 8-bit levels apart.
+    assert np.all(np.diff(output[0, :, 0]) > 5 / 255)
     # Encoding the source to 8-bit first irreversibly merges all three values.
     clipped = np.clip(linear_to_srgb(source) * 255, 0, 255).astype(np.uint8)
     legacy = apply_adjustments(clipped.astype(np.float32) / 255, ToneAdjustments(exposure=-2))

@@ -102,12 +102,15 @@ def test_highlights_recover_raw_radiance_above_display_white():
     assert np.min(np.diff(recovered[16, :, 0])) >= -2e-6
 
 
-def test_spatial_shadow_lift_preserves_in_gamut_color_ratios():
+def test_spatial_shadow_lift_preserves_hue():
+    # Green sits halfway between red and blue in the source. The lift scales
+    # all three alike and the RAW look keeps the middle channel's place, so
+    # it is still halfway in the render.
     linear = srgb_to_linear(_texture(0.325)) * np.array([1.2, 0.9, 0.6], dtype=np.float32)
     out = apply_adjustments(linear, ToneAdjustments(shadows=100), input_linear=True, range_sigma=range_sigma(256))
     mapped = srgb_to_linear(out)
-    np.testing.assert_allclose(mapped[..., 0] / mapped[..., 1], linear[..., 0] / linear[..., 1], atol=1e-6)
-    np.testing.assert_allclose(mapped[..., 2] / mapped[..., 1], linear[..., 2] / linear[..., 1], atol=1e-6)
+    place = (mapped[..., 1] - mapped[..., 2]) / (mapped[..., 0] - mapped[..., 2])
+    np.testing.assert_allclose(place, 0.5, atol=1e-4)
 
 
 def test_local_range_adjustment_leaves_unselected_texture_unchanged():

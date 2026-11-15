@@ -20,26 +20,28 @@ verification, and the temporary build's removal plan.
    floating point. Negative and above-display-white channels survive this
    conversion; integer RGB clipping and an intermediate JPEG are avoided.
    The scale puts the sensor ceiling of the least amplified channel (green,
-   for most cameras) at display white, as a standard clipped decode does.
+   for most cameras) at 1.0, as a standard clipped decode does.
    LibRaw's unclipped modes instead scale to the most amplified channel,
    which darkens the frame by the largest white-balance multiplier (about a
    stop in daylight); Vireo multiplies that back, so only the channels white
-   balance amplifies, and rebuilt highlights, extend above display white.
+   balance amplifies, and rebuilt highlights, extend above 1.0.
 3. Matched lens-profile vignetting, manual vignetting, and edge-aware
    purple/green defringing operate in linear light. Calibrated and manual
    radial distortion share one resample, transforming the photo and its local
    mask before rotation and cropping. Geometry, global and masked exposure,
-   and white-balance adjustments operate on this source. A luminance shoulder
-   maps highlights to display range, with
-   gamut compression to avoid independently clipping color channels.
+   and white-balance adjustments operate on this source. The RAW look then
+   maps scene radiance to display range (see [The RAW look](#the-raw-look)).
 4. Shadows and Highlights are a local exposure change on scene radiance,
-   applied before the shoulder: each pixel gains or loses up to 1.7 stops
+   applied before the RAW look: each pixel gains or loses up to 1.7 stops
    according to the brightness of its neighborhood, an edge-aware base of log
    luminance whose blur is 1.5% of the frame's long edge. A dark region lifts
    as a whole, so its texture keeps its contrast, and Highlights can bring
-   retained radiance above display white back into range before the shoulder
-   compresses it. Near strong edges the base falls back to each pixel's own
-   level, so flat regions gain no rim. Whites and Blacks remain point curves. Tonal range, curves, color, presence,
+   retained radiance above display white back into range before the look's
+   shoulder compresses it. Their zones are placed by displayed brightness: a
+   region the look shows at middle grey barely moves under Shadows, as a
+   middle-grey region of a JPEG does. Near strong edges the base falls back to
+   each pixel's own level, so flat regions gain no rim. Whites and Blacks
+   remain point curves. Tonal range, curves, color, presence,
    and detail controls keep floating-point buffers. Existing detail algorithms
    still run after tone and output resizing.
 5. JPEG and PNG output is quantized to 8 bits at encoding. TIFF output from this
@@ -75,6 +77,12 @@ retain their existing fast JPEG paths and disk working copies.
   edit saved under an earlier version renders brighter by the ratio of its
   photo's largest white-balance multiplier to its smallest, about one stop.
   Lowering its Exposure by log2 of that ratio restores the look it had.
+  Render version 14 adds the RAW look: every RAW render, edited or not, is
+  about 1.2 stops brighter in the midtones and has more contrast, and
+  Shadows/Highlights act on the tones that are now displayed as shadows and
+  highlights. An edit saved under an earlier version was tuned against the
+  darker, flatter render and usually needs its Exposure lowered; the curve
+  also adds contrast, so Exposure alone brings it close, not identical.
 - An unsupported RAW can still fall back to its embedded JPEG. Offline files
   can use a companion JPEG or working copy. Those sources retain their original
   precision limits; their TIFF exports remain 8-bit. A pre-existing darktable
@@ -94,6 +102,63 @@ retain their existing fast JPEG paths and disk working copies.
 - This change upgrades RAW processing and TIFF output. It does not add a
   high-bit-depth loader for arbitrary TIFF or PNG inputs.
 
+## The RAW look
+
+A linear decode shown as it is looks wrong next to the camera's own JPEG of
+the same exposure: more than a stop darker in the midtones, and flat. Cameras
+meter to keep highlight headroom, so middle grey sits well under 18% of the
+sensor ceiling, and they brighten and add contrast when they render. Browse
+and the lightbox show that camera rendering, so the editor has to start from
+something close to it, or every edit begins by undoing the difference.
+
+`tone.raw_look_curve` is that starting point. It maps scene-linear luminance
+`s` (1.0 is the sensor ceiling) to display-linear luminance `v / (1 + v)`,
+where `v = (s / 0.18) * ((s + 0.016) / 0.196) ** 0.95`:
+
+- 0.18 is the scene level shown at half display luminance (sRGB 188).
+- The exponent makes midtone contrast 1.95 in log-log terms: one stop of
+  scene brightness spans almost two on the display.
+- Below about 0.016 the curve is linear, so deep shadows keep their relative
+  differences.
+- The rational shoulder approaches white without reaching it. The sensor
+  ceiling lands at sRGB 251 and a rebuilt blown area (about 2.0) at 254.
+
+The three constants were fitted to camera JPEGs: 48 NEF files, 16 each from a
+Nikon D7200, D850 and Z 8, spread across each camera's shooting days. Each
+file's linear decode and its embedded JPEG were reduced to the same grid, and
+the median JPEG luminance was taken at each scene level.
+
+| Scene level (stops under the ceiling) | D7200 | D850 | Z 8 | RAW look |
+|---|---|---|---|---|
+| -7.9 | 9 | 12 | 10 | 9 |
+| -6.4 | 26 | 28 | 23 | 26 |
+| -4.9 | 64 | 63 | 60 | 63 |
+| -3.4 | 137 | 139 | 131 | 134 |
+| -1.9 | 213 | 215 | 217 | 216 |
+| -0.4 | 249 | 247 | 251 | 248 |
+
+Values are 8-bit sRGB luminance. The three cameras agree within about 5
+levels of each other, which is why one curve serves all of them. Over the 48
+files the mean brightness of an unadjusted render is within 1 level of the
+camera JPEG's (standard deviation 5, worst file 15, 92% of files within 10);
+without the look it was 35 levels darker. A single file can differ because Active D-Lighting and the
+Picture Control change the camera's rendering per shot. Cameras from other
+makers were not measured.
+
+The curve is applied to each pixel's largest and smallest channel, and the
+middle channel keeps its relative place between them. Hue is unchanged, and
+saturation follows the curve as it does in a camera's rendering: over the 48
+files the unadjusted render's mean chroma is 3% above the camera JPEGs' (7%
+above for the median file), where scaling all three channels by one luminance
+gain left it 16% lower and pushed bright saturated colors past white. A channel below zero (a color outside sRGB) is
+first brought to zero by reducing chroma toward the pixel's luminance.
+
+The look applies only to scene-linear RAW sources. A JPEG, a working copy or
+an embedded preview is already rendered and passes through unchanged. Exposure,
+white balance and Shadows/Highlights act before the curve; everything else
+acts on its output. `vireo/tests/test_raw_look.py` holds the curve to the
+measured camera levels above.
+
 ## Clipped highlights
 
 A saturated sensel records only a lower bound, and each channel's ceiling
@@ -106,7 +171,7 @@ Vireo therefore raises clipped sensels in white-balanced camera space:
 - A neighboring channel that is also clipped counts as reaching the brightest
   channel there. An area where every channel clipped becomes neutral at the
   highest ceiling, which sits above display white by the largest
-  white-balance multiplier; the luminance shoulder renders it white.
+  white-balance multiplier; the RAW look renders it white.
 - A sensel is only raised, never lowered, and the correction fades in over the
   last tenth below the ceiling. Unclipped photos decode exactly as before.
 
@@ -222,7 +287,7 @@ future denoising, highlight-reconstruction, and sharpening algorithms.
 brightness, hard-edge halo limits, noise protection near black, ordered tone
 ramps, local-mask isolation, float precision, tile seams, and preview scaling.
 These synthetic checks do not replace visual tuning on real wildlife photos.
-Shadows/Highlights run on scene radiance before the RAW highlight shoulder.
+Shadows/Highlights run on scene radiance before the RAW look.
 
 `vireo/tests/test_optics.py` checks known radial-grid recovery, border coverage,
 linear-light falloff recovery, fringe hue/edge isolation, mask alignment,

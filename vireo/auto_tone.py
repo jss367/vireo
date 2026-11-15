@@ -50,7 +50,6 @@ import numpy as np
 try:
     from .float_image import FloatImage
     from .tone import (
-        HIGHLIGHT_KNEE,
         LUMA_B,
         LUMA_G,
         LUMA_R,
@@ -64,7 +63,6 @@ try:
 except ImportError:
     from float_image import FloatImage
     from tone import (
-        HIGHLIGHT_KNEE,
         LUMA_B,
         LUMA_G,
         LUMA_R,
@@ -95,8 +93,11 @@ EXPOSURE_LIMIT = 2.5
 SUBJECT_METERING_SHARE = 0.5
 SUBJECT_PULL_LIMIT = 0.75
 # Darkening recovers at most the stops that bring the frame's 99th
-# percentile (or the subject's 95th) of scene-linear luminance down to the
-# renderer's highlight knee; above it the shoulder is compressing detail.
+# percentile (or the subject's 95th) of scene-linear luminance down to
+# RAW_NEAR_CLIP, a share of the sensor ceiling. Above it the RAW look shows
+# every tone within about 7 sRGB levels of white, as the camera's own JPEG
+# does, so only a RAW still holds the detail and only darkening shows it.
+RAW_NEAR_CLIP = 0.85
 HEADROOM_FRAME_QUANTILE = 0.99
 HEADROOM_SUBJECT_QUANTILE = 0.95
 # Brightening stops before the frame's 99th percentile passes this level:
@@ -327,9 +328,10 @@ def _weighted_median(values, weights):
 def _headroom_stops(rgb, *, input_linear, white_balance, weights):
     """Stops of darkening that still recover highlight detail.
 
-    Only a scene-linear (RAW) source holds tones above the renderer's
-    highlight knee; darkening brings them back out of the shoulder. A
-    display-referred source has nothing above white, so it has no headroom.
+    Only a scene-linear (RAW) source holds tones at and beyond the sensor
+    ceiling, which the RAW look renders as near-white; darkening brings them
+    back down its shoulder. A display-referred source has nothing above
+    white, so it has no headroom.
     """
     if not input_linear:
         return 0.0
@@ -338,9 +340,9 @@ def _headroom_stops(rgb, *, input_linear, white_balance, weights):
     bright = float(np.quantile(luma, HEADROOM_FRAME_QUANTILE))
     if weights is not None:
         bright = max(bright, _weighted_quantile(luma, weights, HEADROOM_SUBJECT_QUANTILE))
-    if bright <= HIGHLIGHT_KNEE:
+    if bright <= RAW_NEAR_CLIP:
         return 0.0
-    return math.log2(bright / HIGHLIGHT_KNEE)
+    return math.log2(bright / RAW_NEAR_CLIP)
 
 
 def _stops_to_grey(level, brighten_share=EXPOSURE_BRIGHTEN_SHARE, limit=EXPOSURE_LIMIT):
