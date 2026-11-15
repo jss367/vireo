@@ -1308,6 +1308,36 @@ def _postprocess_raw(raw, max_size, preserve_highlights=False):
     return Image.fromarray(rgb)
 
 
+def _unclipped_white_balance_gain(raw):
+    """Linear factor that restores an unclipped LibRaw decode's brightness.
+
+    Clipping highlights, LibRaw scales the white-balance multipliers so the
+    smallest is 1: the least amplified channel's sensor ceiling is output
+    white. In every other highlight mode it scales them so the largest is 1,
+    which keeps the most amplified channel inside the integer range and
+    leaves the whole frame darker by largest/smallest: about one stop in
+    daylight (red near 2), more under tungsten (blue above 3). The decode
+    reserves its own headroom with ``exp_shift``, so multiplying by this
+    ratio loses nothing.
+
+    Call this after ``raw.postprocess``: it reads the multipliers LibRaw
+    applied, whichever balance it chose (as-shot, daylight, its own estimate,
+    or none for a file whose balance is already in the sensor data), with the
+    missing entries already filled in. Reading the as-shot metadata instead
+    would brighten a file LibRaw balanced some other way.
+    """
+    import math
+
+    applied = raw.auto_whitebalance or ()
+    multipliers = [
+        float(value) for value in applied
+        if value > 0 and math.isfinite(value)
+    ]
+    if not multipliers:
+        return 1.0
+    return max(multipliers) / min(multipliers)
+
+
 def _postprocess_raw_linear(raw):
     """Decode an edit source without an 8-bit or gamma-encoded intermediate.
 
@@ -1319,6 +1349,11 @@ def _postprocess_raw_linear(raw):
     neutral first (highlight_reconstruction); their detail is not recoverable.
     Always demosaic at full resolution: half-size binning makes fine detail
     change between fitted previews and exports. Browsing keeps its fast path.
+
+    The result is scaled so the sensor ceiling of the least amplified channel
+    (green, for most cameras) is 1.0, the same brightness a clipped decode
+    gives. More amplified channels and rebuilt highlights reach above that, up
+    to ``_unclipped_white_balance_gain``.
     """
     import numpy as np
     import rawpy
@@ -1345,10 +1380,13 @@ def _postprocess_raw_linear(raw):
         [-0.9692660, 1.8760108, 0.0415560],
         [0.0556434, -0.2040259, 1.0572252],
     ], dtype=np.float32)
+    # Undo exp_shift's two reserved stops and the unclipped white-balance
+    # scale in one multiply.
+    scale = np.float32(4.0 * _unclipped_white_balance_gain(raw) / 65535.0)
     # Convert rows in bounded blocks; avoid two full-frame float temporaries.
     pixels = np.empty(rgb.shape, dtype=np.float32)
     rows = max(1, 1_000_000 // max(1, rgb.shape[1]))
     for top in range(0, rgb.shape[0], rows):
-        xyz = rgb[top:top + rows].astype(np.float32) * np.float32(4.0 / 65535.0)
+        xyz = rgb[top:top + rows].astype(np.float32) * scale
         pixels[top:top + rows] = xyz @ xyz_to_rgb.T
     return FloatImage(pixels)

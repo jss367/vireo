@@ -3,6 +3,7 @@
 import io
 import json
 import os
+from types import SimpleNamespace
 
 import image_loader
 import numpy as np
@@ -52,6 +53,61 @@ def test_real_raw_decode_retains_above_white_and_sub_byte_detail(dng):
     assert len(np.unique(pixels[32, :, 0])) > 400
     assert image.size == (512, 64)
     assert np.isfinite(pixels).all()
+
+
+def test_linear_decode_is_as_bright_as_a_clipped_decode(dng):
+    """Keeping highlights unclipped must not darken the rest of the frame."""
+    image = load_image(dng, max_size=None, raw_decode=RAW_DECODE_LINEAR)
+    with rawpy.imread(str(dng)) as raw:
+        clipped = raw.postprocess(
+            output_bps=16, gamma=(1, 1), use_camera_wb=True, no_auto_bright=True,
+            output_color=rawpy.ColorSpace.sRGB,
+        ).astype(np.float32) / 65535
+    # Compare where the clipped decode clipped nothing: below each channel's
+    # ceiling, and above the floor where it zeroes out-of-gamut negatives.
+    unclipped = (clipped.max(axis=-1) < 0.9) & (clipped.min(axis=-1) > 0.01)
+    assert unclipped.mean() > 0.1
+    np.testing.assert_allclose(
+        np.asarray(image)[unclipped], clipped[unclipped], rtol=0.02,
+    )
+
+
+@pytest.mark.parametrize(('applied', 'gain'), [
+    # Daylight, as LibRaw reports it after an unclipped decode: largest is 1.
+    ([1.0, 0.51354, 0.76931, 0.51354], 1.9473),
+    # Tungsten: blue is the most amplified channel.
+    ([0.40625, 0.3125, 1.0, 0.3125], 3.2),
+    # A multiplier below green's is the smallest.
+    ([0.4, 0.5, 1.0, 0.5], 2.5),
+    # A four-color sensor's fourth multiplier counts.
+    ([0.5, 1.0, 0.75, 0.25], 4.0),
+    # A balance already in the sensor data: LibRaw applied none.
+    ([1.0, 1.0, 1.0, 1.0], 1.0),
+    # Not decoded yet, or nothing usable: leave the scale alone.
+    (None, 1.0),
+    ([0.0, 0.0, 0.0, 0.0], 1.0),
+])
+def test_unclipped_white_balance_gain_is_largest_over_smallest_applied_multiplier(applied, gain):
+    raw = SimpleNamespace(auto_whitebalance=applied)
+    assert image_loader._unclipped_white_balance_gain(raw) == pytest.approx(gain, rel=1e-4)
+
+
+def test_linear_decode_gain_uses_the_balance_libraw_applied(dng, monkeypatch):
+    """The as-shot metadata is not what LibRaw applies to every file."""
+    seen = []
+    original = image_loader._unclipped_white_balance_gain
+
+    def gain(raw):
+        seen.append((list(raw.auto_whitebalance), original(raw)))
+        return seen[-1][1]
+
+    monkeypatch.setattr(image_loader, '_unclipped_white_balance_gain', gain)
+    monkeypatch.setattr(image_loader, '_linear_cache', image_loader.OrderedDict())
+    load_image(dng, max_size=None, raw_decode=RAW_DECODE_LINEAR)
+    (applied, value), = seen
+    # AsShotNeutral (1/2, 1, 2/3): LibRaw applied (2, 1, 1.5) scaled to red.
+    np.testing.assert_allclose(applied, [1.0, 0.5, 0.75, 0.5], rtol=1e-4)
+    assert value == pytest.approx(2.0, rel=1e-4)
 
 
 def test_negative_exposure_recovers_distinct_highlights_before_display_mapping():
@@ -117,7 +173,9 @@ def test_tiff_export_has_real_16_bit_samples_and_correct_profile(dng):
     from export import _OUTPUT_FORMATS, _save_export_image
 
     source = load_image(dng, max_size=None, raw_decode=RAW_DECODE_LINEAR)
-    result = apply_recipe_to_loaded_image(source, {'adjustments': {'exposure': -1}})
+    # Two stops down brings the ramp's red channel, amplified to twice the
+    # green ceiling, under display white, so its samples stay distinct.
+    result = apply_recipe_to_loaded_image(source, {'adjustments': {'exposure': -2}})
     stream = io.BytesIO()
     _save_export_image(result, stream, _OUTPUT_FORMATS['tiff'], 92)
     stream.seek(0)

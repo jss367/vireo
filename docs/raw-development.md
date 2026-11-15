@@ -19,6 +19,12 @@ verification, and the temporary build's removal plan.
 2. Vireo restores the exposure scale and converts XYZ to linear RGB in 32-bit
    floating point. Negative and above-display-white channels survive this
    conversion; integer RGB clipping and an intermediate JPEG are avoided.
+   The scale puts the sensor ceiling of the least amplified channel (green,
+   for most cameras) at display white, as a standard clipped decode does.
+   LibRaw's unclipped modes instead scale to the most amplified channel,
+   which darkens the frame by the largest white-balance multiplier (about a
+   stop in daylight); Vireo multiplies that back, so only the channels white
+   balance amplifies, and rebuilt highlights, extend above display white.
 3. Matched lens-profile vignetting, manual vignetting, and edge-aware
    purple/green defringing operate in linear light. Calibrated and manual
    radial distortion share one resample, transforming the photo and its local
@@ -65,6 +71,10 @@ retain their existing fast JPEG paths and disk working copies.
   version 10 re-renders Shadows/Highlights edits as local exposure: deep
   shadows lift at most 1.7 stops, mid-shadows move less than under the old
   curve, and Highlights can now darken display white on JPEG sources.
+  Render version 13 corrects the decode's brightness scale (step 2): a RAW
+  edit saved under an earlier version renders brighter by the ratio of its
+  photo's largest white-balance multiplier to its smallest, about one stop.
+  Lowering its Exposure by log2 of that ratio restores the look it had.
 - An unsupported RAW can still fall back to its embedded JPEG. Offline files
   can use a companion JPEG or working copy. Those sources retain their original
   precision limits; their TIFF exports remain 8-bit. A pre-existing darktable
@@ -95,7 +105,8 @@ Vireo therefore raises clipped sensels in white-balanced camera space:
   highlight that clipped only green keeps the color red and blue measured.
 - A neighboring channel that is also clipped counts as reaching the brightest
   channel there. An area where every channel clipped becomes neutral at the
-  highest ceiling, which LibRaw scales to display white.
+  highest ceiling, which sits above display white by the largest
+  white-balance multiplier; the luminance shoulder renders it white.
 - A sensel is only raised, never lowered, and the correction fades in over the
   last tenth below the ceiling. Unclipped photos decode exactly as before.
 
