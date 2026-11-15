@@ -218,8 +218,12 @@ class PipelineFeaturesRepository:
             visible_sql = photo_visible_in_workspace_sql("d.photo_id")
             visible_params = (workspace_id, workspace_id)
             # Equal confidences get an explicit order, so which species make a
-            # photo's top five never depends on the query plan.
-            tie_order = ", d.id, pr.id" if continuity_only else ", d.detector_confidence, d.id, pr.id"
+            # photo's top five never depends on the query plan. Stronger
+            # detections lead, matching ``subject_order.primary_order_sql``:
+            # the top-k truncation in ``pipeline.load_predictions`` must not
+            # let a weak box displace an equally scored prediction from the
+            # primary, higher-confidence box.
+            tie_order = ", d.id, pr.id" if continuity_only else ", d.detector_confidence DESC, d.id, pr.id"
         else:
             visible_join = "JOIN photo_workspace_visibility wf ON wf.photo_id = p.id"
             visible_sql = "wf.workspace_id = ?"

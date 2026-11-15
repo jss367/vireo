@@ -138,7 +138,14 @@ def test_staged_prediction_rows_cover_exactly_the_workspace_photos(db, catalog):
 
 
 def test_staged_prediction_rows_order_equal_confidences(db, catalog):
-    """Which species lead a photo's list must not depend on the query plan."""
+    """Which species lead a photo's list must not depend on the query plan.
+
+    Equal classifier confidences break stronger-detection-first, matching
+    ``subject_order.primary_order_sql``: ``pipeline.load_predictions``
+    truncates these rows at ``top_k_predictions``, so a weak box must not
+    displace the equally scored prediction from the primary, higher-confidence
+    box.
+    """
     ws, photos, dets = catalog
     strong, weak = dets[photos[0]]
     db.predictions.add(strong, "Strong box", 0.7, "m", labels_fingerprint="fp")
@@ -150,7 +157,7 @@ def test_staged_prediction_rows_order_equal_confidences(db, catalog):
         features.stage_scope_photo_ids(photos)
         features.stage_continuity_detection_ids([weak, strong])
     assert _staged_species(db, ws, min_conf=0, scoped=True) == [
-        "Weak box", "Weak box, second model", "Strong box",
+        "Strong box", "Weak box", "Weak box, second model",
     ]
     by_detection_id = {strong: ["Strong box"], weak: ["Weak box", "Weak box, second model"]}
     assert _staged_species(db, ws, continuity_only=True) == [
