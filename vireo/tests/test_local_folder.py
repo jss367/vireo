@@ -2617,6 +2617,42 @@ def test_workspace_ids_for_folder_tree_includes_ancestor_linked_workspaces(tmp_p
         db.close()
 
 
+def test_workspace_ids_for_folder_tree_matches_whole_path_components(tmp_path):
+    """A sibling that only shares a name prefix is another tree, and a
+    workspace with several links under the root is reported once."""
+    from services.local_folder import workspace_ids_for_folder_tree
+
+    root = tmp_path / "nas" / "trip"
+    for name in ("trip/day1", "trip/day2", "trip-extras", "elsewhere"):
+        (tmp_path / "nas" / name).mkdir(parents=True)
+
+    db = Database(str(tmp_path / "vireo.db"))
+    try:
+        inside_ws = db.create_workspace("Inside")
+        sibling_ws = db.create_workspace("Sibling")
+        unrelated_ws = db.create_workspace("Unrelated")
+        db.commit()
+        root_id = workspace_folders.add_folder(db, str(root), name="trip", link_to_workspace=False)
+        for name in ("day1", "day2"):
+            day = workspace_folders.add_folder(
+                db, str(root / name), name=name, parent_id=root_id, link_to_workspace=False,
+            )
+            workspace_folders.add_workspace_folder(db, inside_ws, day)
+        extras = workspace_folders.add_folder(
+            db, str(tmp_path / "nas" / "trip-extras"), name="trip-extras", link_to_workspace=False,
+        )
+        workspace_folders.add_workspace_folder(db, sibling_ws, extras)
+        elsewhere = workspace_folders.add_folder(
+            db, str(tmp_path / "nas" / "elsewhere"), name="elsewhere", link_to_workspace=False,
+        )
+        workspace_folders.add_workspace_folder(db, unrelated_ws, elsewhere)
+        assert workspace_ids_for_folder_tree(db, root_id) == [inside_ws]
+        assert workspace_ids_for_folder_tree(db, extras) == [sibling_ws]
+        assert workspace_ids_for_folder_tree(db, 10**9) == []
+    finally:
+        db.close()
+
+
 def test_bulk_stage_skips_ancestor_of_descendant_local_session(tmp_path):
     """Bulk "Make All Folders Local" from the workspace UI derives its root list
     from the workspace's user-facing roots. If one of those roots already

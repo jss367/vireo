@@ -40,6 +40,7 @@ from services.local_workspace import (
     _local_changes,
     _managed_root_state,
     _matches_remote,
+    _norm,
     _physical_is_within,
     _prepare_publish_target,
     _relative,
@@ -752,16 +753,28 @@ def workspace_ids_for_folder_tree(db: Database, root_folder_id: int) -> list[int
     root = db.folders.get(root_folder_id)
     if root is None:
         return []
+    root_path = _norm(root["path"])
     workspace_ids: set[int] = set()
     rows = db.workspace_folders.all_linked_paths()
     for row in rows:
+        # The Work Locally poll asks this for every root of the workspace, over
+        # every folder link in the catalog: one link of a workspace settles it,
+        # and one common prefix answers both directions below.
+        workspace_id = int(row["workspace_id"])
+        if workspace_id in workspace_ids:
+            continue
+        linked_path = _norm(row["path"])
+        try:
+            common = os.path.commonpath([linked_path, root_path])
+        except ValueError:
+            continue
         # Intersection is symmetric: a workspace root that contains the local
         # root shares the same catalog subtree as a workspace root nested
         # inside it. Missing the ancestor direction here would let
         # _busy_job/_pending_local_workspace_transition enqueue overlapping
         # jobs in an ancestor-linked workspace during the staging window.
-        if _is_within(row["path"], root["path"]) or _is_within(root["path"], row["path"]):
-            workspace_ids.add(int(row["workspace_id"]))
+        if common in (linked_path, root_path):
+            workspace_ids.add(workspace_id)
     return sorted(workspace_ids)
 
 
