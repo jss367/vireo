@@ -60,6 +60,17 @@ class EditsRepository:
         ).fetchall()
         return [row["photo_id"] for row in rows]
 
+    def render_cache_photo_ids(self, raw_extensions: Collection[str]) -> list[int]:
+        """Photos whose renders can change with rendering math, including bare RAWs."""
+        extensions = sorted(raw_extensions)
+        marks = ",".join("?" for _ in extensions)
+        rows = self.conn.execute(
+            "SELECT photo_id FROM photo_edit_recipes UNION "
+            f"SELECT id FROM photos WHERE LOWER(extension) IN ({marks})",
+            extensions,
+        ).fetchall()
+        return [row[0] for row in rows]
+
     def get_photo_recipes(self, photo_ids: Collection[int]) -> dict[int, dict[str, Any]]:
         """Return {photo_id: normalized recipe dict} for the given photos."""
         if not photo_ids:

@@ -193,17 +193,19 @@ def test_overexposed_raw_is_darkened_in_linear_light():
 
 
 def test_raw_darkening_stops_once_its_headroom_is_recovered():
-    # A bright RAW frame whose top tones sit just one stop past the knee.
+    # A bright RAW frame whose top tones sit just one stop past the level
+    # the camera's own JPEG would show as white.
     rgb = np.full((H, W, 3), 1.0, dtype=np.float32)
-    rgb *= np.linspace(0.8, 2 * 0.85, W, dtype=np.float32)[None, :, None]
+    rgb *= np.linspace(0.8, 2 * auto_tone.RAW_NEAR_CLIP, W, dtype=np.float32)[None, :, None]
     exposure = auto_tone.fit(rgb, input_linear=True)['adjustments']['exposure']
     assert -1.0 <= exposure < 0
 
 
 def test_bright_raw_within_white_is_not_darkened():
-    # Bright, but nothing above the highlight knee: no detail to recover.
+    # Bright, but nothing near the sensor ceiling: no detail to recover.
     rgb = np.full((H, W, 3), 0.6, dtype=np.float32)
     rgb *= np.linspace(0.9, 1.4, W, dtype=np.float32)[None, :, None]
+    assert rgb.max() < auto_tone.RAW_NEAR_CLIP
     assert auto_tone.fit(rgb, input_linear=True)['adjustments']['exposure'] >= 0
 
 

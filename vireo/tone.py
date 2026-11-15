@@ -17,7 +17,9 @@ flat white. This pipeline therefore:
   1. de-gammas sRGB -> linear light,
   2. applies the scene-referred ops (exposure, white balance, and
      Shadows/Highlights as a local exposure change) in linear,
-  3. rolls highlights off with a smooth shoulder (no hard clip to 1.0),
+  3. maps to display range: RAW through the look curve, which brightens,
+     adds contrast and eases highlights toward white; other sources through
+     a smooth shoulder that only acts when an adjustment pushes past white,
   4. remaps perceptual luminance for Whites/Blacks and reconstructs RGB in
      linear light,
   5. re-encodes linear -> sRGB,
@@ -25,11 +27,12 @@ flat white. This pipeline therefore:
 
 RAW inputs use ``input_linear=True`` and retain floating-point radiance,
 including negative/out-of-display-gamut and above-white channel values, until
-exposure, white balance and Shadows/Highlights have been applied. A luminance
-shoulder and gamut compression then map to display range, so Highlights can
-pull radiance above display white back into range before the shoulder
-compresses it. Rendered buffers stay float through geometry, tone, presence,
-and detail; encoding is the quantization boundary. JPEGs and offline working
+exposure, white balance and Shadows/Highlights have been applied. The RAW
+look curve (:func:`raw_look_curve`) then maps to display range, hue held, so
+Highlights can pull radiance above display white back into range before the
+curve's shoulder compresses it. Rendered buffers stay float
+through geometry, tone, presence, and detail; encoding is the quantization
+boundary. JPEGs and offline working
 copies retain the legacy sRGB input path and cannot recover information
 already lost before loading. The WebGL shader implements that legacy path
 only; RAW adjustments use the server renderer.
@@ -67,6 +70,25 @@ import numpy as np
 # untouched and only genuinely bright pixels ever enter the shoulder.
 HIGHLIGHT_KNEE = 0.85
 
+# The RAW look: the curve that takes a scene-linear level to a display-linear
+# one when no adjustment is set (``_scene_to_display_linear`` applies it to
+# each pixel's largest and smallest channel). A linear decode shown as it is
+# looks more than a stop darker and much flatter than the camera's own JPEG
+# of the same exposure, because a camera meters for highlight headroom and
+# then brightens and adds contrast when it renders. These three numbers are
+# fitted to that rendering: the median camera JPEG luminance at each scene
+# level over 48 files from a Nikon D7200, D850 and Z 8, whose curves agree
+# within about 5 sRGB levels of each other (see docs/raw-development.md).
+#
+# RAW_LOOK_HALF is the scene luminance shown at half display luminance (sRGB
+# 188). RAW_LOOK_CONTRAST is the slope of the midtones in log-log terms: one
+# stop of scene brightness there spans almost two stops on the display.
+# Below about RAW_LOOK_TOE the curve turns linear, so deep shadows keep a
+# finite slope and are neither crushed to black nor stretched into noise.
+RAW_LOOK_HALF = 0.18
+RAW_LOOK_CONTRAST = 1.95
+RAW_LOOK_TOE = 0.016
+
 # White-balance channel-gain coefficients. Mirrors the original
 # ``_apply_white_balance`` so saved recipes keep their intended colour cast;
 # the only change is that the gains are now applied in linear light.
@@ -100,6 +122,9 @@ BLACK_CHROMA_FADE = 4.0 / 255.0
 # Shadows fades out by SHADOW_EV[1] and Highlights fades in from
 # HIGHLIGHT_EV[0], so mid-grey regions barely move under either control.
 RANGE_STOPS = 1.7
+# Display-linear middle grey (sRGB 118). A display-referred source is measured
+# against it directly; a scene-linear one against RAW_MIDDLE_GREY, the scene
+# luminance the RAW look shows at this level.
 MIDDLE_GREY = 0.18
 SHADOW_EV = (-4.8, 0.3)
 HIGHLIGHT_EV = (-1.0, 2.8)
@@ -243,9 +268,15 @@ def _range_base_log(lin, range_base, origin, ev_shift):
     return range_base.at(log_y - ev_shift, *origin) + ev_shift
 
 
-def _range_stops(base_log, shadows, highlights):
-    """Stops of exposure Shadows/Highlights give a pixel with this base."""
-    ev = (base_log - np.float32(np.log2(MIDDLE_GREY)))[..., None]
+def _range_stops(base_log, shadows, highlights, middle_grey=MIDDLE_GREY):
+    """Stops of exposure Shadows/Highlights give a pixel with this base.
+
+    ``middle_grey`` is the luminance, in the base's own units, that the
+    display shows as middle grey: the zones are placed by what the viewer
+    sees, so a region shown at mid-grey barely moves under either control
+    whether the source is display-referred or scene-linear.
+    """
+    ev = (base_log - np.float32(np.log2(middle_grey)))[..., None]
     stops = np.zeros_like(ev)
     if np.any(shadows):
         weight = 1.0 - smoothstep(*SHADOW_EV, ev)
@@ -281,6 +312,42 @@ def highlight_rolloff(lin, knee=HIGHLIGHT_KNEE):
     over = np.maximum(lin - knee, 0.0)
     rolled = knee + headroom * (over / (over + headroom))
     return np.where(lin > knee, rolled, lin)
+
+
+def raw_look_curve(luminance):
+    """Display-linear luminance the RAW look gives a scene-linear luminance.
+
+    ``v / (1 + v)`` with ``v = (s / HALF) * ((s + TOE) / (HALF + TOE)) **
+    (CONTRAST - 1)``. Monotonic, zero at zero, and below 1.0 for every finite
+    input: ``v`` grows like ``s ** CONTRAST`` through the midtones, which is
+    the contrast, and the rational shoulder then eases highlights toward
+    white without reaching it. The sensor ceiling (1.0) lands near sRGB 250
+    and a rebuilt, fully blown area (the largest white-balance multiplier,
+    about 2) near 254. Toward zero ``v`` is proportional to ``s``, so the
+    darkest tones keep their relative differences.
+    """
+    s = np.maximum(np.asarray(luminance, dtype=np.float32), 0.0)
+    v = (s / np.float32(RAW_LOOK_HALF)) * (
+        (s + np.float32(RAW_LOOK_TOE)) / np.float32(RAW_LOOK_HALF + RAW_LOOK_TOE)
+    ) ** np.float32(RAW_LOOK_CONTRAST - 1.0)
+    return v / (1.0 + v)
+
+
+def _raw_look_inverse(level):
+    """Scene luminance the RAW look shows at display-linear ``level``."""
+    low, high = 0.0, 64.0
+    for _ in range(64):
+        middle = 0.5 * (low + high)
+        if float(raw_look_curve(middle)) < level:
+            low = middle
+        else:
+            high = middle
+    return 0.5 * (low + high)
+
+
+# Scene luminance the RAW look shows at display middle grey, about 1.2 stops
+# under it. Shadows/Highlights place their zones around this level.
+RAW_MIDDLE_GREY = _raw_look_inverse(MIDDLE_GREY)
 
 
 def smoothstep(edge0, edge1, x):
@@ -352,20 +419,36 @@ def _compress_linear_gamut(rgb, luminance):
 def _scene_to_display_linear(rgb):
     """Map scene radiance to display range after exposure and white balance.
 
-    Roll luminance off, retaining channel ratios until gamut compression is
-    necessary. Unlike the legacy JPEG push-gate, RAW values above display white
-    need this mapping even at zero exposure. A negative exposure is applied
-    before the shoulder, so bright source detail remains recoverable.
+    The RAW look curve is applied to each pixel's largest and smallest
+    channel, and the middle channel keeps its relative place between them.
+    Hue is therefore unchanged, while saturation follows the curve the way a
+    camera's own rendering does: its contrast deepens midtone color, and its
+    shoulder carries a bright saturated color toward white with its gradation
+    intact, where scaling all three channels by one luminance gain would push
+    the largest past white and need clipping. Every output channel is below
+    1.0, so no upper gamut fit is needed.
+
+    Unlike the legacy JPEG push-gate, RAW needs this mapping even at zero
+    exposure. A negative exposure is applied before the curve, so bright
+    source detail remains recoverable.
     """
+    # RAW's float color conversion can produce negative channels (colors
+    # outside sRGB). Reduce chroma toward the pixel's own luminance just
+    # enough to bring the lowest channel to zero before the curve sees it.
     luminance = np.maximum(_luma(rgb), 0.0)
-    mapped = highlight_rolloff(luminance)
-    rgb = rgb * (mapped / np.maximum(luminance, np.float32(1e-7)))
-    # Compress both upper and lower gamut boundaries toward the same neutral
-    # luminance. RAW's float color conversion can produce negative channels.
-    chroma = rgb - mapped
-    upper = (1.0 - mapped) / np.maximum(np.max(chroma, axis=-1, keepdims=True), 1e-7)
-    lower = mapped / np.maximum(-np.min(chroma, axis=-1, keepdims=True), 1e-7)
-    return np.clip(mapped + chroma * np.minimum(1.0, np.minimum(upper, lower)), 0.0, 1.0)
+    lowest = np.min(rgb, axis=-1, keepdims=True)
+    fit = np.where(
+        lowest < 0.0,
+        luminance / np.maximum(luminance - lowest, np.float32(1e-7)),
+        np.float32(1.0),
+    )
+    rgb = luminance + (rgb - luminance) * fit
+    lowest = np.maximum(np.min(rgb, axis=-1, keepdims=True), 0.0)
+    highest = np.maximum(np.max(rgb, axis=-1, keepdims=True), lowest)
+    mapped_low = raw_look_curve(lowest)
+    mapped_high = raw_look_curve(highest)
+    place = (rgb - lowest) / np.maximum(highest - lowest, np.float32(1e-7))
+    return np.clip(mapped_low + (mapped_high - mapped_low) * place, 0.0, 1.0)
 
 
 def _apply_whites_blacks_linear(linear, *, whites=0.0, blacks=0.0):
@@ -635,7 +718,7 @@ def _scene_referred_linear(
     rgb, *, exposure, white_balance, input_linear, shadows=0.0, highlights=0.0,
     range_base=None, origin=(0, 0), ev_shift=None,
 ):
-    """Exposure, white balance, Shadows/Highlights and the display shoulder.
+    """Exposure, white balance, Shadows/Highlights and the display mapping.
 
     ``exposure``, ``shadows`` and ``highlights`` may be per-pixel maps (local
     adjustments). ``range_base`` is the frame's :class:`RangeBase` and
@@ -656,11 +739,12 @@ def _scene_referred_linear(
     if white_balance:
         gr, gg, gb = white_balance_gains(white_balance)
         lin = lin * np.array([gr, gg, gb], dtype=np.float32)
-    # Shadows/Highlights run on scene radiance, before the shoulder, so
-    # Highlights can bring a RAW's above-white detail back into range.
+    # Shadows/Highlights run on scene radiance, before the display mapping,
+    # so Highlights can bring a RAW's above-white detail back into range.
     if np.any(shadows) or np.any(highlights):
         stops = _range_stops(
             _range_base_log(lin, range_base, origin, ev_shift), shadows, highlights,
+            RAW_MIDDLE_GREY if input_linear else MIDDLE_GREY,
         )
         lin = lin * np.exp2(stops)
         max_gain *= 2.0 ** float(np.max(stops))

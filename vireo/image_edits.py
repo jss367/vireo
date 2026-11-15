@@ -44,7 +44,9 @@ except ImportError:
 #  12 — clipped sensels are rebuilt toward neutral before the linear RAW decode.
 #  13 — the linear RAW decode is scaled to the sensor ceiling of its least
 #       amplified channel, not its most amplified one.
-EDIT_MATH_VERSION = 13
+#  14 — RAW renders through the look curve fitted to camera JPEGs, and
+#       Shadows/Highlights place their zones by displayed brightness.
+EDIT_MATH_VERSION = 14
 
 # Tile budget for the tone pass, in pixels. Bounds peak memory on
 # full-resolution originals/exports; overridable in tests to force many tiles.
