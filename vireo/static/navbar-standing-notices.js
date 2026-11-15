@@ -40,6 +40,20 @@ function report() {
   setStandingNotices(state);
 }
 
+/** @param {Element} action */
+function focusNoticeDialog(action) {
+  const dialogId = action.getAttribute('data-notice-dialog');
+  const dialog = dialogId ? document.getElementById(dialogId) : null;
+  if (!dialog || !dialog.getClientRects().length) return;
+  const controls = dialog.querySelectorAll('button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])');
+  const first = Array.from(controls).find(control => control instanceof HTMLElement && control.getClientRects().length);
+  if (first instanceof HTMLElement) first.focus();
+  else {
+    dialog.tabIndex = -1;
+    dialog.focus();
+  }
+}
+
 if (container) {
   // A page partial parsed after the navbar (the sync panel) declares its row
   // in place; it belongs with the others. Module scripts run after parsing,
@@ -51,7 +65,11 @@ if (container) {
   // the panel. The row's own handler has already run when this one fires.
   container.addEventListener('click', event => {
     const target = event.target instanceof Element ? event.target : null;
-    if (target?.closest('[data-notice-closes-panel]')) closeNotificationsForAction();
+    const action = target?.closest('[data-notice-closes-panel]');
+    if (action) {
+      focusNoticeDialog(action);
+      closeNotificationsForAction();
+    }
   });
   new MutationObserver(report).observe(container, {
     subtree: true, childList: true, characterData: true,

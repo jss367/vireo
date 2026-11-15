@@ -50,17 +50,17 @@
     </div>
     <div class="standing-notice" id="missingFoldersBanner" data-notice-level="warning" style="display:none;">
       <span class="standing-notice-text" id="missingFoldersMsg" data-notice-text></span>
-      <a href="#" data-notice-closes-panel data-navbar-on="click:openMissingFoldersModal">Review</a>
+      <a href="#" data-notice-closes-panel data-notice-dialog="missingFoldersModal" data-navbar-on="click:openMissingFoldersModal">Review</a>
       <button class="banner-dismiss" type="button" title="Dismiss" aria-label="Dismiss" data-navbar-on="click:dismissMissingBanner">&times;</button>
     </div>
     <div class="standing-notice" id="missingPhotosBanner" data-notice-level="warning" style="display:none;">
       <span class="standing-notice-text" id="missingPhotosMsg" data-notice-text></span>
-      <a href="#" data-notice-closes-panel data-navbar-on="click:openMissingPhotosModal">Review</a>
+      <a href="#" data-notice-closes-panel data-notice-dialog="missingPhotosModal" data-navbar-on="click:openMissingPhotosModal">Review</a>
       <button class="banner-dismiss" type="button" title="Dismiss" aria-label="Dismiss" data-navbar-on="click:dismissMissingPhotosBanner">&times;</button>
     </div>
     <div class="standing-notice" id="newImagesBanner" style="display:none;">
       <span class="standing-notice-text" id="newImagesMsg" data-notice-text></span>
-      <button type="button" class="banner-cta" data-notice-closes-panel data-navbar-on="click:reviewNewImagesImport">Review import</button>
+      <button type="button" class="banner-cta" data-navbar-on="click:reviewNewImagesImport">Review import</button>
       <button type="button" class="banner-recheck" id="newImagesRecheck"
               style="display:none;" data-navbar-on="click:recheckNewImages">Check again</button>
       <span class="banner-meta" id="newImagesCheckedAt"></span>

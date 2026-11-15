@@ -1,6 +1,7 @@
 """Standing notices sit behind the navbar's bell instead of in rows above the
 page: the bell counts them, and the panel lists them with their actions."""
 
+import pytest
 from playwright.sync_api import expect
 
 from e2e.notices import open_notices
@@ -35,6 +36,42 @@ def test_sync_start_error_is_visible_with_the_notice_panel_closed(live_server, p
     page.evaluate("void runSync()")
     expect(page.locator("#syncStatus")).to_contain_text("Synthetic sync unavailable")
     expect(page.locator('.notification-toast[data-type="error"]')).to_contain_text("Synthetic sync unavailable")
+
+
+@pytest.mark.parametrize('banner, overlay', [
+    ('missingFoldersBanner', 'missingFoldersModal'),
+    ('missingPhotosBanner', 'missingPhotosModal'),
+    ('syncBanner', 'syncPreviewOverlay'),
+])
+def test_notice_review_transfers_keyboard_focus(live_server, page, banner, overlay):
+    page.route('**/api/sync/status', _pending_sync)
+    page.goto(f"{live_server['url']}/browse")
+    page.locator('.grid-card').first.wait_for(state='visible')
+    page.evaluate("id => { document.getElementById(id).style.display = 'flex'; }", banner)
+    open_notices(page)
+    action = page.locator(f'#{banner} [data-notice-closes-panel]')
+    action.focus()
+    page.keyboard.press('Enter')
+    expect(page.locator('#' + overlay)).to_be_visible()
+    expect(page.locator('#notificationHistory')).to_be_hidden()
+    assert page.evaluate('id => document.getElementById(id).contains(document.activeElement)', overlay)
+
+
+def test_pending_import_keeps_its_progress_visible(live_server, page):
+    held = []
+    page.route('**/api/workspaces/active/new-images/snapshot', lambda route: held.append(route))
+    page.goto(f"{live_server['url']}/browse")
+    page.locator('.grid-card').first.wait_for(state='visible')
+    page.evaluate("() => { document.getElementById('newImagesBanner').style.display = 'flex'; }")
+    open_notices(page)
+    button = page.locator('#newImagesBanner .banner-cta')
+    try:
+        button.click()
+        expect(button).to_have_text('Opening...')
+        expect(button).to_be_visible()
+    finally:
+        for route in held:
+            route.abort()
 
 
 def test_notices_are_counted_on_the_bell_and_take_no_row_above_the_photos(live_server, page):
