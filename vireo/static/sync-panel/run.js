@@ -136,5 +136,6 @@ async function runSync(changeIds) {
     });
   } catch(e) {
     status.textContent = 'Error: ' + (e instanceof Error ? e.message : String(e));
+    showToast(status.textContent, 'error');
   }
 }

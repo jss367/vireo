@@ -23,6 +23,20 @@ def test_a_page_without_notices_has_a_quiet_bell(live_server, page):
     expect(page.locator("#notificationList")).to_have_text("No notifications yet.")
 
 
+def test_sync_start_error_is_visible_with_the_notice_panel_closed(live_server, page):
+    """A failed request must be visible when the standing status row is hidden."""
+    page.route("**/api/sync/status", _pending_sync)
+    page.route("**/api/jobs/sync", lambda route: route.fulfill(
+        status=503, json={"error": "Synthetic sync unavailable"},
+    ))
+    page.goto(f"{live_server['url']}/browse")
+    expect(page.locator("#notificationBadge")).to_have_text("1")
+    expect(page.locator("#notificationHistory")).to_be_hidden()
+    page.evaluate("void runSync()")
+    expect(page.locator("#syncStatus")).to_contain_text("Synthetic sync unavailable")
+    expect(page.locator('.notification-toast[data-type="error"]')).to_contain_text("Synthetic sync unavailable")
+
+
 def test_notices_are_counted_on_the_bell_and_take_no_row_above_the_photos(live_server, page):
     page.goto(f"{live_server['url']}/browse")
     first_card = page.locator(".grid-card").first
