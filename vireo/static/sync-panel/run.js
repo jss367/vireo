@@ -3,9 +3,22 @@
 // Classic script.
 
 /**
- * Report a finished sync in the banner: what reached the sidecars, not merely
+ * Say a finished sync's outcome as a toast as well. The pending-changes
+ * notice sits in the notifications panel, which is usually closed, and it
+ * disappears once nothing is pending; a failure must not depend on either.
+ *
+ * @param {HTMLElement} status The notice's status line, already filled in.
+ */
+function _syncToastResult(status) {
+  var state = status.dataset.syncState;
+  var type = state === 'failure' ? 'error' : (state === 'success' ? 'success' : 'info');
+  showToast(status.textContent || '', type, {details: status.title});
+}
+
+/**
+ * Report a finished sync in the notice: what reached the sidecars, not merely
  * that the job ran. A NAS that rejects every write finishes the job normally;
- * saying "Synced!" over it is why a stuck banner looks like a UI bug.
+ * saying "Synced!" over it is why a stuck notice looks like a UI bug.
  *
  * @param {HTMLElement} status @param {SyncJobEvent} event
  */
@@ -113,6 +126,7 @@ async function runSync(changeIds) {
       },
       onComplete: function(event) {
         _syncShowSyncResult(status, event);
+        _syncToastResult(status);
         setTimeout(checkPendingSync, 1000);
       },
       onError: function() {
@@ -122,5 +136,6 @@ async function runSync(changeIds) {
     });
   } catch(e) {
     status.textContent = 'Error: ' + (e instanceof Error ? e.message : String(e));
+    showToast(status.textContent, 'error');
   }
 }

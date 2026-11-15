@@ -1,9 +1,11 @@
-<!-- Sync banner: pending changes indicator -->
-<div id="syncBanner" style="display:none;background:var(--bg-tertiary);padding:10px 20px;border-bottom:1px solid var(--border-primary);font-size:13px;align-items:center;gap:12px;">
-  <span id="syncBannerText" style="color:var(--warning);"></span>
-  <button type="button" id="syncBannerReviewButton" style="background:var(--bg-secondary);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:5px 14px;font-size:12px;cursor:pointer;">Review Changes</button>
-  <button type="button" id="syncBannerSyncButton" style="background:var(--accent);color:var(--accent-text);border:none;border-radius:4px;padding:5px 14px;font-size:12px;cursor:pointer;font-weight:500;">Sync to XMP</button>
-  <span id="syncStatus" style="font-size:12px;color:var(--text-dim);"></span>
+<!-- Pending-changes notice. The navbar moves it into the notifications
+     panel's standing notices (navbar-standing-notices.js), so it takes no
+     row above the page's photos. -->
+<div id="syncBanner" class="standing-notice" data-standing-notice style="display:none;">
+  <span id="syncBannerText" class="standing-notice-text" data-notice-text></span>
+  <button type="button" id="syncBannerReviewButton" class="standing-notice-button" data-notice-closes-panel data-notice-dialog="syncPreviewOverlay">Review Changes</button>
+  <button type="button" id="syncBannerSyncButton" class="standing-notice-button standing-notice-primary">Sync to XMP</button>
+  <span id="syncStatus" class="standing-notice-status"></span>
 </div>
 
 <!-- Sync Preview Modal -->

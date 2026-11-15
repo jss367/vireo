@@ -161,6 +161,72 @@ test('notification text is rendered as text and stored details survive page relo
   assert.equal(row.children[2].children[1].textContent, '<script>bad</script>');
 });
 
+test('standing notices count on the bell until they clear, whatever the history says', () => {
+  const h = ui();
+  h.context.setStandingNotices({count: 2, urgent: false, summary: 'Two things'});
+  assert.equal(h.elements.notificationBadge.textContent, '2');
+  assert.equal(h.elements.notificationBadge.hidden, false);
+  assert.equal(h.elements.notificationBadge.dataset.level, 'notice');
+  assert.equal(h.elements.notificationsToggle.attributes['aria-label'], 'Notifications, 2 need attention');
+  assert.equal(h.elements.notificationsToggle.title, 'Two things');
+  h.context.showToast('Disk full', 'error');
+  assert.equal(h.elements.notificationBadge.textContent, '3');
+  assert.equal(h.elements.notificationBadge.dataset.level, 'warning');
+  // Reading or clearing history answers the toast, not the standing conditions.
+  h.elements.notificationReadAll.click();
+  h.elements.notificationClear.click();
+  assert.equal(h.elements.notificationBadge.textContent, '2');
+  h.context.setStandingNotices({count: 1, urgent: true, summary: 'Folder missing'});
+  assert.equal(h.elements.notificationBadge.dataset.level, 'warning');
+  assert.equal(h.elements.notificationsToggle.attributes['aria-label'], 'Notifications, 1 needs attention');
+  h.context.setStandingNotices({count: 0, urgent: false, summary: ''});
+  assert.equal(h.elements.notificationBadge.hidden, true);
+  assert.equal(h.elements.notificationsToggle.title, 'Notifications');
+});
+
+test('closing the panel for a notice action leaves focus with what the action opened', () => {
+  const h = ui();
+  h.elements.notificationsToggle.click();
+  h.elements.notificationsToggle.focused = false;
+  h.context.closeNotificationsForAction();
+  assert.equal(h.elements.notificationHistory.hidden, true);
+  assert.equal(h.elements.notificationsToggle.focused, false);
+  // The Close button hands focus back to the bell.
+  h.elements.notificationsToggle.click();
+  h.elements.notificationClose.click();
+  assert.equal(h.elements.notificationsToggle.focused, true);
+});
+
+const standingSource = readFileSync('vireo/static/navbar-standing-notices.js', 'utf8').replace(/^import .*;\n/m, '').replaceAll('export ', '');
+class Notice {
+  constructor({display = '', hidden = false, level = null, text = ''} = {}) {
+    this.style = {display}; this.hidden = hidden; this.level = level; this.textContent = text;
+  }
+  getAttribute(name) { return name === 'data-notice-level' ? this.level : null; }
+  querySelector() { return null; }
+}
+function summarize(notices) {
+  // No #standingNotices in this document, so the module only defines its functions.
+  const context = vm.createContext({HTMLElement: Notice, document: {getElementById: () => null}});
+  vm.runInContext(standingSource + '\nthis.summarize = summarizeStandingNotices;', context);
+  return context.summarize(notices);
+}
+
+test('only rows their owner is showing count as standing notices', () => {
+  const state = summarize([
+    new Notice({display: 'flex', text: '  4 duplicate   copies\n could be cleaned up. '}),
+    new Notice({display: 'none', level: 'warning', text: 'Folder missing'}),
+    new Notice({display: '', text: 'Never shown'}),
+    new Notice({display: 'flex', hidden: true, text: 'Hidden'}),
+    new Notice({display: 'flex', text: '75 new images'}),
+  ]);
+  assert.equal(state.count, 2);
+  assert.equal(state.urgent, false);
+  assert.equal(state.summary, '4 duplicate copies could be cleaned up.\n75 new images');
+  assert.equal(summarize([new Notice({display: 'flex', level: 'warning', text: 'Folder missing'})]).urgent, true);
+  assert.deepEqual({...summarize([])}, {count: 0, urgent: false, summary: ''});
+});
+
 // The ?job=X resolver lives in polling.js and is called from boot.js after
 // the initial Promise.all and from every successful fetchJobs/fetchHistory
 // apply. Load its source once so the tests exercise the shipped function

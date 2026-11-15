@@ -26,7 +26,7 @@
   <button type="button" class="nav-overflow-btn" id="navOverflowBtn" hidden data-navbar-on="click:toggleOverflowMenu">&hellip;</button>
   <div class="nav-overflow-menu" id="navOverflowMenu" hidden></div>
   <span class="nav-spacer"></span>
-  <button type="button" class="nav-icon notification-toggle" id="notificationsToggle" aria-label="Notifications" aria-expanded="false" aria-controls="notificationHistory" title="Notification history">&#128276;<span id="notificationBadge" hidden></span></button>
+  <button type="button" class="nav-icon notification-toggle" id="notificationsToggle" aria-label="Notifications" aria-expanded="false" aria-controls="notificationHistory" title="Notifications">&#128276;<span id="notificationBadge" hidden></span></button>
   <span class="nav-icon" title="Report Issue" id="reportToggle" data-navbar-on="click:openReportModal">&#9888;</span>
   <span class="nav-icon" title="Help (F1)" id="helpToggle" data-navbar-on="click:openHelpModal">&#63;</span>
   <span class="nav-icon" title="Toggle advanced mode" id="devModeToggle" style="opacity:0.4;" data-navbar-on="click:toggleAdvancedMode">&#9881;</span>
@@ -36,17 +36,49 @@
     <span class="activity-dot" id="navActivityDot"></span>
   </span>
 </nav>
-<section id="notificationHistory" class="notification-history" aria-label="Notification history" hidden>
+<section id="notificationHistory" class="notification-history" aria-label="Notifications" hidden>
   <div class="notification-toolbar"><strong>Notifications</strong><button type="button" id="notificationClose">Close</button></div>
+  <!-- Standing notices: conditions that hold until the user acts on them.
+       Each row is shown by its owner setting an inline display; the bell's
+       badge counts the rows that are showing (navbar-standing-notices.js).
+       A page partial adds its own row by marking it data-standing-notice. -->
+  <h3 class="notification-heading" id="standingNoticesHeading">Needs attention</h3>
+  <div id="standingNotices" class="standing-notices" aria-labelledby="standingNoticesHeading">
+    <div class="standing-notice" id="runtimeWarningBanner" data-notice-level="warning" data-testid="runtime-warning-banner" style="display:none;">
+      <div class="standing-notice-text" id="runtimeWarningText" data-notice-text></div>
+      <button class="banner-dismiss" type="button" title="Dismiss" aria-label="Dismiss" data-navbar-on="click:dismissRuntimeWarning">&times;</button>
+    </div>
+    <div class="standing-notice" id="missingFoldersBanner" data-notice-level="warning" style="display:none;">
+      <span class="standing-notice-text" id="missingFoldersMsg" data-notice-text></span>
+      <a href="#" data-notice-closes-panel data-notice-dialog="missingFoldersModal" data-navbar-on="click:openMissingFoldersModal">Review</a>
+      <button class="banner-dismiss" type="button" title="Dismiss" aria-label="Dismiss" data-navbar-on="click:dismissMissingBanner">&times;</button>
+    </div>
+    <div class="standing-notice" id="missingPhotosBanner" data-notice-level="warning" style="display:none;">
+      <span class="standing-notice-text" id="missingPhotosMsg" data-notice-text></span>
+      <a href="#" data-notice-closes-panel data-notice-dialog="missingPhotosModal" data-navbar-on="click:openMissingPhotosModal">Review</a>
+      <button class="banner-dismiss" type="button" title="Dismiss" aria-label="Dismiss" data-navbar-on="click:dismissMissingPhotosBanner">&times;</button>
+    </div>
+    <div class="standing-notice" id="newImagesBanner" style="display:none;">
+      <span class="standing-notice-text" id="newImagesMsg" data-notice-text></span>
+      <button type="button" class="banner-cta" data-navbar-on="click:reviewNewImagesImport">Review import</button>
+      <button type="button" class="banner-recheck" id="newImagesRecheck"
+              style="display:none;" data-navbar-on="click:recheckNewImages">Check again</button>
+      <span class="banner-meta" id="newImagesCheckedAt"></span>
+      <button class="banner-dismiss" type="button" title="Dismiss" aria-label="Dismiss" data-navbar-on="click:dismissNewImagesBanner">&times;</button>
+    </div>
+    <div class="standing-notice" id="dupCleanupBanner" style="display:none;">
+      <span class="standing-notice-text" id="dupCleanupMsg" data-notice-text></span>
+      <a href="/duplicates?show=resolved">Review</a>
+      <button class="banner-dismiss" type="button" title="Dismiss" aria-label="Dismiss" data-navbar-on="click:dismissDupCleanupBanner">&times;</button>
+    </div>
+  </div>
+  <p class="standing-notices-empty" id="standingNoticesEmpty">Nothing needs attention.</p>
+  <h3 class="notification-heading">History</h3>
   <p>Last 100 notifications in this browser.</p>
   <div class="notification-toolbar"><button type="button" id="notificationReadAll">Mark all read</button><button type="button" id="notificationClear">Clear history</button></div>
   <ol id="notificationList"></ol>
 </section>
 
-<div class="runtime-warning-banner" id="runtimeWarningBanner" data-testid="runtime-warning-banner">
-  <div class="runtime-warning-text" id="runtimeWarningText"></div>
-  <button class="banner-dismiss" type="button" title="Dismiss" data-navbar-on="click:dismissRuntimeWarning">&times;</button>
-</div>
 
 <!-- Command palette (cmd+K) -->
 <div class="cmd-palette-overlay" id="commandPalette" hidden data-navbar-on="click:closeCommandPaletteOnBackdrop">
@@ -117,37 +149,6 @@
   </div>
 </div>
 <script src="/static/vireo-color-labels.js"></script>
-
-<!-- Missing Folders Banner -->
-<div class="missing-folders-banner" id="missingFoldersBanner" style="display:none;">
-  <span id="missingFoldersMsg"></span>
-  <a href="#" data-navbar-on="click:openMissingFoldersModal">Review</a>
-  <button class="banner-dismiss" data-navbar-on="click:dismissMissingBanner">&times;</button>
-</div>
-
-<!-- Missing Originals Banner -->
-<div class="missing-folders-banner" id="missingPhotosBanner" style="display:none;">
-  <span id="missingPhotosMsg"></span>
-  <a href="#" data-navbar-on="click:openMissingPhotosModal">Review</a>
-  <button class="banner-dismiss" data-navbar-on="click:dismissMissingPhotosBanner">&times;</button>
-</div>
-
-<!-- New Images Banner -->
-<div class="new-images-banner" id="newImagesBanner" style="display:none;">
-  <span id="newImagesMsg"></span>
-  <button type="button" class="banner-cta" data-navbar-on="click:reviewNewImagesImport">Review import</button>
-  <button type="button" class="banner-recheck" id="newImagesRecheck"
-          style="display:none;" data-navbar-on="click:recheckNewImages">Check again</button>
-  <span class="banner-meta" id="newImagesCheckedAt"></span>
-  <button class="banner-dismiss" data-navbar-on="click:dismissNewImagesBanner">&times;</button>
-</div>
-
-<!-- Duplicate Cleanup Banner -->
-<div class="dup-cleanup-banner" id="dupCleanupBanner" style="display:none;">
-  <span id="dupCleanupMsg"></span>
-  <a href="/duplicates?show=resolved">Review</a>
-  <button class="banner-dismiss" data-navbar-on="click:dismissDupCleanupBanner">&times;</button>
-</div>
 
 <!-- Missing Folders Modal -->
 <div class="modal-overlay" id="missingFoldersModal">
