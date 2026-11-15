@@ -349,14 +349,16 @@ def _migrate_edit_math_render_caches(app):
       * every ``preview_cache`` row plus its on-disk JPEG
       * every per-photo thumbnail file plus its ``photos.thumb_path``
 
-    for photos that have a non-null edit recipe (recipe-free photos render
-    identically across math versions and don't need re-rendering). Then we
+    for photos with an edit recipe and every RAW photo, whose default look
+    can change even without a recipe. Recipe-free display-referred photos
+    retain their camera-rendered bytes. Then we
     write the new version so the migration is a no-op next boot.
 
     On a fresh DB with no recipes, the walk does nothing and we still bump
     the version so future deploys only act on real prior state.
     """
     from image_edits import EDIT_MATH_VERSION
+    from image_loader import RAW_EXTENSIONS
 
     vireo_dir = media_root(app.config["THUMB_CACHE_DIR"])
     thumb_dir = app.config["THUMB_CACHE_DIR"]
@@ -371,7 +373,7 @@ def _migrate_edit_math_render_caches(app):
         if stored_version >= EDIT_MATH_VERSION:
             return
 
-        photo_ids = db.edits.edited_photo_ids()
+        photo_ids = db.edits.render_cache_photo_ids(RAW_EXTENSIONS)
 
         invalidated_previews = 0
         invalidated_thumbs = 0

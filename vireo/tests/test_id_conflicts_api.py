@@ -469,10 +469,8 @@ def test_compare_rows_carry_the_render_key_their_thumbnails_need(compare_collect
         )
         for photo_id in photo_ids[1:]:
             if photo_id in by_id:
-                assert by_id[photo_id]["render_key"] is None, (
-                    f"{label} row for an unedited photo invented a render "
-                    "key, costing a needless refetch"
-                )
+                from image_edits import EDIT_MATH_VERSION
+                assert by_id[photo_id]["render_key"] == f"m{EDIT_MATH_VERSION}"
 
 
 def test_multi_species_counts_real_case_variant_unlinked_keywords(compare_collection):

@@ -32,9 +32,9 @@ def render_key_for_recipe(recipe):
     it keys the server-side render caches: a change to the rendering math
     produces different bytes for an unchanged recipe.
 
-    Returns ``None`` for a recipe that renders as a no-op, which leaves the
-    URL bare -- correct, because an unedited photo's thumbnail is the same
-    image it has always been.
+    A recipe-free render still carries the math version: RAW's default look
+    can change without an edit, including the RAW side of a paired thumbnail.
+    This also refreshes camera-rendered JPEGs once per math version.
     """
     from edit_recipe import RecipeError, recipe_to_json
     from image_edits import EDIT_MATH_VERSION
@@ -47,7 +47,7 @@ def render_key_for_recipe(recipe):
         # Fingerprint the raw value so the URL at least changes with it.
         canonical = repr(recipe)
     if not canonical:
-        return None
+        return f"m{EDIT_MATH_VERSION}"
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
     return f"{digest}.m{EDIT_MATH_VERSION}"
 

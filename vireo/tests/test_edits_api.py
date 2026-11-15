@@ -3208,12 +3208,13 @@ def test_render_key_fingerprints_the_whole_recipe():
     import image_edits
     from photo_payload import render_key_for_recipe
 
-    # A recipe that renders as a no-op leaves the URL bare: an unedited
-    # photo's thumbnail is the same image it has always been.
-    assert render_key_for_recipe(None) is None
-    assert render_key_for_recipe({}) is None
-    assert render_key_for_recipe({"version": 1}) is None
-    assert render_key_for_recipe({"rotation": 0, "flip": {}}) is None
+    # The default RAW look changes without a recipe, so even a no-op recipe
+    # has a versioned URL. Canonically equivalent no-op recipes share it.
+    key = f"m{image_edits.EDIT_MATH_VERSION}"
+    assert render_key_for_recipe(None) == key
+    assert render_key_for_recipe({}) == key
+    assert render_key_for_recipe({"version": 1}) == key
+    assert render_key_for_recipe({"rotation": 0, "flip": {}}) == key
 
     local_a = render_key_for_recipe(_local_only_recipe(1.0))
     local_b = render_key_for_recipe(_local_only_recipe(-2.0))
@@ -3276,7 +3277,8 @@ def test_photo_payloads_carry_render_key(app_and_db):
         return found
 
     unedited = keys_for(None)
-    assert set(unedited.values()) == {None}
+    from image_edits import EDIT_MATH_VERSION
+    assert set(unedited.values()) == {f"m{EDIT_MATH_VERSION}"}
 
     first = keys_for(_local_only_recipe(1.0))
     assert all(first.values()), f"local-only edit produced no render key: {first}"
