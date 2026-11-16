@@ -69,7 +69,8 @@ A kept region can be rejected like any other with **Not an animal**.
 Each embedding model examines a region itself, once per species list, and a
 region is kept as soon as one of them recognizes an animal in it. A model that
 runs later in the same job classifies the kept region like any other animal
-region; a model that already ran in that job classifies it on the next run.
+region; a model that already ran in that job classifies it on the next run, and the
+run finishes with a note naming the models it still needs.
 The Process plan reflects this: a region no embedding model has settled yet
 counts as pending for every selected model, and a kept region that an earlier
 model has not classified shows as an ordinary pending target.

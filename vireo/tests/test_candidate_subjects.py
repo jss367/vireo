@@ -712,3 +712,59 @@ def test_importing_a_kept_regions_classification_keeps_it_in_a_fresh_catalog(tmp
     ).fetchone()
     assert row["category"] == "animal"
     assert destination.candidate_subjects.evidence([row["id"]])[row["id"]]["promoted"] == 1
+
+
+# -- the pipeline stage with more than one model ---------------------------
+
+
+def _stage_pass(db, photos, specs):
+    from pipeline_stages.classification import _ClassifyPass
+
+    stage = object.__new__(_ClassifyPass)
+    stage.thread_db = db
+    stage.photos = photos
+    stage.specs = specs
+    stage.contextual_weak_ids = set()
+    stage.detector_confidence = FLOOR
+    stage.cached_detections = {}
+    stage.total_candidates_kept = 0
+    stage.run = MagicMock()
+    stage._read_image = lambda spec, photo, region: (_crop(photo["id"]), "", "", False)
+    stage._should_stop = lambda: False
+    stage._uses_cache = lambda: True
+    return stage
+
+
+def _spec_pass(index, name, clf, model_type="bioclip"):
+    from pipeline_stages.classification import _SpecPass
+
+    return _SpecPass(
+        index=index, spec={"id": name, "name": name}, step_id=f"classify:{name}",
+        clf=clf, model_type=model_type, model_name=name, fp="fp1",
+        common_names_notice=None,
+    )
+
+
+def test_a_region_kept_by_a_later_model_is_noted_for_the_models_that_ran_first(db):
+    """The earlier model's pass is not reopened, so the run says the region
+    still needs it; the first model to run has nobody before it to name."""
+    duck = _photo(db, "duck.jpg")
+    _detect(db, duck, [_region("person", 0.44)])
+    specs = [{"id": "a", "name": "Model A"}, {"id": "b", "name": "Model B"}]
+    stage = _stage_pass(db, [duck], specs)
+
+    stage._keep_recognized_candidates(
+        _spec_pass(0, "Model A", _clf({duck["id"]: (0.37, 0.26)})),
+    )
+    stage.run.note.assert_not_called()
+
+    second = _spec_pass(1, "Model B", _clf({duck["id"]: (0.55, 0.20)}))
+    stage._keep_recognized_candidates(second)
+
+    assert second.candidates_kept == 1
+    assert stage.total_candidates_kept == 1
+    (message,), _ = stage.run.note.call_args
+    assert message == (
+        "[kept_regions] Model B kept 1 person/vehicle region as subjects after "
+        "Model A had run. Run Process again to classify it with Model A."
+    )

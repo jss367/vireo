@@ -788,6 +788,24 @@ class _ClassifyPass:
         spec.candidates_kept = len(outcome.kept_photo_ids)
         self.total_candidates_kept += spec.candidates_kept
         mark_kept_regions(self.thread_db, self.cached_detections)
+        if spec.candidates_kept and spec.index:
+            # The models before this one picked their targets while these
+            # regions still read person/vehicle, so they did not classify
+            # them. Their passes are not reopened; the plan lists the
+            # regions as pending for those models, and this note says so on
+            # the run. Tagged with no stage's name: nothing was skipped.
+            earlier = ", ".join(s["name"] for s in self.specs[:spec.index])
+            regions = (
+                "1 person/vehicle region"
+                if spec.candidates_kept == 1
+                else f"{spec.candidates_kept} person/vehicle regions"
+            )
+            self.run.note(
+                f"[kept_regions] {spec.spec['name']} kept {regions} as "
+                f"subjects after {earlier} had run. Run Process again to "
+                f"classify {'it' if spec.candidates_kept == 1 else 'them'} "
+                f"with {earlier}."
+            )
 
     # -- preflight ---------------------------------------------------
 
