@@ -145,6 +145,9 @@ def _queue_keyword_rename_sidecars(db: Database, old_row: Row, new_row: Row, aff
             new_name,
             pairs,
         )
+        # species_choices rows store the species name at write time and are
+        # catalog-wide, so the rename is a plain name change here.
+        db.species_choices.rename(old_name, new_name)
     # A pure location-to-location rename is handled entirely by the
     # ``location`` change _queue_location_path_changes queues WHEN
     # ``write_location_keywords_to_xmp`` is on for the affected

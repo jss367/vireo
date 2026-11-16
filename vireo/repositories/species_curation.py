@@ -4,8 +4,11 @@ This module owns the SQL behind the curated-species features:
 
 - ``species_highlights``: the ordered per-workspace Highlights buckets (add,
   promote, move, remove, rename, and the eligibility-filtered read);
-- ``species_representatives``: the global representative photos per species,
-  newest selection first, with the undo restore and the rename;
+- ``species_representatives``: the global representative photos per species
+  (a species' chosen photos), with the undo restore and the rename. Which of
+  them leads is decided by the comparisons in ``repositories.species_choices``
+  through ``species_preference.Preferences``; the newest selection leads
+  among photos nobody has compared;
 - ``photo_preferences``: the per-workspace preference rows kept for older
   callers, their clear and rename;
 - the Life List and taxonomy-explorer reads (candidates, found taxa,
@@ -50,6 +53,7 @@ import json
 
 from keyword_normalization import keyword_match_key
 from repositories import chunks
+from repositories.collections import CollectionRepository
 from repositories.effective_config import active_effective_config
 from repositories.folder_subtrees import folder_subtree_ids
 from repositories.keyword_taxa import KeywordTaxonRepository
@@ -59,9 +63,11 @@ from repositories.prediction_review import (
     prediction_review_join,
     prediction_review_status,
 )
+from repositories.species_choices import SpeciesChoiceRepository
 from repositories.subject_order import chosen_subject_sql, subject_rank_sql
 from settings_source import config_value
 from species_memberships import photo_species_memberships, subject_evidence_order, subject_from_row
+from species_preference import Preferences
 
 # ``get_highlights(eligible_only=True)``: the joins and filter that keep only
 # highlights whose photo is reachable, not rejected and still in the bucket.
@@ -290,6 +296,60 @@ _HIGHLIGHT_ELIGIBILITY_FILTER = f"""
                  )"""
 
 
+# ``get_representative_lists(eligible_only=True)``: the filter that keeps only
+# representatives whose photo still shows the species.
+# Accept a hierarchy leaf whose taxon links back to a root
+# identification with the curation-keyed name. After
+# the retired duplicate-species repair detached a redundant root but
+# leaves the hierarchical leaf attached, the leaf's stored
+# spelling may differ from the root ("verdin" vs "Verdin"), yet
+# the photo still represents the same identification via a
+# shared taxon_id. An exact k.name = sr.species compare would
+# then silently drop that photo from Life List / Representative
+# eligibility even though curation was intentionally preserved
+# on the root key.
+# Eligibility mirrors :meth:`get_life_list_candidates`,
+# :meth:`get_photo_life_list_species`, and
+# ``_photo_can_be_life_list_preference`` — all admit linked
+# higher-rank taxonomy identifications (genus, family, class,
+# …). Without this, a just-saved representative for a
+# higher-rank Life List entry would be dropped by the
+# eligible-only reader that ``GET /api/photos/<id>`` uses to
+# decide ``is_current_photo``, so the shared Set Representative
+# affordance would keep offering the write even after it had
+# already succeeded. The shared ancestor-suppression clause is
+# appended so an ancestor keyword (``Aves``) does not survive
+# eligibility when the same photo also carries a descendant
+# identification (``American Robin``) — otherwise the class
+# bucket the Life List query already hides would still show a
+# current representative here.
+_REPRESENTATIVE_ELIGIBILITY_FILTER = f"""
+                 AND COALESCE(p.flag, 'none') != 'rejected'
+                 AND f.status IN ('ok', 'partial')
+                 AND EXISTS (
+                     SELECT 1
+                     FROM photo_keywords pk
+                     JOIN keywords k ON k.id = pk.keyword_id
+                      AND (k.is_species = 1 OR k.type = 'taxonomy')
+                     WHERE pk.photo_id = sr.photo_id
+                       AND (
+                           k.name = sr.species
+                           OR (
+                               k.taxon_id IS NOT NULL
+                               AND EXISTS (
+                                   SELECT 1 FROM keywords root
+                                   WHERE root.parent_id IS NULL
+                                     AND (root.is_species = 1
+                                          OR root.type = 'taxonomy')
+                                     AND root.taxon_id = k.taxon_id
+                                     AND root.name = sr.species
+                               )
+                           )
+                       )
+                       {LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE}
+                 )"""
+
+
 class SpeciesCurationRepository:
     def __init__(self, conn, resolve_workspace_id):
         self.conn = conn
@@ -317,7 +377,10 @@ class SpeciesCurationRepository:
         ).fetchone()
         return int(row["next_order"] or 1)
 
-    def get_highlights_candidates(self, folder_id, min_quality=0.0, photo_id=None):
+    def get_highlights_candidates(
+        self, folder_id, min_quality=0.0, photo_id=None, rules=None,
+        collection_id=None,
+    ):
         """Return photos eligible for highlights selection.
 
         When ``folder_id`` is an int, returns photos in that folder and its
@@ -325,7 +388,10 @@ class SpeciesCurationRepository:
         across every folder visible in the active workspace. When
         ``photo_id`` is set, the result is additionally restricted to that
         single photo so the photo-detail endpoint can compute its highlight
-        eligibility without rebuilding every workspace bucket.
+        eligibility without rebuilding every workspace bucket. ``rules`` (a
+        universal-filter rule tree) and ``collection_id`` restrict the result
+        further, exactly as they restrict Browse's grid; both raise
+        ``ValueError`` on a malformed tree or an unknown collection.
 
         Each row is a dict that carries every species the photo holds:
 
@@ -367,6 +433,7 @@ class SpeciesCurationRepository:
         else:
             photo_filter = "AND p.id = ?"
             photo_params = (photo_id,)
+        rules_filter, rules_params = self._rules_scope_filter(rules, collection_id)
         scope_sql = f"""SELECT p.id
                FROM photos p
                JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
@@ -376,9 +443,11 @@ class SpeciesCurationRepository:
                  {photo_filter}
                  AND (p.quality_score >= ?
                       OR (? <= 0 AND p.quality_score IS NULL))
-                 AND (p.flag IS NULL OR p.flag != 'rejected')"""
+                 AND (p.flag IS NULL OR p.flag != 'rejected')
+                 {rules_filter}"""
         scope_params = (
             ws, *folder_params, *photo_params, min_quality, min_quality,
+            *rules_params,
         )
         rows = [
             dict(row) for row in
@@ -400,6 +469,28 @@ class SpeciesCurationRepository:
             row["predicted_confidence"] = top["confidence"] if top else None
         return rows
 
+    def _rules_scope_filter(self, rules, collection_id):
+        """``(sql, params)`` restricting ``p.id`` to a rule tree and a collection.
+
+        Empty when neither is given. The membership test is a subquery with
+        its own ``photos`` alias, so it composes with any outer query on
+        ``p``.
+        """
+        if rules is None and collection_id is None:
+            return "", ()
+        collections = CollectionRepository(self.conn, self._resolve_workspace_id)
+        folder_join, join_clause, where, params = collections.build_query_from_rules(
+            rules if rules is not None else [],
+        )
+        where, params = collections._append_collection_restriction(
+            collection_id, where, params,
+        )
+        return (
+            "AND p.id IN (SELECT DISTINCT p.id FROM photos p "
+            f"{folder_join} {join_clause} {where})",
+            tuple(params),
+        )
+
     def _highlight_candidate_rows(self, scope_sql, scope_params):
         """The photo columns of ``get_highlights_candidates`` over its scope."""
         return self.conn.execute(
@@ -414,7 +505,6 @@ class SpeciesCurationRepository:
                       p.subject_clip_high, p.subject_clip_low,
                       p.subject_y_median, p.noise_estimate,
                       p.eye_tenengrad,
-                      p.dino_subject_embedding, p.dino_global_embedding,
                       kw.keyword_names
                FROM scope
                JOIN photos p ON p.id = scope.id
@@ -1048,14 +1138,53 @@ class SpeciesCurationRepository:
         ).fetchall()
         return {r["species"]: r["photo_id"] for r in rows}
 
-    def get_representative_lists(self, eligible_only=False, species=None):
+    def get_globally_eligible_representatives(self, species=None):
+        """``{species: [photo_id, ...]}`` of catalog-wide eligible representatives.
+
+        Same eligibility as :meth:`get_representative_lists` with
+        ``eligible_only=True`` (photo not rejected, folder ok/partial, still
+        carries the species keyword), but without scoping to the active
+        workspace's visible folders. Callers use it as the traversal set when
+        ranking, so comparisons chained through an intermediate representative
+        visible only in another workspace still settle a scoped pair — the
+        chain's photo is still chosen for the species, just not in sight.
+        """
+        params: list = []
+        species_filter = ""
+        if species is not None:
+            canonical = self._keyword_taxa.resolve_species_display(species)
+            if canonical:
+                species_filter = " AND sr.species = ?"
+                params.append(canonical)
+        rows = self.conn.execute(
+            f"""SELECT sr.species, sr.photo_id
+               FROM species_representatives sr
+               JOIN photos p ON p.id = sr.photo_id
+               JOIN folders f ON f.id = p.folder_id
+                 {_REPRESENTATIVE_ELIGIBILITY_FILTER}
+                 {species_filter}
+               ORDER BY sr.species, sr.selected_order DESC, sr.id DESC""",
+            tuple(params),
+        ).fetchall()
+        result: dict = {}
+        for row in rows:
+            ids = result.setdefault(row["species"], [])
+            if row["photo_id"] not in ids:
+                ids.append(row["photo_id"])
+        return result
+
+    def get_representative_lists(self, eligible_only=False, species=None, ranked=True):
         """Return {species: [photo_id, ...]} representative photos.
 
         Representative markings are global, but this read is still scoped to
         the active workspace's folders. Life List callers still apply these
         rows only to actual species buckets, so a representative row alone
-        does not make an untagged species appear on the list. Lists are
-        newest-selection first, so item 0 is the main representative.
+        does not make an untagged species appear on the list. Item 0 is the
+        main representative: lists follow the recorded comparisons
+        (``species_preference.Preferences.rank`` over the photos returned),
+        with the newest selection first among photos nobody has compared.
+        ``ranked=False`` returns plain newest-selection order, for a caller
+        that ranks a narrower set of photos itself.
 
         When ``eligible_only`` is true, omit preferences whose photo is
         rejected, unavailable, or no longer carries the stored species keyword.
@@ -1068,58 +1197,9 @@ class SpeciesCurationRepository:
         if species is not None:
             species = self._keyword_taxa.resolve_species_display(species)
         ws = self.workspace_id
-        eligibility_filter = ""
-        if eligible_only:
-            # Accept a hierarchy leaf whose taxon links back to a root
-            # identification with the curation-keyed name. After
-            # the retired duplicate-species repair detached a redundant root but
-            # leaves the hierarchical leaf attached, the leaf's stored
-            # spelling may differ from the root ("verdin" vs "Verdin"), yet
-            # the photo still represents the same identification via a
-            # shared taxon_id. An exact k.name = sr.species compare would
-            # then silently drop that photo from Life List / Representative
-            # eligibility even though curation was intentionally preserved
-            # on the root key.
-            # Eligibility mirrors :meth:`get_life_list_candidates`,
-            # :meth:`get_photo_life_list_species`, and
-            # ``_photo_can_be_life_list_preference`` — all admit linked
-            # higher-rank taxonomy identifications (genus, family, class,
-            # …). Without this, a just-saved representative for a
-            # higher-rank Life List entry would be dropped by the
-            # eligible-only reader that ``GET /api/photos/<id>`` uses to
-            # decide ``is_current_photo``, so the shared Set Representative
-            # affordance would keep offering the write even after it had
-            # already succeeded. The shared ancestor-suppression clause is
-            # appended so an ancestor keyword (``Aves``) does not survive
-            # eligibility when the same photo also carries a descendant
-            # identification (``American Robin``) — otherwise the class
-            # bucket the Life List query already hides would still show a
-            # current representative here.
-            eligibility_filter = f"""
-                 AND COALESCE(p.flag, 'none') != 'rejected'
-                 AND f.status IN ('ok', 'partial')
-                 AND EXISTS (
-                     SELECT 1
-                     FROM photo_keywords pk
-                     JOIN keywords k ON k.id = pk.keyword_id
-                      AND (k.is_species = 1 OR k.type = 'taxonomy')
-                     WHERE pk.photo_id = sr.photo_id
-                       AND (
-                           k.name = sr.species
-                           OR (
-                               k.taxon_id IS NOT NULL
-                               AND EXISTS (
-                                   SELECT 1 FROM keywords root
-                                   WHERE root.parent_id IS NULL
-                                     AND (root.is_species = 1
-                                          OR root.type = 'taxonomy')
-                                     AND root.taxon_id = k.taxon_id
-                                     AND root.name = sr.species
-                               )
-                           )
-                       )
-                       {LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE}
-                 )"""
+        eligibility_filter = (
+            _REPRESENTATIVE_ELIGIBILITY_FILTER if eligible_only else ""
+        )
         species_filter = ""
         params = [ws]
         if species:
@@ -1142,7 +1222,17 @@ class SpeciesCurationRepository:
             ids = result.setdefault(row["species"], [])
             if row["photo_id"] not in ids:
                 ids.append(row["photo_id"])
+        if ranked:
+            self._rank_representative_lists(result)
         return result
+
+    def _rank_representative_lists(self, lists):
+        """Reorder each species' newest-first list by the comparisons."""
+        if not any(len(ids) > 1 for ids in lists.values()):
+            return
+        preferences = Preferences(SpeciesChoiceRepository(self.conn).comparisons())
+        for name, ids in lists.items():
+            lists[name] = list(preferences.rank(ids, ids).order)
 
     def set_global_representative(self, species, photo_id):
         order = self.next_representative_order()
@@ -1222,9 +1312,11 @@ class SpeciesCurationRepository:
         )
 
     def clear_representative(self, species):
-        """Clear all representative photos for a species globally."""
+        """Clear all representative photos for a species globally, and the
+        choices that ranked them."""
         species = self._keyword_taxa.resolve_species_display(species)
         ws = self.workspace_id
+        SpeciesChoiceRepository(self.conn).clear_for_representatives_of(species)
         self.conn.execute(
             "DELETE FROM species_representatives WHERE species = ?",
             (species,),

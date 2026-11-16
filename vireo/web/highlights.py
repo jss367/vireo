@@ -31,9 +31,10 @@ from highlights_payload import (
 )
 from keyword_normalization import keyword_match_key, normalize_keyword_display
 from photo_payload import attach_edit_recipes
-from services import keyword_tagging, prediction_decisions, review_decisions
+from services import keyword_tagging, prediction_decisions, review_decisions, species_choices
 from services.pending_changes import queue_keyword_add, queue_keyword_remove
 from species_memberships import photo_species_memberships, subject_from_row
+from web.photo_review import flag_provenance
 from web.request_args import request_bool_arg
 
 if TYPE_CHECKING:
@@ -790,10 +791,17 @@ def create_highlights_blueprint(get_db: GetDb, json_error: JsonError) -> Bluepri
                     parsed["species"], parsed["photo_id"]
                 )
             return jsonify({"ok": True, **parsed, "rank": rank})
-        # The representative write and its promotion land together.
+        # A hand click sends no provenance; a caller that does (a headless
+        # reviewer on the older route) has it recorded with the choice.
+        provenance, error = flag_provenance(body)
+        if provenance is None:
+            return json_error(error or "invalid source or reason")
+        # The choice (chosen over every other chosen photo of the species)
+        # and its promotion land together.
         with db.transaction():
-            db.set_species_representative(
-                parsed["species"], parsed["photo_id"]
+            species_choices.choose_best(
+                db, parsed["species"], parsed["photo_id"],
+                source=provenance[0], reason=provenance[1],
             )
             # Only promote to `species_highlights` when the photo is actually
             # a Highlights candidate. Otherwise the row is invisible on the

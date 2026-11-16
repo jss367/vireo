@@ -95,6 +95,7 @@ def test_tools_are_the_documented_set(mcp):
         "set_flag", "set_rating", "add_keyword", "remove_keyword",
         "get_species_evidence", "preview_species_assignment", "apply_species_assignment",
         "reject_region", "restore_region",
+        "best_of_each_species", "choose_best_photo",
     }
     for tool in anyio.run(server.list_tools):
         assert tool.description, f"{tool.name} has no description"
@@ -703,6 +704,79 @@ def test_burst_keeps_quality_fields_on_eligible_frames(mcp, monkeypatch):
     frame = call(server, "burst", photo_id=42)["frames"][0]
     assert frame["sharpness"] == 0.5
     assert frame["quality"] == 0.72
+
+
+def _eagles(db):
+    """Two confirmed eagle photos a year apart; returns their ids."""
+    from services import keyword_tagging, photo_ingest
+
+    folder_id = db.folders.id_by_path("/photos/2024")
+    ids = []
+    for name, stamp in (("eagle24.jpg", "2024-03-01T08:00:00"), ("eagle25.jpg", "2025-03-01T08:00:00")):
+        pid = photo_ingest.add_photo(
+            db, folder_id=folder_id, filename=name, extension=".jpg",
+            file_size=10, file_mtime=1.0, timestamp=stamp,
+        )
+        keyword_tagging.tag_photo(db, pid, db.keywords.add("Bald Eagle", is_species=True))
+        ids.append(pid)
+    db.commit()
+    return ids
+
+
+def test_best_tools_list_choose_and_scope_by_date(mcp):
+    server, db, transport = mcp
+    old, new = _eagles(db)
+
+    listed = call(server, "best_of_each_species", species="Bald Eagle", per_species=5)
+
+    eagle = listed["species"][0]
+    assert {p["id"] for p in eagle["photos"]} == {old, new}
+    assert eagle["decision"]["kind"] in ("score", "unanalyzed")
+
+    chosen = call(
+        server, "choose_best_photo", species="Bald Eagle", photo_id=old,
+        over=[new], reason="sharper eye", source="claude",
+    )
+
+    assert chosen["over"] == [new]
+    assert chosen["superseded"] == []
+    assert transport.calls[-1][3] == {
+        "species": "Bald Eagle", "photo_id": old, "reason": "sharper eye",
+        "over": [new], "source": "claude",
+    }
+    listed = call(server, "best_of_each_species", species="Bald Eagle")
+    decision = listed["species"][0]["decision"]
+    assert (decision["kind"], decision["photo_id"]) == ("chosen", old)
+    assert (decision["source"], decision["reason"]) == ("claude", "sharper eye")
+
+    year = call(
+        server, "best_of_each_species", species="Bald Eagle",
+        date_from="2025-01-01", date_to="2025-12-31",
+    )
+    assert [p["id"] for p in year["species"][0]["photos"]] == [new]
+    assert year["species"][0]["decision"]["kind"] != "chosen"
+
+
+def test_choose_best_photo_requires_a_reason_and_reports_the_apps_refusal(mcp):
+    server, db, _ = mcp
+    old, _new = _eagles(db)
+
+    assert "reason" in call_error(
+        server, "choose_best_photo", species="Bald Eagle", photo_id=old, reason=" ",
+    )
+    assert "confirm the species" in call_error(
+        server, "choose_best_photo", species="Osprey", photo_id=old, reason="best",
+    )
+
+
+def test_best_tools_advertise_side_effects_to_clients(mcp):
+    server, _, _ = mcp
+    tools = {tool.name: tool for tool in anyio.run(server.list_tools)}
+    hints = tools["best_of_each_species"].model_dump(by_alias=True)["annotations"]
+    assert hints["readOnlyHint"] is True
+    hints = tools["choose_best_photo"].model_dump(by_alias=True)["annotations"]
+    assert hints["readOnlyHint"] is False
+    assert hints["destructiveHint"] is False
 
 
 def test_set_flag_writes_only_what_the_route_persists(mcp):

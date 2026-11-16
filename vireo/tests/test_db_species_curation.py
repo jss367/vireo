@@ -1617,7 +1617,8 @@ def test_species_curation_signatures_unchanged():
                   "get_highlights")
     })
     assert sig["repo.get_highlights_candidates"] == (
-        "(self, folder_id, min_quality=0.0, photo_id=None)"
+        "(self, folder_id, min_quality=0.0, photo_id=None, rules=None, "
+        "collection_id=None)"
     )
     assert sig["repo.set_photo_preference"] == (
         "(self, purpose, species, photo_id)"
@@ -1640,7 +1641,7 @@ def test_species_curation_signatures_unchanged():
     assert sig["repo.get_taxon_subtree"] == "(self, root_id, max_depth=12)"
     assert sig["repo.get_explorer_root"] == "(self, name='Aves', rank='class')"
     assert sig["repo.get_representative_lists"] == (
-        "(self, eligible_only=False, species=None)"
+        "(self, eligible_only=False, species=None, ranked=True)"
     )
     assert sig["repo.get_highlights"] == (
         "(self, species=None, eligible_only=False)"

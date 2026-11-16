@@ -100,6 +100,7 @@ if TYPE_CHECKING:
     from repositories.processes import ProcessesRepository
     from repositories.scanning import ScanningRepository
     from repositories.source_cleanup import SourceCleanupRepository
+    from repositories.species_choices import SpeciesChoiceRepository
     from repositories.species_curation import SpeciesCurationRepository
     from repositories.species_identity_repairs import SpeciesIdentityRepairRepository
     from repositories.species_provenance import SpeciesProvenanceRepository
@@ -1114,6 +1115,18 @@ class Database:
         active one when they run (raising ``RuntimeError`` when none is set).
         """
         return self._species_curation_repository()
+
+    @property
+    def species_choices(self) -> SpeciesChoiceRepository:
+        """Species choices: ``db.species_choices.comparisons([species])`` and friends.
+
+        Which chosen photo of a species was picked over which, by whom and
+        why. Catalog-wide, so it needs no active workspace; every access
+        builds a fresh repository on this connection.
+        """
+        from repositories.species_choices import SpeciesChoiceRepository
+
+        return SpeciesChoiceRepository(self.conn)
 
     # -- Reference taxonomy (``taxonomy.py`` loaders own the commits) --
 
@@ -2283,7 +2296,8 @@ class Database:
         ]
 
     def get_species_representatives(self, eligible_only: bool = False) -> dict[str, int]:
-        """Return {species: main_photo_id} for compatibility callers."""
+        """Return {species: main_photo_id}: each species' leading
+        representative among the photos visible in the active workspace."""
         return {
             species: photo_ids[0]
             for species, photo_ids in self.species_curation.get_representative_lists(
@@ -2296,7 +2310,9 @@ class Database:
         """Mark a photo as a representative for a species globally.
 
         Multiple photos can represent a species. Re-selecting an existing
-        representative promotes it by assigning the newest selection order.
+        representative assigns it the newest selection order, which leads
+        among representatives nobody has compared; a comparison is recorded
+        by ``services.species_choices.choose_best``.
         A compatibility ``photo_preferences`` row is kept for older callers
         that still expect one main representative in the active workspace.
         """

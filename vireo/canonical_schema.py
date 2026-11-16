@@ -20,7 +20,7 @@ This module must not import ``db``: ``schema.py`` imports ``db``, and
 # database it creates from nothing. It is the newest registry migration in
 # ``schema.MIGRATIONS``: ``create_tables`` builds every migration's end state,
 # so a fresh database has nothing to migrate.
-SCHEMA_VERSION = 35
+SCHEMA_VERSION = 36
 
 # Promoted EXIF summary columns in the ``photos`` table — the canonical
 # list the scanner uses to clear absent fields on rescan (a metadata write
@@ -265,6 +265,35 @@ def create_photo_versions(conn):
     )""")
 
 
+def create_species_choices(conn):
+    """A species' chosen photos compared: one choice, the photos it beat."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS species_choices (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        species TEXT NOT NULL,
+        photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+        source TEXT,
+        reason TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS species_choice_losers (
+        choice_id INTEGER NOT NULL REFERENCES species_choices(id) ON DELETE CASCADE,
+        photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+        PRIMARY KEY (choice_id, photo_id)
+    )""")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_species_choices_species "
+        "ON species_choices(species, photo_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_species_choices_photo "
+        "ON species_choices(photo_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_species_choice_losers_photo "
+        "ON species_choice_losers(photo_id)"
+    )
+
+
 def create_auxiliary_schema_objects(conn):
     """Shared auxiliary objects for fresh catalogs; migrations use the same DDL."""
     create_formerly_lazy_objects(conn)
@@ -274,6 +303,7 @@ def create_auxiliary_schema_objects(conn):
     create_detection_evidence_reviews(conn)
     create_same_shot_reviews(conn)
     create_photo_versions(conn)
+    create_species_choices(conn)
 
 
 class CanonicalSchema:
