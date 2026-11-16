@@ -144,6 +144,7 @@ GET          /api/settings/export
 GET          /api/settings/schema
 GET          /api/settings/values
 GET          /api/species
+GET          /api/species-best
 GET          /api/species/search
 GET          /api/stats
 GET          /api/storage
@@ -167,6 +168,7 @@ GET          /api/v1/photos
 GET          /api/v1/photos/<int:photo_id>
 GET          /api/v1/photos/<int:photo_id>/burst-evidence
 GET          /api/v1/photos/<int:photo_id>/focus-crop
+GET          /api/v1/species-best
 GET          /api/v1/version
 GET          /api/v1/workspaces
 GET          /api/version
@@ -435,6 +437,7 @@ POST         /api/selection/wildlife-state
 POST         /api/settings/import
 POST         /api/setup/complete
 POST         /api/shutdown
+POST         /api/species-best/choose
 POST         /api/species-highlights
 POST         /api/storage/clear
 POST         /api/storage/clear-safe
@@ -461,6 +464,7 @@ POST         /api/v1/photos/analysis-retry
 POST         /api/v1/photos/burst-evidence
 POST         /api/v1/photos/species-evidence
 POST         /api/v1/shutdown
+POST         /api/v1/species-best/choose
 POST         /api/v1/workspaces/<int:ws_id>/activate
 POST         /api/workspace/tabs/pin
 POST         /api/workspace/tabs/reorder
