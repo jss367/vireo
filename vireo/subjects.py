@@ -220,8 +220,13 @@ def payload(db, photo_id):
     grouped = {}
     for prediction in predictions:
         grouped.setdefault(prediction["detection_id"], []).append(dict(prediction))
+    kept = db.candidate_subjects.evidence(d["id"] for d in detections)
     for detection in detections:
         analysis = analyses.get(detection["id"])
+        # The detector's own label for a person/vehicle region kept as an
+        # animal subject (``classify_job.candidate_subjects``), else None.
+        check = kept.get(detection["id"])
+        detection["detector_category"] = check["detector_category"] if check and check["promoted"] else None
         detection["analysis"] = ({"crop": json.loads(analysis["crop"]),
             "quality_score": analysis["quality_score"], "exposure_ev": analysis["exposure_ev"],
             "basis": "detection_box", "source_key": analysis["source_key"]} if analysis else None)

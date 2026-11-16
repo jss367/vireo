@@ -262,6 +262,9 @@ class _SpecPass:
     source_skipped: int = 0
     skipped_existing: int = 0
     full_image_fallbacks: int = 0
+    # Photos whose person/vehicle region this spec's classifier recognized
+    # as an animal and kept as a subject (``_keep_recognized_candidates``).
+    candidates_kept: int = 0
     # Photo-scoped bookkeeping for ``count`` (inferred) and ``cached``.
     # ``total`` and ``cached_estimate`` count PHOTOS (× specs), so
     # multi-subject photos with several qualifying detections must not
@@ -419,6 +422,7 @@ class _ClassifyPass:
 
         self.total_predictions_stored = 0
         self.total_full_image_fallbacks = 0
+        self.total_candidates_kept = 0
         self.total_failed = 0
         self.total_skipped_existing = 0
         # Unique photo IDs that failed in any model, so the rollup
@@ -599,6 +603,9 @@ class _ClassifyPass:
             fp=self.loaded_models.get("labels_fingerprint", "legacy"),
             common_names_notice=common_names_notice,
         )
+        # Before the preflight, so its cached and unclassifiable estimates
+        # see a kept region as the animal target it now is.
+        self._keep_recognized_candidates(spec)
         self._preflight(spec)
         # Set total BEFORE the pre-flight event so the UI's
         # ``stageTotal - stageCachedEst`` subtraction renders the
@@ -738,6 +745,44 @@ class _ClassifyPass:
             return None
         loaded_models.update(bundle)
         return bundle["clf"], bundle["model_type"], bundle["model_name"]
+
+    # -- person/vehicle regions that hold an animal -------------------
+
+    def _keep_recognized_candidates(self, spec: _SpecPass) -> None:
+        """Ask this model about person/vehicle regions on photos with no animal region.
+
+        MegaDetector labels some animals "person" or "vehicle"; such a photo
+        would otherwise take the confident-non-animal skip in
+        ``_detections_to_classify`` and never reach masks or quality
+        analysis. A region the classifier recognizes becomes an ``animal``
+        region in the catalog (``classify_job.candidate_subjects``), and the
+        detect stage's in-memory boxes are brought in line so this pass
+        classifies it like any other. A contextual-weak photo already has a
+        weak animal box to classify and is left to that path.
+        """
+        from classify_job.candidate_subjects import (
+            examine_candidates,
+            mark_kept_regions,
+        )
+        from classify_job.classify_pass import ClassifierModel
+
+        outcome = examine_candidates(
+            self.thread_db,
+            [p for p in self.photos if p["id"] not in self.contextual_weak_ids],
+            ClassifierModel(
+                clf=spec.clf, model_type=spec.model_type,
+                model_name=spec.model_name, labels_fingerprint=spec.fp,
+            ),
+            min_conf=self.detector_confidence,
+            prepare_crop=lambda photo, region: self.classify_job._prepare_image(
+                photo, self.folders, region,
+            )[0],
+            should_stop=self._should_stop,
+            recheck=not self._uses_cache(),
+        )
+        spec.candidates_kept = len(outcome.kept_photo_ids)
+        self.total_candidates_kept += spec.candidates_kept
+        mark_kept_regions(self.thread_db, self.cached_detections)
 
     # -- preflight ---------------------------------------------------
 
@@ -1804,6 +1849,11 @@ class _ClassifyPass:
             parts.append(
                 f"{len(self.contextual_weak_ids)} weak detections rescued"
             )
+        if spec.candidates_kept:
+            parts.append(
+                f"{spec.candidates_kept} person/vehicle "
+                f"region{'' if spec.candidates_kept == 1 else 's'} kept as subjects"
+            )
         if spec.failed:
             parts.append(f"{spec.failed} failed")
         if spec.source_skipped:
@@ -1908,6 +1958,7 @@ class _ClassifyPass:
             "already_classified": self.total_skipped_existing,
             "full_image_fallbacks": self.total_full_image_fallbacks,
             "weak_detection_rescues": len(self.contextual_weak_ids),
+            "candidate_subjects_kept": self.total_candidates_kept,
             "model_count": len(self.specs),
             "models_succeeded": self.models_succeeded,
             "models_skipped": len(self.skipped_model_names),

@@ -439,13 +439,37 @@ class _ClassifyPlan:
         self.full_image_fallbacks = stage_counts.count_full_image_fallback_photos(
             db, self.fallback_photo_ids, min_conf=self.detector_confidence,
         )
-        self.classifiable_units = self.total_dets + self.full_image_fallbacks
-
         self.unblocked_count = sum(
             1 for m in self.models
             if not self.label_resolution[m["id"]].get("blocked")
         )
-        self.eligible = self.classifiable_units * self.unblocked_count
+        # Person/vehicle regions on photos with no animal region: each
+        # embedding model examines them before picking targets, so they are
+        # work for those models and none for a timm model.
+        self.examining_count = sum(
+            1 for m in self.models
+            if self._examines_candidates(m)
+        )
+        self.candidate_regions = (
+            stage_counts.count_candidate_subjects(
+                db, self.fallback_photo_ids, self.detector_confidence,
+            )
+            if self.examining_count else 0
+        )
+        self.classifiable_units = (
+            self.total_dets + self.full_image_fallbacks + self.candidate_regions
+        )
+        self.eligible = (
+            (self.total_dets + self.full_image_fallbacks) * self.unblocked_count
+            + self.candidate_regions * self.examining_count
+        )
+
+    def _examines_candidates(self, model):
+        """True for a runnable model that checks person/vehicle regions."""
+        return (
+            model.get("model_type") != "timm"
+            and not self.label_resolution[model["id"]].get("blocked")
+        )
 
     def _count_over_targets(
         self, count_dets, count_primary, count_full_image, model_name, fp,
@@ -508,8 +532,11 @@ class _ClassifyPlan:
             if info.get("blocked"):
                 self.blocked.append(m["name"])
                 continue
+            examines = self._examines_candidates(m)
             if params.reclassify or params.raw_subject_analysis:
-                pending = self.classifiable_units
+                pending = self.classifiable_units - (
+                    0 if examines else self.candidate_regions
+                )
             else:
                 pending = self._count_over_targets(
                     stage_counts.count_classify_pending_pairs,
@@ -517,6 +544,12 @@ class _ClassifyPlan:
                     stage_counts.count_full_image_classify_pending_pairs,
                     m["name"], info["fingerprint"],
                 )
+                if examines and self.candidate_regions:
+                    pending += stage_counts.count_candidate_subjects(
+                        self.db, self.fallback_photo_ids, self.detector_confidence,
+                        classifier_model=m["name"],
+                        labels_fingerprint=info["fingerprint"],
+                    )
             if pending:
                 self.pending_per_model[m["name"]] = pending
                 self.pending_total += pending

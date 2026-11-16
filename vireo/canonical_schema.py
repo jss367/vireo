@@ -20,7 +20,7 @@ This module must not import ``db``: ``schema.py`` imports ``db``, and
 # database it creates from nothing. It is the newest registry migration in
 # ``schema.MIGRATIONS``: ``create_tables`` builds every migration's end state,
 # so a fresh database has nothing to migrate.
-SCHEMA_VERSION = 36
+SCHEMA_VERSION = 37
 
 # Promoted EXIF summary columns in the ``photos`` table — the canonical
 # list the scanner uses to clear absent fields on rescan (a metadata write
@@ -294,6 +294,28 @@ def create_species_choices(conn):
     )
 
 
+def create_subject_candidates(conn):
+    """Person/vehicle detector regions the classifier was asked about.
+
+    One row per examined region (``candidate_subjects``): the detector's own
+    category, the classifier evidence, and whether the region was kept as an
+    animal subject. A kept region's ``detections.category`` reads ``animal``;
+    this row is the record that the detector said otherwise.
+    """
+    conn.execute("""CREATE TABLE IF NOT EXISTS subject_candidates (
+        detection_id INTEGER PRIMARY KEY REFERENCES detections(id) ON DELETE CASCADE,
+        detector_category TEXT NOT NULL,
+        classifier_model TEXT NOT NULL,
+        labels_fingerprint TEXT NOT NULL,
+        top_species TEXT,
+        max_match_score REAL,
+        background_score REAL,
+        background_prompt TEXT,
+        promoted INTEGER NOT NULL DEFAULT 0,
+        checked_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )""")
+
+
 def create_auxiliary_schema_objects(conn):
     """Shared auxiliary objects for fresh catalogs; migrations use the same DDL."""
     create_formerly_lazy_objects(conn)
@@ -304,6 +326,7 @@ def create_auxiliary_schema_objects(conn):
     create_same_shot_reviews(conn)
     create_photo_versions(conn)
     create_species_choices(conn)
+    create_subject_candidates(conn)
 
 
 class CanonicalSchema:

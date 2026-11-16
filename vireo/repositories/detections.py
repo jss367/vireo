@@ -35,6 +35,8 @@ import sqlite3
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from typing import Any
 
+from repositories.candidate_subjects import CandidateSubjectRepository
+
 
 class DetectionsRepository:
     # Miss category -> ``photos`` flag column.
@@ -130,6 +132,11 @@ class DetectionsRepository:
         for det_id in ordered_ids:
             det, category, _idx = unique[det_id]
             box = det["box"]
+            # A person/vehicle region the classifier recognized as an animal
+            # (``subject_candidates.promoted``) keeps its ``animal`` category
+            # when the detector writes the same region again: the id is
+            # content-addressed on the detector's own category, so the same
+            # output lands on the same row and must not withdraw the subject.
             # INSERT ON CONFLICT DO UPDATE — true UPSERT. Do NOT use
             # `INSERT OR REPLACE`, which DELETEs the conflicting row before
             # re-inserting; that DELETE fires `predictions.detection_id`
@@ -149,13 +156,25 @@ class DetectionsRepository:
                      box_w = excluded.box_w,
                      box_h = excluded.box_h,
                      detector_confidence = excluded.detector_confidence,
-                     category = excluded.category""",
+                     category = CASE WHEN EXISTS (
+                         SELECT 1 FROM subject_candidates sc
+                          WHERE sc.detection_id = detections.id
+                            AND sc.promoted = 1
+                     ) THEN detections.category ELSE excluded.category END""",
                 (det_id, photo_id, detector_model, runtime_fingerprint,
                  box["x"], box["y"], box["w"], box["h"],
                  det["confidence"], category),
             )
             ids.append(det_id)
 
+        self._retire_unproduced_rows(photo_id, detector_model, runtime_fingerprint, ids)
+        return ids
+
+    def _retire_unproduced_rows(
+        self, photo_id: int, detector_model: str, runtime_fingerprint: str,
+        ids: Sequence[int],
+    ) -> None:
+        """Delete this runtime's rows of (photo, model) that ``ids`` leaves out."""
         # Retire rows the new run no longer produces. Narrow DELETE: only
         # rows whose ID is NOT in the new set. Safe under concurrent writers
         # because two writers with the same detections compute the same
@@ -180,7 +199,54 @@ class DetectionsRepository:
                 f"DELETE FROM detections WHERE id IN ({placeholders})",
                 chunk,
             )
-        return ids
+
+    def _retire_for_replacement(
+        self, photo_id: int, detector_model: str,
+    ) -> tuple[dict[int, str], list[sqlite3.Row]]:
+        """Delete every row of (photo, model) ahead of a runtime replacement.
+
+        Returns what a reproduced region must keep: the reviewer's subject
+        verdicts by detection id, and the kept person/vehicle regions
+        (``subject_candidates.promoted``). The id is content-addressed on
+        (photo, model, box, detector category) and does not change with the
+        detector runtime, so a region the new run reproduces by the same id
+        is the same pixels and must keep its verdict, or stay a subject,
+        rather than silently re-enter review.
+
+        Runtime ownership changes are an explicit retirement event.
+        Deleting first prevents old-runtime rows from surviving the new
+        run's same-runtime stale-row sweep.
+        """
+        verdicts = {
+            row["id"]: row["subject_verdict"]
+            for row in self.conn.execute(
+                """SELECT id, subject_verdict FROM detections
+                   WHERE photo_id = ? AND detector_model = ?
+                     AND subject_verdict IS NOT NULL""",
+                (photo_id, detector_model),
+            )
+        }
+        kept = CandidateSubjectRepository(self.conn).kept_rows_for_photo(
+            photo_id, detector_model,
+        )
+        self.conn.execute(
+            """DELETE FROM detections
+               WHERE photo_id = ? AND detector_model = ?""",
+            (photo_id, detector_model),
+        )
+        return verdicts, kept
+
+    def _restore_reviewed_state(
+        self, reviewed: tuple[dict[int, str], list[sqlite3.Row]], ids: Sequence[int],
+    ) -> None:
+        """Put back the verdicts and kept regions of the ids a rewrite reproduced."""
+        verdicts, kept = reviewed
+        for det_id in set(ids) & verdicts.keys():
+            self.conn.execute(
+                "UPDATE detections SET subject_verdict = ? WHERE id = ?",
+                (verdicts[det_id], det_id),
+            )
+        CandidateSubjectRepository(self.conn).restore(kept, ids)
 
     def write_batch(
         self,
@@ -234,39 +300,15 @@ class DetectionsRepository:
             ).fetchall()
             return [row["id"] for row in rows]
 
-        preserved_verdicts: dict[int, str] = {}
-        if identity_changed or no_run_replace:
-            # Preserve the reviewer's subject verdicts across runtime
-            # replacement: the id is content-addressed on (photo, model, box,
-            # category) and does not change with the detector runtime, so a
-            # region the new run reproduces by the same id is the same pixels
-            # and must keep its verdict rather than silently re-enter review.
-            preserved_verdicts = {
-                row["id"]: row["subject_verdict"]
-                for row in self.conn.execute(
-                    """SELECT id, subject_verdict FROM detections
-                       WHERE photo_id = ? AND detector_model = ?
-                         AND subject_verdict IS NOT NULL""",
-                    (photo_id, detector_model),
-                )
-            }
-            # Runtime ownership changes are an explicit retirement event.
-            # Deleting first prevents old-runtime rows from surviving the
-            # new run's same-runtime stale-row sweep.
-            self.conn.execute(
-                """DELETE FROM detections
-                   WHERE photo_id = ? AND detector_model = ?""",
-                (photo_id, detector_model),
-            )
-
+        reviewed = (
+            self._retire_for_replacement(photo_id, detector_model)
+            if identity_changed or no_run_replace else None
+        )
         ids = self.upsert_rows(
             photo_id, detector_model, detections, runtime_fingerprint,
         )
-        for det_id in set(ids) & preserved_verdicts.keys():
-            self.conn.execute(
-                "UPDATE detections SET subject_verdict = ? WHERE id = ?",
-                (preserved_verdicts[det_id], det_id),
-            )
+        if reviewed is not None:
+            self._restore_reviewed_state(reviewed, ids)
         self.conn.execute(
             """INSERT INTO detector_runs
                  (photo_id, detector_model, runtime_fingerprint,

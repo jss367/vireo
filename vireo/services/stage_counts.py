@@ -184,6 +184,22 @@ def count_full_image_fallback_photos(
     )
 
 
+def count_candidate_subjects(
+    db: Database, photo_ids: Iterable[int], min_conf: float,
+    classifier_model: str | None = None, labels_fingerprint: str | None = None,
+) -> int:
+    """Count the person/vehicle regions classification examines as possible animals.
+
+    A photo with no retained animal region whose strongest retained region
+    is a person or vehicle has that region checked by the classifier before
+    targets are picked (``classify_job.candidate_subjects``). With a model
+    and label set, counts only the regions that pair has not examined yet.
+    """
+    return db.candidate_subjects.count(
+        photo_ids, min_conf, classifier_model, labels_fingerprint,
+    )
+
+
 def count_full_image_classify_pending_pairs(
     db: Database, classifier_model: str, labels_fingerprint: str,
     photo_ids: Iterable[int] | None = None, detector_model: str = "megadetector-v6",

@@ -3432,18 +3432,13 @@ def test_pipeline_classifies_full_image_when_only_raw_noise_boxes_exist(
     ]
 
 
-def test_pipeline_skips_full_image_when_only_confident_non_animal_box(
-    tmp_path, monkeypatch,
-):
-    """A confident person/vehicle box must still suppress the full-image
-    fallback.
+def _run_person_only_pipeline(tmp_path, monkeypatch, top_prediction):
+    """Run the pipeline over one photo whose only region is a confident
+    person box; the classifier answers every crop with ``top_prediction``.
 
-    The animal-filter above ``detections_to_classify`` strips non-animal
-    rows before the emptiness check, so a photo whose only MegaDetector
-    output is a high-confidence person or vehicle box would otherwise slip
-    into the fallback and get a spurious wildlife prediction. The guard
-    only whitelists photos whose non-animal rows are all sub-threshold
-    (i.e. actual noise).
+    Returns ``(result, rows, prepared_detections, person_det_id)``: the job
+    result, the photo's detection rows joined to their predictions, the
+    detection of every crop that was read, and the person box's id.
     """
     import classifier as classifier_mod
     import classify_job
@@ -3509,7 +3504,7 @@ def test_pipeline_skips_full_image_when_only_confident_non_animal_box(
             import numpy as np
 
             return [(
-                [{"species": "Bald Eagle", "score": 0.99}],
+                [dict(top_prediction)],
                 np.zeros(512, dtype=np.float32),
             ) for _ in images]
 
@@ -3525,9 +3520,6 @@ def test_pipeline_skips_full_image_when_only_confident_non_animal_box(
         ),
     )
 
-    assert result["stages"]["classify"]["full_image_fallbacks"] == 0
-    assert prepared_detections == []
-
     check = Database(db_path)
     check.set_active_workspace(ws_id)
     rows = check.conn.execute(
@@ -3538,11 +3530,67 @@ def test_pipeline_skips_full_image_when_only_confident_non_animal_box(
             ORDER BY d.detector_model""",
         (photo_id,),
     ).fetchall()
-    assert [dict(row) for row in rows] == [
+    return result, [dict(row) for row in rows], prepared_detections, person_det_id
+
+
+def test_pipeline_skips_full_image_when_only_confident_non_animal_box(
+    tmp_path, monkeypatch,
+):
+    """A confident person/vehicle box must still suppress the full-image
+    fallback.
+
+    The animal-filter above ``detections_to_classify`` strips non-animal
+    rows before the emptiness check, so a photo whose only MegaDetector
+    output is a high-confidence person or vehicle box would otherwise slip
+    into the fallback and get a spurious wildlife prediction. The guard
+    only whitelists photos whose non-animal rows are all sub-threshold
+    (i.e. actual noise).
+
+    The person region itself is read once, so the classifier can say
+    whether it holds an animal the detector mislabeled. A classifier that
+    finds no listed species in it leaves the photo unclassified.
+    """
+    result, rows, prepared_detections, person_det_id = _run_person_only_pipeline(
+        tmp_path, monkeypatch,
+        {"species": "Bald Eagle", "score": 0.99, "raw_score": 0.36,
+         "background_score": 0.30, "background_prompt": "rocks"},
+    )
+
+    assert result["stages"]["classify"]["full_image_fallbacks"] == 0
+    assert result["stages"]["classify"]["candidate_subjects_kept"] == 0
+    assert [d["id"] for d in prepared_detections] == [person_det_id]
+    assert rows == [
         {
             "detector_model": "megadetector-v6",
             "category": "person",
             "species": None,
+        },
+    ]
+
+
+def test_pipeline_classifies_a_person_box_the_classifier_recognizes_as_an_animal(
+    tmp_path, monkeypatch,
+):
+    """MegaDetector labels some animals "person" (a Wood Duck drake, a
+    resting goose). When the classifier clearly recognizes a listed species
+    in the region, the region is kept as an animal subject and classified
+    like any other, instead of leaving the photo with no subject at all.
+    """
+    result, rows, prepared_detections, person_det_id = _run_person_only_pipeline(
+        tmp_path, monkeypatch,
+        {"species": "Wood Duck", "score": 0.99, "raw_score": 0.55,
+         "background_score": 0.20, "background_prompt": "water"},
+    )
+
+    assert result["stages"]["classify"]["candidate_subjects_kept"] == 1
+    assert result["stages"]["classify"]["full_image_fallbacks"] == 0
+    # Read once to examine the region, once to classify it.
+    assert [d["id"] for d in prepared_detections] == [person_det_id, person_det_id]
+    assert rows == [
+        {
+            "detector_model": "megadetector-v6",
+            "category": "animal",
+            "species": "Wood Duck",
         },
     ]
 

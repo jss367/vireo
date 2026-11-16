@@ -33,6 +33,13 @@ COSINE = "cosine"
 # this much cosine similarity of its best species label.
 BACKGROUND_MARGIN = 0.15
 
+# A person/vehicle detector region is recognized as an animal when its best
+# species label scores at least ``RECOGNIZED_MIN_MATCH`` and beats its best
+# background prompt by at least ``RECOGNIZED_MIN_GAP``
+# (:func:`is_recognized_animal`).
+RECOGNIZED_MIN_MATCH = 0.46
+RECOGNIZED_MIN_GAP = 0.28
+
 # A detector box at or above this confidence is trusted to hold an animal
 # and is never called background, whatever its prompt gap. Below it, and for
 # the whole-frame row (no localized box), the gap decides.
@@ -85,3 +92,38 @@ def is_background_like(max_match_score, background_score, score_kind=COSINE,
         return False
     gap = background_gap(max_match_score, background_score)
     return gap is not None and gap >= -BACKGROUND_MARGIN
+
+
+def is_recognized_animal(max_match_score, background_score, score_kind=COSINE):
+    """True when a person/vehicle detector region clearly holds a listed animal.
+
+    MegaDetector labels some animals "person" or "vehicle" at high
+    confidence (a Wood Duck drake, a Mandarin Duck, a resting Canada Goose)
+    and repeats the label on a tight crop of the same region, so the detector
+    cannot settle it. The classifier can, under a stricter test than
+    :func:`is_background_like`: a wrong answer here makes a subject out of a
+    car or a tree, while a miss leaves the photo as it was.
+
+    Calibrated 2026-11-15 on 280 such regions from 26 folders (BioCLIP-2.5,
+    1,167-label California list), each viewed and labeled: 144 animals, 100
+    non-animals, 36 too small or blurred to call. The rule keeps 100 of the
+    144 animals and none of the 100 non-animals; every person and car fails
+    on the match score alone (0.33 to 0.44). On a further 245 regions from
+    the same folders it kept 128, and each of those holds an animal. The
+    animals it misses matched a plant prompt closely (flamingos against
+    "tamarisk", munias on a flowering branch) or are not on the list
+    (frogs). The gap alone, down at ``BACKGROUND_MARGIN``, kept 27
+    non-animals: trunks and nest platforms named as the birds that live on
+    them.
+
+    Only cosine scores compare with the background prompts, so any other
+    ``score_kind`` and any missing score answer False.
+    """
+    if score_kind != COSINE:
+        return False
+    gap = background_gap(max_match_score, background_score)
+    return (
+        gap is not None
+        and float(max_match_score) >= RECOGNIZED_MIN_MATCH
+        and -gap >= RECOGNIZED_MIN_GAP
+    )

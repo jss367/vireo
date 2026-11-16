@@ -59,6 +59,7 @@ if TYPE_CHECKING:
     from canonical_schema import CanonicalSchema
     from repositories.audit import AuditRepository
     from repositories.caches import CachesRepository
+    from repositories.candidate_subjects import CandidateSubjectRepository
     from repositories.card_cleanup import CardCleanupRepository
     from repositories.collections import CollectionRepository
     from repositories.companion_pairing import CompanionPairingRepository
@@ -1127,6 +1128,19 @@ class Database:
         from repositories.species_choices import SpeciesChoiceRepository
 
         return SpeciesChoiceRepository(self.conn)
+
+    @property
+    def candidate_subjects(self) -> CandidateSubjectRepository:
+        """Candidate subjects: ``db.candidate_subjects.pending(ids, floor, model, fp)`` and friends.
+
+        Person/vehicle detector regions the classifier was asked about, and
+        which of them were kept as animal subjects. Catalog-wide, so it needs
+        no active workspace; every access builds a fresh repository on this
+        connection.
+        """
+        from repositories.candidate_subjects import CandidateSubjectRepository
+
+        return CandidateSubjectRepository(self.conn)
 
     # -- Reference taxonomy (``taxonomy.py`` loaders own the commits) --
 

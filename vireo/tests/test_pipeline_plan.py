@@ -448,7 +448,12 @@ def test_primary_classify_counts_ignore_secondary_detections(tmp_path):
 def test_primary_classify_counts_ignore_confident_non_animal_boxes(
     tmp_path, monkeypatch,
 ):
-    """Person and vehicle boxes suppress fallback but are not crop targets."""
+    """Person and vehicle boxes suppress fallback but are not crop targets.
+
+    A person-only photo's region is one thing for the classifier to examine
+    (it may be an animal the detector mislabeled), so the plan counts it as
+    pending until that check is recorded, and as done afterwards.
+    """
     db, folder_id = _make_db(tmp_path)
     photo_id = photo_ingest.add_photo(
         db, folder_id=folder_id, filename="hiker.jpg", extension=".jpg",
@@ -486,8 +491,25 @@ def test_primary_classify_counts_ignore_confident_non_animal_boxes(
 
     plan = compute_plan(db, _params(model_ids=["m1"]), str(tmp_path / "test.db"))
     classify = plan["stages"]["Classify"]
+    assert classify["state"] == "will-run"
+    assert classify["detail"]["eligible"] == 1
+    assert classify["detail"]["pending"] == 1
+    from labels_fingerprint import TOL_SENTINEL
+
+    (region,) = db.candidate_subjects.pending([photo_id], 0.2, "BioCLIP-2", TOL_SENTINEL)
+    with db.transaction():
+        db.candidate_subjects.record(
+            region["id"],
+            {"detector_category": "person", "classifier_model": "BioCLIP-2",
+             "labels_fingerprint": TOL_SENTINEL, "max_match_score": 0.36,
+             "background_score": 0.30},
+            promoted=False,
+        )
+
+    plan = compute_plan(db, _params(model_ids=["m1"]), str(tmp_path / "test.db"))
+    classify = plan["stages"]["Classify"]
     assert classify["state"] == "done-prior"
-    assert classify["detail"]["eligible"] == 0
+    assert classify["detail"]["eligible"] == 1
     assert classify["detail"]["pending"] == 0
 
 
