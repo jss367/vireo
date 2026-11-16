@@ -113,13 +113,30 @@ class CompanionPairingRepository:
         )
 
     def detections_of(self, photo_id: int) -> list[sqlite3.Row]:
-        """The photo's detections, with every column a re-key needs."""
+        """The photo's detections, with every column a re-key needs.
+
+        ``id_category`` is the category the content-addressed id derives
+        from: the detector's own label, which differs from ``category`` for
+        a person/vehicle region kept as an animal subject
+        (``subject_candidates``).
+        """
         return self.conn.execute(
-            "SELECT id, detector_model, box_x, box_y, box_w, box_h,"
-            " detector_confidence, category"
-            " FROM detections WHERE photo_id = ?",
+            "SELECT d.id, d.detector_model, d.box_x, d.box_y, d.box_w, d.box_h,"
+            " d.detector_confidence, d.category,"
+            " COALESCE(sc.detector_category, d.category) AS id_category"
+            " FROM detections d"
+            " LEFT JOIN subject_candidates sc"
+            "   ON sc.detection_id = d.id AND sc.promoted = 1"
+            " WHERE d.photo_id = ?",
             (photo_id,),
         ).fetchall()
+
+    def redirect_subject_candidate(self, old_id: int, new_id: int) -> None:
+        """Move the examined-region record of ``old_id`` onto ``new_id``."""
+        self.conn.execute(
+            "UPDATE OR IGNORE subject_candidates SET detection_id = ? WHERE detection_id = ?",
+            (new_id, old_id),
+        )
 
     def move_detection(self, detection_id: int, photo_id: int) -> None:
         self.conn.execute(

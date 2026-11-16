@@ -75,3 +75,6 @@ Detection ids are content-addressed on the detector's category. When the
 detector writes the same region again the row keeps its `animal` category, and
 when a new detector runtime reproduces the region exactly it stays a subject.
 A region the new runtime moves is examined again.
+The portable computation cache exports the detector's own category for a kept
+region, and RAW+JPEG pairing carries the record to the primary photo, so both
+keep mapping the region to the same detection.

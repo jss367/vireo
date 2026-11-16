@@ -402,3 +402,62 @@ def test_the_classify_job_moves_a_kept_photo_out_of_its_skip_set(db, tmp_path, m
     assert [d["id"] for d in run.detection_map[duck["id"]]] == [duck_region]
     assert run.detection_map[duck["id"]][0]["category"] == "animal"
     assert car["id"] not in run.detection_map
+
+
+# -- the portable computation cache -------------------------------------
+
+
+def test_the_portable_cache_reads_a_kept_regions_detector_category(db):
+    """An artifact's box maps back to its detection id through the category,
+    and the id was derived from the detector's own label."""
+    from detection_id import detection_id
+
+    duck = _photo(db, "duck.jpg")
+    (region,) = _detect(db, duck, [_region("person", 0.44)])
+    _keep(db, duck, region)
+
+    (box,) = db.computation_cache.run_detection_boxes(duck["id"], "megadetector-v6", "rt1")
+    identity = db.computation_cache.promotable_detection(region)
+
+    assert box["category"] == "person"
+    assert identity["category"] == "person"
+    assert detection_id(
+        duck["id"], "megadetector-v6",
+        (box["box_x"], box["box_y"], box["box_w"], box["box_h"]), box["category"],
+    ) == region
+
+
+# -- RAW+JPEG pairing ----------------------------------------------------
+
+
+def test_pairing_moves_a_kept_region_to_the_primary_and_keeps_it_kept(db):
+    """Pairing re-keys the JPEG's detections onto the RAW. A kept region's
+    new id derives from the detector's own label, so the detector writing
+    the same box on the RAW lands on that row and leaves it a subject."""
+    from detection_id import detection_id
+    from scanner.companions import _pair_raw_jpeg_companions
+
+    jpeg = _photo(db, "IMG_1.jpg")
+    raw_id = photo_ingest.add_photo(
+        db, db.folder_id, "IMG_1.cr3", extension=".cr3", file_size=1, file_mtime=1.0,
+    )
+    db.commit()
+    (region,) = _detect(db, jpeg, [_region("person", 0.44)])
+    _keep(db, jpeg, region)
+
+    _pair_raw_jpeg_companions(db)
+    db.commit()
+
+    box = PERSON_BOX
+    moved = detection_id(
+        raw_id, "megadetector-v6", (box["x"], box["y"], box["w"], box["h"]), "person",
+    )
+    rows = db.conn.execute(
+        "SELECT id, category FROM detections WHERE photo_id = ?", (raw_id,),
+    ).fetchall()
+    assert [(row["id"], row["category"]) for row in rows] == [(moved, "animal")]
+    assert db.candidate_subjects.evidence([moved])[moved]["promoted"] == 1
+
+    raw = {"id": raw_id, "filename": "IMG_1.cr3", "folder_id": db.folder_id}
+    assert _detect(db, raw, [_region("person", 0.44)]) == [moved]
+    assert _category(db, moved) == "animal"
