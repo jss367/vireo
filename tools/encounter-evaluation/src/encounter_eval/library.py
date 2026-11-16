@@ -342,6 +342,7 @@ def open_library(path):
     for table, columns in {
         "detection_subjects": ("detection_id", "crop", "quality_score", "exposure_ev"),
         "photo_subject_choices": ("photo_id", "detection_id"),
+        "workspace_photos": ("workspace_id", "photo_id"),
         "classifier_match_scores": ("rowid", "detection_id", "score_kind", "max_match_score",
                                     "background_score", "run_at"),
         "photo_masks": ("photo_id", "variant", "path", "detector_model",

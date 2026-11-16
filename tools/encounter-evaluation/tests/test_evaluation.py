@@ -599,6 +599,37 @@ def test_reader_includes_photo_grants_without_siblings_or_source_writes(library,
     assert library.read_bytes() == before
 
 
+@pytest.mark.parametrize("has_grants_table", [False, True])
+def test_grant_table_compatibility_preserves_main_catalog(library, has_grants_table):
+    from pipeline import load_photo_features
+
+    with sqlite3.connect(library) as source:
+        source.execute("INSERT INTO workspaces VALUES(2, 'Photo-only workspace')")
+        if has_grants_table:
+            source.executescript("""
+                CREATE TABLE workspace_photos(workspace_id INTEGER, photo_id INTEGER);
+                INSERT INTO workspace_photos VALUES(2, 1);
+            """)
+    before = library.read_bytes()
+    conn = open_library(library)
+    try:
+        assert [tuple(row) for row in conn.execute(
+            "SELECT workspace_id, photo_id FROM workspace_photos"
+        )] == ([(2, 1)] if has_grants_table else [])
+        temporary = conn.execute(
+            "SELECT type FROM sqlite_temp_master WHERE name = 'workspace_photos'"
+        ).fetchone()
+        assert (temporary is None) == has_grants_table
+        assert bool(conn.execute("PRAGMA main.table_info(workspace_photos)").fetchone()) == has_grants_table
+        features = load_photo_features(FeatureReader(conn, 2), photo_ids=[1], effective_config={})
+        assert [photo["id"] for photo in features] == ([1] if has_grants_table else [])
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            conn.execute("UPDATE main.photos SET filename = filename")
+    finally:
+        conn.close()
+    assert library.read_bytes() == before
+
+
 def test_verified_name_refresh_unifies_sources_and_reference_labels(library, tmp_path):
     from taxonomy import refresh_common_name_index
 
