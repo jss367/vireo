@@ -159,6 +159,23 @@ def test_a_scoped_choice_beats_only_the_chosen_photos_in_the_scope(trips):
     assert species["Bald Eagle"]["decision"]["tied_photo_ids"] == [photos["a2"], photos["b1"]]
 
 
+def test_a_scoped_choice_refuses_a_photo_outside_the_scope(trips):
+    app, db, folders, photos = trips
+    client = app.test_client()
+    _choose(client, species="Bald Eagle", photo_id=photos["a1"], folder_id=folders["first"])
+
+    response = _choose(
+        client, species="Bald Eagle", photo_id=photos["b1"], folder_id=folders["first"],
+    )
+
+    assert response.status_code == 400
+    assert "not in the supplied scope" in response.get_json()["error"]
+    # The first trip's choice stands; b1 recorded no out-of-scope comparison.
+    comparisons = [(c.better, c.worse) for c in db.species_choices.comparisons()]
+    assert comparisons == []
+    assert db.get_species_representatives(eligible_only=True)["Bald Eagle"] == photos["a1"]
+
+
 def test_a_newer_choice_supersedes_the_comparison_it_contradicts(trips):
     app, db, _folders, photos = trips
     client = app.test_client()

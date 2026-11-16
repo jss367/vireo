@@ -61,6 +61,25 @@ class PhotoScope:
         }
 
 
+def _resolve_scope(
+    db: Database, scope: PhotoScope | None,
+) -> set[int] | None:
+    """The photo ids ``scope`` matches, or ``None`` when it is unlimited.
+
+    Resolved even when no scoped photo is chosen yet, so a scope that names
+    no real set of photos is refused instead of being recorded as "over
+    nothing". Raises ``ValueError`` on a malformed rule tree or an unknown
+    collection.
+    """
+    if scope is None or scope.is_everything:
+        return None
+    return set(db.collections.query_photo_ids(
+        scope.rules if scope.rules is not None else [],
+        collection_id=scope.collection_id,
+        folder_id=scope.folder_id,
+    ))
+
+
 def contenders_in_scope(
     db: Database, species: str, scope: PhotoScope | None = None,
 ) -> list[int]:
@@ -74,15 +93,9 @@ def contenders_in_scope(
     chosen = db.species_curation.get_representative_lists(
         eligible_only=True, species=canonical, ranked=False,
     ).get(canonical, [])
-    if scope is None or scope.is_everything:
+    in_scope = _resolve_scope(db, scope)
+    if in_scope is None:
         return list(chosen)
-    # Resolved even when nothing is chosen yet, so a scope that names no real
-    # set of photos is refused instead of being recorded as "over nothing".
-    in_scope = set(db.collections.query_photo_ids(
-        scope.rules if scope.rules is not None else [],
-        collection_id=scope.collection_id,
-        folder_id=scope.folder_id,
-    ))
     return [photo_id for photo_id in chosen if photo_id in in_scope]
 
 
@@ -97,7 +110,9 @@ def choose_best(
     unused. Without ``over``, the photo is chosen over every other chosen
     photo of the species within ``scope`` (all of them when the scope is
     empty), which is what "set as representative" means on a page showing
-    that scope.
+    that scope. A scoped choice whose ``photo_id`` is not itself in the
+    scope is refused, so the stored comparisons never claim that an
+    out-of-scope photo beat the scope's contenders.
 
     The caller validates the photo and owns the transaction. Returns the
     choice with ``over`` (the photos it now beats by this choice) and
@@ -105,7 +120,18 @@ def choose_best(
     """
     canonical = db.keyword_taxa.resolve_species_display(species)
     if over is None:
-        losers = contenders_in_scope(db, canonical, scope)
+        in_scope = _resolve_scope(db, scope)
+        if in_scope is not None and photo_id not in in_scope:
+            raise ValueError(
+                f"photo {photo_id} is not in the supplied scope",
+            )
+        chosen = db.species_curation.get_representative_lists(
+            eligible_only=True, species=canonical, ranked=False,
+        ).get(canonical, [])
+        losers = (
+            list(chosen) if in_scope is None
+            else [pid for pid in chosen if pid in in_scope]
+        )
     else:
         losers = list(dict.fromkeys(int(pid) for pid in over))
     losers = [pid for pid in losers if pid != photo_id]
