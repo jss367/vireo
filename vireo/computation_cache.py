@@ -570,8 +570,8 @@ def _subject_for_detection(key, detection, db=None, detection_id=None):
         }
         subject["category"] = detection["category"] or "animal"
     if db is not None and detection_id is not None:
-        check = db.candidate_subjects.promoted_check(detection_id)
-        if check is not None:
+        check = db.candidate_subjects.evidence([detection_id]).get(detection_id)
+        if check is not None and check["promoted"]:
             subject["candidate_subject"] = {
                 k: check[k] for k in ("detector_category", "classifier_model",
                     "labels_fingerprint", "top_species", "max_match_score",

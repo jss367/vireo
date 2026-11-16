@@ -31,16 +31,13 @@ import sqlite3
 from collections.abc import Mapping
 from typing import Any
 
+from repositories.candidate_subjects import DETECTOR_CATEGORY_SQL
+
 # A person/vehicle region kept as an animal subject reads ``animal`` in
 # ``detections``, while its content-addressed id, and so its portable
-# identity, derive from the detector's own category
-# (``subject_candidates.detector_category``). Artifacts carry the detector's
-# category, so an exported box maps back to the same detection id.
-_KEPT_CANDIDATE_JOIN = (
-    "LEFT JOIN subject_candidates sc "
-    "ON sc.detection_id = d.id AND sc.promoted = 1"
-)
-_DETECTOR_CATEGORY_SQL = "COALESCE(sc.detector_category, d.category)"
+# identity, derive from the detector's own category. Artifacts carry the
+# detector's category (``DETECTOR_CATEGORY_SQL``), so an exported box maps
+# back to the same detection id.
 
 
 class ComputationCacheRepository:
@@ -74,11 +71,10 @@ class ComputationCacheRepository:
         return self.conn.execute(
             f"""SELECT d.photo_id, d.detector_model, d.runtime_fingerprint,
                   d.box_x, d.box_y, d.box_w, d.box_h,
-                  {_DETECTOR_CATEGORY_SQL} AS category,
+                  {DETECTOR_CATEGORY_SQL} AS category,
                   p.file_hash, p.companion_path, p.working_copy_path
            FROM detections d
            JOIN photos p ON p.id = d.photo_id
-           {_KEPT_CANDIDATE_JOIN}
            WHERE d.id = ?""",
             (detection_id,),
         ).fetchone()
@@ -124,9 +120,8 @@ class ComputationCacheRepository:
         return self.conn.execute(
             f"""SELECT d.box_x, d.box_y, d.box_w, d.box_h,
                       d.detector_confidence,
-                      {_DETECTOR_CATEGORY_SQL} AS category
+                      {DETECTOR_CATEGORY_SQL} AS category
                FROM detections d
-               {_KEPT_CANDIDATE_JOIN}
                WHERE d.photo_id = ? AND d.detector_model = ?
                  AND d.runtime_fingerprint = ?
                ORDER BY d.detector_confidence DESC, d.id ASC""",
@@ -152,10 +147,9 @@ class ComputationCacheRepository:
         """The detections one ``portable_classifier_runs`` row classified, best first."""
         return self.conn.execute(
             f"""SELECT d.id, d.box_x, d.box_y, d.box_w, d.box_h,
-                  d.detector_model, {_DETECTOR_CATEGORY_SQL} AS category
+                  d.detector_model, {DETECTOR_CATEGORY_SQL} AS category
            FROM detections d
            JOIN classifier_runs cr ON cr.detection_id = d.id
-           {_KEPT_CANDIDATE_JOIN}
            WHERE d.photo_id = ? AND d.detector_model = ?
              AND d.runtime_fingerprint = ?
              AND cr.classifier_model = ?

@@ -67,6 +67,9 @@ class _ClassifyJobRun:
         # The detect phase's photo-id sets for the classify phase. Held here,
         # never on ``job``: the runner publishes the job dict to /api/jobs.
         self.detect_handoff = DetectionHandoff()
+        # Person/vehicle regions ``keep_recognized_candidates`` could not
+        # read or score; reported with the classify pass's failures.
+        self.unread_candidates = 0
 
     def _progress(self, current: int, total: int, current_file: str, phase: str, **extra: object) -> None:
         self.runner.push_event(
@@ -1025,7 +1028,7 @@ class _ClassifyJobRun:
         min_conf = config_value(
             self.db.get_effective_config(cfg.load()), "detector_confidence",
         )
-        examine_candidates(
+        outcome = examine_candidates(
             self.db,
             [p for p in self.photos if p["id"] in skipped],
             ClassifierModel(
@@ -1039,6 +1042,9 @@ class _ClassifyJobRun:
             should_stop=lambda: self.runner.is_cancelled(self.job["id"]),
             recheck=bool(self.params.reclassify),
         )
+        # A region that could not be read or scored was not examined; the
+        # classify pass skips its photo, so count it here or nothing would.
+        self.unread_candidates = outcome.unread
         for photo_id, regions in kept_regions(self.db, skipped).items():
             confident = [r for r in regions if (r["confidence"] or 0) >= min_conf]
             if confident:
@@ -1101,9 +1107,9 @@ class _ClassifyJobRun:
                 non_animal_ids=self.detect_handoff.non_animal_ids,
             )
         self.raw_results = raw_results
-        self.failed = failed
+        self.failed = failed + self.unread_candidates
         self.skipped_existing = skipped_existing
-        parts = _classify_summary_parts(raw_results, skipped_existing, failed)
+        parts = _classify_summary_parts(raw_results, skipped_existing, self.failed)
         cancelled_mid_classify = (
             runner.is_cancelled(job["id"])
             or bool(job.get("_classify_cancelled"))

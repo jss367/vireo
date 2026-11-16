@@ -123,11 +123,7 @@ def examine_candidates(
             stats["max_match_score"], stats["background_score"], stats["score_kind"],
         )
         with db.transaction():
-            # Inference runs without holding the catalog write lock. A
-            # concurrent re-detect may have retired this exact region.
-            if db.conn.execute("SELECT 1 FROM detections WHERE id = ?", (row["id"],)).fetchone() is None:
-                continue
-            db.candidate_subjects.record(
+            recorded = db.candidate_subjects.record(
                 row["id"],
                 {
                     **stats,
@@ -137,6 +133,9 @@ def examine_candidates(
                 },
                 promoted=kept,
             )
+        if not recorded:
+            # A concurrent re-detect retired the region during inference.
+            continue
         outcome.examined += 1
         if kept:
             outcome.kept_photo_ids.add(row["photo_id"])

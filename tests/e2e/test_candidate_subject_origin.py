@@ -1,6 +1,4 @@
-"""Independent synthetic browser validation of candidate subject provenance."""
-from pathlib import Path
-
+"""The lightbox says when a subject is a region the detector labeled person or vehicle."""
 from PIL import Image
 from playwright.sync_api import expect
 from services import detection_store, photo_ingest, workspace_folders
@@ -37,11 +35,9 @@ def test_candidate_origin_in_subjects_and_inspector(live_server, page, tmp_path)
         "Detector region labeled person, kept because the classifier recognized an animal",
     )
     expect(page.locator("#lightboxSubjectDetails")).to_contain_text("Wood Duck")
-    page.screenshot(path=str(Path(__file__).resolve().parents[3] / "pr2511-subjects.png"))
     page.locator("#lightboxImg").click(button="right")
     page.locator(".vireo-ctx-item", has_text="Inspect Pipeline").click()
     expect(page.locator("#pipelineOverlay")).to_be_visible()
     expect(page.locator("#pipelineContent")).to_contain_text(
         "megadetector-v6 78% as person, kept: the classifier recognized an animal",
     )
-    page.screenshot(path=str(Path(__file__).resolve().parents[3] / "pr2511-inspector.png"))

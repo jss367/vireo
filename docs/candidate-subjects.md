@@ -8,7 +8,7 @@ confidence. Running the detector again on a tight crop of the region repeats
 the label, so the detector cannot correct itself.
 
 A photo whose only retained region is a person or vehicle is left out of
-species classification on purpose, so a hiker is never named as a bird. Before
+species classification on purpose, so that a hiker is not named as a bird. Before
 this check existed that also left the mislabeled animals with no subject: no
 species, no mask, no quality analysis, and a burst of one bird split across
 many encounters.
@@ -31,8 +31,10 @@ This is stricter than the background gate used for ordinary animal regions,
 because a wrong answer here makes a subject out of a car or a tree, while a
 miss leaves the photo as it was. The thresholds were set on 280 hand-labeled
 regions and checked on 245 more; `background_match.is_recognized_animal`
-records the numbers. People and cars score 0.33 to 0.44 against every species
-and are never kept.
+records the numbers. In those samples every person and car scored 0.33 to
+0.44 against every species, below the first threshold, and none was kept. The
+rule is a measurement, not a guarantee: a region it keeps by mistake can be
+rejected with **Not an animal**.
 
 The check needs cosine scores and background prompts, so it runs with BioCLIP
 models and not with a timm classifier.
@@ -62,19 +64,34 @@ For those, draw the subject box in the Subjects panel
 
 A kept region can be rejected like any other with **Not an animal**.
 
+## More than one model
+
+Each embedding model examines a region itself, once per species list, and a
+region is kept as soon as one of them recognizes an animal in it. A model that
+runs later in the same job classifies the kept region like any other animal
+region; a model that already ran in that job classifies it on the next run.
+The Process plan reflects this: a region no embedding model has settled yet
+counts as pending for every selected model, and a kept region that an earlier
+model has not classified shows as an ordinary pending target.
+
 ## Storage
 
-`subject_candidates` holds one row per examined region: the detector's own
-category, the classifier model and label set, the best species and its score,
-the best background prompt and its score, and whether the region was kept. A
-kept region's `detections.category` is `animal`. The answer is stored per
-(model, label set), so changing the species list examines the remaining
-regions again; a region already kept stays kept.
+`subject_candidates` holds one row per check, keyed by region, classifier
+model and label set: the detector's own category, the best species and its
+score, the best background prompt and its score, and whether that check kept
+the region. A region is kept when any of its checks kept it, and its
+`detections.category` is then `animal`. Changing the species list or the model
+examines the remaining regions again without discarding earlier answers; a
+region already kept stays kept.
 
 Detection ids are content-addressed on the detector's category. When the
 detector writes the same region again the row keeps its `animal` category, and
-when a new detector runtime reproduces the region exactly it stays a subject.
-A region the new runtime moves is examined again.
+when a new detector runtime reproduces a region exactly its checks are
+restored, so a kept region stays a subject and a rejected one is not read
+again. A region the new runtime moves is examined again.
+
 The portable computation cache exports the detector's own category for a kept
-region, and RAW+JPEG pairing carries the record to the primary photo, so both
-keep mapping the region to the same detection.
+region, so the box still maps to the same detection, and a kept region's
+classification carries the check that kept it; importing that classification
+makes the region a subject in the receiving catalog. RAW+JPEG pairing carries
+a region's checks to the primary photo.

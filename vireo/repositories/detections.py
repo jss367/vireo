@@ -226,7 +226,7 @@ class DetectionsRepository:
                 (photo_id, detector_model),
             )
         }
-        kept = CandidateSubjectRepository(self.conn).kept_rows_for_photo(
+        kept = CandidateSubjectRepository(self.conn).checks_for_photo(
             photo_id, detector_model,
         )
         self.conn.execute(

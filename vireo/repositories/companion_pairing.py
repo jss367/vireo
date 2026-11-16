@@ -29,6 +29,10 @@ import sqlite3
 from contextlib import contextmanager
 
 from canonical_schema import EXIF_SUMMARY_COLUMNS
+from repositories.candidate_subjects import (
+    DETECTOR_CATEGORY_SQL,
+    CandidateSubjectRepository,
+)
 from repositories.identity_alternatives import (
     merge_candidate_names,
     remap_identity_keyword_intents,
@@ -122,40 +126,19 @@ class CompanionPairingRepository:
         """
         return self.conn.execute(
             "SELECT d.id, d.detector_model, d.box_x, d.box_y, d.box_w, d.box_h,"
-            " d.detector_confidence, d.category,"
-            " COALESCE(sc.detector_category, d.category) AS id_category"
-            " FROM detections d"
-            " LEFT JOIN subject_candidates sc"
-            "   ON sc.detection_id = d.id AND sc.promoted = 1"
-            " WHERE d.photo_id = ?",
+            f" d.detector_confidence, d.category, {DETECTOR_CATEGORY_SQL} AS id_category"
+            " FROM detections d WHERE d.photo_id = ?",
             (photo_id,),
         ).fetchall()
 
     def redirect_subject_candidate(self, old_id: int, new_id: int) -> None:
-        """Move the examined-region record of ``old_id`` onto ``new_id``."""
-        self.conn.execute(
-            """UPDATE subject_candidates SET promoted = MAX(promoted, COALESCE(
-                 (SELECT promoted FROM subject_candidates WHERE detection_id = ?), 0))
-               WHERE detection_id = ?""",
-            (old_id, new_id),
-        )
-        from repositories.candidate_subjects import CandidateSubjectRepository
+        """Carry the examined-region checks of ``old_id`` onto ``new_id``.
 
-        checks = self.conn.execute(
-            "SELECT * FROM subject_candidate_checks WHERE detection_id = ?", (old_id,),
-        ).fetchall()
-        for check in checks:
-            CandidateSubjectRepository(self.conn).record(new_id, dict(check), promoted=bool(check["promoted"]))
-        self.conn.execute(
-            "UPDATE OR IGNORE subject_candidates SET detection_id = ? WHERE detection_id = ?",
-            (new_id, old_id),
-        )
-        self.conn.execute(
-            """UPDATE detections SET category = 'animal' WHERE id = ?
-               AND EXISTS (SELECT 1 FROM subject_candidates
-                           WHERE detection_id = ? AND promoted = 1)""",
-            (new_id, new_id),
-        )
+        The primary may already hold the same region, with checks of its
+        own or none; either way a region the companion kept stays kept
+        (``CandidateSubjectRepository.move``).
+        """
+        CandidateSubjectRepository(self.conn).move(old_id, new_id)
 
     def move_detection(self, detection_id: int, photo_id: int) -> None:
         self.conn.execute(

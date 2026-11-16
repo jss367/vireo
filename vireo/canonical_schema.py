@@ -20,7 +20,7 @@ This module must not import ``db``: ``schema.py`` imports ``db``, and
 # database it creates from nothing. It is the newest registry migration in
 # ``schema.MIGRATIONS``: ``create_tables`` builds every migration's end state,
 # so a fresh database has nothing to migrate.
-SCHEMA_VERSION = 38
+SCHEMA_VERSION = 37
 
 # Promoted EXIF summary columns in the ``photos`` table — the canonical
 # list the scanner uses to clear absent fields on rescan (a metadata write
@@ -297,42 +297,26 @@ def create_species_choices(conn):
 def create_subject_candidates(conn):
     """Person/vehicle detector regions the classifier was asked about.
 
-    One row per examined region (``candidate_subjects``): the detector's own
-    category, the classifier evidence, and whether the region was kept as an
-    animal subject. A kept region's ``detections.category`` reads ``animal``;
-    this row is the record that the detector said otherwise.
+    One row per check (``candidate_subjects``): a region under one
+    classifier model and label set, with the detector's own category, the
+    classifier evidence, and whether that check kept the region as an animal
+    subject. A region is kept when any of its checks kept it; its
+    ``detections.category`` then reads ``animal``, and these rows are the
+    record that the detector said otherwise.
     """
     conn.execute("""CREATE TABLE IF NOT EXISTS subject_candidates (
-        detection_id INTEGER PRIMARY KEY REFERENCES detections(id) ON DELETE CASCADE,
-        detector_category TEXT NOT NULL,
+        detection_id INTEGER NOT NULL REFERENCES detections(id) ON DELETE CASCADE,
         classifier_model TEXT NOT NULL,
         labels_fingerprint TEXT NOT NULL,
+        detector_category TEXT NOT NULL,
         top_species TEXT,
         max_match_score REAL,
         background_score REAL,
         background_prompt TEXT,
         promoted INTEGER NOT NULL DEFAULT 0,
-        checked_at TEXT NOT NULL DEFAULT (datetime('now'))
-    )""")
-
-
-def create_subject_candidate_checks(conn):
-    """Keep each classifier/label completion separately from region promotion."""
-    conn.execute("""CREATE TABLE IF NOT EXISTS subject_candidate_checks (
-        detection_id INTEGER NOT NULL REFERENCES detections(id) ON DELETE CASCADE,
-        classifier_model TEXT NOT NULL,
-        labels_fingerprint TEXT NOT NULL,
-        detector_category TEXT NOT NULL,
-        top_species TEXT, max_match_score REAL, background_score REAL,
-        background_prompt TEXT, promoted INTEGER NOT NULL DEFAULT 0,
         checked_at TEXT NOT NULL DEFAULT (datetime('now')),
         PRIMARY KEY (detection_id, classifier_model, labels_fingerprint)
     )""")
-    conn.execute("""INSERT OR IGNORE INTO subject_candidate_checks
-        SELECT detection_id, classifier_model, labels_fingerprint,
-               detector_category, top_species, max_match_score,
-               background_score, background_prompt, promoted, checked_at
-          FROM subject_candidates""")
 
 
 def create_auxiliary_schema_objects(conn):
@@ -346,7 +330,6 @@ def create_auxiliary_schema_objects(conn):
     create_photo_versions(conn)
     create_species_choices(conn)
     create_subject_candidates(conn)
-    create_subject_candidate_checks(conn)
 
 
 class CanonicalSchema:

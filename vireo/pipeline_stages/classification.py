@@ -15,7 +15,7 @@ import sqlite3
 import time
 from dataclasses import dataclass, field
 from datetime import datetime as dt
-from typing import TYPE_CHECKING, Any, TypedDict
+from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 import numpy as np
 from config import config_value
@@ -759,6 +759,10 @@ class _ClassifyPass:
         detect stage's in-memory boxes are brought in line so this pass
         classifies it like any other. A contextual-weak photo already has a
         weak animal box to classify and is left to that path.
+
+        Crops are read through ``_read_image``, so a dropped source pauses,
+        retries and is reported exactly as it is for any other crop, and an
+        unreadable photo counts as failed instead of passing unexamined.
         """
         from classify_job.candidate_subjects import (
             examine_candidates,
@@ -774,8 +778,9 @@ class _ClassifyPass:
                 model_name=spec.model_name, labels_fingerprint=spec.fp,
             ),
             min_conf=self.detector_confidence,
-            prepare_crop=lambda photo, region: self.classify_job._prepare_image(
-                photo, self.folders, region,
+            # ``self.photos`` holds catalog rows, which is what the pass hands back.
+            prepare_crop=lambda photo, region: self._read_image(
+                spec, cast("sqlite3.Row", photo), region,
             )[0],
             should_stop=self._should_stop,
             recheck=not self._uses_cache(),

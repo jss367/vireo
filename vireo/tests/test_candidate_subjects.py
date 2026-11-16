@@ -461,3 +461,254 @@ def test_pairing_moves_a_kept_region_to_the_primary_and_keeps_it_kept(db):
     raw = {"id": raw_id, "filename": "IMG_1.cr3", "folder_id": db.folder_id}
     assert _detect(db, raw, [_region("person", 0.44)]) == [moved]
     assert _category(db, moved) == "animal"
+
+
+# -- one check per (region, model, label set) ----------------------------
+
+
+def _reject(db, region, model="BioCLIP", fp="fp1", category="vehicle"):
+    with db.transaction():
+        assert db.candidate_subjects.record(
+            region,
+            {"detector_category": category, "classifier_model": model,
+             "labels_fingerprint": fp, "max_match_score": 0.3,
+             "background_score": 0.2},
+            promoted=False,
+        )
+
+
+def test_alternating_models_and_label_sets_each_keep_their_own_check(db):
+    """Model A's answer survives model B's, so a multi-model run or a user
+    switching label sets does not read the region again every time."""
+    car = _photo(db, "car.jpg")
+    (region,) = _detect(db, car, [_region("vehicle", 0.8)])
+
+    _reject(db, region)
+    _reject(db, region, model="OtherClassifier")
+    _reject(db, region, fp="fp2")
+
+    for model, fp in (("BioCLIP", "fp1"), ("OtherClassifier", "fp1"), ("BioCLIP", "fp2")):
+        assert db.candidate_subjects.pending([car["id"]], FLOOR, model, fp) == []
+    assert [r["id"] for r in db.candidate_subjects.pending(
+        [car["id"]], FLOOR, "OtherClassifier", "fp2",
+    )] == [region]
+
+
+def test_evidence_reports_the_check_that_kept_the_region(db):
+    duck = _photo(db, "duck.jpg")
+    (region,) = _detect(db, duck, [_region("person", 0.44)])
+    _keep(db, duck, region)
+    _reject(db, region, model="OtherClassifier", category="person")
+
+    check = db.candidate_subjects.evidence([region])[region]
+
+    assert check["promoted"] == 1
+    assert check["classifier_model"] == "BioCLIP"
+    assert check["detector_category"] == "person"
+
+
+def test_a_rejected_check_survives_a_new_detector_runtime_that_reproduces_the_region(db):
+    car = _photo(db, "car.jpg")
+    (region,) = _detect(db, car, [_region("vehicle", 0.8)])
+    _reject(db, region)
+
+    assert _detect(db, car, [_region("vehicle", 0.8)], runtime="rt2") == [region]
+
+    assert db.candidate_subjects.pending([car["id"]], FLOOR, "BioCLIP", "fp1") == []
+    assert _category(db, region) == "vehicle"
+
+
+def test_a_region_retired_during_inference_is_not_recorded(db):
+    car = _photo(db, "car.jpg")
+    (region,) = _detect(db, car, [_region("vehicle", 0.8)])
+
+    def prepare(photo, detection):
+        with db.transaction():
+            db.detections.clear(photo["id"], detector_model="megadetector-v6")
+        return _crop(photo["id"])
+
+    outcome = examine_candidates(
+        db, [car], _model(_clf({car["id"]: (0.55, 0.20)})), min_conf=FLOOR,
+        prepare_crop=prepare,
+    )
+
+    assert outcome.examined == 0
+    assert outcome.kept_photo_ids == set()
+    assert db.candidate_subjects.evidence([region]) == {}
+
+
+def test_stop_while_waiting_for_an_inference_slot_ends_the_pass_quietly(db, monkeypatch):
+    import classify_job.candidate_subjects as candidates
+    from resource_ledger import ResourceWaitCancelled
+
+    car = _photo(db, "car.jpg")
+    (region,) = _detect(db, car, [_region("vehicle", 0.8)])
+
+    def stopped(*args, **kwargs):
+        raise ResourceWaitCancelled("stop")
+
+    monkeypatch.setattr(candidates, "_classify_batch_images", stopped)
+    crop = _crop(car["id"])
+
+    outcome = examine_candidates(
+        db, [car], _model(_clf({})), min_conf=FLOOR,
+        prepare_crop=lambda photo, region: crop,
+    )
+
+    assert (outcome.examined, outcome.unread) == (0, 0)
+    crop.close.assert_called_once()
+    assert [r["id"] for r in db.candidate_subjects.pending(
+        [car["id"]], FLOOR, "BioCLIP", "fp1",
+    )] == [region]
+
+
+# -- a kept region the reviewer rejects ----------------------------------
+
+
+def test_a_kept_region_the_reviewer_rejects_is_no_longer_a_classify_target(db, tmp_path, monkeypatch):
+    """The photo also has a retained vehicle region, so it is in the skip
+    set; the rejected region must not pull it back out."""
+    import classify_job.classify_pass as classify_pass
+
+    duck = _photo(db, "duck.jpg")
+    kept, _other = _detect(db, duck, [
+        _region("person", 0.44),
+        _region("vehicle", 0.30, {"x": 0.7, "y": 0.7, "w": 0.2, "h": 0.2}),
+    ])
+    _keep(db, duck, kept)
+    db.detections.set_subject_verdict(kept, "not_animal")
+    db.commit()
+    monkeypatch.setattr(
+        classify_pass, "_prepare_image",
+        lambda photo, folders, detection, vireo_dir=None: (_crop("other"), "", ""),
+    )
+    run = _job_run(db, [duck], {duck["id"]}, _clf({"other": (0.37, 0.26)}), tmp_path)
+
+    run.keep_recognized_candidates()
+
+    assert kept_regions(db, [duck["id"]]) == {}
+    assert run.detect_handoff.non_animal_ids == {duck["id"]}
+    assert run.detection_map == {}
+
+
+def test_the_classify_job_counts_a_region_it_could_not_read(db, tmp_path, monkeypatch):
+    import classify_job.classify_pass as classify_pass
+
+    duck = _photo(db, "duck.jpg")
+    _detect(db, duck, [_region("person", 0.44)])
+    monkeypatch.setattr(
+        classify_pass, "_prepare_image",
+        lambda photo, folders, detection, vireo_dir=None: (None, "", ""),
+    )
+    run = _job_run(db, [duck], {duck["id"]}, _clf({}), tmp_path)
+
+    run.keep_recognized_candidates()
+
+    assert run.unread_candidates == 1
+    assert run.detect_handoff.non_animal_ids == {duck["id"]}
+
+
+# -- pairing onto a primary that already holds the region -----------------
+
+
+@pytest.mark.parametrize("primary_checked", [False, True])
+def test_pairing_onto_a_primary_that_holds_the_same_region_keeps_it_kept(db, primary_checked):
+    """The RAW already has the same person/vehicle box, with a rejecting
+    check of its own or none. The JPEG's kept region must still end up a
+    subject on the RAW."""
+    from scanner.companions import _pair_raw_jpeg_companions
+
+    jpeg = _photo(db, "IMG_1.jpg")
+    raw_id = photo_ingest.add_photo(
+        db, db.folder_id, "IMG_1.cr3", extension=".cr3", file_size=1, file_mtime=1.0,
+    )
+    db.commit()
+    (primary,) = _detect(db, {"id": raw_id}, [_region("vehicle", 0.8)])
+    if primary_checked:
+        _reject(db, primary)
+    (companion,) = _detect(db, jpeg, [_region("vehicle", 0.8)])
+    _keep(db, jpeg, companion)
+
+    _pair_raw_jpeg_companions(db)
+    db.commit()
+
+    assert _category(db, primary) == "animal"
+    assert db.candidate_subjects.evidence([primary])[primary]["promoted"] == 1
+    assert db.candidate_subjects.evidence([companion]) == {}
+
+
+# -- the portable computation cache carries a kept region -----------------
+
+
+def test_a_kept_regions_portable_subject_carries_the_check_that_kept_it(db):
+    from computation_cache import _subject_for_detection
+
+    duck = _photo(db, "duck.jpg")
+    (region,) = _detect(db, duck, [_region("person", 0.44)])
+    _keep(db, duck, region)
+
+    subject = _subject_for_detection(
+        "d0", db.computation_cache.promotable_detection(region), db, region,
+    )
+
+    assert subject["category"] == "person"
+    assert subject["candidate_subject"]["detector_category"] == "person"
+    assert subject["candidate_subject"]["max_match_score"] == pytest.approx(0.55)
+
+
+def test_a_rejected_regions_portable_subject_carries_no_check(db):
+    from computation_cache import _subject_for_detection
+
+    car = _photo(db, "car.jpg")
+    (region,) = _detect(db, car, [_region("vehicle", 0.8)])
+    _reject(db, region)
+
+    subject = _subject_for_detection(
+        "d0", db.computation_cache.promotable_detection(region), db, region,
+    )
+
+    assert "candidate_subject" not in subject
+
+
+def test_importing_a_kept_regions_classification_keeps_it_in_a_fresh_catalog(tmp_path):
+    """The artifact names the detector's category so the box maps to its
+    detection id; the check it carries makes the region a subject again."""
+    from computation_cache import classification_input, materialize_artifacts
+    from test_computation_cache import (
+        CLASSIFIER_RUNTIME,
+        PHOTO_HASH,
+        RUNTIME,
+        _database_with_photo,
+        classification_artifact,
+        detection_artifact,
+    )
+
+    destination, _, photo = _database_with_photo(tmp_path / "import.db", "cached.jpg")
+    detection = detection_artifact()
+    detection["subjects"][0]["category"] = "person"
+    classification = classification_artifact(match={
+        "max_match_score": 0.55, "background_score": 0.19,
+        "background_prompt": "water", "score_kind": "cosine",
+        "top_species": "Robin",
+    })
+    classification["subjects"][0]["category"] = "person"
+    classification["subjects"][0]["candidate_subject"] = {
+        "detector_category": "person", "classifier_model": "BioCLIP",
+        "labels_fingerprint": "fp1", "max_match_score": 0.55,
+        "background_score": 0.19, "top_species": "Robin",
+    }
+    classification["input"], classification["input_fingerprint"] = classification_input(
+        PHOTO_HASH, RUNTIME, classification["subjects"],
+    )
+
+    result = materialize_artifacts(
+        destination, [detection, classification], known_runtimes={RUNTIME},
+        known_classifier_runtimes={CLASSIFIER_RUNTIME},
+    )
+
+    assert result["classifier_runs_applied"] == 1
+    row = destination.conn.execute(
+        "SELECT id, category FROM detections WHERE photo_id = ?", (photo,),
+    ).fetchone()
+    assert row["category"] == "animal"
+    assert destination.candidate_subjects.evidence([row["id"]])[row["id"]]["promoted"] == 1
