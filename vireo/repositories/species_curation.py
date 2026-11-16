@@ -505,7 +505,6 @@ class SpeciesCurationRepository:
                       p.subject_clip_high, p.subject_clip_low,
                       p.subject_y_median, p.noise_estimate,
                       p.eye_tenengrad,
-                      p.dino_subject_embedding, p.dino_global_embedding,
                       kw.keyword_names
                FROM scope
                JOIN photos p ON p.id = scope.id

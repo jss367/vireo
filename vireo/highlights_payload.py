@@ -10,6 +10,7 @@ photo-detail highlight badges in ``web.photos``.
 
 import math
 import re
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
 
 from db import text_search_match
@@ -24,15 +25,30 @@ from species_memberships import (
 from species_preference import Preferences, choice_note
 
 
-def _rank01(value, values):
-    valid = [v for v in values if v is not None]
-    if value is None:
-        return 0.0
-    if len(valid) <= 1:
-        return 0.5 if valid else 0.0
-    below = sum(1 for v in valid if v < value)
-    equal = sum(1 for v in valid if v == value)
-    return (below + 0.5 * equal) / len(valid)
+class _Ranks:
+    """One metric's values across a bucket, for ranking each photo in it.
+
+    Sorted once, so ranking every photo of a bucket costs ``n log n``; a
+    species bucket at workspace scope can hold thousands of photos.
+    """
+
+    def __init__(self, values):
+        self._sorted = sorted(v for v in values if v is not None)
+
+    def __bool__(self):
+        return bool(self._sorted)
+
+    def rank01(self, value):
+        """The share of the bucket's values below ``value`` (ties count
+        half): 0.0 for a missing value, 0.5 when the bucket has one."""
+        valid = self._sorted
+        if value is None:
+            return 0.0
+        if len(valid) <= 1:
+            return 0.5 if valid else 0.0
+        below = bisect_left(valid, value)
+        equal = bisect_right(valid, value) - below
+        return (below + 0.5 * equal) / len(valid)
 
 
 def _highlight_exposure_score(photo):
@@ -60,11 +76,11 @@ def _highlight_score_bucket(photos, picked_first=False):
     such as Life List can calculate the ranked baseline before applying their
     own Representative / Pick curation tiers.
     """
-    subject_values = [p.get("subject_tenengrad") for p in photos]
-    eye_values = [p.get("eye_tenengrad") for p in photos if p.get("eye_tenengrad") is not None]
-    bg_values = [p.get("bg_tenengrad") for p in photos if p.get("bg_tenengrad") is not None]
+    subject_values = _Ranks(p.get("subject_tenengrad") for p in photos)
+    eye_values = _Ranks(p.get("eye_tenengrad") for p in photos)
+    bg_values = _Ranks(p.get("bg_tenengrad") for p in photos)
     bg_sep_values = [p.get("bg_separation") for p in photos if p.get("bg_separation") is not None]
-    noise_values = [p.get("noise_estimate") for p in photos if p.get("noise_estimate") is not None]
+    noise_values = _Ranks(p.get("noise_estimate") for p in photos)
     max_bg_sep = max(bg_sep_values) if bg_sep_values else None
 
     for p in photos:
@@ -80,9 +96,9 @@ def _highlight_score_bucket(photos, picked_first=False):
         composition = 0.55 * crop_score + 0.45 * bg_sep
         area = _highlight_area_score(p.get("subject_size"))
         if p.get("noise_estimate") is not None and noise_values:
-            noise = 1.0 - _rank01(p.get("noise_estimate"), noise_values)
+            noise = 1.0 - noise_values.rank01(p.get("noise_estimate"))
         elif p.get("bg_tenengrad") is not None and bg_values:
-            noise = 1.0 - _rank01(p.get("bg_tenengrad"), bg_values)
+            noise = 1.0 - bg_values.rank01(p.get("bg_tenengrad"))
         else:
             noise = 0.5
 
@@ -143,11 +159,11 @@ def _highlight_score_bucket(photos, picked_first=False):
 def _highlight_focus(p, eye_values, subject_values):
     """``(focus score, reason label)`` for one photo in a bucket."""
     if p.get("eye_tenengrad") is not None and eye_values:
-        focus = _rank01(p.get("eye_tenengrad"), eye_values)
+        focus = eye_values.rank01(p.get("eye_tenengrad"))
         focus_label = "eye focus"
     else:
         subject_t = p.get("subject_tenengrad")
-        rank = _rank01(subject_t, subject_values)
+        rank = subject_values.rank01(subject_t)
         if subject_t is not None and p.get("bg_tenengrad") is not None:
             ratio = math.log((subject_t + 1e-8) / (p.get("bg_tenengrad") + 1e-8))
             bg_term = 1.0 / (1.0 + math.exp(-ratio))
@@ -530,11 +546,15 @@ def collect_highlight_buckets(
     confidence_threshold,
     confirmation_filter="all",
     canonicalize_species=None,
+    seen_species=None,
 ):
     """Group candidate rows into species buckets plus the unidentified photos.
 
     A photo with two species appears in both buckets, as a separate entry
     each, so each bucket's scores, ranks and confirm state are its own.
+    ``seen_species``, when given a set, receives every species any candidate
+    is a member of, whatever ``confirmation_filter`` then keeps, so a caller
+    can say how many species its filter left out.
     """
     confirmation_filter = normalize_highlight_confirmation_filter(
         confirmation_filter
@@ -549,6 +569,8 @@ def collect_highlight_buckets(
         )
         confirmed = [m.species for m in memberships if m.accepted_name]
         all_buckets = [m.species for m in memberships]
+        if seen_species is not None:
+            seen_species.update(all_buckets)
         if not memberships:
             if confirmation_filter != "confirmed":
                 subjects = candidate_subjects(r)

@@ -86,10 +86,17 @@ def _species_entry(bucket, per_species):
     }
 
 
-def _matching_buckets(buckets, species, canonicalize):
+def _species_key(species, canonicalize):
+    """The match key of the species asked for, None when every species is."""
     if species is None:
+        return None
+    return keyword_match_key(canonicalize(species) or species)
+
+
+def _matching_buckets(buckets, species, canonicalize):
+    wanted = _species_key(species, canonicalize)
+    if wanted is None:
         return buckets
-    wanted = keyword_match_key(canonicalize(species) or species)
     return [b for b in buckets if keyword_match_key(b["species"]) == wanted]
 
 
@@ -111,22 +118,21 @@ def build_species_best_payload(db, query=None):
         scope.folder_id, min_quality=0.0,
         rules=scope.rules, collection_id=scope.collection_id,
     )
+    seen_species = set()
     buckets, _unidentified = collect_highlight_buckets(
         candidates, query.confidence_threshold,
         "all" if query.include_unconfirmed else "confirmed",
-        canonicalize_species=canonicalize,
+        canonicalize_species=canonicalize, seen_species=seen_species,
     )
     buckets = _matching_buckets(buckets, query.species, canonicalize)
-    unconfirmed_omitted = 0
-    if not query.include_unconfirmed:
-        # Counted against the same candidates with predictions let in, so the
-        # payload can say how many species the confirmed-only list leaves out.
-        every, _unidentified = collect_highlight_buckets(
-            candidates, query.confidence_threshold, "all",
-            canonicalize_species=canonicalize,
-        )
-        every = _matching_buckets(every, query.species, canonicalize)
-        unconfirmed_omitted = len(every) - len(buckets)
+    # Species some candidate belongs to but the list does not show: the ones
+    # held only by an unconfirmed prediction, when those are left out.
+    wanted = _species_key(query.species, canonicalize)
+    listed = {keyword_match_key(b["species"]) for b in buckets}
+    unconfirmed_omitted = len({
+        key for key in map(keyword_match_key, seen_species)
+        if key not in listed and wanted in (None, key)
+    })
     apply_ordered_highlights(db, buckets)
     apply_highlight_preferences(db, buckets)
     entries = sorted(
