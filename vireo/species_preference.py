@@ -53,15 +53,27 @@ class Ranking:
         return len(self.leaders) > 1
 
 
-def _reaches(beats: dict[int, set[int]], start: int, target: int) -> bool:
-    """Whether ``start`` beats ``target`` directly or through other photos."""
+def _reaches(
+    beats: dict[int, set[int]], start: int, target: int,
+    through: frozenset[int] | None = None,
+) -> bool:
+    """Whether ``start`` beats ``target`` directly or through other photos.
+
+    When ``through`` is given, a transitive step must land on a photo in it;
+    a direct edge to ``target`` is always allowed. Callers that rank one
+    species pass the species' chosen photos there, so a comparison through
+    a photo no longer chosen for the species is inert (``repositories.
+    species_choices`` module docstring). ``None`` keeps every photo
+    reachable, which is what ``split_contradictions`` needs: a cycle across
+    species stays a cycle.
+    """
     seen = {start}
     stack = [start]
     while stack:
         for worse in beats.get(stack.pop(), ()):
             if worse == target:
                 return True
-            if worse not in seen:
+            if worse not in seen and (through is None or worse in through):
                 seen.add(worse)
                 stack.append(worse)
     return False
@@ -100,21 +112,32 @@ class Preferences:
         for comparison in kept:
             self._beats.setdefault(comparison.better, set()).add(comparison.worse)
 
-    def rank(self, contenders: Sequence[int]) -> Ranking:
+    def rank(
+        self, contenders: Sequence[int],
+        chosen_for_species: Iterable[int] | None = None,
+    ) -> Ranking:
         """Rank ``contenders``, given in tie-break order.
 
         A comparison counts through photos outside the set: with A over X and
-        X over B, A beats B wherever both appear, whether or not X does.
-        Photos that are not contenders never lead, whatever comparisons name
-        them.
+        X over B, A beats B wherever both appear, whether or not X does — as
+        long as X is still chosen for the species being ranked. Callers that
+        know the species pass its chosen photos as ``chosen_for_species``,
+        so a stored comparison through a photo no longer chosen for it (a
+        relabel, a cleared representative) stays inert until it is chosen
+        again. ``None`` lets any stored edge carry the chain. Photos that
+        are not contenders never lead, whatever comparisons name them.
         """
         ordered = list(dict.fromkeys(contenders))
         if len(ordered) < 2 or not self._beats:
             return Ranking(tuple(ordered), tuple(ordered))
+        through = (
+            None if chosen_for_species is None
+            else frozenset(chosen_for_species)
+        )
         beaten_by = {
             photo: {
                 other for other in ordered
-                if other != photo and _reaches(self._beats, other, photo)
+                if other != photo and _reaches(self._beats, other, photo, through)
             }
             for photo in ordered
         }
@@ -133,9 +156,10 @@ class Preferences:
 
 def rank_contenders(
     contenders: Sequence[int], comparisons: Iterable[Comparison],
+    chosen_for_species: Iterable[int] | None = None,
 ) -> Ranking:
     """Rank ``contenders`` (in tie-break order) by ``comparisons``."""
-    return Preferences(comparisons).rank(contenders)
+    return Preferences(comparisons).rank(contenders, chosen_for_species)
 
 
 def choice_note(

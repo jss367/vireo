@@ -349,13 +349,15 @@ def apply_highlight_preferences(db, buckets):
         # Ranked within the bucket's own photos, so a folder or filtered view
         # leads with the best chosen photo it can show; the species-level
         # state below is ranked over every chosen photo in the workspace.
-        ranking = choices.rank([pid for pid in chosen_ids if pid in visible_ids])
+        ranking = choices.rank(
+            [pid for pid in chosen_ids if pid in visible_ids], chosen_ids,
+        )
         representative_ids = list(ranking.order)
         representative_set = set(representative_ids)
         representative_order = {
             photo_id: idx for idx, photo_id in enumerate(representative_ids)
         }
-        workspace_order = choices.rank(chosen_ids).order
+        workspace_order = choices.rank(chosen_ids, chosen_ids).order
         preferred_id = workspace_order[0] if workspace_order else None
         applied = False
         for photo in bucket.get("photos") or []:
@@ -1147,6 +1149,7 @@ def _rank_listed_representatives(preferences, representative_ids, photos):
     listed_ids = {photo["id"] for photo in photos}
     ranking = preferences.rank(
         [pid for pid in representative_ids if pid in listed_ids],
+        representative_ids,
     )
     return ranking, [
         *ranking.order,

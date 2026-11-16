@@ -46,6 +46,17 @@ def test_a_comparison_counts_through_a_photo_outside_the_set():
     assert ranking.leaders == (1,)
 
 
+def test_a_chain_through_a_photo_not_chosen_for_the_species_is_inert():
+    # 1 beat 5, 5 beat 2, but the ranking is asked under a species 5 is no
+    # longer chosen for (a relabel), so the chain breaks.
+    comparisons = [_c(1, 1, 5), _c(2, 5, 2)]
+
+    ranking = rank_contenders([2, 1], comparisons, chosen_for_species=[1, 2])
+
+    assert ranking.leaders == (2, 1)
+    assert ranking.tied
+
+
 def test_two_winners_of_separate_sets_stay_tied():
     # 1 beat 2 on one trip, 3 beat 4 on another; nobody compared 1 with 3.
     comparisons = [_c(1, 1, 2), _c(2, 3, 4)]

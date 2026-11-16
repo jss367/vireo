@@ -1197,7 +1197,7 @@ class SpeciesCurationRepository:
             return
         preferences = Preferences(SpeciesChoiceRepository(self.conn).comparisons())
         for name, ids in lists.items():
-            lists[name] = list(preferences.rank(ids).order)
+            lists[name] = list(preferences.rank(ids, ids).order)
 
     def set_global_representative(self, species, photo_id):
         order = self.next_representative_order()
