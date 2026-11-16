@@ -41,6 +41,14 @@ export function removeRejectedPhotoFromModel(photoId) {
       if (typeof section.loaded_count === 'number') {
         section.loaded_count = Math.max(0, section.loaded_count - 1);
       }
+      // A tie decision names the row's chosen contenders; pruning one of them
+      // leaves "N representatives here" false until the next reload, so clear
+      // it and let bucketDecision skip the line in the meantime.
+      var decision = /** @type {HighlightsBucket} */ (section).best_decision;
+      if (decision && Array.isArray(decision.tied_photo_ids)
+          && decision.tied_photo_ids.indexOf(photoId) >= 0) {
+        /** @type {HighlightsBucket} */ (section).best_decision = null;
+      }
       changed = true;
     }
   }
