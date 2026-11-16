@@ -7,6 +7,7 @@ and with one folder selected it claims only that folder.
 """
 import re
 
+import pytest
 from playwright.sync_api import expect
 from services.species_choices import choose_best
 
@@ -110,3 +111,89 @@ def test_setting_a_representative_settles_a_tie_within_the_folder(live_server, p
     assert int(first.get_attribute("data-photo-id")) == hawks[0]
     comparisons = [(c.better, c.worse) for c in db.species_choices.comparisons()]
     assert comparisons == [(hawks[0], hawks[1])]
+
+
+def test_decision_is_below_title_and_metadata(live_server, page):
+    _seed_hawks(live_server["db"], live_server["data"])
+    page.set_viewport_size({"width": 1440, "height": 900})
+    _goto_highlights(page, live_server["url"])
+    row = _hawk_row(page)
+    expect(row.locator(".bucket-decision")).to_be_visible()
+    for width in (1440, 768):
+        page.set_viewport_size({"width": width, "height": 900})
+        decision = row.locator(".bucket-decision").bounding_box()
+        for selector in (".bucket-title", ".bucket-meta"):
+            preceding = row.locator(selector).bounding_box()
+            assert decision["y"] >= preceding["y"] + preceding["height"]
+
+
+def test_shared_unscoped_representative_button_is_hidden(live_server, page):
+    hawks = _seed_hawks(live_server["db"], live_server["data"])
+    _goto_highlights(page, live_server["url"])
+    _hawk_row(page).locator(f'.highlights-card[data-photo-id="{hawks[0]}"]').click()
+    expect(page.locator('[data-lb-action="set-representative"]')).to_be_visible()
+    # Wait for the async photo detail, which creates the shared panel later.
+    page.wait_for_function(
+        "document.querySelector('#lifeListLightboxPanel .lifelist-lb-row') !== null",
+    )
+    expect(page.locator("#lifeListLightboxPanel")).to_be_hidden()
+
+
+def test_rejecting_nonleading_tied_representative_refreshes_decision(live_server, page):
+    db = live_server["db"]
+    hawks = _seed_hawks(db, live_server["data"])
+    with db.transaction():
+        choose_best(db, "Red-tailed Hawk", hawks[0], over=[])
+        choose_best(db, "Red-tailed Hawk", hawks[1], over=[])
+    _goto_highlights(page, live_server["url"])
+    page.select_option("#highlightSelectionFilter", "all")
+    page.select_option("#representativeFilter", "all")
+    row = _hawk_row(page)
+    expect(row.locator(".bucket-decision")).to_contain_text("newest of 2")
+    row.locator(f'.highlights-card[data-photo-id="{hawks[0]}"]').click()
+    page.wait_for_function(
+        "pid => vireoLightboxSession.requestedPhotoId() === pid", arg=hawks[0],
+    )
+    page.keyboard.press("x")
+    page.keyboard.press("Escape")
+    expect(row.locator(f'.highlights-card[data-photo-id="{hawks[0]}"]')).to_have_count(0)
+    expect(row.locator(".bucket-decision.tie")).to_have_count(0)
+    assert int(row.locator(".highlights-card").first.get_attribute("data-photo-id")) == hawks[1]
+
+
+@pytest.mark.parametrize("opening", ["right-click", "keyboard"])
+def test_folder_highlights_menu_omits_unscoped_representative(live_server, page, opening):
+    db = live_server["db"]
+    hawks = _seed_hawks(db, live_server["data"])
+    park_id = db.conn.execute(
+        "SELECT folder_id FROM photos WHERE id = ?", (hawks[0],)
+    ).fetchone()["folder_id"]
+    page.route(
+        "**/photos/*/full**",
+        lambda route: route.fulfill(
+            body='<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200"/>',
+            content_type="image/svg+xml",
+        ),
+    )
+    _goto_highlights(page, live_server["url"])
+    page.select_option("#folderSelect", str(park_id))
+    _hawk_row(page).locator(f'.highlights-card[data-photo-id="{hawks[0]}"]').click()
+    page.wait_for_function(
+        """pid => {
+            const photo = window._lbPhotoDataByPhoto?.[String(pid)];
+            return photo?.life_list?.length > 0;
+        }""", arg=hawks[0],
+    )
+    image = page.locator("#lightboxImg")
+    expect(image).to_be_visible()
+    if opening == "right-click":
+        image.click(button="right")
+    else:
+        image.focus()
+        page.keyboard.press("Shift+F10")
+    menu = page.locator(".vireo-ctx-menu")
+    expect(menu).to_be_visible()
+    expect(menu.locator(".vireo-ctx-item", has_text="Set Representative")).to_have_count(0)
+    expect(menu.locator(".vireo-ctx-item", has_text="Close Lightbox")).to_be_visible()
+    page.keyboard.press("Escape")
+    expect(page.locator('[data-lb-action="set-representative"]')).to_be_visible()
