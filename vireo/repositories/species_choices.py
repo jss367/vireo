@@ -100,6 +100,24 @@ class SpeciesChoiceRepository:
         )
         return cur.rowcount
 
+    def rename(self, old_species: str, new_species: str) -> int:
+        """Carry a keyword rename through stored choices.
+
+        A choice stores the species name that was current when the choice
+        was made. When the keyword is renamed, the stored name must follow,
+        so ``species_preference.choice_note`` keeps finding the note for
+        that species without having to fall back to another species' note
+        (two species can share a chosen photo). The rename is catalog-wide,
+        matching the choice's own scope.
+        """
+        if not old_species or not new_species or old_species == new_species:
+            return 0
+        cur = self.conn.execute(
+            "UPDATE species_choices SET species = ? WHERE species = ?",
+            (new_species, old_species),
+        )
+        return cur.rowcount
+
     def clear_for_representatives_of(self, species: str) -> int:
         """Forget the choices behind ``species``' representatives.
 

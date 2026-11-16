@@ -342,22 +342,31 @@ def apply_highlight_preferences(db, buckets):
     any_chosen = any(preferences.get(bucket["species"]) for bucket in buckets)
     choices = Preferences(db.species_choices.comparisons() if any_chosen else ())
     notes = db.species_choices.notes() if any_chosen else {}
+    # A representative visible only in another workspace is still chosen for
+    # the species, so comparisons chained through it settle a scoped pair.
+    # ``chosen_for_species`` must therefore include the catalog-wide eligible
+    # set, not just what this workspace can see.
+    globally_chosen = (
+        db.species_curation.get_globally_eligible_representatives()
+        if any_chosen else {}
+    )
     for bucket in buckets:
         species = bucket["species"]
         chosen_ids = preferences.get(species) or []
+        global_chosen = globally_chosen.get(species) or chosen_ids
         visible_ids = {photo.get("id") for photo in bucket.get("photos") or []}
         # Ranked within the bucket's own photos, so a folder or filtered view
         # leads with the best chosen photo it can show; the species-level
         # state below is ranked over every chosen photo in the workspace.
         ranking = choices.rank(
-            [pid for pid in chosen_ids if pid in visible_ids], chosen_ids,
+            [pid for pid in chosen_ids if pid in visible_ids], global_chosen,
         )
         representative_ids = list(ranking.order)
         representative_set = set(representative_ids)
         representative_order = {
             photo_id: idx for idx, photo_id in enumerate(representative_ids)
         }
-        workspace_order = choices.rank(chosen_ids, chosen_ids).order
+        workspace_order = choices.rank(chosen_ids, global_chosen).order
         preferred_id = workspace_order[0] if workspace_order else None
         applied = False
         for photo in bucket.get("photos") or []:
@@ -1141,18 +1150,20 @@ def _compact_life_list_photo(photo):
 _LIFE_LIST_DECISION_KINDS = {"pick": "pick", "highlight": "highlight"}
 
 
-def _rank_listed_representatives(preferences, representative_ids, photos):
+def _rank_listed_representatives(
+    preferences, representative_ids, photos, chosen_for_species=None,
+):
     """``(ranking, ids)``: the chosen photos on the list ranked by the
     comparisons, then every chosen id with those first. A chosen photo the
     list cannot show (rejected, or no longer this species) keeps its
-    selection order after them and never leads one it can, and never carries
-    a transitive comparison that would influence the rank of one that can:
-    the saved representative rows kept for undo include photos no longer
-    tagged with the species, so only the ones the list can show count as
-    chosen for the species being ranked."""
+    selection order after them and never leads one it can; ``chosen_for_species``
+    carries the catalog-wide eligible set so a chain through a representative
+    visible only in another workspace still settles a scoped pair, while a
+    stale row kept for undo (no longer tagged with the species) stays inert."""
     listed_ids = {photo["id"] for photo in photos}
     live_ids = [pid for pid in representative_ids if pid in listed_ids]
-    ranking = preferences.rank(live_ids, live_ids)
+    through = chosen_for_species if chosen_for_species is not None else live_ids
+    ranking = preferences.rank(live_ids, through)
     return ranking, [
         *ranking.order,
         *(pid for pid in representative_ids if pid not in listed_ids),
@@ -1165,14 +1176,16 @@ def _life_list_species_entry(
 ):
     """Rank one species' photos and build its Life List entry.
 
-    ``choices`` is ``(preferences, notes)``: the recorded comparisons and
-    each chosen photo's choices.
+    ``choices`` is ``(preferences, notes, globally_chosen)``: the recorded
+    comparisons, each chosen photo's choices, and the catalog-wide eligible
+    representatives per species used as the ranking's traversal set.
     """
-    preferences, notes = choices
+    preferences, notes, globally_chosen = choices
     timestamps = [p["timestamp"] for p in photos if p.get("timestamp")]
     _highlight_score_bucket(photos)
     ranking, representative_ids = _rank_listed_representatives(
         preferences, representative_ids, photos,
+        chosen_for_species=globally_chosen.get(species),
     )
     representative_order = {
         photo_id: idx for idx, photo_id in enumerate(representative_ids)
@@ -1288,11 +1301,12 @@ def build_life_list_payload(
     representatives, highlights = _life_list_selection_maps(
         db, identities, buckets, scoped=species_filter is not None,
     )
-    choices = (Preferences(), {})
+    choices = (Preferences(), {}, {})
     if representatives:
         choices = (
             Preferences(db.species_choices.comparisons()),
             db.species_choices.notes(),
+            db.species_curation.get_globally_eligible_representatives(),
         )
 
     species_entries = []

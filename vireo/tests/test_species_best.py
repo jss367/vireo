@@ -338,6 +338,75 @@ def test_life_list_reports_an_uncompared_pair_as_a_tie(trips):
     assert entry["best"]["id"] == photos["b1"]
 
 
+def test_rank_traverses_through_representatives_visible_in_other_workspaces(trips):
+    # The first workspace sees ``b1`` and ``b2`` only; a second workspace
+    # sees ``a2``. Comparisons ``b1 > a2`` and ``a2 > b2`` must still settle
+    # ``b1 > b2`` for the first workspace's species-best, since ``a2`` is
+    # chosen for Bald Eagle catalog-wide even when this workspace cannot
+    # see it. Without the globally-eligible traversal set, the chain's hop
+    # through ``a2`` would be inert and the two visible representatives
+    # would be reported as tied.
+    app, db, folders, photos = trips
+    first_ws = db._ws_id()
+    other = db.create_workspace("Other")
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (other, folders["first"]),
+    )
+    db.conn.execute(
+        "DELETE FROM workspace_folders "
+        "WHERE workspace_id = ? AND folder_id = ?",
+        (first_ws, folders["first"]),
+    )
+    db.commit()
+    db.set_active_workspace(other)
+    with db.transaction():
+        choose_best(db, "Bald Eagle", photos["a2"], over=[photos["b2"]])
+    db.set_active_workspace(first_ws)
+    with db.transaction():
+        choose_best(db, "Bald Eagle", photos["b2"])
+        choose_best(db, "Bald Eagle", photos["b1"], over=[photos["a2"]])
+
+    _data, species = _best(app.test_client())
+
+    decision = species["Bald Eagle"]["decision"]
+    assert decision["kind"] == "chosen"
+    assert decision["photo_id"] == photos["b1"]
+
+
+def test_life_list_rank_traverses_through_other_workspace_representatives(trips):
+    # Same chain as above, verified through the Life List entry: the first
+    # workspace only lists the second trip, but ``b1 > a2 > b2`` still
+    # settles ``b1 > b2`` even though ``a2`` is not on this Life List.
+    _app, db, folders, photos = trips
+    first_ws = db._ws_id()
+    other = db.create_workspace("Other")
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (other, folders["first"]),
+    )
+    db.conn.execute(
+        "DELETE FROM workspace_folders "
+        "WHERE workspace_id = ? AND folder_id = ?",
+        (first_ws, folders["first"]),
+    )
+    db.commit()
+    db.set_active_workspace(other)
+    with db.transaction():
+        choose_best(db, "Bald Eagle", photos["a2"], over=[photos["b2"]])
+    db.set_active_workspace(first_ws)
+    with db.transaction():
+        choose_best(db, "Bald Eagle", photos["b2"])
+        choose_best(db, "Bald Eagle", photos["b1"], over=[photos["a2"]])
+
+    entry = next(
+        e for e in build_life_list_payload(db)["species"] if e["species"] == "Bald Eagle"
+    )
+
+    assert entry["best_decision"]["kind"] == "chosen"
+    assert entry["best"]["id"] == photos["b1"]
+
+
 def test_life_list_rank_ignores_representatives_no_longer_tagged(trips):
     # b1 > a2 and a2 > a1, but a2 was relabeled off Bald Eagle. The
     # species_representatives row for a2 is kept for undo, but the Life

@@ -124,7 +124,10 @@ def test_one_preferences_object_ranks_any_number_of_sets():
     assert Preferences().rank([5, 6]).leaders == (5, 6)
 
 
-def test_choice_note_prefers_the_species_then_any_name_then_nothing():
+def test_choice_note_only_returns_a_note_recorded_for_the_species():
+    # A multi-species photo's note belongs to the species the choice was made
+    # for; without a tracked alias, a choice under another name never carries
+    # over to the species being rendered.
     notes = {
         7: [
             {"species": "Verdin", "reason": "first"},
@@ -135,5 +138,5 @@ def test_choice_note_prefers_the_species_then_any_name_then_nothing():
 
     assert choice_note(notes, "Verdin", 7)["reason"] == "first"
     assert choice_note(notes, "Bushtit", 7)["reason"] == "other species"
-    assert choice_note(notes, "New Name", 8)["reason"] == "before the rename"
+    assert choice_note(notes, "New Name", 8) is None
     assert choice_note(notes, "Verdin", 9) is None

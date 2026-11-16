@@ -1138,6 +1138,41 @@ class SpeciesCurationRepository:
         ).fetchall()
         return {r["species"]: r["photo_id"] for r in rows}
 
+    def get_globally_eligible_representatives(self, species=None):
+        """``{species: [photo_id, ...]}`` of catalog-wide eligible representatives.
+
+        Same eligibility as :meth:`get_representative_lists` with
+        ``eligible_only=True`` (photo not rejected, folder ok/partial, still
+        carries the species keyword), but without scoping to the active
+        workspace's visible folders. Callers use it as the traversal set when
+        ranking, so comparisons chained through an intermediate representative
+        visible only in another workspace still settle a scoped pair — the
+        chain's photo is still chosen for the species, just not in sight.
+        """
+        params: list = []
+        species_filter = ""
+        if species is not None:
+            canonical = self._keyword_taxa.resolve_species_display(species)
+            if canonical:
+                species_filter = " AND sr.species = ?"
+                params.append(canonical)
+        rows = self.conn.execute(
+            f"""SELECT sr.species, sr.photo_id
+               FROM species_representatives sr
+               JOIN photos p ON p.id = sr.photo_id
+               JOIN folders f ON f.id = p.folder_id
+                 {_REPRESENTATIVE_ELIGIBILITY_FILTER}
+                 {species_filter}
+               ORDER BY sr.species, sr.selected_order DESC, sr.id DESC""",
+            tuple(params),
+        ).fetchall()
+        result: dict = {}
+        for row in rows:
+            ids = result.setdefault(row["species"], [])
+            if row["photo_id"] not in ids:
+                ids.append(row["photo_id"])
+        return result
+
     def get_representative_lists(self, eligible_only=False, species=None, ranked=True):
         """Return {species: [photo_id, ...]} representative photos.
 

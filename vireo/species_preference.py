@@ -165,14 +165,18 @@ def rank_contenders(
 def choice_note(
     notes: Mapping[int, Sequence[Mapping[str, Any]]], species: str, photo_id: int,
 ) -> Mapping[str, Any] | None:
-    """Who chose ``photo_id`` and why: its newest choice made for ``species``,
-    else its newest choice under any name (a choice made before the species
-    was renamed), else None for a photo chosen before choices were recorded.
+    """Who chose ``photo_id`` for ``species`` and why: its newest choice
+    recorded for that species, else None.
+
+    A photo can be chosen for more than one species, so a choice recorded
+    for another species (with its own source and reason) is never attributed
+    to the one being rendered. A species rename without a tracked alias
+    therefore loses its note on the next render, which is cheaper than
+    showing a note belonging to an unrelated species.
 
     ``notes`` maps a photo to its choices, oldest first.
     """
-    photo_notes = notes.get(photo_id) or ()
-    for note in reversed(photo_notes):
+    for note in reversed(notes.get(photo_id) or ()):
         if note.get("species") == species:
             return note
-    return photo_notes[-1] if photo_notes else None
+    return None
