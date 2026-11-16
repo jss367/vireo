@@ -99,6 +99,11 @@ export function ensureHighlightsLightboxPanel() {
 export function updateHighlightsLightboxControls(photoId) {
   var panel = ensureHighlightsLightboxPanel();
   if (!panel) return;
+  // The shared lifelist panel's "Set Representative" posts without a folder
+  // scope; on Highlights that would quietly override the folder-scoped choice
+  // this page's own panel records, so hide the duplicate here.
+  var sharedLifeList = document.getElementById('lifeListLightboxPanel');
+  if (sharedLifeList) sharedLifeList.style.display = 'none';
   var photo = findHighlightPhoto(photoId);
   if (!photo && !state.lastHighlightReject) {
     panel.style.display = 'none';
