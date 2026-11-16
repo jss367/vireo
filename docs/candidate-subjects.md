@@ -7,11 +7,11 @@ resting Canada Goose and a swimming grebe have all been labeled "person" or
 confidence. Running the detector again on a tight crop of the region repeats
 the label, so the detector cannot correct itself.
 
-A photo whose only retained region is a person or vehicle is left out of
-species classification on purpose, so that a hiker is not named as a bird. Before
-this check existed that also left the mislabeled animals with no subject: no
-species, no mask, no quality analysis, and a burst of one bird split across
-many encounters.
+Before this check existed, Vireo left every photo whose only retained region
+was a person or vehicle out of species classification, to reduce the risk of
+naming a hiker as a bird. That also left the mislabeled animals with no
+subject: no species, no mask, no quality analysis, and a burst of one bird
+split across many encounters.
 
 ## What Vireo does
 
