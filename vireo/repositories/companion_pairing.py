@@ -134,8 +134,27 @@ class CompanionPairingRepository:
     def redirect_subject_candidate(self, old_id: int, new_id: int) -> None:
         """Move the examined-region record of ``old_id`` onto ``new_id``."""
         self.conn.execute(
+            """UPDATE subject_candidates SET promoted = MAX(promoted, COALESCE(
+                 (SELECT promoted FROM subject_candidates WHERE detection_id = ?), 0))
+               WHERE detection_id = ?""",
+            (old_id, new_id),
+        )
+        from repositories.candidate_subjects import CandidateSubjectRepository
+
+        checks = self.conn.execute(
+            "SELECT * FROM subject_candidate_checks WHERE detection_id = ?", (old_id,),
+        ).fetchall()
+        for check in checks:
+            CandidateSubjectRepository(self.conn).record(new_id, dict(check), promoted=bool(check["promoted"]))
+        self.conn.execute(
             "UPDATE OR IGNORE subject_candidates SET detection_id = ? WHERE detection_id = ?",
             (new_id, old_id),
+        )
+        self.conn.execute(
+            """UPDATE detections SET category = 'animal' WHERE id = ?
+               AND EXISTS (SELECT 1 FROM subject_candidates
+                           WHERE detection_id = ? AND promoted = 1)""",
+            (new_id, new_id),
         )
 
     def move_detection(self, detection_id: int, photo_id: int) -> None:

@@ -76,7 +76,7 @@ class CandidateSubjectRepository:
         for chunk in chunked(sorted({int(pid) for pid in photo_ids})):
             placeholders = ",".join("?" * len(chunk))
             examined = "" if recheck else (
-                "AND NOT EXISTS (SELECT 1 FROM subject_candidates sc "
+                "AND NOT EXISTS (SELECT 1 FROM subject_candidate_checks sc "
                 "WHERE sc.detection_id = c.id AND sc.classifier_model = ? "
                 "AND sc.labels_fingerprint = ?)"
             )
@@ -113,6 +113,25 @@ class CandidateSubjectRepository:
         its subject analysis and species decisions are not withdrawn by a
         label change.
         """
+        values = (
+            detection_id, evidence["detector_category"], evidence["classifier_model"],
+            evidence["labels_fingerprint"], evidence.get("top_species"),
+            evidence.get("max_match_score"), evidence.get("background_score"),
+            evidence.get("background_prompt"), 1 if promoted else 0,
+        )
+        self.conn.execute(
+            """INSERT INTO subject_candidate_checks
+                 (detection_id, detector_category, classifier_model, labels_fingerprint,
+                  top_species, max_match_score, background_score, background_prompt, promoted)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(detection_id, classifier_model, labels_fingerprint) DO UPDATE SET
+                 top_species = CASE WHEN subject_candidate_checks.promoted > excluded.promoted THEN subject_candidate_checks.top_species ELSE excluded.top_species END,
+                 max_match_score = CASE WHEN subject_candidate_checks.promoted > excluded.promoted THEN subject_candidate_checks.max_match_score ELSE excluded.max_match_score END,
+                 background_score = CASE WHEN subject_candidate_checks.promoted > excluded.promoted THEN subject_candidate_checks.background_score ELSE excluded.background_score END,
+                 background_prompt = CASE WHEN subject_candidate_checks.promoted > excluded.promoted THEN subject_candidate_checks.background_prompt ELSE excluded.background_prompt END,
+                 promoted = MAX(subject_candidate_checks.promoted, excluded.promoted),
+                 checked_at = datetime('now')""", values,
+        )
         self.conn.execute(
             """INSERT INTO subject_candidates
                  (detection_id, detector_category, classifier_model,
@@ -128,13 +147,7 @@ class CandidateSubjectRepository:
                  background_prompt = excluded.background_prompt,
                  promoted = MAX(subject_candidates.promoted, excluded.promoted),
                  checked_at = datetime('now')""",
-            (
-                detection_id, evidence["detector_category"],
-                evidence["classifier_model"], evidence["labels_fingerprint"],
-                evidence.get("top_species"), evidence.get("max_match_score"),
-                evidence.get("background_score"), evidence.get("background_prompt"),
-                1 if promoted else 0,
-            ),
+            values,
         )
         if promoted:
             self.conn.execute(
@@ -181,17 +194,24 @@ class CandidateSubjectRepository:
                 found[row["detection_id"]] = row
         return found
 
-    def kept_rows_for_photo(self, photo_id: int, detector_model: str) -> list[sqlite3.Row]:
-        """Every kept candidate row of one photo's detector, for a rewrite to restore."""
+    def promoted_check(self, detection_id: int) -> sqlite3.Row | None:
+        """The positive evidence to preserve in a portable classifier subject."""
         return self.conn.execute(
-            """SELECT sc.* FROM subject_candidates sc
+            "SELECT * FROM subject_candidate_checks WHERE detection_id = ? "
+            "AND promoted = 1 ORDER BY checked_at DESC LIMIT 1", (detection_id,),
+        ).fetchone()
+
+    def kept_rows_for_photo(self, photo_id: int, detector_model: str) -> list[sqlite3.Row]:
+        """Every candidate check of one photo's detector, for a rewrite to restore."""
+        return self.conn.execute(
+            """SELECT sc.* FROM subject_candidate_checks sc
                  JOIN detections d ON d.id = sc.detection_id
-                WHERE d.photo_id = ? AND d.detector_model = ? AND sc.promoted = 1""",
+                WHERE d.photo_id = ? AND d.detector_model = ?""",
             (photo_id, detector_model),
         ).fetchall()
 
     def restore(self, rows: Iterable[sqlite3.Row], surviving_ids: Iterable[int]) -> None:
-        """Re-insert kept rows whose detection a rewrite reproduced.
+        """Re-insert all checks whose detection a rewrite reproduced.
 
         Detection ids are content-addressed on (photo, model, box, detector
         category), so a reproduced id is the same region with the same
@@ -201,20 +221,9 @@ class CandidateSubjectRepository:
         for row in rows:
             if row["detection_id"] not in surviving:
                 continue
-            self.conn.execute(
-                """INSERT OR REPLACE INTO subject_candidates
-                     (detection_id, detector_category, classifier_model,
-                      labels_fingerprint, top_species, max_match_score,
-                      background_score, background_prompt, promoted, checked_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                tuple(row[key] for key in (
-                    "detection_id", "detector_category", "classifier_model",
-                    "labels_fingerprint", "top_species", "max_match_score",
-                    "background_score", "background_prompt", "promoted",
-                    "checked_at",
-                )),
-            )
-            self.conn.execute(
-                "UPDATE detections SET category = 'animal' WHERE id = ?",
-                (row["detection_id"],),
-            )
+            self.record(row["detection_id"], dict(row), promoted=bool(row["promoted"]))
+            if row["promoted"]:
+                self.conn.execute(
+                    "UPDATE detections SET category = 'animal' WHERE id = ?",
+                    (row["detection_id"],),
+                )

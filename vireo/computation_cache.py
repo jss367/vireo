@@ -559,7 +559,7 @@ def _promotable_detection_row(db, detection_id, source_is_original):
     return row
 
 
-def _subject_for_detection(key, detection):
+def _subject_for_detection(key, detection, db=None, detection_id=None):
     """A portable subject (box or full image) for one detection row."""
     kind = "full_image" if detection["detector_model"] == "full-image" else "box"
     subject = {"key": key, "kind": kind}
@@ -569,6 +569,14 @@ def _subject_for_detection(key, detection):
             "w": detection["box_w"], "h": detection["box_h"],
         }
         subject["category"] = detection["category"] or "animal"
+    if db is not None and detection_id is not None:
+        check = db.candidate_subjects.promoted_check(detection_id)
+        if check is not None:
+            subject["candidate_subject"] = {
+                k: check[k] for k in ("detector_category", "classifier_model",
+                    "labels_fingerprint", "top_species", "max_match_score",
+                    "background_score", "background_prompt")
+            }
     return subject
 
 
@@ -611,7 +619,7 @@ def promote_and_publish_classifier_run(
     )
     if classifier_runtime is None:
         return None
-    subject = _subject_for_detection("d0", row)
+    subject = _subject_for_detection("d0", row, db, detection_id)
     input_block, input_fp = classification_input(
         row["file_hash"], row["runtime_fingerprint"], [subject],
     )
@@ -882,6 +890,17 @@ def _validate_envelope(artifact):
 def _validate_box_subject(subject):
     """Check a box subject's geometry and optional category."""
     _validate_box(subject.get("box"))
+    check = subject.get("candidate_subject")
+    if check is not None:
+        if not isinstance(check, dict) or check.get("detector_category") not in ("person", "vehicle"):
+            raise CacheFormatError("invalid candidate subject detector category")
+        if check["detector_category"] != subject.get("category"):
+            raise CacheFormatError("candidate subject category differs from detector category")
+        for field in ("classifier_model", "labels_fingerprint"):
+            if not isinstance(check.get(field), str) or not check[field] or len(check[field]) > 256:
+                raise CacheFormatError("invalid candidate subject classifier identity")
+        _validate_subject_match(check)
+
     # Category is optional on classification box subjects
     # (materialize falls back to "animal") but MUST be a bounded
     # string when supplied.  ``compute_detection_id`` feeds it to
@@ -1608,7 +1627,7 @@ def _classification_subjects(db, row):
     classified = db.computation_cache.classified_detections(row)
     subjects = []
     for index, detection in enumerate(classified):
-        subject = _subject_for_detection(f"d{index}", detection)
+        subject = _subject_for_detection(f"d{index}", detection, db, detection["id"])
         predictions = db.computation_cache.run_predictions(
             detection["id"], row["classifier_model"], row["labels_fingerprint"],
         )
@@ -2308,6 +2327,9 @@ class _ArtifactMaterialization:
         )
         if detection_id is None:
             return False
+        check = subject.get("candidate_subject")
+        if check is not None:
+            db.candidate_subjects.record(detection_id, check, promoted=True)
         prior = db.computation_cache.classifier_run_identity(
             detection_id, artifact["classifier_model"],
             labels["short_fingerprint"],

@@ -32,6 +32,7 @@ from classify_job.classify_pass import (
     _match_stats,
 )
 from classify_job.common import log
+from resource_ledger import ResourceWaitCancelled
 
 if TYPE_CHECKING:
     from classify_job.classify_types import DetectionDict, DetectionMap, PhotoRecord
@@ -108,6 +109,8 @@ def examine_candidates(
                 [{"photo": photo, "img": img}], [img], model.clf, model.model_type,
                 propagate_cancel=True,
             )
+        except ResourceWaitCancelled:
+            break
         finally:
             img.close()
         stats = _match_stats(results[0][0], model.model_type) if results[0] else None
@@ -120,6 +123,10 @@ def examine_candidates(
             stats["max_match_score"], stats["background_score"], stats["score_kind"],
         )
         with db.transaction():
+            # Inference runs without holding the catalog write lock. A
+            # concurrent re-detect may have retired this exact region.
+            if db.conn.execute("SELECT 1 FROM detections WHERE id = ?", (row["id"],)).fetchone() is None:
+                continue
             db.candidate_subjects.record(
                 row["id"],
                 {
