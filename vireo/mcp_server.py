@@ -81,6 +81,20 @@ the frame and the specified detection using view_photo(view="subject",
 detection_id=...). Use preview_species_assignment, then apply_species_assignment
 with the unchanged selection, provenance and returned token. Preserve existing
 identifications; model confidence is not a probability of correct identification.
+
+Best photos: best_of_each_species lists one photo per species for a folder, a
+collection, a date range or the whole workspace. Each species has a decision
+saying why its first photo leads: chosen (someone chose it and no other chosen
+photo there beats it), tie (several chosen photos nobody has compared, listed in
+tied_photo_ids; the newest choice is shown meanwhile), highlight or pick (the
+user's ranked highlight or flagged pick), score or unanalyzed (nobody chose;
+Vireo ordered it). To settle a tie or replace a guess, list more of that
+species (species=..., per_species=N), compare the candidates with
+view_photo(view="subject") and view_photo(view="preview"), then call
+choose_best_photo with the photos it beat in over and a reason. A choice
+claims only what it names: the photos in over, or the other chosen photos in
+the scope you pass. Leave a decision whose source is the user's alone unless
+asked to revisit it.
 """
 
 _QUALITY_METRIC_KEYS = ("quality_score", "sharpness", "subject_sharpness", "subject_size")
@@ -428,6 +442,7 @@ def build_server(client: VireoClient):
     _register_photo_tools(server, client)
     _register_species_tools(server, client)
     _register_region_tools(server, client)
+    _register_best_tools(server, client)
     _register_write_tools(server, client)
     return server
 
@@ -757,6 +772,95 @@ def _verdict_result(data):
         "retained_detection_ids": [s["id"] for s in subjects.get("subjects", [])],
         "rejected_detection_ids": [s["id"] for s in subjects.get("rejected", [])],
     }
+
+
+def _date_rules(date_from, date_to):
+    """A universal-filter rule tree for an ISO date range, or None."""
+    if date_from and date_to:
+        return [{"field": "timestamp", "op": "between", "value": [date_from, date_to]}]
+    if date_from:
+        return [{"field": "timestamp", "op": ">=", "value": date_from}]
+    if date_to:
+        return [{"field": "timestamp", "op": "<=", "value": date_to}]
+    return None
+
+
+def _register_best_tools(server, client):
+    """The best photo of each species in a scope, and the choice behind it."""
+
+    @server.tool(annotations=mcp_types.ToolAnnotations(read_only_hint=True))
+    def best_of_each_species(
+        folder_id: int | None = None,
+        collection_id: int | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        species: str | None = None,
+        per_species: int = 1,
+        include_unconfirmed: bool = False,
+    ) -> dict:
+        """The best photos of each species in a folder (a trip), a
+        collection, an ISO date range (``2025-01-01`` to ``2025-12-31`` for a
+        year) or, with no scope, the whole workspace; scopes combine.
+
+        Each species lists ``per_species`` photos, best first, and a
+        ``decision`` for the first one: ``kind`` (``chosen``, ``tie``,
+        ``highlight``, ``pick``, ``score``, ``unanalyzed``), who chose it and
+        why, ``tied_photo_ids`` for a tie and ``contender_ids`` (every chosen
+        photo of the species here, best first). ``meta`` counts the species
+        that need a comparison and the ones Vireo guessed. Species held only
+        by an unconfirmed prediction are left out and counted in
+        ``meta.unconfirmed_species_omitted`` unless ``include_unconfirmed``.
+        """
+        rules = _date_rules(date_from, date_to)
+        return client.get_json("/api/species-best", {
+            "folder_id": folder_id,
+            "collection_id": collection_id,
+            "rules": json.dumps(rules) if rules else None,
+            "species": species,
+            "per_species": per_species,
+            "include_unconfirmed": "1" if include_unconfirmed else None,
+        })
+
+    @server.tool(annotations=mcp_types.ToolAnnotations(read_only_hint=False, destructive_hint=False))
+    def choose_best_photo(
+        species: str,
+        photo_id: int,
+        reason: str,
+        over: list[int] | None = None,
+        folder_id: int | None = None,
+        collection_id: int | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        source: str | None = None,
+    ) -> dict:
+        """Record that ``photo_id`` is the best photo of ``species`` among
+        photos you compared, after viewing them at full detail.
+
+        ``over`` lists the photo ids it beat. Without ``over``, it is chosen
+        over every other chosen photo of the species in the scope given
+        (folder, collection, dates; none means the whole workspace). Send
+        ``over`` or a scope, not both. The photo must already carry the
+        species as a confirmed identification. ``reason`` (required, up to
+        300 characters) says what made it the best and ``source`` (up to 60)
+        who decided; both are shown with the photo wherever it leads.
+        ``superseded`` lists older comparisons this choice reversed.
+        """
+        if not isinstance(reason, str) or not reason.strip():
+            raise VireoError("reason must say what makes this photo the best")
+        body: dict[str, object] = {"species": species, "photo_id": photo_id, "reason": reason}
+        if over is not None:
+            body["over"] = over
+        if folder_id is not None:
+            body["folder_id"] = folder_id
+        if collection_id is not None:
+            body["collection_id"] = collection_id
+        rules = _date_rules(date_from, date_to)
+        if rules:
+            body["rules"] = rules
+        if source:
+            body["source"] = source
+        data = client.post_json("/api/species-best/choose", body)
+        return _pick(data, ("choice_id", "species", "photo_id", "over", "source", "reason", "superseded"))
 
 
 def _register_write_tools(server, client):

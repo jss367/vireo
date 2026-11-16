@@ -21,6 +21,7 @@ from species_memberships import (
     subject_is_background_like,
     subject_is_whole_frame,
 )
+from species_preference import rank_contenders
 
 
 def _rank01(value, values):
@@ -274,15 +275,78 @@ def _bucket_unanalyzed_count(photos):
     return tail
 
 
+def best_decision(top, ranking, note, fallback_kind=None):
+    """Why ``top`` is the photo shown first for its species in this set.
+
+    ``chosen``: it is the one chosen photo here that no other chosen photo
+    beats. ``tie``: several chosen photos here have never been compared
+    (``tied_photo_ids``) and the newest choice is shown meanwhile. Otherwise
+    nobody chose a photo here, and ``fallback_kind`` (or, when None, the
+    Highlights page's own order) names what put it first: ``highlight`` (the
+    workspace's ranked highlights), ``pick`` (a flagged pick, by Vireo's
+    score among picks), ``score`` (Vireo's score) or ``unanalyzed`` (no
+    score yet, so nothing but capture order).
+
+    ``note`` is the photo's newest recorded choice, None when it was chosen
+    before choices were recorded.
+    """
+    if not top:
+        return None
+    decision = {
+        "photo_id": top["id"],
+        "contender_ids": list(ranking.order),
+        "tied_photo_ids": [],
+        "source": None,
+        "reason": None,
+        "chosen_at": None,
+    }
+    if ranking.order and ranking.order[0] == top["id"]:
+        decision["kind"] = "tie" if ranking.tied else "chosen"
+        if ranking.tied:
+            decision["tied_photo_ids"] = list(ranking.leaders)
+        for key in ("source", "reason", "chosen_at"):
+            decision[key] = (note or {}).get(key)
+    elif fallback_kind is not None:
+        decision["kind"] = fallback_kind
+    elif top.get("is_highlighted"):
+        decision["kind"] = "highlight"
+    elif top.get("flag") == "flagged":
+        decision["kind"] = "pick"
+    elif top.get("quality_score") is None:
+        decision["kind"] = "unanalyzed"
+    else:
+        decision["kind"] = "score"
+    return decision
+
+
 def apply_highlight_preferences(db, buckets):
-    preferences = db.species_curation.get_representative_lists(eligible_only=True)
+    preferences = db.species_curation.get_representative_lists(
+        eligible_only=True, ranked=False,
+    )
+    chosen_species = [
+        bucket["species"] for bucket in buckets
+        if preferences.get(bucket["species"])
+    ]
+    comparisons = db.species_choices.comparisons(chosen_species) if chosen_species else {}
+    notes = db.species_choices.notes(chosen_species) if chosen_species else {}
     for bucket in buckets:
-        representative_ids = preferences.get(bucket["species"]) or []
+        species = bucket["species"]
+        species_comparisons = comparisons.get(species, [])
+        chosen_ids = preferences.get(species) or []
+        visible_ids = {photo.get("id") for photo in bucket.get("photos") or []}
+        # Ranked within the bucket's own photos, so a folder or filtered view
+        # leads with the best chosen photo it can show; the species-level
+        # state below is ranked over every chosen photo in the workspace.
+        ranking = rank_contenders(
+            [pid for pid in chosen_ids if pid in visible_ids], species_comparisons,
+        )
+        representative_ids = list(ranking.order)
         representative_set = set(representative_ids)
         representative_order = {
             photo_id: idx for idx, photo_id in enumerate(representative_ids)
         }
-        preferred_id = representative_ids[0] if representative_ids else None
+        workspace_order = rank_contenders(chosen_ids, species_comparisons).order
+        preferred_id = workspace_order[0] if workspace_order else None
         applied = False
         for photo in bucket.get("photos") or []:
             is_rep = photo.get("id") in representative_set
@@ -318,6 +382,9 @@ def apply_highlight_preferences(db, buckets):
         # doesn't leave a stale tail count that anchors the divider above
         # analyzed content.
         bucket["unanalyzed_count"] = _bucket_unanalyzed_count(bucket.get("photos"))
+        bucket["best_decision"] = best_decision(
+            top, ranking, notes.get((species, top.get("id"))),
+        )
 
 
 def apply_ordered_highlights(db, buckets):
@@ -979,6 +1046,25 @@ def _life_list_selection_maps(db, identities, buckets, scoped):
     return representatives, highlights
 
 
+def _life_list_choices(db, identities, representatives):
+    """``{identity: (comparisons, notes_by_photo)}`` for the identities that
+    have chosen photos, gathered across every stored spelling of the name."""
+    choices = {key: ([], {}) for key in representatives}
+    if not choices:
+        return choices
+    names = {
+        name for name, keys in identities.aliases.items()
+        if keys.intersection(choices)
+    }
+    for name, rows in db.species_choices.comparisons(names).items():
+        for key in identities.aliases.get(name, set()).intersection(choices):
+            choices[key][0].extend(rows)
+    for (name, photo_id), note in db.species_choices.notes(names).items():
+        for key in identities.aliases.get(name, set()).intersection(choices):
+            choices[key][1][photo_id] = note
+    return choices
+
+
 def _life_list_buckets(rows, identities, class_by_taxon):
     """Group linked names by taxon and unlinked names by stored spelling."""
     buckets = {}
@@ -1053,13 +1139,31 @@ def _compact_life_list_photo(photo):
     }
 
 
+_LIFE_LIST_DECISION_KINDS = {"pick": "pick", "highlight": "highlight"}
+
+
 def _life_list_species_entry(
     species, entry, photos, representative_ids, highlight_ranks,
-    locations, photo_offset, photo_limit,
+    locations, photo_offset, photo_limit, choices=((), {}),
 ):
-    """Rank one species' photos and build its Life List entry."""
+    """Rank one species' photos and build its Life List entry.
+
+    ``choices`` is the species' ``(comparisons, notes_by_photo)``. The chosen
+    photos on the list are ranked by the comparisons; a chosen photo the list
+    cannot show (rejected, or no longer this species) follows them in
+    selection order and never leads one it can.
+    """
+    comparisons, notes = choices
     timestamps = [p["timestamp"] for p in photos if p.get("timestamp")]
     _highlight_score_bucket(photos)
+    listed_ids = {photo["id"] for photo in photos}
+    ranking = rank_contenders(
+        [pid for pid in representative_ids if pid in listed_ids], comparisons,
+    )
+    representative_ids = [
+        *ranking.order,
+        *(pid for pid in representative_ids if pid not in listed_ids),
+    ]
     representative_order = {
         photo_id: idx for idx, photo_id in enumerate(representative_ids)
     }
@@ -1129,6 +1233,10 @@ def _life_list_species_entry(
         "preferred_photo_id": preferred_id,
         "has_preferred_photo": preferred_applied,
         "best_source": best_source,
+        "best_decision": best_decision(
+            best_photo, ranking, notes.get(best_photo.get("id")),
+            fallback_kind=_LIFE_LIST_DECISION_KINDS.get(best_source),
+        ),
         "best": _compact_life_list_photo(photos[0]) if photos else None,
         "photos": [_compact_life_list_photo(p) for p in top],
         "loaded_count": min(len(photos), photo_offset + len(top)),
@@ -1170,6 +1278,7 @@ def build_life_list_payload(
     representatives, highlights = _life_list_selection_maps(
         db, identities, buckets, scoped=species_filter is not None,
     )
+    choices = _life_list_choices(db, identities, representatives)
 
     species_entries = []
     distinct_photo_ids = set()
@@ -1179,7 +1288,7 @@ def build_life_list_payload(
         species_entries.append(_life_list_species_entry(
             entry["species"], entry, photos, representatives.get(identity, []),
             highlights.get(identity, {}), locations.get(identity, []),
-            photo_offset, photo_limit,
+            photo_offset, photo_limit, choices.get(identity, ((), {})),
         ))
 
     # Life-list numbering: chronological by first photographed date,

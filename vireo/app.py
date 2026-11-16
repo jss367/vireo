@@ -86,6 +86,7 @@ from web.remote_setup import create_remote_setup_blueprint
 from web.responses import json_error, photo_not_found_error
 from web.settings import create_settings_blueprint
 from web.species import create_species_blueprint
+from web.species_best import create_species_best_blueprint
 from web.storage import create_storage_blueprint
 from web.sync import create_sync_blueprint
 from web.system import _application_version, create_system_blueprint
@@ -977,6 +978,7 @@ def _register_core_blueprints(app, w):
     _get_db, db_path, missing_originals = w.get_db, w.db_path, w.missing_originals
     app.register_blueprint(create_pages_blueprint(_get_db))
     app.register_blueprint(create_highlights_blueprint(_get_db, json_error))
+    app.register_blueprint(create_species_best_blueprint(_get_db, json_error))
     app.register_blueprint(
         create_local_workspace_blueprint(
             _get_db,
@@ -1350,6 +1352,10 @@ _V1_ALIASES = [
     # Preview or confirm species keyword changes on an encounter transition.
     ("/api/v1/encounters/species", "encounters.api_encounter_species", ["POST"]),
     ("/api/v1/encounters/species/bulk", "encounters.api_encounter_species_bulk", ["POST"]),
+    # The best photo of each species within a scope, and the choice that
+    # says one photo is the best of a species among others.
+    ("/api/v1/species-best", "species_best.api_species_best", ["GET"]),
+    ("/api/v1/species-best/choose", "species_best.api_species_best_choose", ["POST"]),
 ]
 
 

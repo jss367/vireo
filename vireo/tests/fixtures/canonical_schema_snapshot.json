@@ -1112,6 +1112,42 @@
   ],
   [
    "table",
+   "species_choices",
+   "species_choices",
+   "CREATE TABLE species_choices (\n        id INTEGER PRIMARY KEY AUTOINCREMENT,\n        species TEXT NOT NULL,\n        photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,\n        source TEXT,\n        reason TEXT,\n        created_at TEXT NOT NULL DEFAULT (datetime('now'))\n    )"
+  ],
+  [
+   "table",
+   "species_choice_losers",
+   "species_choice_losers",
+   "CREATE TABLE species_choice_losers (\n        choice_id INTEGER NOT NULL REFERENCES species_choices(id) ON DELETE CASCADE,\n        photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,\n        PRIMARY KEY (choice_id, photo_id)\n    )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_species_choice_losers_1",
+   "species_choice_losers",
+   null
+  ],
+  [
+   "index",
+   "idx_species_choices_species",
+   "species_choices",
+   "CREATE INDEX idx_species_choices_species ON species_choices(species, photo_id)"
+  ],
+  [
+   "index",
+   "idx_species_choices_photo",
+   "species_choices",
+   "CREATE INDEX idx_species_choices_photo ON species_choices(photo_id)"
+  ],
+  [
+   "index",
+   "idx_species_choice_losers_photo",
+   "species_choice_losers",
+   "CREATE INDEX idx_species_choice_losers_photo ON species_choice_losers(photo_id)"
+  ],
+  [
+   "table",
    "photo_exif_search_text",
    "photo_exif_search_text",
    "CREATE TABLE photo_exif_search_text (\n            photo_id   INTEGER PRIMARY KEY\n                REFERENCES photos(id) ON DELETE CASCADE ON UPDATE CASCADE,\n            value_text TEXT NOT NULL\n        )"
