@@ -33,9 +33,11 @@ from keyword_normalization import keyword_match_key, normalize_keyword_display
 from photo_payload import attach_edit_recipes
 from services import keyword_tagging, prediction_decisions, review_decisions, species_choices
 from services.pending_changes import queue_keyword_add, queue_keyword_remove
+from services.species_choices import PhotoScope
 from species_memberships import photo_species_memberships, subject_from_row
 from web.photo_review import flag_provenance
 from web.request_args import request_bool_arg
+from web.species_best import scope_from
 
 if TYPE_CHECKING:
     from sqlite3 import Row
@@ -766,6 +768,21 @@ def create_highlights_blueprint(get_db: GetDb, json_error: JsonError) -> Bluepri
             return _photo_can_be_highlights_preference(db, species, photo_id)
         return _photo_can_be_life_list_preference(db, species, photo_id)
 
+    def _promote_representative_highlight(db: Database, parsed: JsonDict) -> int | None:
+        """Make a new representative the species' first ranked highlight.
+
+        Only when the photo is a Highlights candidate: otherwise the row
+        would be invisible on the Highlights page, where the user could
+        neither see it nor remove it.
+        """
+        if not _photo_can_be_highlights_preference(
+            db, parsed["species"], parsed["photo_id"]
+        ):
+            return None
+        return db.species_curation.promote_highlight(
+            parsed["species"], parsed["photo_id"]
+        )
+
     @blueprint.route("/api/photo-preferences", methods=["POST"])
     def api_photo_preferences_set() -> ResponseReturnValue:
         db = get_db()
@@ -796,25 +813,25 @@ def create_highlights_blueprint(get_db: GetDb, json_error: JsonError) -> Bluepri
         provenance, error = flag_provenance(body)
         if provenance is None:
             return json_error(error or "invalid source or reason")
-        # The choice (chosen over every other chosen photo of the species)
-        # and its promotion land together.
-        with db.transaction():
-            species_choices.choose_best(
-                db, parsed["species"], parsed["photo_id"],
-                source=provenance[0], reason=provenance[1],
-            )
-            # Only promote to `species_highlights` when the photo is actually
-            # a Highlights candidate. Otherwise the row is invisible on the
-            # Highlights page (which filters by quality_score) — the user
-            # could neither see it nor remove it.
-            rank = None
-            if _photo_can_be_highlights_preference(
-                db, parsed["species"], parsed["photo_id"]
-            ):
-                rank = db.species_curation.promote_highlight(
-                    parsed["species"], parsed["photo_id"]
+        # A page showing one folder sends it, so the choice claims only the
+        # chosen photos the user could see; with no scope it is chosen over
+        # every other chosen photo of the species.
+        scope = scope_from(db, body, json_error=json_error)
+        if not isinstance(scope, PhotoScope):
+            return scope
+        # The choice and its promotion land together.
+        try:
+            with db.transaction():
+                choice = species_choices.choose_best(
+                    db, parsed["species"], parsed["photo_id"], scope=scope,
+                    source=provenance[0], reason=provenance[1],
                 )
-        return jsonify({"ok": True, **parsed, "highlight_rank": rank})
+                rank = _promote_representative_highlight(db, parsed)
+        except ValueError as exc:
+            return json_error(str(exc), 400)
+        return jsonify({
+            "ok": True, **parsed, "highlight_rank": rank, "over": choice["over"],
+        })
 
     @blueprint.route("/api/photo-preferences", methods=["DELETE"])
     def api_photo_preferences_clear() -> ResponseReturnValue:
@@ -1154,6 +1171,12 @@ def create_highlights_blueprint(get_db: GetDb, json_error: JsonError) -> Bluepri
             "has_more": offset + len(chunk) < len(photos),
             "best_score": bucket_best_score(photos),
             "best_timestamp": top.get("timestamp") if top else None,
+            # Why the first photo leads, recomputed with the order, so a
+            # refetch after a pick or reject never shows a stale reason.
+            "best_decision": (
+                None if species == "__unidentified__"
+                else bucket.get("best_decision")
+            ),
         })
 
     @blueprint.route("/api/highlights/save", methods=["POST"])

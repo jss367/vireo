@@ -540,3 +540,54 @@ def test_clearing_one_species_keeps_another_species_choices(trips):
 
     assert db.species_choices.comparisons() == []
     assert list(db.species_choices.notes()) == [osprey]
+
+
+def test_set_representative_with_a_folder_claims_only_that_folder(trips):
+    app, _db, folders, photos = trips
+    client = app.test_client()
+    _choose(client, species="Bald Eagle", photo_id=photos["a1"], folder_id=folders["first"])
+    _choose(client, species="Bald Eagle", photo_id=photos["b1"], folder_id=folders["second"])
+
+    response = client.post("/api/photo-preferences", json={
+        "purpose": "species_representative", "species": "Bald Eagle",
+        "photo_id": photos["a2"], "folder_id": folders["first"],
+    })
+
+    assert response.status_code == 200
+    assert response.get_json()["over"] == [photos["a1"]]
+    _data, species = _best(client)
+    assert species["Bald Eagle"]["decision"]["kind"] == "tie"
+    assert species["Bald Eagle"]["decision"]["tied_photo_ids"] == [photos["a2"], photos["b1"]]
+
+
+def test_set_representative_refuses_a_folder_that_is_not_one(trips):
+    app, db, _folders, photos = trips
+
+    response = app.test_client().post("/api/photo-preferences", json={
+        "purpose": "species_representative", "species": "Bald Eagle",
+        "photo_id": photos["a1"], "folder_id": "everywhere",
+    })
+
+    assert response.status_code == 400
+    assert db.species_curation.get_representative_lists() == {}
+
+
+def test_a_bucket_page_carries_the_decision_for_its_order(trips):
+    app, _db, _folders, photos = trips
+    client = app.test_client()
+
+    page = client.get(
+        "/api/highlights/bucket?scope=workspace&species=Bald%20Eagle"
+    ).get_json()
+
+    assert page["best_decision"]["kind"] == "score"
+    assert page["best_decision"]["photo_id"] == page["photos"][0]["id"]
+
+    _choose(client, species="Bald Eagle", photo_id=photos["b1"], reason="in flight")
+    page = client.get(
+        "/api/highlights/bucket?scope=workspace&species=Bald%20Eagle"
+    ).get_json()
+
+    assert page["best_decision"]["kind"] == "chosen"
+    assert page["best_decision"]["reason"] == "in flight"
+    assert page["photos"][0]["id"] == photos["b1"]
