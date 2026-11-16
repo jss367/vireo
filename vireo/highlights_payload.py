@@ -1145,12 +1145,14 @@ def _rank_listed_representatives(preferences, representative_ids, photos):
     """``(ranking, ids)``: the chosen photos on the list ranked by the
     comparisons, then every chosen id with those first. A chosen photo the
     list cannot show (rejected, or no longer this species) keeps its
-    selection order after them and never leads one it can."""
+    selection order after them and never leads one it can, and never carries
+    a transitive comparison that would influence the rank of one that can:
+    the saved representative rows kept for undo include photos no longer
+    tagged with the species, so only the ones the list can show count as
+    chosen for the species being ranked."""
     listed_ids = {photo["id"] for photo in photos}
-    ranking = preferences.rank(
-        [pid for pid in representative_ids if pid in listed_ids],
-        representative_ids,
-    )
+    live_ids = [pid for pid in representative_ids if pid in listed_ids]
+    ranking = preferences.rank(live_ids, live_ids)
     return ranking, [
         *ranking.order,
         *(pid for pid in representative_ids if pid not in listed_ids),

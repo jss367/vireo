@@ -338,6 +338,28 @@ def test_life_list_reports_an_uncompared_pair_as_a_tie(trips):
     assert entry["best"]["id"] == photos["b1"]
 
 
+def test_life_list_rank_ignores_representatives_no_longer_tagged(trips):
+    # b1 > a2 and a2 > a1, but a2 was relabeled off Bald Eagle. The
+    # species_representatives row for a2 is kept for undo, but the Life
+    # List ranks only the chosen photos it can show, and a chain hopping
+    # through a2 must not survive the relabel. b1 and a1 therefore stay
+    # tied until someone compares them directly.
+    _app, db, _folders, photos = trips
+    eagle_kw = db.keywords.add("Bald Eagle", is_species=True)
+    with db.transaction():
+        choose_best(db, "Bald Eagle", photos["a1"])
+        choose_best(db, "Bald Eagle", photos["a2"], over=[photos["a1"]])
+        choose_best(db, "Bald Eagle", photos["b1"], over=[photos["a2"]])
+        keyword_tagging.untag_photo(db, photos["a2"], eagle_kw)
+
+    entry = next(
+        e for e in build_life_list_payload(db)["species"] if e["species"] == "Bald Eagle"
+    )
+
+    assert entry["best_decision"]["kind"] == "tie"
+    assert set(entry["best_decision"]["tied_photo_ids"]) == {photos["a1"], photos["b1"]}
+
+
 def test_clearing_a_species_representatives_forgets_its_choices(trips):
     app, db, _folders, photos = trips
     client = app.test_client()
