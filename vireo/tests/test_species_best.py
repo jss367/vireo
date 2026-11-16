@@ -572,6 +572,27 @@ def test_set_representative_refuses_a_folder_that_is_not_one(trips):
     assert db.species_curation.get_representative_lists() == {}
 
 
+def test_set_representative_refuses_a_winner_outside_the_folder(trips):
+    # /api/v1 is a headless surface, so a caller can send any (photo, folder)
+    # pair. The winner must belong to the scope, or the stored comparisons
+    # would claim an out-of-scope photo beat representatives in a folder
+    # where it was never shown.
+    app, db, folders, photos = trips
+    client = app.test_client()
+    _choose(client, species="Bald Eagle", photo_id=photos["a1"], folder_id=folders["first"])
+
+    response = client.post("/api/photo-preferences", json={
+        "purpose": "species_representative", "species": "Bald Eagle",
+        "photo_id": photos["b1"], "folder_id": folders["first"],
+    })
+
+    assert response.status_code == 400
+    assert "not in the supplied scope" in response.get_json()["error"]
+    comparisons = [(c.better, c.worse) for c in db.species_choices.comparisons()]
+    assert comparisons == []
+    assert db.get_species_representatives(eligible_only=True)["Bald Eagle"] == photos["a1"]
+
+
 def test_a_bucket_page_carries_the_decision_for_its_order(trips):
     app, _db, _folders, photos = trips
     client = app.test_client()

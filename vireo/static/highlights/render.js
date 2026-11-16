@@ -80,7 +80,11 @@ export function bucketDecision(bucket) {
   } else if (kind === 'pick') {
     text = 'First photo: a pick, ranked by Vireo\'s score among picks';
   } else if (kind === 'score') {
-    text = 'First photo: ranked by Vireo\'s score; nobody has chosen one';
+    // "here" because apply_highlight_preferences emits `score` when no
+    // chosen photo is visible in this bucket's scope; the species may still
+    // have a representative outside the selected folder or the current
+    // filters (see `has_species_representative`).
+    text = 'First photo: ranked by Vireo\'s score; nobody has chosen one here';
   } else if (kind === 'unanalyzed') {
     text = 'First photo: not analyzed yet, so in capture order';
   }

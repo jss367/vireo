@@ -50,7 +50,8 @@ def test_row_says_vireo_ordered_it_until_someone_chooses(live_server, page):
 
     line = _hawk_row(page).locator(".bucket-decision")
     expect(line).to_have_text(
-        "First photo: ranked by Vireo's score; nobody has chosen one", timeout=5000,
+        "First photo: ranked by Vireo's score; nobody has chosen one here",
+        timeout=5000,
     )
 
     with db.transaction():
