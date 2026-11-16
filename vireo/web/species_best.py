@@ -17,7 +17,7 @@ Both are aliased under ``/api/v1`` for headless reviewers.
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeGuard
 
 from flask import Blueprint, jsonify, request
 from services.species_choices import MAX_CHOICE_OVER, PhotoScope, choose_best
@@ -35,30 +35,30 @@ if TYPE_CHECKING:
     from web.web_types import GetDb
 
 
-def _valid_photo_id(value: object) -> bool:
+def _valid_photo_id(value: object) -> TypeGuard[int]:
     return isinstance(value, int) and not isinstance(value, bool) and 0 < value < 2**63
 
 
 def _scope_from(
     db: Database, values: Mapping[str, object], *, json_error: JsonError,
-) -> tuple[PhotoScope, None] | tuple[None, ErrorResponse]:
-    """``(scope, None)`` from ``folder_id`` / ``collection_id`` / ``rules``,
-    or ``(None, response)``. ``rules`` may be a JSON string (a query
-    parameter) or an already-parsed tree (a JSON body)."""
+) -> PhotoScope | ErrorResponse:
+    """The scope named by ``folder_id`` / ``collection_id`` / ``rules``, or
+    the 400 response saying what is wrong with them. ``rules`` may be a JSON
+    string (a query parameter) or an already-parsed tree (a JSON body)."""
     raw_folder = values.get("folder_id")
     folder_id = None
     if raw_folder not in (None, ""):
         if isinstance(raw_folder, bool) or not isinstance(raw_folder, (int, str)):
-            return None, json_error("folder_id must be an integer", 400)
+            return json_error("folder_id must be an integer", 400)
         try:
             folder_id = int(raw_folder)
         except ValueError:
-            return None, json_error("folder_id must be an integer", 400)
+            return json_error("folder_id must be an integer", 400)
     invalid = reject_visual_collection(
         db, values.get("collection_id"), json_error=json_error,
     )
     if invalid is not None:
-        return None, invalid
+        return invalid
     collection_id = coerce_collection_id(values.get("collection_id"))
     rules = values.get("rules")
     if isinstance(rules, str):
@@ -68,14 +68,14 @@ def _scope_from(
             try:
                 rules = json.loads(rules)
             except ValueError:
-                return None, json_error("rules must be valid JSON", 400)
+                return json_error("rules must be valid JSON", 400)
     if rules is not None:
         rules = inject_active_visual_model(rules)
     return PhotoScope(
         folder_id=folder_id,
         collection_id=collection_id if isinstance(collection_id, int) else None,
         rules=rules,
-    ), None
+    )
 
 
 def _parse_over(body: JsonDict) -> tuple[list[int] | None, str | None]:
@@ -114,9 +114,9 @@ def create_species_best_blueprint(get_db: GetDb, json_error: JsonError) -> Bluep
     @blueprint.route("/api/species-best")
     def api_species_best() -> ResponseReturnValue:
         db = get_db()
-        scope, invalid = _scope_from(db, request.args, json_error=json_error)
-        if scope is None:
-            return invalid
+        scope = _scope_from(db, request.args, json_error=json_error)
+        if not isinstance(scope, PhotoScope):
+            return scope
         species = (request.args.get("species") or "").strip() or None
         query = SpeciesBestQuery(
             scope=scope,
@@ -153,9 +153,9 @@ def create_species_best_blueprint(get_db: GetDb, json_error: JsonError) -> Bluep
         provenance, error = flag_provenance(body)
         if provenance is None:
             return json_error(error or "invalid source or reason", 400)
-        scope, invalid = _scope_from(db, body, json_error=json_error)
-        if scope is None:
-            return invalid
+        scope = _scope_from(db, body, json_error=json_error)
+        if not isinstance(scope, PhotoScope):
+            return scope
         if over is not None and not scope.is_everything:
             return json_error(
                 "send over (the photos it was chosen over) or a scope "

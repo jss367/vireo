@@ -1117,6 +1117,21 @@ def _compact_life_list_photo(photo):
 _LIFE_LIST_DECISION_KINDS = {"pick": "pick", "highlight": "highlight"}
 
 
+def _rank_listed_representatives(preferences, representative_ids, photos):
+    """``(ranking, ids)``: the chosen photos on the list ranked by the
+    comparisons, then every chosen id with those first. A chosen photo the
+    list cannot show (rejected, or no longer this species) keeps its
+    selection order after them and never leads one it can."""
+    listed_ids = {photo["id"] for photo in photos}
+    ranking = preferences.rank(
+        [pid for pid in representative_ids if pid in listed_ids],
+    )
+    return ranking, [
+        *ranking.order,
+        *(pid for pid in representative_ids if pid not in listed_ids),
+    ]
+
+
 def _life_list_species_entry(
     species, entry, photos, representative_ids, highlight_ranks,
     locations, photo_offset, photo_limit, choices,
@@ -1124,22 +1139,14 @@ def _life_list_species_entry(
     """Rank one species' photos and build its Life List entry.
 
     ``choices`` is ``(preferences, notes)``: the recorded comparisons and
-    each chosen photo's choices. The chosen photos on the list are ranked by
-    the comparisons; a chosen photo the list cannot show (rejected, or no
-    longer this species) follows them in selection order and never leads one
-    it can.
+    each chosen photo's choices.
     """
     preferences, notes = choices
     timestamps = [p["timestamp"] for p in photos if p.get("timestamp")]
     _highlight_score_bucket(photos)
-    listed_ids = {photo["id"] for photo in photos}
-    ranking = preferences.rank(
-        [pid for pid in representative_ids if pid in listed_ids],
+    ranking, representative_ids = _rank_listed_representatives(
+        preferences, representative_ids, photos,
     )
-    representative_ids = [
-        *ranking.order,
-        *(pid for pid in representative_ids if pid not in listed_ids),
-    ]
     representative_order = {
         photo_id: idx for idx, photo_id in enumerate(representative_ids)
     }
