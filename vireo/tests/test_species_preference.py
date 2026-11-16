@@ -1,6 +1,12 @@
 """Ranking a species' chosen photos by recorded comparisons."""
 
-from species_preference import Comparison, rank_contenders, split_contradictions
+from species_preference import (
+    Comparison,
+    Preferences,
+    choice_note,
+    rank_contenders,
+    split_contradictions,
+)
 
 
 def _c(choice_id, better, worse):
@@ -96,3 +102,27 @@ def test_photos_that_are_not_contenders_never_lead():
 
 def test_duplicate_contenders_are_ranked_once():
     assert rank_contenders([1, 1, 2], []).order == (1, 2)
+
+
+def test_one_preferences_object_ranks_any_number_of_sets():
+    preferences = Preferences([_c(1, 1, 2), _c(2, 3, 4)])
+
+    assert preferences.rank([2, 1]).order == (1, 2)
+    assert preferences.rank([4, 3]).order == (3, 4)
+    assert preferences.rank([4, 1]).leaders == (4, 1)
+    assert Preferences().rank([5, 6]).leaders == (5, 6)
+
+
+def test_choice_note_prefers_the_species_then_any_name_then_nothing():
+    notes = {
+        7: [
+            {"species": "Verdin", "reason": "first"},
+            {"species": "Bushtit", "reason": "other species"},
+        ],
+        8: [{"species": "Old Name", "reason": "before the rename"}],
+    }
+
+    assert choice_note(notes, "Verdin", 7)["reason"] == "first"
+    assert choice_note(notes, "Bushtit", 7)["reason"] == "other species"
+    assert choice_note(notes, "New Name", 8)["reason"] == "before the rename"
+    assert choice_note(notes, "Verdin", 9) is None

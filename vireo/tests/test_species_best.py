@@ -169,7 +169,7 @@ def test_a_newer_choice_supersedes_the_comparison_it_contradicts(trips):
     assert response.get_json()["superseded"] == [
         {"better_photo_id": photos["a1"], "worse_photo_id": photos["b1"]},
     ]
-    comparisons = db.species_choices.comparisons(["Bald Eagle"])["Bald Eagle"]
+    comparisons = db.species_choices.comparisons()
     assert [(c.better, c.worse) for c in comparisons] == [(photos["b1"], photos["a1"])]
     _data, species = _best(client)
     assert species["Bald Eagle"]["decision"]["photo_id"] == photos["b1"]
@@ -331,7 +331,7 @@ def test_clearing_a_species_representatives_forgets_its_choices(trips):
     })
 
     assert response.status_code == 200
-    assert db.species_choices.comparisons() == {}
+    assert db.species_choices.comparisons() == []
     assert db.species_choices.notes() == {}
 
 
@@ -341,8 +341,8 @@ def test_deleting_a_photo_removes_its_comparisons(trips):
 
     catalog_deletion.delete_photos(db, [photos["b1"]])
 
-    assert db.species_choices.comparisons() == {}
-    assert ("Bald Eagle", photos["a1"]) in db.species_choices.notes()
+    assert db.species_choices.comparisons() == []
+    assert list(db.species_choices.notes()) == [photos["a1"]]
 
 
 @pytest.mark.parametrize(("body", "status", "message"), [
@@ -393,3 +393,42 @@ def test_the_routes_are_aliased_for_headless_reviewers(trips):
 
     assert chosen.status_code == 200
     assert listed.get_json()["species"][0]["decision"]["source"] == "claude"
+
+
+def test_a_comparison_survives_renaming_the_species(trips):
+    app, db, _folders, photos = trips
+    client = app.test_client()
+    _choose(client, species="Bald Eagle", photo_id=photos["b1"])
+    _choose(client, species="Bald Eagle", photo_id=photos["a1"], over=[photos["b1"]],
+            source="claude", reason="closer")
+    # Choosing b1 again in a scope without a1 makes it the newest choice, so
+    # only the comparison keeps a1 ahead.
+    _choose(client, species="Bald Eagle", photo_id=photos["b1"], over=[])
+    keyword_id = db.keywords.add("Bald Eagle", is_species=True)
+    db.commit()
+
+    response = client.put(f"/api/keywords/{keyword_id}", json={"name": "American Bald Eagle"})
+
+    assert response.status_code == 200, response.get_json()
+    _data, species = _best(client)
+    decision = species["American Bald Eagle"]["decision"]
+    assert decision["kind"] == "chosen"
+    assert decision["photo_id"] == photos["a1"]
+    assert decision["contender_ids"] == [photos["a1"], photos["b1"]]
+    assert (decision["source"], decision["reason"]) == ("claude", "closer")
+
+
+def test_clearing_one_species_keeps_another_species_choices(trips):
+    app, db, folders, photos = trips
+    osprey = _photo(db, folders["first"], "o.jpg", "2024-05-02T08:00:00", 0.7, species="Osprey")
+    db.commit()
+    client = app.test_client()
+    _choose(client, species="Osprey", photo_id=osprey, reason="only one")
+    _choose(client, species="Bald Eagle", photo_id=photos["a1"], over=[photos["b1"]])
+
+    client.delete("/api/photo-preferences", json={
+        "purpose": "species_representative", "species": "Bald Eagle",
+    })
+
+    assert db.species_choices.comparisons() == []
+    assert list(db.species_choices.notes()) == [osprey]

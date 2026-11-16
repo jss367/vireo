@@ -7,7 +7,7 @@ This module owns the SQL behind the curated-species features:
 - ``species_representatives``: the global representative photos per species
   (a species' chosen photos), with the undo restore and the rename. Which of
   them leads is decided by the comparisons in ``repositories.species_choices``
-  through ``species_preference.rank_contenders``; the newest selection leads
+  through ``species_preference.Preferences``; the newest selection leads
   among photos nobody has compared;
 - ``photo_preferences``: the per-workspace preference rows kept for older
   callers, their clear and rename;
@@ -67,7 +67,7 @@ from repositories.species_choices import SpeciesChoiceRepository
 from repositories.subject_order import chosen_subject_sql, subject_rank_sql
 from settings_source import config_value
 from species_memberships import photo_species_memberships, subject_evidence_order, subject_from_row
-from species_preference import rank_contenders
+from species_preference import Preferences
 
 # ``get_highlights(eligible_only=True)``: the joins and filter that keep only
 # highlights whose photo is reachable, not rejected and still in the bucket.
@@ -1147,7 +1147,7 @@ class SpeciesCurationRepository:
         rows only to actual species buckets, so a representative row alone
         does not make an untagged species appear on the list. Item 0 is the
         main representative: lists follow the recorded comparisons
-        (``species_preference.rank_contenders`` over the photos returned),
+        (``species_preference.Preferences.rank`` over the photos returned),
         with the newest selection first among photos nobody has compared.
         ``ranked=False`` returns plain newest-selection order, for a caller
         that ranks a narrower set of photos itself.
@@ -1193,16 +1193,12 @@ class SpeciesCurationRepository:
         return result
 
     def _rank_representative_lists(self, lists):
-        """Reorder each species' newest-first list by its comparisons."""
-        compared = [name for name, ids in lists.items() if len(ids) > 1]
-        if not compared:
+        """Reorder each species' newest-first list by the comparisons."""
+        if not any(len(ids) > 1 for ids in lists.values()):
             return
-        comparisons = SpeciesChoiceRepository(self.conn).comparisons(compared)
-        for name in compared:
-            if name in comparisons:
-                lists[name] = list(
-                    rank_contenders(lists[name], comparisons[name]).order
-                )
+        preferences = Preferences(SpeciesChoiceRepository(self.conn).comparisons())
+        for name, ids in lists.items():
+            lists[name] = list(preferences.rank(ids).order)
 
     def set_global_representative(self, species, photo_id):
         order = self.next_representative_order()
@@ -1286,11 +1282,11 @@ class SpeciesCurationRepository:
         choices that ranked them."""
         species = self._keyword_taxa.resolve_species_display(species)
         ws = self.workspace_id
+        SpeciesChoiceRepository(self.conn).clear_for_representatives_of(species)
         self.conn.execute(
             "DELETE FROM species_representatives WHERE species = ?",
             (species,),
         )
-        SpeciesChoiceRepository(self.conn).clear_species(species)
         self.conn.execute(
             """DELETE FROM photo_preferences
                WHERE workspace_id = ?

@@ -38,6 +38,9 @@ thumbnail or the detected subject as an image), `burst`, `set_flag`,
 `set_rating`, `add_keyword` and `remove_keyword`. Identification tools are
 `get_species_evidence`, `preview_species_assignment` and
 `apply_species_assignment`; see [species review evidence](species-review-evidence.md).
+`best_of_each_species` and `choose_best_photo` list and settle the best photo of
+each species for a trip, a year or everything; see
+[the best photo of each species](#the-best-photo-of-each-species).
 `view_photo(view="subject", detection_id=...)` addresses the exact animal region,
 and `get_photo` includes saved `species_assignments` and their provenance.
 For linked taxa, photo-detail keywords and assignments also share `display_name`
@@ -181,6 +184,8 @@ Current stable set:
 | POST | `/api/v1/photos/burst-evidence` | The same pack for an explicit `{"photo_ids": [...]}` selection (2–500 ids). |
 | POST | `/api/v1/photos/species-evidence` | Read-only identification evidence for 1–100 exact unique `photo_ids`: subjects, model candidates, score meanings, uncertainty, list provenance and bound crop URLs. No automatic continuity or assignment claim. |
 | GET  | `/api/v1/photos/<id>/focus-crop` | Unresampled JPEG window around the scored focus point. `size` (128–1024, default 512); `basis` (`auto`, `eye`, `subject`, `frame`); `center=x,y` uses normalized coordinates in the unedited upright source raster, before any crop/rotation recipe; `source` (`auto` default, `working`, `original`): working requires a usable working copy and returns 404 without decoding an original when absent; auto serves the working copy unless it is downsized against the catalog dimensions and the original can be decoded; `mask=1` shades pixels outside the SAM mask. Headers: `X-Vireo-Focus-Basis` (`eye`, `subject`, `frame`, `point`), `X-Vireo-Focus-Center`, `X-Vireo-Focus-Window`, `X-Vireo-Focus-Source` (`working_copy`, `original`), `X-Vireo-Focus-Raster-Size`, `X-Vireo-Focus-Original-Scale` (decoded pixels per original pixel, `unknown` without catalog dimensions), `X-Vireo-Focus-Mask`. |
+| GET  | `/api/v1/species-best` | The best photos of each species within a scope, each with the decision behind its first photo. See [the best photo of each species](#the-best-photo-of-each-species). |
+| POST | `/api/v1/species-best/choose` | Record that one photo is the best of a species among others: `{"species": str, "photo_id": int, "over"?: [int], "folder_id"?, "collection_id"?, "rules"?, "source"?: str, "reason"?: str}`. |
 | GET  | `/api/v1/folders/<id>/bursts` | Every burst in one folder with coverage, the scorer's pick and ambiguity; folder-level coverage too. `margin` (relative sharpness gap for a close call, default 0.10). Folders over 5000 photos answer 400. |
 
 Selected analysis recovery uses `POST /api/v1/photos/analysis-readiness` with
@@ -288,6 +293,58 @@ look at each card's `focus_crop_url` (and `focus_crop_mask_url`) at 1:1
 before deciding. Record decisions through the normal flag endpoints so they
 show up in, and can be reversed from, the Undo panel. Design:
 `docs/plans/2026-10-17-burst-evidence-adjudication-design.md`.
+
+### The best photo of each species
+
+"The best photo of each bird on this trip", "of this year" and "ever" are one
+question asked of different sets of photos. `GET /api/v1/species-best` answers
+it for any scope: `folder_id` (a folder and its subfolders), `collection_id`,
+`rules` (a URL-encoded universal-filter rule tree, the same JSON a collection
+stores; `[{"field": "timestamp", "op": "between", "value": ["2025-01-01",
+"2025-12-31"]}]` is a year), any of them combined, or none for the whole
+workspace. `species` narrows it to one species, `per_species` (1–50, default 1)
+lists that many photos of each, best first, and `include_unconfirmed=1` adds
+species held only by an unconfirmed prediction (left out otherwise and counted
+in `meta.unconfirmed_species_omitted`). Rejected photos are never listed.
+
+Within a species the order is: the species' chosen photos (the photos marked
+as its representative), then the workspace's ranked highlights, then flagged
+picks by Vireo's score, then everything else by score. Each species carries a
+`decision` saying which of those put its first photo there:
+
+| `kind` | Meaning |
+| --- | --- |
+| `chosen` | Someone chose this photo, and no other chosen photo in the scope beats it. `source`, `reason` and `chosen_at` say who, why and when (all null for a photo chosen before choices were recorded). |
+| `tie` | Several chosen photos in the scope have never been compared (`tied_photo_ids`). The newest choice is shown until someone compares them. |
+| `highlight` | Nobody chose a photo here; the workspace's top ranked highlight leads. |
+| `pick` | Nobody chose; a flagged pick leads, by Vireo's score among the picks. |
+| `score` | Nobody chose or flagged; Vireo's score ordered the photos. |
+| `unanalyzed` | Nobody chose and the first photo has no score yet, so the order is capture order. Run Process before trusting it. |
+
+`contender_ids` lists every chosen photo of the species in the scope, best
+first. `meta` counts `chosen`, `needs_comparison` (ties) and `guessed` (score or
+unanalyzed) so a reviewer can see what is left to settle.
+
+Chosen photos are ranked by comparisons, not by when they were chosen. A choice
+made for a trip says that photo beats the other chosen photos of that trip and
+nothing more, so the best eagle of 2024 and the best eagle of 2025 stay tied in
+a lifetime list until they are compared. `POST /api/v1/species-best/choose`
+records a choice: with `over`, the photo beats exactly those photos (they need
+not be chosen yet; the comparison counts once both are); without `over`, it
+beats every other chosen photo of the species within the scope sent (all of
+them when no scope is sent). `over` and a scope together answer 400. The photo
+must be a confirmed, unrejected photo of the species. The response lists `over`
+and `superseded`, the older comparisons this choice reversed: the newest
+decision wins a contradiction and the older comparison is removed. A comparison
+counts through other photos (A over B and B over C puts A over C). "Set as
+representative" in the app records the same choice, over every other chosen
+photo of the species.
+
+A reviewer working through a scope reads the list, takes the species whose
+`kind` is `tie`, `score` or `unanalyzed`, lists more of each
+(`species=...&per_species=10`), looks at the candidates at full detail (the
+photo preview and `/api/v1/photos/<id>/focus-crop`), and records one choice per
+species with a `reason`.
 
 ### Previewing encounter species confirmation
 

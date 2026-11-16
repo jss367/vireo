@@ -11,10 +11,11 @@ not about the workspace it was made in. ``species`` holds the spelling the
 representative rows use (``KeywordTaxonRepository.resolve_species_display``),
 which the caller resolves before writing.
 
-Rows are kept when a photo stops carrying the species (a relabel, a removed
-keyword): a comparison counts only between photos that are both chosen for
-the species at the time of the read, so the rows of a relabeled photo are
-inert until an undo makes them true again. Deleting a photo cascades.
+A comparison is between two photos and counts for any species both are
+chosen for; ``species`` on a choice records what was being chosen. So a
+species rename, a relabel and their undo need no bookkeeping here: the rows
+of photos that no longer share a species are inert until they share one
+again. Deleting a photo cascades.
 
 What stays elsewhere: which photos are chosen at all
 (``species_representatives``, in ``repositories.species_curation``), the
@@ -26,7 +27,6 @@ No method here commits: the caller owns the transaction.
 
 from __future__ import annotations
 
-import json
 import sqlite3
 from collections.abc import Iterable, Sequence
 from typing import Any
@@ -56,55 +56,40 @@ class SpeciesChoiceRepository:
         )
         return choice_id
 
-    def comparisons(
-        self, species_names: Iterable[str] | None = None,
-    ) -> dict[str, list[Comparison]]:
-        """``{species: [Comparison, ...]}``, every species or the named ones."""
-        species_filter = ""
-        params: list[Any] = []
-        if species_names is not None:
-            species_filter = "WHERE c.species IN (SELECT value FROM json_each(?))"
-            params.append(json.dumps(sorted(set(species_names))))
-        result: dict[str, list[Comparison]] = {}
-        for row in self.conn.execute(
-            f"""SELECT c.species, c.id, c.photo_id, l.photo_id AS loser_id
-                FROM species_choices c
-                JOIN species_choice_losers l ON l.choice_id = c.id
-                {species_filter}
-                ORDER BY c.id, l.photo_id""",
-            params,
-        ):
-            result.setdefault(row["species"], []).append(
-                Comparison(row["id"], row["photo_id"], row["loser_id"])
-            )
-        return result
+    def comparisons(self) -> list[Comparison]:
+        """Every recorded comparison, oldest choice first.
 
-    def notes(
-        self, species_names: Iterable[str] | None = None,
-    ) -> dict[tuple[str, int], dict[str, Any]]:
-        """``{(species, photo_id): note}``: the newest choice of each photo.
-
-        A note carries ``source``, ``reason`` and ``chosen_at``. A chosen
-        photo with no note was chosen before choices were recorded.
+        All of them, whatever species each was made for: a comparison is
+        between two photos, and the ranking follows it through photos outside
+        the set being ranked.
         """
-        species_filter = ""
-        params: list[Any] = []
-        if species_names is not None:
-            species_filter = "WHERE species IN (SELECT value FROM json_each(?))"
-            params.append(json.dumps(sorted(set(species_names))))
-        result: dict[tuple[str, int], dict[str, Any]] = {}
+        return [
+            Comparison(row["choice_id"], row["better"], row["worse"])
+            for row in self.conn.execute(
+                """SELECT c.id AS choice_id, c.photo_id AS better,
+                          l.photo_id AS worse
+                   FROM species_choices c
+                   JOIN species_choice_losers l ON l.choice_id = c.id
+                   ORDER BY c.id, l.photo_id"""
+            )
+        ]
+
+    def notes(self) -> dict[int, list[dict[str, Any]]]:
+        """``{photo_id: [note, ...]}``: each chosen photo's choices, oldest
+        first, each with ``species``, ``source``, ``reason`` and
+        ``chosen_at``. Read one with ``species_preference.choice_note``."""
+        result: dict[int, list[dict[str, Any]]] = {}
         for row in self.conn.execute(
-            f"""SELECT species, photo_id, source, reason, created_at
-                FROM species_choices
-                {species_filter}
-                ORDER BY id""",
-            params,
+            """SELECT species, photo_id, source, reason, created_at
+               FROM species_choices
+               ORDER BY id"""
         ):
-            result[(row["species"], row["photo_id"])] = {
+            result.setdefault(row["photo_id"], []).append({
+                "species": row["species"],
                 "source": row["source"],
                 "reason": row["reason"],
                 "chosen_at": row["created_at"],
-            }
+            })
         return result
 
     def delete_comparisons(self, comparisons: Sequence[Comparison]) -> int:
@@ -115,9 +100,30 @@ class SpeciesChoiceRepository:
         )
         return cur.rowcount
 
-    def clear_species(self, species: str) -> int:
-        """Forget every choice made for ``species``."""
+    def clear_for_representatives_of(self, species: str) -> int:
+        """Forget the choices behind ``species``' representatives.
+
+        Removes, for each photo chosen for ``species``, its choices made for
+        that species and its choices made under a name it is no longer
+        chosen for (a since-renamed species), so clearing a species leaves
+        no comparison to revive when its photos are chosen again. A photo
+        also chosen for another species keeps that species' choices. Call it
+        before the representative rows are deleted.
+        """
         cur = self.conn.execute(
-            "DELETE FROM species_choices WHERE species = ?", (species,),
+            """DELETE FROM species_choices
+               WHERE photo_id IN (
+                       SELECT photo_id FROM species_representatives
+                       WHERE species = ?
+                   )
+                 AND (
+                       species = ?
+                       OR NOT EXISTS (
+                           SELECT 1 FROM species_representatives sr
+                           WHERE sr.photo_id = species_choices.photo_id
+                             AND sr.species = species_choices.species
+                       )
+                 )""",
+            (species, species),
         )
         return cur.rowcount

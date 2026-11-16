@@ -4,7 +4,7 @@ A choice is "this photo is the best of this species among those photos". It
 makes the photo one of the species' chosen photos (a representative) and
 records one comparison per photo it was chosen over, with who decided and
 why. The best photo of any set (a trip, a year, everything) is then read
-from the comparisons by ``species_preference.rank_contenders``, so a choice
+from the comparisons by ``species_preference.Preferences``, so a choice
 made for a trip never claims more than the trip: the trip's best and another
 trip's best stay tied until someone compares them.
 
@@ -113,8 +113,7 @@ def choose_best(
     choice_id = db.species_choices.record(
         canonical, photo_id, losers, source=source, reason=reason,
     )
-    comparisons = db.species_choices.comparisons([canonical]).get(canonical, [])
-    _kept, contradicted = split_contradictions(comparisons)
+    _kept, contradicted = split_contradictions(db.species_choices.comparisons())
     db.species_choices.delete_comparisons(contradicted)
     return {
         "choice_id": choice_id,

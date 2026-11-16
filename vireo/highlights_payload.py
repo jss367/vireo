@@ -21,7 +21,7 @@ from species_memberships import (
     subject_is_background_like,
     subject_is_whole_frame,
 )
-from species_preference import rank_contenders
+from species_preference import Preferences, choice_note
 
 
 def _rank01(value, values):
@@ -323,29 +323,23 @@ def apply_highlight_preferences(db, buckets):
     preferences = db.species_curation.get_representative_lists(
         eligible_only=True, ranked=False,
     )
-    chosen_species = [
-        bucket["species"] for bucket in buckets
-        if preferences.get(bucket["species"])
-    ]
-    comparisons = db.species_choices.comparisons(chosen_species) if chosen_species else {}
-    notes = db.species_choices.notes(chosen_species) if chosen_species else {}
+    any_chosen = any(preferences.get(bucket["species"]) for bucket in buckets)
+    choices = Preferences(db.species_choices.comparisons() if any_chosen else ())
+    notes = db.species_choices.notes() if any_chosen else {}
     for bucket in buckets:
         species = bucket["species"]
-        species_comparisons = comparisons.get(species, [])
         chosen_ids = preferences.get(species) or []
         visible_ids = {photo.get("id") for photo in bucket.get("photos") or []}
         # Ranked within the bucket's own photos, so a folder or filtered view
         # leads with the best chosen photo it can show; the species-level
         # state below is ranked over every chosen photo in the workspace.
-        ranking = rank_contenders(
-            [pid for pid in chosen_ids if pid in visible_ids], species_comparisons,
-        )
+        ranking = choices.rank([pid for pid in chosen_ids if pid in visible_ids])
         representative_ids = list(ranking.order)
         representative_set = set(representative_ids)
         representative_order = {
             photo_id: idx for idx, photo_id in enumerate(representative_ids)
         }
-        workspace_order = rank_contenders(chosen_ids, species_comparisons).order
+        workspace_order = choices.rank(chosen_ids).order
         preferred_id = workspace_order[0] if workspace_order else None
         applied = False
         for photo in bucket.get("photos") or []:
@@ -383,7 +377,7 @@ def apply_highlight_preferences(db, buckets):
         # analyzed content.
         bucket["unanalyzed_count"] = _bucket_unanalyzed_count(bucket.get("photos"))
         bucket["best_decision"] = best_decision(
-            top, ranking, notes.get((species, top.get("id"))),
+            top, ranking, choice_note(notes, species, top.get("id")),
         )
 
 
@@ -1046,25 +1040,6 @@ def _life_list_selection_maps(db, identities, buckets, scoped):
     return representatives, highlights
 
 
-def _life_list_choices(db, identities, representatives):
-    """``{identity: (comparisons, notes_by_photo)}`` for the identities that
-    have chosen photos, gathered across every stored spelling of the name."""
-    choices = {key: ([], {}) for key in representatives}
-    if not choices:
-        return choices
-    names = {
-        name for name, keys in identities.aliases.items()
-        if keys.intersection(choices)
-    }
-    for name, rows in db.species_choices.comparisons(names).items():
-        for key in identities.aliases.get(name, set()).intersection(choices):
-            choices[key][0].extend(rows)
-    for (name, photo_id), note in db.species_choices.notes(names).items():
-        for key in identities.aliases.get(name, set()).intersection(choices):
-            choices[key][1][photo_id] = note
-    return choices
-
-
 def _life_list_buckets(rows, identities, class_by_taxon):
     """Group linked names by taxon and unlinked names by stored spelling."""
     buckets = {}
@@ -1144,21 +1119,22 @@ _LIFE_LIST_DECISION_KINDS = {"pick": "pick", "highlight": "highlight"}
 
 def _life_list_species_entry(
     species, entry, photos, representative_ids, highlight_ranks,
-    locations, photo_offset, photo_limit, choices=((), {}),
+    locations, photo_offset, photo_limit, choices,
 ):
     """Rank one species' photos and build its Life List entry.
 
-    ``choices`` is the species' ``(comparisons, notes_by_photo)``. The chosen
-    photos on the list are ranked by the comparisons; a chosen photo the list
-    cannot show (rejected, or no longer this species) follows them in
-    selection order and never leads one it can.
+    ``choices`` is ``(preferences, notes)``: the recorded comparisons and
+    each chosen photo's choices. The chosen photos on the list are ranked by
+    the comparisons; a chosen photo the list cannot show (rejected, or no
+    longer this species) follows them in selection order and never leads one
+    it can.
     """
-    comparisons, notes = choices
+    preferences, notes = choices
     timestamps = [p["timestamp"] for p in photos if p.get("timestamp")]
     _highlight_score_bucket(photos)
     listed_ids = {photo["id"] for photo in photos}
-    ranking = rank_contenders(
-        [pid for pid in representative_ids if pid in listed_ids], comparisons,
+    ranking = preferences.rank(
+        [pid for pid in representative_ids if pid in listed_ids],
     )
     representative_ids = [
         *ranking.order,
@@ -1234,7 +1210,7 @@ def _life_list_species_entry(
         "has_preferred_photo": preferred_applied,
         "best_source": best_source,
         "best_decision": best_decision(
-            best_photo, ranking, notes.get(best_photo.get("id")),
+            best_photo, ranking, choice_note(notes, species, best_photo.get("id")),
             fallback_kind=_LIFE_LIST_DECISION_KINDS.get(best_source),
         ),
         "best": _compact_life_list_photo(photos[0]) if photos else None,
@@ -1278,7 +1254,12 @@ def build_life_list_payload(
     representatives, highlights = _life_list_selection_maps(
         db, identities, buckets, scoped=species_filter is not None,
     )
-    choices = _life_list_choices(db, identities, representatives)
+    choices = (Preferences(), {})
+    if representatives:
+        choices = (
+            Preferences(db.species_choices.comparisons()),
+            db.species_choices.notes(),
+        )
 
     species_entries = []
     distinct_photo_ids = set()
@@ -1288,7 +1269,7 @@ def build_life_list_payload(
         species_entries.append(_life_list_species_entry(
             entry["species"], entry, photos, representatives.get(identity, []),
             highlights.get(identity, {}), locations.get(identity, []),
-            photo_offset, photo_limit, choices.get(identity, ((), {})),
+            photo_offset, photo_limit, choices,
         ))
 
     # Life-list numbering: chronological by first photographed date,
