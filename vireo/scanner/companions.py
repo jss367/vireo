@@ -386,7 +386,7 @@ def _rekey_companion_detections_onto_primary(
         new_id = _detection_id(
             primary["id"], det["detector_model"],
             (det["box_x"], det["box_y"], det["box_w"], det["box_h"]),
-            det["category"],
+            det["id_category"],
         )
         if new_id == det["id"]:
             # Cannot happen in practice (photo_id changed) but defensive.
@@ -410,6 +410,10 @@ def _rekey_companion_detections_onto_primary(
         # primary's own run rows win on (detection_id, classifier_model,
         # labels_fingerprint) conflicts.
         pairing.redirect_classifier_runs(det["id"], new_id)
+        # A person/vehicle region kept as an animal subject stays kept: its
+        # record names the detector's own label, which the new id derives
+        # from and the detection writer consults before resetting a category.
+        pairing.redirect_subject_candidate(det["id"], new_id)
         # Drop any predictions/classifier_runs that lost the UPDATE race
         # (duplicate-key) along with the now-orphan companion detection
         # row — CASCADE on both FKs cleans up any remaining rows tied to

@@ -29,6 +29,10 @@ import sqlite3
 from contextlib import contextmanager
 
 from canonical_schema import EXIF_SUMMARY_COLUMNS
+from repositories.candidate_subjects import (
+    DETECTOR_CATEGORY_SQL,
+    CandidateSubjectRepository,
+)
 from repositories.identity_alternatives import (
     merge_candidate_names,
     remap_identity_keyword_intents,
@@ -113,13 +117,28 @@ class CompanionPairingRepository:
         )
 
     def detections_of(self, photo_id: int) -> list[sqlite3.Row]:
-        """The photo's detections, with every column a re-key needs."""
+        """The photo's detections, with every column a re-key needs.
+
+        ``id_category`` is the category the content-addressed id derives
+        from: the detector's own label, which differs from ``category`` for
+        a person/vehicle region kept as an animal subject
+        (``subject_candidates``).
+        """
         return self.conn.execute(
-            "SELECT id, detector_model, box_x, box_y, box_w, box_h,"
-            " detector_confidence, category"
-            " FROM detections WHERE photo_id = ?",
+            "SELECT d.id, d.detector_model, d.box_x, d.box_y, d.box_w, d.box_h,"
+            f" d.detector_confidence, d.category, {DETECTOR_CATEGORY_SQL} AS id_category"
+            " FROM detections d WHERE d.photo_id = ?",
             (photo_id,),
         ).fetchall()
+
+    def redirect_subject_candidate(self, old_id: int, new_id: int) -> None:
+        """Carry the examined-region checks of ``old_id`` onto ``new_id``.
+
+        The primary may already hold the same region, with checks of its
+        own or none; either way a region the companion kept stays kept
+        (``CandidateSubjectRepository.move``).
+        """
+        CandidateSubjectRepository(self.conn).move(old_id, new_id)
 
     def move_detection(self, detection_id: int, photo_id: int) -> None:
         self.conn.execute(

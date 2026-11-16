@@ -448,7 +448,12 @@ def test_primary_classify_counts_ignore_secondary_detections(tmp_path):
 def test_primary_classify_counts_ignore_confident_non_animal_boxes(
     tmp_path, monkeypatch,
 ):
-    """Person and vehicle boxes suppress fallback but are not crop targets."""
+    """Person and vehicle boxes suppress fallback but are not crop targets.
+
+    A person-only photo's region is one thing for the classifier to examine
+    (it may be an animal the detector mislabeled), so the plan counts it as
+    pending until that check is recorded, and as done afterwards.
+    """
     db, folder_id = _make_db(tmp_path)
     photo_id = photo_ingest.add_photo(
         db, folder_id=folder_id, filename="hiker.jpg", extension=".jpg",
@@ -486,9 +491,93 @@ def test_primary_classify_counts_ignore_confident_non_animal_boxes(
 
     plan = compute_plan(db, _params(model_ids=["m1"]), str(tmp_path / "test.db"))
     classify = plan["stages"]["Classify"]
+    assert classify["state"] == "will-run"
+    assert classify["detail"]["eligible"] == 1
+    assert classify["detail"]["pending"] == 1
+    from labels_fingerprint import TOL_SENTINEL
+
+    (region,) = db.candidate_subjects.pending([photo_id], 0.2, "BioCLIP-2", TOL_SENTINEL)
+    with db.transaction():
+        db.candidate_subjects.record(
+            region["id"],
+            {"detector_category": "person", "classifier_model": "BioCLIP-2",
+             "labels_fingerprint": TOL_SENTINEL, "max_match_score": 0.36,
+             "background_score": 0.30},
+            promoted=False,
+        )
+
+    plan = compute_plan(db, _params(model_ids=["m1"]), str(tmp_path / "test.db"))
+    classify = plan["stages"]["Classify"]
     assert classify["state"] == "done-prior"
-    assert classify["detail"]["eligible"] == 0
+    assert classify["detail"]["eligible"] == 1
     assert classify["detail"]["pending"] == 0
+
+
+def test_an_unexamined_person_region_is_possible_work_for_a_timm_model_too(
+    tmp_path, monkeypatch,
+):
+    """An embedding model that keeps a person/vehicle region turns it into an
+    animal target, and a timm model running after it in the same job then
+    classifies it. Until an embedding model has examined the region the plan
+    counts it for both; once it is rejected it is work for neither. A timm
+    model on its own examines nothing, so the region is not work at all."""
+    import labels as labels_mod
+    import models as models_mod
+    from labels_fingerprint import TOL_SENTINEL
+    from pipeline_plan import compute_plan
+
+    db, folder_id = _make_db(tmp_path)
+    photo_id = photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="duck.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    db.detections.save(
+        photo_id,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+          "confidence": 0.7, "category": "person"}],
+        detector_model="megadetector-v6",
+    )
+    db.model_runs.record_detector_run(photo_id, "megadetector-v6", box_count=1)
+    db.commit()
+    monkeypatch.setattr(models_mod, "get_models", lambda: [
+        {"id": "m1", "name": "BioCLIP-2",
+         "model_str": "hf-hub:imageomics/bioclip-2",
+         "model_type": "bioclip", "downloaded": True,
+         "weights_path": _tol_weights(tmp_path)},
+        {"id": "inat", "name": "iNat21 (EVA-02 Large)",
+         "model_str": "hf-hub:timm/eva02_large_patch14_clip_336.merged2b_ft_inat21",
+         "model_type": "timm", "downloaded": True},
+    ])
+    monkeypatch.setattr(labels_mod, "get_active_labels", lambda: [])
+    monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
+    monkeypatch.setattr(
+        "computation_cache.megadetector_runtime_fingerprint",
+        lambda: "current-runtime",
+    )
+    db_path = str(tmp_path / "test.db")
+
+    both = compute_plan(db, _params(model_ids=["m1", "inat"]), db_path)["stages"]["Classify"]
+    assert both["state"] == "will-run"
+    assert both["detail"]["per_model"] == {"BioCLIP-2": 1, "iNat21 (EVA-02 Large)": 1}
+    assert both["detail"]["eligible"] == 2
+
+    timm_only = compute_plan(db, _params(model_ids=["inat"]), db_path)["stages"]["Classify"]
+    assert timm_only["state"] == "done-prior"
+    assert timm_only["detail"]["eligible"] == 0
+
+    (region,) = db.candidate_subjects.pending([photo_id], 0.2, "BioCLIP-2", TOL_SENTINEL)
+    with db.transaction():
+        db.candidate_subjects.record(
+            region["id"],
+            {"detector_category": "person", "classifier_model": "BioCLIP-2",
+             "labels_fingerprint": TOL_SENTINEL, "max_match_score": 0.36,
+             "background_score": 0.30},
+            promoted=False,
+        )
+
+    settled = compute_plan(db, _params(model_ids=["m1", "inat"]), db_path)["stages"]["Classify"]
+    assert settled["state"] == "done-prior"
+    assert settled["detail"]["pending"] == 0
 
 
 def test_count_photos_pending_masks(tmp_path):

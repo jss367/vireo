@@ -92,6 +92,18 @@ const AUTOMATIC_PRIMARY = 'Primary picked automatically: favors animal regions t
     return item;
   }
   /** Disable every primary-subject control while the photo has no retained subject. */
+  // Where the primary region came from. A region the detector labeled
+  // person or vehicle is a subject only because the classifier recognized an
+  // animal in it, and says so.
+  /** @param {NavSubject} subject */
+  function regionOrigin(subject) {
+    if (subject.evidence_basis === 'reviewer_box') return 'Reviewer-selected region · ';
+    if (subject.detector_category) {
+      return 'Detector region labeled ' + subject.detector_category
+        + ', kept because the classifier recognized an animal · ';
+    }
+    return 'Localized detector region · ';
+  }
   function renderWithoutPrimary() {
     status.textContent = data?.rejected.length ? 'Every detected region was rejected as not an animal. Restore one to review it again.' : '';
     analyzeButton.hidden = true;
@@ -152,7 +164,7 @@ const AUTOMATIC_PRIMARY = 'Primary picked automatically: favors animal regions t
     const description = document.createElement('div');
     const species = document.createElement('strong');
     const prediction = subject.predictions[0];
-    species.textContent = (subject.evidence_basis === 'reviewer_box' ? 'Reviewer-selected region · ' : 'Localized detector region · ') + (prediction ? prediction.species + ' · ' + Math.round(prediction.confidence * 100) + '%' : 'Species not predicted');
+    species.textContent = regionOrigin(subject) + (prediction ? prediction.species + ' · ' + Math.round(prediction.confidence * 100) + '%' : 'Species not predicted');
     const quality = document.createElement('p');
     quality.textContent = subject.analysis ? 'Box quality ' + Math.round(subject.analysis.quality_score * 100) + '/100 · Exposure '
       + (subject.analysis.exposure_ev >= 0 ? '+' : '') + subject.analysis.exposure_ev.toFixed(2) + ' EV' : 'Analyze subjects to compute quality and exposure.';

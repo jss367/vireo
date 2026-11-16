@@ -162,5 +162,6 @@ def _run_classify_phases(
     if not params.reclassify:
         classify.reapply_local_computation_cache()
 
+    classify.keep_recognized_candidates()
     classify.classify_photos()
     return _with_common_names_notice(job, classify.store_predictions())

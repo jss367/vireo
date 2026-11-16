@@ -256,7 +256,11 @@ function highlightsRoleText(r, floorPct) {
 /** @param {NavInspectorRegion} r */
 function regionDetectorText(r) {
   if (r.detector_model === 'reviewer-selected') return 'drawn by you';
-  return escapeHtml(String(r.detector_model || '')) + ' ' + Math.round(r.detector_confidence * 100) + '%';
+  var text = escapeHtml(String(r.detector_model || '')) + ' ' + Math.round(r.detector_confidence * 100) + '%';
+  // The detector's score is for its own label. A person or vehicle region
+  // is listed here only because the classifier recognized an animal in it.
+  if (r.detector_category) text += ' as ' + escapeHtml(r.detector_category) + ', kept: the classifier recognized an animal';
+  return text;
 }
 
 // Every region the detector kept, numbered as drawn on the image, so a

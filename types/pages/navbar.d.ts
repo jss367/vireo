@@ -149,6 +149,8 @@ interface NavLightboxToken {
 }
 interface NavSubject {
   evidence_basis?: string;
+  /** The detector's own label ('person' or 'vehicle') for a region kept as an animal subject. */
+  detector_category?: string | null;
   id: number;
   is_primary?: boolean;
   box_x: number;
@@ -351,6 +353,8 @@ interface NavInspectorRegion {
   box: NavBox;
   detector_model?: string;
   detector_confidence: number;
+  /** The detector's own label ('person' or 'vehicle') for a region kept as an animal subject. */
+  detector_category?: string | null;
   is_subject: boolean;
   chosen: boolean;
   spans_frame: boolean;

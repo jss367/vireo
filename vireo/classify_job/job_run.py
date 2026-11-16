@@ -67,6 +67,9 @@ class _ClassifyJobRun:
         # The detect phase's photo-id sets for the classify phase. Held here,
         # never on ``job``: the runner publishes the job dict to /api/jobs.
         self.detect_handoff = DetectionHandoff()
+        # Person/vehicle regions ``keep_recognized_candidates`` could not
+        # read or score; reported with the classify pass's failures.
+        self.unread_candidates = 0
 
     def _progress(self, current: int, total: int, current_file: str, phase: str, **extra: object) -> None:
         self.runner.push_event(
@@ -1004,6 +1007,50 @@ class _ClassifyJobRun:
                 known_classifier_runtimes = set()
         return known_classifier_runtimes
 
+    def keep_recognized_candidates(self) -> None:
+        """Ask the classifier about person/vehicle regions the detect phase set aside.
+
+        ``detect_handoff.non_animal_ids`` holds the photos whose only
+        confident boxes are people or vehicles. MegaDetector gives some
+        animals those labels, so the classifier examines each photo's
+        strongest such region once (``classify_job.candidate_subjects``).
+        A photo whose region is kept in the catalog, by this run or an
+        earlier one, moves into ``detection_map`` with that region as its
+        classifier candidate; the rest stay skipped.
+        """
+        skipped = self.detect_handoff.non_animal_ids
+        if not skipped or self.runner.is_cancelled(self.job["id"]):
+            return
+        import config as cfg
+        from classify_job.candidate_subjects import examine_candidates, kept_regions
+        from classify_job.classify_pass import _prepare_image
+
+        min_conf = config_value(
+            self.db.get_effective_config(cfg.load()), "detector_confidence",
+        )
+        outcome = examine_candidates(
+            self.db,
+            [p for p in self.photos if p["id"] in skipped],
+            ClassifierModel(
+                clf=self.clf, model_type=self.model_type,
+                model_name=self.model_name, labels_fingerprint=self.fp,
+            ),
+            min_conf=min_conf,
+            prepare_crop=lambda photo, region: _prepare_image(
+                photo, self.folders, region, self.vireo_dir,
+            )[0],
+            should_stop=lambda: self.runner.is_cancelled(self.job["id"]),
+            recheck=bool(self.params.reclassify),
+        )
+        # A region that could not be read or scored was not examined; the
+        # classify pass skips its photo, so count it here or nothing would.
+        self.unread_candidates = outcome.unread
+        for photo_id, regions in kept_regions(self.db, skipped).items():
+            confident = [r for r in regions if (r["confidence"] or 0) >= min_conf]
+            if confident:
+                self.detection_map[photo_id] = confident
+                skipped.discard(photo_id)
+
     # -- Phases 6-7: classification and storage ------------------------
 
     def classify_photos(self) -> None:
@@ -1060,9 +1107,9 @@ class _ClassifyJobRun:
                 non_animal_ids=self.detect_handoff.non_animal_ids,
             )
         self.raw_results = raw_results
-        self.failed = failed
+        self.failed = failed + self.unread_candidates
         self.skipped_existing = skipped_existing
-        parts = _classify_summary_parts(raw_results, skipped_existing, failed)
+        parts = _classify_summary_parts(raw_results, skipped_existing, self.failed)
         cancelled_mid_classify = (
             runner.is_cancelled(job["id"])
             or bool(job.get("_classify_cancelled"))

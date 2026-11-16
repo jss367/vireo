@@ -2005,9 +2005,11 @@ def _inspector_regions(db: Database, photo_id: int, dets: list[Row], predictions
         top.setdefault(pred["detection_id"], pred)
     choice = db.subjects.choice(photo_id)
     chosen_id = choice["detection_id"] if choice else None
+    kept = db.candidate_subjects.evidence(det["id"] for det in dets)
     regions = []
     for number, det in enumerate(dets, start=1):
         best = top.get(det["id"])
+        check = kept.get(det["id"])
         role, species = roles.get(det["id"], ("unclassified", None))
         regions.append({
             "number": number,
@@ -2015,6 +2017,9 @@ def _inspector_regions(db: Database, photo_id: int, dets: list[Row], predictions
             "box": {"x": det["box_x"], "y": det["box_y"], "w": det["box_w"], "h": det["box_h"]},
             "detector_model": det["detector_model"],
             "detector_confidence": det["detector_confidence"],
+            # The detector's own label for a person/vehicle region kept as
+            # an animal subject; None for a region it labeled animal.
+            "detector_category": check["detector_category"] if check and check["promoted"] else None,
             "is_subject": number == 1,
             "chosen": det["id"] == chosen_id,
             "spans_frame": subject_spans_frame({"box_w": det["box_w"], "box_h": det["box_h"]}),
