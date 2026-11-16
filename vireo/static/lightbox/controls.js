@@ -219,7 +219,10 @@ function photoDestinationMenuItems(pid) {
       showFetchFallback: true,
     }));
   }
-  if (!lbState.readOnly && typeof buildSpeciesRepresentativeMenuItems === 'function') {
+  // Highlights provides its own folder-aware representative action. The
+  // shared menu action makes a global choice, so omit it on that page.
+  if (!lbState.readOnly && !Vireo.pageHook('updateHighlightsLightboxControls')
+      && typeof buildSpeciesRepresentativeMenuItems === 'function') {
     items = items.concat(buildSpeciesRepresentativeMenuItems([pid], {
       photoById: _lbPhotoDataByPhoto,
     }));

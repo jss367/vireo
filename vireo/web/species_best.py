@@ -39,7 +39,7 @@ def _valid_photo_id(value: object) -> TypeGuard[int]:
     return isinstance(value, int) and not isinstance(value, bool) and 0 < value < 2**63
 
 
-def _scope_from(
+def scope_from(
     db: Database, values: Mapping[str, object], *, json_error: JsonError,
 ) -> PhotoScope | ErrorResponse:
     """The scope named by ``folder_id`` / ``collection_id`` / ``rules``, or
@@ -114,7 +114,7 @@ def create_species_best_blueprint(get_db: GetDb, json_error: JsonError) -> Bluep
     @blueprint.route("/api/species-best")
     def api_species_best() -> ResponseReturnValue:
         db = get_db()
-        scope = _scope_from(db, request.args, json_error=json_error)
+        scope = scope_from(db, request.args, json_error=json_error)
         if not isinstance(scope, PhotoScope):
             return scope
         species = (request.args.get("species") or "").strip() or None
@@ -153,7 +153,7 @@ def create_species_best_blueprint(get_db: GetDb, json_error: JsonError) -> Bluep
         provenance, error = flag_provenance(body)
         if provenance is None:
             return json_error(error or "invalid source or reason", 400)
-        scope = _scope_from(db, body, json_error=json_error)
+        scope = scope_from(db, body, json_error=json_error)
         if not isinstance(scope, PhotoScope):
             return scope
         if over is not None and not scope.is_everything:

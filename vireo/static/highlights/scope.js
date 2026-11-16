@@ -15,6 +15,24 @@ export function formatPercent(v) {
   return v == null ? '' : Math.round(Number(v) * 100) + '%';
 }
 
+// The folder the page is scoped to, null when it shows every folder.
+export function selectedFolderId() {
+  var value = /** @type {HTMLSelectElement} */ (document.getElementById('folderSelect')).value;
+  if (!value || value === WORKSPACE_SCOPE) return null;
+  var id = parseInt(value, 10);
+  return isNaN(id) ? null : id;
+}
+
+// What a representative click just claimed: how many other representatives
+// of the species the photo was chosen over, and within what.
+/** @param {number} overCount @param {boolean} inFolder */
+export function representativeToast(overCount, inFolder) {
+  var where = inFolder ? ' in this folder' : '';
+  if (!overCount) return 'Representative set' + (inFolder ? ' for this folder' : '');
+  return 'Representative set, chosen over ' + overCount + ' other representative'
+    + (overCount === 1 ? '' : 's') + where;
+}
+
 export function requestScopeParams() {
   var params = new URLSearchParams();
   var folderSelect = /** @type {HTMLSelectElement} */ (document.getElementById('folderSelect'));

@@ -29,9 +29,16 @@ interface HighlightsBucket extends HighlightsSection {
   species: string; highlight_count?: number; is_accepted?: boolean; avg_confidence?: number | null; certainty?: string;
   /** Photos in the bucket whose prediction is a whole-frame guess; `certainty` is `whole_frame` when that is all of them. */
   whole_frame_count?: number;
+  /** Why the first photo leads the row; see `highlights_payload.best_decision`. */
+  best_decision?: HighlightsBestDecision | null;
+}
+interface HighlightsBestDecision {
+  kind: 'chosen' | 'tie' | 'highlight' | 'pick' | 'score' | 'unanalyzed';
+  photo_id: number; contender_ids: number[]; tied_photo_ids: number[];
+  source: string | null; reason: string | null; chosen_at: string | null;
 }
 /** A page of one bucket from /api/highlights/bucket. */
-interface HighlightsBucketPage extends HighlightsSection {loaded_count: number; has_more: boolean}
+interface HighlightsBucketPage extends HighlightsSection {loaded_count: number; has_more: boolean; best_decision?: HighlightsBestDecision | null}
 interface HighlightsData {
   buckets?: HighlightsBucket[]; unidentified?: HighlightsSection | null;
   folders: {id: number; name: string; path?: string; photo_count?: number}[];

@@ -69,6 +69,10 @@ export function applyBucketOrderingKeysFromPage(bucket, page) {
     }
     bucket.best_score = best;
   }
+  // Why the first photo leads belongs to the order it was computed with.
+  if (page && Object.prototype.hasOwnProperty.call(page, 'best_decision')) {
+    /** @type {HighlightsBucket} */ (bucket).best_decision = page.best_decision;
+  }
   if (page && Object.prototype.hasOwnProperty.call(page, 'best_timestamp')) {
     bucket.best_timestamp = page.best_timestamp;
   } else {

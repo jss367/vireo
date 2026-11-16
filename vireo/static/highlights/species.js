@@ -6,6 +6,7 @@ import { safeFetch, showToast } from './shared.js';
 import { updateHighlightsLightboxControls } from './lightbox.js';
 import { loadHighlights } from './loading.js';
 import { loadMoreBucket } from './render.js';
+import { representativeToast, selectedFolderId } from './scope.js';
 import { state } from './state.js';
 
 /** @param {string | null} species @param {boolean} isUnidentified @returns {Promise<HighlightsPhoto[]>} */
@@ -176,15 +177,24 @@ export async function setSpeciesRepresentative(species, photoId, button) {
   if (!species || !photoId) return;
   if (button) button.disabled = true;
   try {
-    await safeFetch('/api/photo-preferences', {
+    // The choice claims what the page shows: with one folder selected, the
+    // photo is chosen over the other representatives in that folder only, so
+    // it does not outrank another trip's representative the user never saw
+    // beside it. With every folder shown it is chosen over all of them.
+    /** @type {{purpose: string, species: string, photo_id: number, folder_id?: number}} */
+    var body = { purpose: 'species_representative', species: species, photo_id: photoId };
+    var folderId = selectedFolderId();
+    if (folderId != null) body.folder_id = folderId;
+    /** @type {{over?: number[]}} */
+    var result = await safeFetch('/api/photo-preferences', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ purpose: 'species_representative', species: species, photo_id: photoId }),
+      body: JSON.stringify(body),
     });
     await loadHighlights();
     updateHighlightsLightboxControls(state.activeLightboxPhotoId);
     if (typeof showToast === 'function') {
-      showToast('Species representative set', 'success');
+      showToast(representativeToast(result && result.over ? result.over.length : 0, folderId != null), 'success');
     }
   } finally {
     if (button) button.disabled = false;

@@ -57,6 +57,41 @@ export function bucketBadge(bucket) {
   return '<span class="bucket-badge candidate">Top candidates</span>';
 }
 
+// Why the row's first photo is first, in the server's own words
+// (`best_decision`). It is shown only while that photo still leads the loaded
+// row: a local change (a reject pruned before the reload) leaves the line out
+// instead of describing a photo that is no longer first.
+/** @param {HighlightsBucket} bucket */
+export function bucketDecision(bucket) {
+  var decision = bucket.best_decision;
+  var first = bucket.photos[0];
+  if (!decision || !first || first.id !== decision.photo_id) return '';
+  var kind = decision.kind;
+  var text = '';
+  if (kind === 'chosen') {
+    text = 'First photo: chosen as representative'
+      + (decision.source ? ' by ' + decision.source : '')
+      + (decision.reason ? ' (' + decision.reason + ')' : '');
+  } else if (kind === 'tie') {
+    text = 'First photo: the newest of ' + decision.tied_photo_ids.length
+      + ' representatives here that were never compared. Set the better one as Representative to settle it.';
+  } else if (kind === 'highlight') {
+    text = 'First photo: your top-ranked highlight';
+  } else if (kind === 'pick') {
+    text = 'First photo: a pick, ranked by Vireo\'s score among picks';
+  } else if (kind === 'score') {
+    // "here" because apply_highlight_preferences emits `score` when no
+    // chosen photo is visible in this bucket's scope; the species may still
+    // have a representative outside the selected folder or the current
+    // filters (see `has_species_representative`).
+    text = 'First photo: ranked by Vireo\'s score; nobody has chosen one here';
+  } else if (kind === 'unanalyzed') {
+    text = 'First photo: not analyzed yet, so in capture order';
+  }
+  if (!text) return '';
+  return '<div class="bucket-decision ' + escapeAttr(kind) + '">' + escapeAttr(text) + '</div>';
+}
+
 /** @param {HighlightsBucket} bucket */
 export function renderBucket(bucket) {
   var perRow = parseInt(/** @type {HTMLInputElement} */ (document.getElementById('perRowSlider')).value);
@@ -94,7 +129,7 @@ export function renderBucket(bucket) {
   return '<section class="bucket">'
     + '<div class="bucket-header">'
     + '<div class="bucket-heading"><div class="bucket-title">' + escapeAttr(bucket.species) + badge + '</div>'
-    + '<div class="bucket-meta">' + meta + '</div></div>'
+    + '<div class="bucket-meta">' + meta + '</div>' + bucketDecision(bucket) + '</div>'
     + actions
     + '</div>'
     + '<div class="bucket-strip">' + renderStripCards(visible) + '</div>'
