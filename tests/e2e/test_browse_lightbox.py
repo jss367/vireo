@@ -45,7 +45,7 @@ def test_browse_lightbox_arrows_navigate(live_server, page):
     """
     url = live_server["url"]
     page.route(
-        "**/photos/*/full",
+        "**/photos/*/full*",
         lambda route: route.fulfill(
             body=base64.b64decode(_PNG_1X1), content_type="image/png"
         ),
@@ -89,6 +89,46 @@ def test_browse_lightbox_arrows_navigate(live_server, page):
     expect(keywords.locator(".lightbox-keyword")).to_have_text("Red-tailed Hawk")
 
 
+def test_browse_lightbox_full_request_carries_render_fingerprint(live_server, page):
+    """The lightbox's /full request must carry an ``er`` fingerprint.
+
+    ``serve_full`` answers ``Cache-Control: public, max-age=86400`` like
+    thumbnails do, so a browser holding a day-old copy of a bare URL will
+    serve the pre-edit pixels until that copy expires. The other mocks match
+    `**/photos/*/full*`, which accepts a bare ``/full`` URL too, so a
+    regression that dropped ``vireoRenderedUrl`` from ``_lbSrcUrl`` would
+    leave every other lightbox test green while users again saw stale
+    full-size images.
+    """
+    current_id = live_server["data"]["photos"][0]
+    full_requests = []
+
+    def serve_full(route):
+        full_requests.append(route.request.url)
+        route.fulfill(
+            body=base64.b64decode(_PNG_1X1), content_type="image/png"
+        )
+
+    page.route("**/photos/*/full*", serve_full)
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.dblclick()
+    page.wait_for_function(
+        "photoId => vireoLightboxSession.displayedPhotoId() === photoId",
+        arg=current_id,
+    )
+
+    photo_full_requests = [
+        url for url in full_requests if f"/photos/{current_id}/full" in url
+    ]
+    assert photo_full_requests, (
+        f"no /full request for the opened photo: {full_requests!r}"
+    )
+    assert any("er=" in url for url in photo_full_requests), (
+        "lightbox /full request carried no er= fingerprint; a browser with a "
+        f"24h-cached copy would never refetch: {photo_full_requests!r}"
+    )
+
+
 def test_browse_lightbox_autoloads_next_page_at_navigation_boundary(
     live_server, page,
 ):
@@ -110,7 +150,7 @@ def test_browse_lightbox_autoloads_next_page_at_navigation_boundary(
         ),
     )
     page.route(
-        "**/photos/*/full",
+        "**/photos/*/full*",
         lambda route: route.fulfill(
             body=base64.b64decode(_PNG_1X1), content_type="image/png"
         ),
@@ -235,7 +275,7 @@ def test_browse_lightbox_single_photo_window_waits_for_previous_page(
         ),
     )
     page.route(
-        "**/photos/*/full",
+        "**/photos/*/full*",
         lambda route: route.fulfill(
             body=base64.b64decode(_PNG_1X1), content_type="image/png"
         ),
@@ -293,7 +333,7 @@ def test_browse_lightbox_delete_preserves_live_pagination_list(live_server, page
         ),
     )
     page.route(
-        "**/photos/*/full",
+        "**/photos/*/full*",
         lambda route: route.fulfill(
             body=base64.b64decode(_PNG_1X1), content_type="image/png"
         ),
@@ -354,7 +394,7 @@ def test_browse_lightbox_stale_boundary_retry_does_not_advance_reopened_session(
         ),
     )
     page.route(
-        "**/photos/*/full",
+        "**/photos/*/full*",
         lambda route: route.fulfill(
             body=base64.b64decode(_PNG_1X1), content_type="image/png"
         ),
@@ -407,7 +447,7 @@ def test_browse_lightbox_stale_boundary_retry_does_not_advance_reopened_session(
 def test_browse_lightbox_close_selects_current_photo(live_server, page):
     """Closing after lightbox navigation focuses the last-viewed grid photo."""
     page.route(
-        "**/photos/*/full",
+        "**/photos/*/full*",
         lambda route: route.fulfill(
             body=base64.b64decode(_PNG_1X1), content_type="image/png"
         ),
@@ -467,7 +507,7 @@ def test_browse_lightbox_close_during_navigation_returns_to_visible_photo(
             body=base64.b64decode(_PNG_1X1), content_type="image/png"
         )
 
-    page.route("**/photos/*/full", route_full)
+    page.route("**/photos/*/full*", route_full)
     page.goto(f"{live_server['url']}/browse")
 
     cards = page.locator(".grid-card")
@@ -517,7 +557,7 @@ def test_browse_lightbox_delete_only_photo_does_not_reselect_it(
     be updated before the lightbox transitions.
     """
     page.route(
-        "**/photos/*/full",
+        "**/photos/*/full*",
         lambda route: route.fulfill(
             body=base64.b64decode(_PNG_1X1), content_type="image/png"
         ),
@@ -586,7 +626,7 @@ def test_browse_lightbox_close_skips_reload_when_photo_unchanged(
     #1486. Skip the reload when `selectedPhotoId` already matches.
     """
     page.route(
-        "**/photos/*/full",
+        "**/photos/*/full*",
         lambda route: route.fulfill(
             body=base64.b64decode(_PNG_1X1), content_type="image/png"
         ),
@@ -748,7 +788,7 @@ def test_user_pan_zoom_cancels_pending_eye_track(live_server, page):
     armed eye alignment, otherwise vireoLightboxViewport.applyPendingEye later stomps
     the user's viewport with the previous photo's eye anchor."""
     page.route(
-        "**/photos/*/full",
+        "**/photos/*/full*",
         lambda route: route.fulfill(
             body=base64.b64decode(_PNG_1X1), content_type="image/png"
         ),
@@ -785,7 +825,7 @@ def test_user_pan_zoom_cancels_pending_eye_track(live_server, page):
 def test_browse_lightbox_same_photo_reopen_does_not_lock_controls(live_server, page):
     """Reopening the visible photo must not wait for a same-src load event."""
     page.route(
-        "**/photos/*/full",
+        "**/photos/*/full*",
         lambda route: route.fulfill(
             body=base64.b64decode(_PNG_1X1), content_type="image/png"
         ),
@@ -1439,7 +1479,7 @@ def test_browse_lightbox_reserves_space_for_bottom_controls(live_server, page):
         'viewBox="0 0 1600 1200"><rect width="1600" height="1200" fill="#274"/></svg>'
     )
     page.route(
-        "**/photos/*/full",
+        "**/photos/*/full*",
         lambda route: route.fulfill(body=svg, content_type="image/svg+xml"),
     )
     # At this width the action row wraps below the filename and keywords,
@@ -1515,7 +1555,7 @@ def test_browse_lightbox_conditional_controls_keep_fitted_photo_size_stable(
         'viewBox="0 0 1600 1200"><rect width="1600" height="1200" fill="#274"/></svg>'
     )
     page.route(
-        "**/photos/*/full",
+        "**/photos/*/full*",
         lambda route: route.fulfill(body=svg, content_type="image/svg+xml"),
     )
     page.set_viewport_size({"width": 1000, "height": 800})
@@ -2592,7 +2632,7 @@ def test_browse_lightbox_preloads_current_original_after_preview_settles(
         route.fulfill(body=original_svg, content_type="image/svg+xml")
 
     page.route(
-        "**/photos/*/full",
+        "**/photos/*/full*",
         lambda route: route.fulfill(body=full_svg, content_type="image/svg+xml"),
     )
     page.route("**/photos/*/original*", serve_original)
@@ -2642,13 +2682,17 @@ def test_browse_lightbox_waits_for_fit_image_before_preloading_original(
     original_requests = []
 
     def hold_full(route):
-        held_full["route"] = route
+        if f"/photos/{current_id}/full" in route.request.url:
+            held_full["route"] = route
+        else:
+            # Neighbor warmups must finish before the current original starts.
+            route.fulfill(body=full_svg, content_type="image/svg+xml")
 
     def serve_original(route):
         original_requests.append(route.request.url)
         route.fulfill(body=original_svg, content_type="image/svg+xml")
 
-    page.route("**/photos/*/full", hold_full)
+    page.route("**/photos/*/full*", hold_full)
     page.route("**/photos/*/original*", serve_original)
     page.goto(f"{live_server['url']}/browse")
     page.locator(".grid-card").first.dblclick()
@@ -2686,7 +2730,7 @@ def test_browse_lightbox_skips_original_when_full_covers_one_to_one(
     original_requests = []
 
     page.route(
-        "**/photos/*/full",
+        "**/photos/*/full*",
         lambda route: route.fulfill(body=svg, content_type="image/svg+xml"),
     )
 
@@ -2727,7 +2771,7 @@ def test_browse_lightbox_cancels_original_warmup_when_zoom_leaves_fit(
     original_requests = []
 
     page.route(
-        "**/photos/*/full",
+        "**/photos/*/full*",
         lambda route: route.fulfill(body=full_svg, content_type="image/svg+xml"),
     )
     page.route(
@@ -2780,7 +2824,7 @@ def test_browse_lightbox_does_not_preload_when_full_already_uses_original(
     original_requests = []
 
     page.route(
-        "**/photos/*/full",
+        "**/photos/*/full*",
         lambda route: route.fulfill(body=svg, content_type="image/svg+xml"),
     )
 
@@ -2809,7 +2853,7 @@ def test_browse_lightbox_carries_current_viewport_to_previously_seen_photo(
         '<circle cx="1000" cy="1400" r="180" fill="#fff"/></svg>'
     )
     page.route(
-        "**/photos/*/full",
+        "**/photos/*/full*",
         lambda route: route.fulfill(body=svg, content_type="image/svg+xml"),
     )
     page.route(
@@ -2910,7 +2954,7 @@ def test_browse_lightbox_holds_off_center_transform_until_next_photo_is_ready(
         'viewBox="0 0 3000 3000"><rect width="3000" height="3000" fill="#426"/></svg>'
     )
     page.route(
-        "**/photos/*/full",
+        "**/photos/*/full*",
         lambda route: route.fulfill(body=first_svg, content_type="image/svg+xml"),
     )
 
@@ -2919,6 +2963,8 @@ def test_browse_lightbox_holds_off_center_transform_until_next_photo_is_ready(
     page.goto(f"{url}/browse")
     page.locator(".grid-card").nth(1).wait_for(state="visible")
     next_id = page.evaluate("browseState.photos[1].id")
+    # Keep the incoming preview cold so navigation waits for the held original.
+    page.route(f"**/photos/{next_id}/full*", lambda route: route.abort())
     held_original = {}
 
     def hold_next_original(route):
@@ -3116,7 +3162,7 @@ def test_browse_lightbox_resize_deferred_during_transition_reapplies_after_load(
         'viewBox="0 0 3000 3000"><rect width="3000" height="3000" fill="#426"/></svg>'
     )
     page.route(
-        "**/photos/*/full",
+        "**/photos/*/full*",
         lambda route: route.fulfill(body=first_svg, content_type="image/svg+xml"),
     )
 
@@ -3125,6 +3171,8 @@ def test_browse_lightbox_resize_deferred_during_transition_reapplies_after_load(
     page.goto(f"{url}/browse")
     page.locator(".grid-card").nth(1).wait_for(state="visible")
     next_id = page.evaluate("browseState.photos[1].id")
+    # Keep the incoming preview cold so navigation waits for the held original.
+    page.route(f"**/photos/{next_id}/full*", lambda route: route.abort())
     held_original = {}
 
     def hold_next_original(route):
@@ -3254,7 +3302,7 @@ def test_browse_lightbox_mid_transition_save_keeps_navigation_handoff(
         'viewBox="0 0 3000 3000"><rect width="3000" height="3000" fill="#426"/></svg>'
     )
     page.route(
-        "**/photos/*/full",
+        "**/photos/*/full*",
         lambda route: route.fulfill(body=first_svg, content_type="image/svg+xml"),
     )
 
@@ -3263,6 +3311,8 @@ def test_browse_lightbox_mid_transition_save_keeps_navigation_handoff(
     page.goto(f"{url}/browse")
     page.locator(".grid-card").nth(1).wait_for(state="visible")
     next_id = page.evaluate("browseState.photos[1].id")
+    # Keep the incoming preview cold so navigation waits for the held original.
+    page.route(f"**/photos/{next_id}/full*", lambda route: route.abort())
     held_original = {}
 
     def hold_next_original(route):
@@ -3396,7 +3446,7 @@ def test_browse_lightbox_clears_transition_state_when_incoming_image_errors(
             return
         route.fulfill(body=first_svg, content_type="image/svg+xml")
 
-    page.route("**/photos/*/full", route_full)
+    page.route("**/photos/*/full*", route_full)
 
     first_card = page.locator(".grid-card").first
     first_card.wait_for(state="visible")
@@ -3471,7 +3521,7 @@ def test_browse_lightbox_defers_overlays_while_visual_transition_pending(
         'viewBox="0 0 3000 3000"><rect width="3000" height="3000" fill="#426"/></svg>'
     )
     page.route(
-        "**/photos/*/full",
+        "**/photos/*/full*",
         lambda route: route.fulfill(body=first_svg, content_type="image/svg+xml"),
     )
 
@@ -3480,6 +3530,8 @@ def test_browse_lightbox_defers_overlays_while_visual_transition_pending(
     page.goto(f"{url}/browse")
     page.locator(".grid-card").nth(1).wait_for(state="visible")
     next_id = page.evaluate("browseState.photos[1].id")
+    # Keep the incoming preview cold so navigation waits for the held original.
+    page.route(f"**/photos/{next_id}/full*", lambda route: route.abort())
 
     held_original = {}
 
@@ -3626,7 +3678,7 @@ def test_browse_lightbox_pending_high_zoom_survives_native_zoom_race(live_server
         '<circle cx="1000" cy="1400" r="180" fill="#fff"/></svg>'
     )
     page.route(
-        "**/photos/*/full",
+        "**/photos/*/full*",
         lambda route: route.fulfill(body=svg, content_type="image/svg+xml"),
     )
     page.route(
@@ -3724,7 +3776,7 @@ def test_browse_lightbox_manual_zoom_cancels_pending_restore(live_server, page):
         '<circle cx="1000" cy="1400" r="180" fill="#fff"/></svg>'
     )
     page.route(
-        "**/photos/*/full",
+        "**/photos/*/full*",
         lambda route: route.fulfill(body=svg, content_type="image/svg+xml"),
     )
     page.route(
@@ -3810,7 +3862,7 @@ def test_browse_lightbox_one_to_one_nav_falls_back_when_original_fails(live_serv
     """1:1 arrow navigation falls back to /full when the original is unavailable."""
     image_body = base64.b64decode(_PNG_1X1)
     page.route("**/photos/*/original*", lambda route: route.fulfill(status=503, body="missing"))
-    page.route("**/photos/*/full", lambda route: route.fulfill(body=image_body, content_type="image/png"))
+    page.route("**/photos/*/full*", lambda route: route.fulfill(body=image_body, content_type="image/png"))
 
     url = live_server["url"]
     page.goto(f"{url}/browse")
@@ -3857,11 +3909,11 @@ def test_browse_lightbox_restored_pending_one_to_one_waits_for_fallback_after_in
         'viewBox="0 0 2560 1600"><rect width="2560" height="1600" fill="#642"/></svg>'
     )
     page.route(
-        "**/photos/*/full",
+        "**/photos/*/full*",
         lambda route: route.fulfill(body=full_svg, content_type="image/svg+xml"),
     )
     held_initial = {}
-    page.route("**/photos/1/full", lambda route: held_initial.update(full=route))
+    page.route("**/photos/1/full*", lambda route: held_initial.update(full=route))
     page.route("**/api/photos/1", lambda route: held_initial.update(metadata=route))
 
     def release_metadata():
@@ -3886,8 +3938,8 @@ def test_browse_lightbox_restored_pending_one_to_one_waits_for_fallback_after_in
         else:
             held_fallback["route"] = route
 
-    page.route("**/photos/*/preview?size=2560", hold_fallback)
-    page.route("**/photos/*/preview?size=3840", hold_fallback)
+    page.route("**/photos/*/preview?size=2560*", hold_fallback)
+    page.route("**/photos/*/preview?size=3840*", hold_fallback)
 
     url = live_server["url"]
     page.set_viewport_size({"width": 900, "height": 700})
@@ -3990,7 +4042,7 @@ def test_browse_lightbox_one_to_one_uses_device_pixels_and_natural_layout(live_s
         '<path d="M0 0L4000 2000M4000 0L0 2000" stroke="#fff" stroke-width="12"/></svg>'
     )
     page.route(
-        "**/photos/*/full",
+        "**/photos/*/full*",
         lambda route: route.fulfill(body=svg, content_type="image/svg+xml"),
     )
     page.route(
@@ -4092,7 +4144,7 @@ def test_browse_lightbox_defers_one_to_one_until_original_size_known(live_server
         'viewBox="0 0 4000 2000"><rect width="4000" height="2000" fill="#3a7"/></svg>'
     )
     page.route(
-        "**/photos/*/full",
+        "**/photos/*/full*",
         lambda route: route.fulfill(body=full_svg, content_type="image/svg+xml"),
     )
     held_original = {}
@@ -4210,7 +4262,7 @@ def test_browse_lightbox_pending_one_to_one_guard_schedules_sharper_source(
         'viewBox="0 0 4000 2000"><rect width="4000" height="2000" fill="#3a7"/></svg>'
     )
     page.route(
-        "**/photos/*/full",
+        "**/photos/*/full*",
         lambda route: route.fulfill(body=full_svg, content_type="image/svg+xml"),
     )
     held_original = {}
@@ -4313,7 +4365,7 @@ def test_browse_lightbox_waits_for_original_before_one_to_one_snap(live_server, 
         'viewBox="0 0 4000 2000"><rect width="4000" height="2000" fill="#3a7"/></svg>'
     )
     page.route(
-        "**/photos/*/full",
+        "**/photos/*/full*",
         lambda route: route.fulfill(body=full_svg, content_type="image/svg+xml"),
     )
     held_original = {}
@@ -4413,7 +4465,7 @@ def test_browse_lightbox_resize_preserves_deferred_one_to_one(live_server, page)
         'viewBox="0 0 4000 2000"><rect width="4000" height="2000" fill="#3a7"/></svg>'
     )
     page.route(
-        "**/photos/*/full",
+        "**/photos/*/full*",
         lambda route: route.fulfill(body=full_svg, content_type="image/svg+xml"),
     )
     held_original = {}
@@ -4542,7 +4594,7 @@ def test_browse_lightbox_does_not_retry_original_after_unavailable(live_server, 
         'viewBox="0 0 3840 1920"><rect width="3840" height="1920" fill="#642"/></svg>'
     )
     page.route(
-        "**/photos/*/full",
+        "**/photos/*/full*",
         lambda route: route.fulfill(body=full_svg, content_type="image/svg+xml"),
     )
     page.route(
@@ -4550,7 +4602,7 @@ def test_browse_lightbox_does_not_retry_original_after_unavailable(live_server, 
         lambda route: route.abort(),
     )
     page.route(
-        "**/photos/*/preview?size=3840",
+        "**/photos/*/preview?size=3840*",
         lambda route: route.fulfill(body=fallback_svg, content_type="image/svg+xml"),
     )
 
@@ -4618,7 +4670,7 @@ def test_browse_lightbox_waits_for_fallback_tier_after_original_fails(live_serve
         'viewBox="0 0 3840 1920"><rect width="3840" height="1920" fill="#642"/></svg>'
     )
     page.route(
-        "**/photos/*/full",
+        "**/photos/*/full*",
         lambda route: route.fulfill(body=full_svg, content_type="image/svg+xml"),
     )
     page.route("**/photos/*/original*", lambda route: route.abort())
@@ -4632,7 +4684,7 @@ def test_browse_lightbox_waits_for_fallback_tier_after_original_fails(live_serve
         else:
             route.fulfill(body=fallback_svg, content_type="image/svg+xml")
 
-    page.route("**/photos/*/preview?size=3840", hold_3840)
+    page.route("**/photos/*/preview?size=3840*", hold_3840)
 
     url = live_server["url"]
     page.set_viewport_size({"width": 1000, "height": 800})
@@ -4721,7 +4773,7 @@ def test_browse_lightbox_ignores_stale_original_failure_after_nav(live_server, p
     held_original = {}
 
     page.route(
-        "**/photos/*/full",
+        "**/photos/*/full*",
         lambda route: route.fulfill(body=full_svg, content_type="image/svg+xml"),
     )
 
@@ -4790,7 +4842,7 @@ def test_browse_lightbox_ignores_stale_original_failure_after_nav(live_server, p
 def test_browse_e_f_g_keyboard_modes(live_server, page):
     """Browse grid shortcuts open the image, request fullscreen, and return to grid."""
     page.route(
-        "**/photos/*/full",
+        "**/photos/*/full*",
         lambda route: route.fulfill(
             body=base64.b64decode(_PNG_1X1), content_type="image/png"
         ),
@@ -4933,7 +4985,7 @@ def test_browse_lightbox_deferred_one_to_one_survives_original_failure_to_fallba
         'viewBox="0 0 2560 1600"><rect width="2560" height="1600" fill="#642"/></svg>'
     )
     page.route(
-        "**/photos/*/full",
+        "**/photos/*/full*",
         lambda route: route.fulfill(body=full_svg, content_type="image/svg+xml"),
     )
     page.route("**/photos/*/original*", lambda route: route.abort())
@@ -4948,11 +5000,11 @@ def test_browse_lightbox_deferred_one_to_one_survives_original_failure_to_fallba
             route.fulfill(body=fallback_svg, content_type="image/svg+xml")
 
     page.route(
-        "**/photos/*/preview?size=2560",
+        "**/photos/*/preview?size=2560*",
         hold_fallback,
     )
     page.route(
-        "**/photos/*/preview?size=3840",
+        "**/photos/*/preview?size=3840*",
         hold_fallback,
     )
 
@@ -5058,7 +5110,7 @@ def test_browse_lightbox_resize_preserves_post_original_failure_fallback(
         'viewBox="0 0 2560 1600"><rect width="2560" height="1600" fill="#642"/></svg>'
     )
     page.route(
-        "**/photos/*/full",
+        "**/photos/*/full*",
         lambda route: route.fulfill(body=full_svg, content_type="image/svg+xml"),
     )
     page.route("**/photos/*/original*", lambda route: route.abort())
@@ -5073,8 +5125,8 @@ def test_browse_lightbox_resize_preserves_post_original_failure_fallback(
         else:
             held_fallback["route"] = route
 
-    page.route("**/photos/*/preview?size=2560", hold_fallback)
-    page.route("**/photos/*/preview?size=3840", hold_fallback)
+    page.route("**/photos/*/preview?size=2560*", hold_fallback)
+    page.route("**/photos/*/preview?size=3840*", hold_fallback)
 
     url = live_server["url"]
     page.set_viewport_size({"width": 1000, "height": 800})
