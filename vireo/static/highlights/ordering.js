@@ -113,34 +113,42 @@ export async function refetchBucketFromZero(target, isUnidentified) {
   // clobber a newer response (Pick → Unpick before the first GET resolves).
   var seq = (state.bucketRefetchSeq[speciesKey] || 0) + 1;
   state.bucketRefetchSeq[speciesKey] = seq;
-  /** @type {HighlightsPhoto[]} */
-  var allPhotos = [];
-  /** @type {HighlightsBucketPage | null} */
-  var lastPage = null;
-  for (var offset = 0; offset < targetLen; offset += 500) {
-    var params = requestScopeParams();
-    appendHighlightFilterParams(params);
-    // appendHighlightFilterParams may set 'species' for the species-search
-    // filter; force it back to the target species/unidentified sentinel so
-    // the endpoint returns the right bucket, not whatever the search box holds.
-    params.set('species', speciesKey);
-    params.set('offset', String(offset));
-    params.set('limit', String(Math.min(500, targetLen - offset)));
+  // Count this refetch as in flight so loadMoreBucket can bail when a reorder
+  // is already pending: seq alone doesn't tell it (seq is bumped at the start,
+  // so pagination started mid-refetch captures the already-bumped value).
+  state.bucketRefetchInFlight[speciesKey] = (state.bucketRefetchInFlight[speciesKey] || 0) + 1;
+  try {
+    /** @type {HighlightsPhoto[]} */
+    var allPhotos = [];
     /** @type {HighlightsBucketPage | null} */
-    var page = await safeFetch('/api/highlights/bucket?' + params);
+    var lastPage = null;
+    for (var offset = 0; offset < targetLen; offset += 500) {
+      var params = requestScopeParams();
+      appendHighlightFilterParams(params);
+      // appendHighlightFilterParams may set 'species' for the species-search
+      // filter; force it back to the target species/unidentified sentinel so
+      // the endpoint returns the right bucket, not whatever the search box holds.
+      params.set('species', speciesKey);
+      params.set('offset', String(offset));
+      params.set('limit', String(Math.min(500, targetLen - offset)));
+      /** @type {HighlightsBucketPage | null} */
+      var page = await safeFetch('/api/highlights/bucket?' + params);
+      if (state.bucketRefetchSeq[speciesKey] !== seq) return false;
+      if (!page || !Array.isArray(page.photos)) return true;
+      lastPage = page;
+      if (page.photos.length === 0) break;
+      allPhotos = allPhotos.concat(page.photos);
+      if (!page.has_more) break;
+    }
+    if (!lastPage) return true;
     if (state.bucketRefetchSeq[speciesKey] !== seq) return false;
-    if (!page || !Array.isArray(page.photos)) return true;
-    lastPage = page;
-    if (page.photos.length === 0) break;
-    allPhotos = allPhotos.concat(page.photos);
-    if (!page.has_more) break;
+    target.photos = allPhotos;
+    target.loaded_count = allPhotos.length;
+    target.has_more = !!lastPage.has_more;
+    if (typeof lastPage.photo_count === 'number') target.photo_count = lastPage.photo_count;
+    applyBucketOrderingKeysFromPage(target, lastPage);
+    return true;
+  } finally {
+    state.bucketRefetchInFlight[speciesKey] = (state.bucketRefetchInFlight[speciesKey] || 0) - 1;
   }
-  if (!lastPage) return true;
-  if (state.bucketRefetchSeq[speciesKey] !== seq) return false;
-  target.photos = allPhotos;
-  target.loaded_count = allPhotos.length;
-  target.has_more = !!lastPage.has_more;
-  if (typeof lastPage.photo_count === 'number') target.photo_count = lastPage.photo_count;
-  applyBucketOrderingKeysFromPage(target, lastPage);
-  return true;
 }

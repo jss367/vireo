@@ -174,6 +174,12 @@ export async function loadMoreBucket(species, isUnidentified) {
   var loadSeq = state.highlightsLoadSeq;
   var offset = target.photos.length;
   var speciesKey = isUnidentified ? '__unidentified__' : String(species);
+  // A refetch already in flight will overwrite target.photos with a reorder;
+  // starting pagination against the old prefix would combine it with the new
+  // backend tail. Bail now rather than wait for the response: the seq check
+  // below cannot catch this race because seq is bumped at the refetch's start,
+  // so pagination captures the already-bumped value.
+  if ((state.bucketRefetchInFlight[speciesKey] || 0) > 0) return false;
   var refetchSeq = state.bucketRefetchSeq[speciesKey] || 0;
   params.set('species', speciesKey);
   params.set('offset', String(offset));

@@ -7,7 +7,7 @@ import {moduleAsScript} from './module-source.mjs';
 function harness(safeFetch, isUnidentified = false) {
   const bucket = {species: 'Hawk', photos: [{id: 1}], has_more: true};
   const data = {buckets: isUnidentified ? [] : [bucket], unidentified: isUnidentified ? bucket : null};
-  const state = {currentData: data, loadedHighlightsScope: 'folder_id=1', highlightsLoadSeq: 1, bucketRefetchSeq: {}};
+  const state = {currentData: data, loadedHighlightsScope: 'folder_id=1', highlightsLoadSeq: 1, bucketRefetchSeq: {}, bucketRefetchInFlight: {}};
   let folderId = 1;
   const toasts = [];
   const context = vm.createContext({
@@ -122,4 +122,50 @@ test('refetching a different bucket does not invalidate pagination', async () =>
   state.bucketRefetchSeq.Owl = 1;
   finishPage({photos: [{id: 2}], loaded_count: 2, has_more: false});
   assert.deepEqual(Array.from(await action), [1, 2]);
+});
+
+// A Pick/Unpick that fires refetchBucketFromZero before the user clicks
+// Confirm/Change leaves the refetch in flight when pagination starts. Seq is
+// bumped at the refetch's start, so pagination captures the already-bumped
+// value and the equality check alone would still pass. The bulk action must
+// cancel instead of returning the old client prefix combined with the newly
+// reordered backend tail.
+for (const isUnidentified of [false, true]) {
+  test(`a ${isUnidentified ? 'unidentified' : 'species'} refetch in flight when pagination starts cancels the bulk action`, async () => {
+    const pending = [];
+    const {bucket, toasts, getIds, refetch} = harness(url => new Promise(resolve => {
+      pending.push({params: new URL(url, 'http://localhost').searchParams, resolve});
+    }), isUnidentified);
+    const refresh = refetch();
+    assert.equal(pending.length, 1);
+    assert.equal(pending[0].params.get('offset'), '0');
+    const action = getIds();
+    // Pagination must bail immediately on the in-flight refetch, before
+    // issuing its own /api/highlights/bucket request.
+    assert.equal(pending.length, 1);
+    assert.equal(await action, null);
+    assertToldNothingChanged(toasts);
+    pending[0].resolve({photos: [{id: 2}], loaded_count: 1, has_more: true});
+    assert.equal(await refresh, true);
+    assert.deepEqual(Array.from(bucket.photos, photo => photo.id), [2]);
+  });
+}
+
+test('a settled refetch does not block later pagination', async () => {
+  const pending = [];
+  const {bucket, getIds, refetch} = harness(url => new Promise(resolve => {
+    pending.push({params: new URL(url, 'http://localhost').searchParams, resolve});
+  }));
+  const refresh = refetch();
+  assert.equal(pending.length, 1);
+  // Refetch leaves has_more true so pagination still runs afterward.
+  pending[0].resolve({photos: [{id: 9}], loaded_count: 1, has_more: true});
+  assert.equal(await refresh, true);
+  // Pagination now sees no refetch in flight and proceeds normally.
+  const action = getIds();
+  assert.equal(pending.length, 2);
+  assert.equal(pending[1].params.get('offset'), '1');
+  pending[1].resolve({photos: [{id: 10}], loaded_count: 2, has_more: false});
+  assert.deepEqual(Array.from(await action), [9, 10]);
+  assert.deepEqual(Array.from(bucket.photos, photo => photo.id), [9, 10]);
 });

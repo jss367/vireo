@@ -65,7 +65,11 @@ registers them, and `frontend-module-pages.json` lists the same names.
 - `refetchBucketFromZero` stamps each bucket's refetch in
   `state.bucketRefetchSeq` so a slower Pick refetch cannot overwrite a newer
   Unpick's order; it resolves `false` when superseded so its caller skips the
-  render.
+  render. It also counts itself in `state.bucketRefetchInFlight` while it runs,
+  so `loadMoreBucket` can bail when a reorder is already pending — seq alone is
+  bumped at the refetch's start and a pagination started mid-refetch captures
+  the already-bumped value, so an inflight count is the only signal that
+  distinguishes "no refetch pending" from "refetch in flight".
 
 ## Why the first photo leads
 

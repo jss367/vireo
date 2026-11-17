@@ -40,6 +40,13 @@ export var WORKSPACE_SCOPE = '__workspace__';
  *   leave two /api/highlights/bucket refetches in flight; without a stamp, an
  *   older response can arrive after a newer one and overwrite the fresher
  *   photos/ordering keys.
+ * @property {Record<string, number>} bucketRefetchInFlight Per-bucket count of
+ *   refetchBucketFromZero calls currently in flight. The seq counter alone
+ *   cannot tell loadMoreBucket that a refetch is pending: seq is bumped at the
+ *   start, so a loadMoreBucket started mid-refetch captures the already-bumped
+ *   value and the equality check still passes. The in-flight count lets
+ *   pagination bail when a reorder is already pending, so it never appends a
+ *   newly reordered backend tail to the old client prefix.
  */
 
 /** @type {HighlightsState} */
@@ -61,4 +68,5 @@ export const state = {
   highlightsLoadSeq: 0,
   rejectedAtLoadSeq: {},
   bucketRefetchSeq: {},
+  bucketRefetchInFlight: {},
 };
