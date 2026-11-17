@@ -3569,21 +3569,124 @@ def test_local_import_reports_publication_error_and_keeps_card_unsafe(tmp_path, 
     def unsupported_link(_src, _dst):
         raise OSError(errno.EPERM, "hard links unavailable")
 
-    def unsupported_rename(_src, _dst):
-        raise OSError(errno.ENOSYS, "atomic no-replace rename unavailable")
+    def failing_rename(_src, _dst):
+        raise OSError(errno.EIO, "simulated I/O error while publishing")
 
     monkeypatch.setattr(copy_verify.os, "link", unsupported_link)
-    monkeypatch.setattr(copy_verify, "rename_no_replace", unsupported_rename)
+    monkeypatch.setattr(copy_verify, "rename_no_replace", failing_rename)
     db, _, result = _run_import(tmp_path, ImportParams(
         sources=[str(card)], destination=str(destination),
     ))
     db.close()
 
     assert (result["copied"], result["failed"], result["safe_to_format"]) == (0, 1, False)
-    assert "atomic no-replace rename unavailable" in result["unsafe_files"][0]["reason"]
+    assert "simulated I/O error while publishing" in result["unsafe_files"][0]["reason"]
     assert (card / filename).is_file()
     assert not list(destination.rglob(filename))
     assert not list(destination.rglob(".vireo-import-*.tmp"))
+
+
+def _no_links_or_no_replace_rename(monkeypatch):
+    """Make the destination behave like a macOS SMB share.
+
+    There, ``link`` and ``renamex_np(RENAME_EXCL)`` to a free name both
+    answer ENOTSUP, leaving only the locked check-then-rename.
+    """
+    import errno
+
+    from file_replace import NoReplaceRenameUnsupported
+    from import_job import copy_verify
+
+    def unsupported_link(_src, _dst):
+        raise OSError(errno.ENOTSUP, "hard links unavailable")
+
+    def unsupported_rename(_src, dst):
+        raise NoReplaceRenameUnsupported(errno.ENOTSUP, "no-replace rename unavailable", dst)
+
+    monkeypatch.setattr(copy_verify.os, "link", unsupported_link)
+    monkeypatch.setattr(copy_verify, "rename_no_replace", unsupported_rename)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows renames never overwrite, so it has no locked fallback")
+def test_local_import_publishes_on_a_share_without_links_or_no_replace_rename(tmp_path, monkeypatch):
+    from import_job import ImportParams
+
+    filename = "photo.jpg"
+    card = _make_card(tmp_path, [(filename, datetime(2025, 4, 3))])
+    destination = tmp_path / "archive"
+    _no_links_or_no_replace_rename(monkeypatch)
+
+    db, _, result = _run_import(tmp_path, ImportParams(
+        sources=[str(card)], destination=str(destination),
+    ))
+    db.close()
+
+    assert (result["copied"], result["failed"], result["safe_to_format"]) == (1, 0, True)
+    assert (destination / "2025" / "2025-04-03" / filename).read_bytes() == (card / filename).read_bytes()
+    assert not list(destination.rglob(".vireo-import-*.tmp"))
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows renames never overwrite, so it has no locked fallback")
+def test_locked_fallback_refuses_an_existing_destination(tmp_path, monkeypatch):
+    from import_job import copy_and_hash_verify
+
+    src = tmp_path / "card.jpg"
+    src.write_bytes(b"card bytes")
+    dst = tmp_path / "archive" / "photo.jpg"
+    dst.parent.mkdir()
+    dst.write_bytes(b"already-verified archive bytes")
+    _no_links_or_no_replace_rename(monkeypatch)
+
+    assert copy_and_hash_verify(str(src), str(dst)) == (False, None)
+    with pytest.raises(FileExistsError):
+        copy_and_hash_verify(str(src), str(dst), raise_on_io_error=True)
+
+    assert dst.read_bytes() == b"already-verified archive bytes"
+    assert not list(dst.parent.glob(".vireo-import-*.tmp"))
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows renames never overwrite, so it has no locked fallback")
+def test_locked_fallback_allows_one_concurrent_publisher(tmp_path, monkeypatch):
+    """Two imports publishing the same name hold the folder lock in turn.
+
+    Each publisher waits at a barrier just after its existence check. Without
+    the lock both pass the check together and the second rename overwrites
+    the first verified copy. With it, the second cannot reach the check until
+    the first has renamed, so the first's wait times out and the second then
+    finds the name taken.
+    """
+    import contextlib
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from import_job import copy_verify
+
+    sources = [tmp_path / "first.jpg", tmp_path / "second.jpg"]
+    for source in sources:
+        source.write_bytes(source.name.encode())
+    dst = tmp_path / "archive" / "same.jpg"
+    _no_links_or_no_replace_rename(monkeypatch)
+    after_check = threading.Barrier(2)
+    real_lexists = os.path.lexists
+
+    def lexists_then_wait(path):
+        found = real_lexists(path)
+        if os.fspath(path) == str(dst):
+            with contextlib.suppress(threading.BrokenBarrierError):
+                after_check.wait(timeout=1.0)
+        return found
+
+    monkeypatch.setattr(copy_verify.os.path, "lexists", lexists_then_wait)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first, second = pool.map(
+            lambda source: copy_verify.copy_and_hash_verify(str(source), str(dst)),
+            sources,
+        )
+
+    assert [first[0], second[0]].count(True) == 1
+    winner = sources[0] if first[0] else sources[1]
+    assert dst.read_bytes() == winner.read_bytes()
+    assert not list(dst.parent.glob(".vireo-import-*.tmp"))
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Scratch path plus basename can exceed the legacy Windows path limit")

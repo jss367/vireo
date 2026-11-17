@@ -33,13 +33,27 @@ def replace_file(src, dst):
     raise last_exc
 
 
+class NoReplaceRenameUnsupported(OSError):
+    """The destination filesystem has no atomic no-overwrite rename.
+
+    macOS SMB shares answer ``renamex_np(RENAME_EXCL)`` with ENOTSUP for a
+    free destination name, so a caller that must publish there needs another
+    way to refuse an overwrite.
+    """
+
+
 @cache
 def _process_libc() -> ctypes.CDLL:
     return ctypes.CDLL(None, use_errno=True)
 
 
 def rename_no_replace(src: str, dst: str) -> None:
-    """Atomically rename a file, raising FileExistsError if the name is taken."""
+    """Atomically rename a file, raising FileExistsError if the name is taken.
+
+    Raises :class:`NoReplaceRenameUnsupported` when the platform or the
+    destination filesystem has no such operation. Windows' ``os.rename``
+    already refuses an existing destination, so it never raises that there.
+    """
     if sys.platform == "win32":
         os.rename(src, dst)
         return
@@ -68,7 +82,7 @@ def rename_no_replace(src: str, dst: str) -> None:
         return
     code = ctypes.get_errno()
     if code in {errno.EINVAL, errno.ENOSYS, errno.ENOTSUP, errno.EOPNOTSUPP}:
-        raise OSError(
-            code, "Destination does not support publishing a copy without overwriting an existing file", dst,
+        raise NoReplaceRenameUnsupported(
+            code, "Destination does not support renaming without overwriting an existing file", dst,
         )
     raise OSError(code, os.strerror(code), dst)

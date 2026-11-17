@@ -14,13 +14,17 @@ import hashlib
 import logging
 import os
 import shutil
+import sys
 import threading
 import time
 import uuid
 from typing import TYPE_CHECKING
 
-from file_replace import rename_no_replace
+from file_replace import NoReplaceRenameUnsupported, rename_no_replace
 from import_dedup import compute_file_hash
+
+if sys.platform != "win32":
+    import fcntl
 
 if TYPE_CHECKING:
     from import_job.import_types import StopCheck
@@ -29,7 +33,7 @@ log = logging.getLogger(__name__)
 
 
 # FAT/exFAT and some network shares reject hard links. A verified temp
-# still needs atomic no-overwrite publication on those destinations.
+# still needs no-overwrite publication on those destinations.
 _HARDLINK_UNSUPPORTED_ERRNOS = frozenset(
     getattr(errno, name)
     for name in ("EPERM", "ENOTSUP", "EOPNOTSUPP", "EACCES", "EXDEV")
@@ -43,9 +47,11 @@ def copy_and_hash_verify(
     """Stage, verify and publish a sibling copy without overwriting a destination.
 
     The temporary name has a fixed length so any valid destination basename
-    can be copied. Publishing uses a hard link, or an atomic no-replace
-    rename on filesystems without links. An interrupted copy leaves only
-    a hidden temp file. By default all failures return (False, None).
+    can be copied. Publishing uses a hard link; on filesystems without links
+    it uses an atomic no-replace rename, and where that is missing too (macOS
+    SMB shares) a check-then-rename under a lock on the destination folder.
+    An existing destination is never overwritten, and an interrupted copy
+    leaves only a hidden temp file. By default all failures return (False, None).
     Callers setting ``raise_on_io_error`` get the filesystem error so
     they can distinguish it from a hash mismatch.
     """
@@ -68,7 +74,7 @@ def copy_and_hash_verify(
         except OSError as exc:
             if exc.errno not in _HARDLINK_UNSUPPORTED_ERRNOS:
                 raise
-            rename_no_replace(tmp, dst)
+            _publish_without_links(tmp, dst, dst_dir)
             tmp = None
         return True, copied_hash
     except OSError as exc:
@@ -80,6 +86,41 @@ def copy_and_hash_verify(
         if tmp is not None:
             with contextlib.suppress(OSError):
                 os.unlink(tmp)
+
+
+def _publish_without_links(tmp: str, dst: str, dst_dir: str) -> None:
+    """Rename the verified ``tmp`` onto a free ``dst``; FileExistsError if taken."""
+    try:
+        rename_no_replace(tmp, dst)
+    except NoReplaceRenameUnsupported:
+        log.info("No atomic no-replace rename on %s; using a locked rename", dst_dir or ".")
+        _locked_rename_no_replace(tmp, dst, dst_dir)
+
+
+def _locked_rename_no_replace(tmp: str, dst: str, dst_dir: str) -> None:
+    """Check that ``dst`` is free and rename onto it under a folder lock.
+
+    Concurrent imports into one folder take the same exclusive ``flock`` on
+    it, so neither can overwrite the other's verified copy between the check
+    and the rename. The lock belongs to a file descriptor and is released if
+    the process dies, so a crash leaves no placeholder at ``dst`` that a retry
+    would mistake for an archived photo. A mount that ignores ``flock`` (some
+    network shares mounted ``nolock``) gets a plain check-then-rename.
+    """
+    try:
+        lock_fd = os.open(dst_dir or ".", os.O_RDONLY)
+    except OSError:
+        lock_fd = None
+    try:
+        if lock_fd is not None and sys.platform != "win32":
+            with contextlib.suppress(OSError):
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        if os.path.lexists(dst):
+            raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), dst)
+        os.rename(tmp, dst)
+    finally:
+        if lock_fd is not None:
+            os.close(lock_fd)
 
 
 # Seconds a destination-side hash read may go without producing a single

@@ -9,9 +9,19 @@ import { loadMoreBucket } from './render.js';
 import { highlightsScopeParams, representativeToast, selectedFolderId } from './scope.js';
 import { state } from './state.js';
 
+var INCOMPLETE_ROW_MESSAGE = 'Nothing was changed: this row\'s photos could not all be loaded '
+  + 'for the current folder and filters. Try again.';
+
+/** Tell the user a bulk action stopped before changing anything. @returns {null} */
+function cancelBulkAction() {
+  showToast(INCOMPLETE_ROW_MESSAGE, 'error');
+  return null;
+}
+
 /**
  * Resolve one displayed bucket before mutating its photos. A view change
- * cancels the action and discards its pending page.
+ * cancels the action and discards its pending page; so does a page that
+ * claims more photos without returning any. Either way the user is told.
  * @param {HighlightsSection | null | undefined} target
  * @param {string | null} species
  * @returns {Promise<number[] | null>}
@@ -19,9 +29,11 @@ import { state } from './state.js';
 export async function ensureFullBucketLoaded(target, species) {
   var data = state.currentData;
   var current = species === null ? data?.unidentified : data?.buckets?.find(function(b) { return b.species === species; });
-  if (!target || current !== target || state.loadedHighlightsScope !== highlightsScopeParams().toString()) return null;
+  if (!target || current !== target || state.loadedHighlightsScope !== highlightsScopeParams().toString()) {
+    return cancelBulkAction();
+  }
   while (target.has_more) {
-    if (!await loadMoreBucket(species, species === null)) return null;
+    if (!await loadMoreBucket(species, species === null)) return cancelBulkAction();
   }
   return target.photos.map(function(p) { return p.id; });
 }
