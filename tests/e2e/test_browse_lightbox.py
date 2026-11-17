@@ -89,6 +89,46 @@ def test_browse_lightbox_arrows_navigate(live_server, page):
     expect(keywords.locator(".lightbox-keyword")).to_have_text("Red-tailed Hawk")
 
 
+def test_browse_lightbox_full_request_carries_render_fingerprint(live_server, page):
+    """The lightbox's /full request must carry an ``er`` fingerprint.
+
+    ``serve_full`` answers ``Cache-Control: public, max-age=86400`` like
+    thumbnails do, so a browser holding a day-old copy of a bare URL will
+    serve the pre-edit pixels until that copy expires. The other mocks match
+    `**/photos/*/full*`, which accepts a bare ``/full`` URL too, so a
+    regression that dropped ``vireoRenderedUrl`` from ``_lbSrcUrl`` would
+    leave every other lightbox test green while users again saw stale
+    full-size images.
+    """
+    current_id = live_server["data"]["photos"][0]
+    full_requests = []
+
+    def serve_full(route):
+        full_requests.append(route.request.url)
+        route.fulfill(
+            body=base64.b64decode(_PNG_1X1), content_type="image/png"
+        )
+
+    page.route("**/photos/*/full*", serve_full)
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.dblclick()
+    page.wait_for_function(
+        "photoId => vireoLightboxSession.displayedPhotoId() === photoId",
+        arg=current_id,
+    )
+
+    photo_full_requests = [
+        url for url in full_requests if f"/photos/{current_id}/full" in url
+    ]
+    assert photo_full_requests, (
+        f"no /full request for the opened photo: {full_requests!r}"
+    )
+    assert any("er=" in url for url in photo_full_requests), (
+        "lightbox /full request carried no er= fingerprint; a browser with a "
+        f"24h-cached copy would never refetch: {photo_full_requests!r}"
+    )
+
+
 def test_browse_lightbox_autoloads_next_page_at_navigation_boundary(
     live_server, page,
 ):
