@@ -184,7 +184,7 @@ export async function loadMoreBucket(species, isUnidentified) {
   // one has already applied.
   var refetchSeq = state.bucketRefetchSeq[speciesKey] || 0;
   if (refetchSeq > (state.bucketRefetchDone[speciesKey] || 0)) return false;
-  // The latest refetch rejected before writing target.photos, so target still
+  // The latest refetch did not replace target.photos, so target still
   // holds the pre-pick prefix against a server tail the Pick/Unpick reordered.
   // Skip pagination until a successful refetch or a full reload rebases this
   // bucket on the backend's current order.

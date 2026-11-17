@@ -115,6 +115,10 @@ export async function refetchBucketFromZero(target, isUnidentified) {
   // (seq > done) from one that has already settled.
   var seq = (state.bucketRefetchSeq[speciesKey] || 0) + 1;
   state.bucketRefetchSeq[speciesKey] = seq;
+  // The server's order already changed. Only a current-seq authoritative
+  // replacement can make this prefix safe for pagination again; rejection
+  // and unusable responses leave it invalid, even after the request settles.
+  state.bucketRefetchFailed[speciesKey] = true;
   try {
     /** @type {HighlightsPhoto[]} */
     var allPhotos = [];
@@ -149,14 +153,6 @@ export async function refetchBucketFromZero(target, isUnidentified) {
     // against the fresh server order again.
     delete state.bucketRefetchFailed[speciesKey];
     return true;
-  } catch (err) {
-    // The server already applied the Pick/Unpick that triggered this refetch,
-    // so its ordering moved; target.photos still holds the pre-pick prefix.
-    // Keep the bucket out of bounds for pagination until a successful refetch
-    // or a full reload replaces target.photos — otherwise loadMoreBucket would
-    // join this stale prefix with the newly reordered backend tail.
-    state.bucketRefetchFailed[speciesKey] = true;
-    throw err;
   } finally {
     // Record this seq as settled regardless of outcome so an older refetch
     // still in flight does not strand pagination on this bucket after the

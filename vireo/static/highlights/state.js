@@ -48,9 +48,10 @@ export var WORKSPACE_SCOPE = '__workspace__';
  *   leave a bucket stranded for pagination after a newer refetch has already
  *   applied the server's post-pick order.
  * @property {Record<string, boolean>} bucketRefetchFailed Per-bucket flag set
- *   when a refetchBucketFromZero rejects before writing target.photos: the
- *   server already applied the Pick/Unpick, so target holds the pre-pick order
- *   while the backend's tail is reordered. Pagination must stay disabled for
+ *   before refetchBucketFromZero starts, and cleared only when the current
+ *   refetch writes target.photos. A rejection or unusable response leaves it
+ *   set: the server already applied the Pick/Unpick, so target holds the
+ *   pre-pick order while the backend's tail is reordered. Pagination stays disabled for
  *   this bucket until a successful refetch rewrites target.photos or the next
  *   full reload replaces state.currentData.
  */

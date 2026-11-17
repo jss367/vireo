@@ -70,11 +70,13 @@ registers them, and `frontend-module-pages.json` lists the same names.
   (`seq > done`): a hung older refetch no longer strands pagination once a
   newer refetch has already applied, while a pagination started mid-refetch
   that captured the already-bumped seq still bails because the current-seq
-  refetch has not settled yet. A refetch that rejects before writing
-  `target.photos` sets `state.bucketRefetchFailed[speciesKey]`: the Pick/Unpick
-  already reordered the backend tail while the client holds the pre-pick
-  prefix, so pagination must stay disabled for that bucket until a successful
-  refetch rewrites the prefix or `loadHighlights` replaces `state.currentData`.
+  refetch has not settled yet. Each refetch sets
+  `state.bucketRefetchFailed[speciesKey]` before it requests the new order: the
+  Pick/Unpick already reordered the backend tail while the client holds the
+  pre-pick prefix. Rejected, null and malformed responses keep pagination
+  disabled until a current-seq refetch rewrites the prefix or `loadHighlights`
+  replaces `state.currentData`. An older request's failure cannot invalidate a
+  newer successful replacement.
 
 ## Why the first photo leads
 

@@ -28,7 +28,17 @@ function harness(safeFetch, isUnidentified = false) {
   return {
     bucket, state, toasts, getIds: () => isUnidentified ? context.unidPhotoIds() : context.bucketPhotoIds(bucket),
     refetch: () => context.refetchBucketFromZero(bucket, isUnidentified),
+    getIdsFor: target => context.bucketPhotoIds(target),
     selectFolder: id => { folderId = id; },
+    reload: () => {
+      const url = new URL('../../vireo/static/highlights/loading.js', import.meta.url);
+      vm.runInContext(moduleAsScript(readFileSync(url, 'utf8')), context);
+      context.document = {getElementById: id => id === 'perRowSlider'
+        ? {value: '20'} : {options: [{textContent: 'Folder'}], selectedIndex: 0}};
+      context.render = () => {};
+      state.rejectedFromGrid = new Set();
+      return context.loadHighlights();
+    },
   };
 }
 
@@ -179,7 +189,7 @@ test('a settled refetch does not block later pagination', async () => {
 // successful refetch or a full reload rebases it on the backend's new order.
 test('a failed refetch keeps pagination disabled against the stale prefix', async () => {
   const pending = [];
-  const {bucket, state, toasts, getIds, refetch} = harness(url => new Promise((resolve, reject) => {
+  const {bucket, toasts, getIds, refetch} = harness(url => new Promise((resolve, reject) => {
     pending.push({params: new URL(url, 'http://localhost').searchParams, resolve, reject});
   }));
   const refresh = refetch();
@@ -195,9 +205,6 @@ test('a failed refetch keeps pagination disabled against the stale prefix', asyn
   // target.photos was never overwritten by the failed refetch.
   assert.deepEqual(Array.from(bucket.photos, photo => photo.id), [1]);
   // A successful refetch replaces the prefix, so pagination may resume.
-  state.bucketRefetchFailed = {};
-  bucket.photos = [{id: 9}];
-  bucket.has_more = true;
   const retry = refetch();
   assert.equal(pending.length, 2);
   pending[1].resolve({photos: [{id: 9}], loaded_count: 1, has_more: true});
@@ -236,4 +243,133 @@ test('a hung older refetch does not block pagination after the newer one settles
   pending[0].resolve({photos: [{id: 99}], loaded_count: 1, has_more: true});
   assert.equal(await refreshA, false);
   assert.deepEqual(Array.from(bucket.photos, photo => photo.id), [42, 43]);
+});
+
+function deferredHarness(isUnidentified = false) {
+  const pending = [];
+  const result = harness(url => new Promise((resolve, reject) => {
+    pending.push({params: new URL(url, 'http://localhost').searchParams, resolve, reject});
+  }), isUnidentified);
+  return {...result, pending};
+}
+
+async function failRefetch(request, refresh, mode) {
+  if (mode === 'reject') {
+    const rejection = assert.rejects(refresh, /network/);
+    request.reject(new Error('network'));
+    await rejection;
+  } else {
+    request.resolve(mode === 'null' ? null : {photos: null});
+    await refresh;
+  }
+}
+
+for (const isUnidentified of [false, true]) {
+  for (const mode of ['reject', 'null', 'malformed']) {
+    test(`a ${isUnidentified ? 'unidentified' : 'species'} ${mode} refetch blocks stale IDs until a real retry succeeds`, async () => {
+      const {bucket, pending, getIds, refetch} = deferredHarness(isUnidentified);
+      const refresh = refetch();
+      await failRefetch(pending[0], refresh, mode);
+      const action = getIds();
+      // The backend order is now [2, 1], while the client still holds [1].
+      // If pagination is attempted, its offset-one tail repeats 1 and omits 2.
+      if (pending.length > 1) pending[1].resolve({photos: [{id: 1}], loaded_count: 2, has_more: false});
+      assert.equal(await action, null);
+      assert.equal(pending.length, 1);
+      assert.deepEqual(Array.from(bucket.photos, p => p.id), [1]);
+      const retry = refetch();
+      pending[1].resolve({photos: [{id: 2}], loaded_count: 1, has_more: true});
+      assert.equal(await retry, true);
+      const resumed = getIds();
+      assert.equal(pending[2].params.get('offset'), '1');
+      pending[2].resolve({photos: [{id: 1}], loaded_count: 2, has_more: false});
+      assert.deepEqual(Array.from(await resumed), [2, 1]);
+    });
+  }
+
+  test(`an older ${isUnidentified ? 'unidentified' : 'species'} rejection cannot invalidate a newer successful refetch`, async () => {
+    const {pending, getIds, refetch} = deferredHarness(isUnidentified);
+    const old = refetch();
+    const latest = refetch();
+    pending[1].resolve({photos: [{id: 2}], loaded_count: 1, has_more: true});
+    assert.equal(await latest, true);
+    await failRefetch(pending[0], old, 'reject');
+    const action = getIds();
+    if (pending.length > 2) pending[2].resolve({photos: [{id: 1}], loaded_count: 2, has_more: false});
+    assert.deepEqual(Array.from(await action || []), [2, 1]);
+  });
+
+  test(`a newer failed ${isUnidentified ? 'unidentified' : 'species'} refetch cannot be rescued by an older successful response`, async () => {
+    const {pending, getIds, refetch} = deferredHarness(isUnidentified);
+    const old = refetch();
+    const latest = refetch();
+    await failRefetch(pending[1], latest, 'reject');
+    pending[0].resolve({photos: [{id: 3}], loaded_count: 1, has_more: true});
+    assert.equal(await old, false);
+    assert.equal(await getIds(), null);
+    assert.equal(pending.length, 2);
+  });
+}
+
+test('a failed bucket does not disable pagination in another bucket', async () => {
+  const {pending, getIds, state} = deferredHarness();
+  state.bucketRefetchFailed.Owl = true;
+  const action = getIds();
+  assert.equal(pending.length, 1);
+  pending[0].resolve({photos: [{id: 2}], loaded_count: 2, has_more: false});
+  assert.deepEqual(Array.from(await action), [1, 2]);
+});
+
+test('a full reload permits pagination after a failed refetch', async () => {
+  const {pending, getIds, getIdsFor, refetch, reload, state} = deferredHarness();
+  const refresh = refetch();
+  await failRefetch(pending[0], refresh, 'reject');
+  assert.equal(await getIds(), null);
+  const replacement = {species: 'Hawk', photos: [{id: 2}], has_more: true};
+  const loaded = reload();
+  pending[1].resolve({buckets: [replacement], unidentified: null, folders: []});
+  await loaded;
+  assert.equal(state.bucketRefetchFailed.Hawk, undefined);
+  // The old row reference is rejected; the replacement can paginate normally.
+  assert.equal(await getIds(), null);
+  const resumed = getIdsFor(replacement);
+  assert.equal(pending[2].params.get('offset'), '1');
+  pending[2].resolve({photos: [{id: 1}], loaded_count: 2, has_more: false});
+  assert.deepEqual(Array.from(await resumed), [2, 1]);
+});
+
+test('a null later refetch page cannot validate a partially refreshed window', async () => {
+  const pending = [];
+  let secondRequested;
+  const secondRequest = new Promise(resolve => { secondRequested = resolve; });
+  const {bucket, getIds, refetch} = harness(() => new Promise(resolve => {
+    pending.push({resolve});
+    if (pending.length === 2) secondRequested();
+  }));
+  bucket.photos = Array.from({length: 501}, (_, id) => ({id: id + 1}));
+  const refresh = refetch();
+  pending[0].resolve({photos: Array.from({length: 500}, (_, id) => ({id: id + 2})), has_more: true});
+  await secondRequest;
+  assert.equal(pending.length, 2);
+  pending[1].resolve(null);
+  await refresh;
+  const action = getIds();
+  if (pending.length > 2) pending[2].resolve({photos: [{id: 1}], loaded_count: 502, has_more: false});
+  assert.equal(await action, null);
+  assert.equal(pending.length, 2);
+  assert.equal(bucket.photos.length, 501);
+  assert.equal(bucket.photos[0].id, 1);
+});
+
+test('an old refetch rejection cannot invalidate a completed full reload', async () => {
+  const {pending, getIdsFor, refetch, reload} = deferredHarness();
+  const old = refetch();
+  const replacement = {species: 'Hawk', photos: [{id: 2}], has_more: true};
+  const loaded = reload();
+  pending[1].resolve({buckets: [replacement], unidentified: null, folders: []});
+  await loaded;
+  await failRefetch(pending[0], old, 'reject');
+  const action = getIdsFor(replacement);
+  if (pending.length > 2) pending[2].resolve({photos: [{id: 1}], loaded_count: 2, has_more: false});
+  assert.deepEqual(Array.from(await action || []), [2, 1]);
 });
