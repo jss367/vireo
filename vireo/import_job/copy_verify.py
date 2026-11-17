@@ -14,6 +14,7 @@ import hashlib
 import logging
 import os
 import shutil
+import stat
 import sys
 import threading
 import time
@@ -49,9 +50,9 @@ def copy_and_hash_verify(
     The temporary name has a fixed length so any valid destination basename
     can be copied. Publishing uses a hard link; on filesystems without links
     it uses an atomic no-replace rename, and where that is missing too (macOS
-    SMB shares) a check-then-rename under a lock on the destination folder.
-    An existing destination is never overwritten, and an interrupted copy
-    leaves only a hidden temp file. By default all failures return (False, None).
+    SMB shares) a check-then-rename under a shared lock file in the destination
+    folder. The lock coordinates Vireo publishers. An interrupted copy can
+    leave a hidden temp file. By default all failures return (False, None).
     Callers setting ``raise_on_io_error`` get the filesystem error so
     they can distinguish it from a hash mismatch.
     """
@@ -97,30 +98,74 @@ def _publish_without_links(tmp: str, dst: str, dst_dir: str) -> None:
         _locked_rename_no_replace(tmp, dst, dst_dir)
 
 
-def _locked_rename_no_replace(tmp: str, dst: str, dst_dir: str) -> None:
-    """Check that ``dst`` is free and rename onto it under a folder lock.
+_PUBLISH_LOCK_BUSY = {errno.EBUSY, errno.EAGAIN, errno.EWOULDBLOCK}
+_PUBLISH_LOCK_TIMEOUT = 5.0
 
-    Concurrent imports into one folder take the same exclusive ``flock`` on
-    it, so neither can overwrite the other's verified copy between the check
-    and the rename. The lock belongs to a file descriptor and is released if
-    the process dies, so a crash leaves no placeholder at ``dst`` that a retry
-    would mistake for an archived photo. A mount that ignores ``flock`` (some
-    network shares mounted ``nolock``) gets a plain check-then-rename.
-    """
+
+def _try_publish_lock(path: str) -> int:
+    """Return a descriptor holding the lock, or raise without waiting."""
+    flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK
+    if sys.platform == "darwin":
+        # smbfs rejects flock on directories. O_EXLOCK on a regular file
+        # uses an exclusive open on both the client and the SMB server.
+        flags |= os.O_EXLOCK
+    fd = os.open(path, flags, 0o666)
     try:
-        lock_fd = os.open(dst_dir or ".", os.O_RDONLY)
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(errno.EINVAL, "The import lock must be a regular file", path)
+        if sys.platform != "darwin":
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
-        lock_fd = None
+        os.close(fd)
+        raise
+    return fd
+
+
+def _acquire_publish_lock(path: str) -> int:
+    deadline = time.monotonic() + _PUBLISH_LOCK_TIMEOUT
+    while True:
+        try:
+            return _try_publish_lock(path)
+        except OSError as exc:
+            if exc.errno not in _PUBLISH_LOCK_BUSY or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.05)
+
+
+def _verify_publish_lock(path: str) -> None:
+    """An independent open must be excluded before publication may proceed."""
     try:
-        if lock_fd is not None and sys.platform != "win32":
-            with contextlib.suppress(OSError):
-                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        probe_fd = _try_publish_lock(path)
+    except OSError as exc:
+        if exc.errno in _PUBLISH_LOCK_BUSY:
+            return
+        raise
+    os.close(probe_fd)
+    raise OSError(errno.ENOLCK, "The filesystem did not enforce the exclusive lock", path)
+
+
+def _locked_rename_no_replace(tmp: str, dst: str, dst_dir: str) -> None:
+    """Serialize Vireo publishers on filesystems without an exclusive rename."""
+    if sys.platform == "win32":
+        os.rename(tmp, dst)
+        return
+
+    # Keep the hidden lock file so waiters always lock the same inode. A
+    # process exit releases its open descriptor without leaving a lock held.
+    lock_path = os.path.join(dst_dir, ".vireo-import.lock")
+    with contextlib.ExitStack() as resources:
+        try:
+            lock_fd = _acquire_publish_lock(lock_path)
+            resources.callback(os.close, lock_fd)
+            _verify_publish_lock(lock_path)
+        except OSError as exc:
+            detail = exc.strerror or str(exc)
+            raise OSError(
+                exc.errno, f"Could not lock the destination folder for a safe import: {detail}", lock_path,
+            ) from exc
         if os.path.lexists(dst):
             raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), dst)
         os.rename(tmp, dst)
-    finally:
-        if lock_fd is not None:
-            os.close(lock_fd)
 
 
 # Seconds a destination-side hash read may go without producing a single

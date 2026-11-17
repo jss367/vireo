@@ -3649,11 +3649,9 @@ def test_locked_fallback_refuses_an_existing_destination(tmp_path, monkeypatch):
 def test_locked_fallback_allows_one_concurrent_publisher(tmp_path, monkeypatch):
     """Two imports publishing the same name hold the folder lock in turn.
 
-    Each publisher waits at a barrier just after its existence check. Without
-    the lock both pass the check together and the second rename overwrites
-    the first verified copy. With it, the second cannot reach the check until
-    the first has renamed, so the first's wait times out and the second then
-    finds the name taken.
+    Each publisher waits at a barrier just after its existence check. The
+    second can reach the check only after the first times out and renames,
+    at which point the destination is already taken.
     """
     import contextlib
     import threading
@@ -3687,6 +3685,52 @@ def test_locked_fallback_allows_one_concurrent_publisher(tmp_path, monkeypatch):
     winner = sources[0] if first[0] else sources[1]
     assert dst.read_bytes() == winner.read_bytes()
     assert not list(dst.parent.glob(".vireo-import-*.tmp"))
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows renames never overwrite, so it has no locked fallback")
+@pytest.mark.parametrize("lock_failure", ["open-fails", "lock-fails", "lock-ignored"])
+def test_local_import_keeps_card_unsafe_when_publish_lock_cannot_protect_it(
+        tmp_path, monkeypatch, lock_failure):
+    import errno
+
+    from import_job import ImportParams, copy_verify
+
+    filename = "photo.jpg"
+    card = _make_card(tmp_path, [(filename, datetime(2025, 4, 3))])
+    destination = tmp_path / "archive"
+    date_folder = destination / "2025" / "2025-04-03"
+    _no_links_or_no_replace_rename(monkeypatch)
+
+    if lock_failure == "open-fails":
+        real_open = os.open
+
+        def open_folder(path, flags, *args, **kwargs):
+            if os.fspath(path) == str(date_folder / ".vireo-import.lock"):
+                raise OSError(errno.EACCES, "lock file open denied")
+            return real_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(copy_verify.os, "open", open_folder)
+    elif lock_failure == "lock-fails":
+        def failed_lock(_path):
+            raise OSError(errno.ENOLCK, "file lock unavailable")
+
+        monkeypatch.setattr(copy_verify, "_try_publish_lock", failed_lock)
+    else:
+        def ignored_lock(path):
+            return os.open(path, os.O_RDWR | os.O_CREAT, 0o666)
+
+        monkeypatch.setattr(copy_verify, "_try_publish_lock", ignored_lock)
+
+    db, _, result = _run_import(tmp_path, ImportParams(
+        sources=[str(card)], destination=str(destination),
+    ))
+    db.close()
+
+    assert (result["copied"], result["failed"], result["safe_to_format"]) == (0, 1, False)
+    assert "lock the destination folder" in result["unsafe_files"][0]["reason"]
+    assert (card / filename).is_file()
+    assert not (date_folder / filename).exists()
+    assert not list(destination.rglob(".vireo-import-*.tmp"))
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Scratch path plus basename can exceed the legacy Windows path limit")
