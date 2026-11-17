@@ -1,6 +1,7 @@
 """Same-shot candidates remain visible, filterable and strictly review-only."""
 import json
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -330,7 +331,9 @@ def test_compare_handles_more_than_two_copies_small_screens_and_escape(live_serv
     expect(dialog).to_be_visible()
     expect(dialog.locator('[data-same-shot-side="1"] option')).to_have_count(3)
     dialog.locator('[data-same-shot-side="1"]').select_option(label="DSC_0386.jpg · 2026-04-03T01:02:04 · Other version")
-    expect(dialog.locator("#sameShotSide1 img")).to_have_attribute("src", f"/thumbnails/duplicate/{third}.jpg")
+    expect(dialog.locator("#sameShotSide1 img")).to_have_attribute(
+        "src", re.compile(rf"^/thumbnails/duplicate/{third}\.jpg(?:\?[^#]+)?$"),
+    )
     assert dialog.evaluate("node => node.getBoundingClientRect().left >= 0 && node.getBoundingClientRect().right <= innerWidth")
     page.keyboard.press("Escape")
     expect(dialog).not_to_be_visible()
