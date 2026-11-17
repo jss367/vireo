@@ -2075,6 +2075,14 @@ def test_location_review_keeps_its_height_when_a_notice_appears(live_server, pag
             (33.2550, -116.4050, photo_id),
         )
 
+    # Control the poll response instead of forcing its DOM row visible: a
+    # late zero-count response could otherwise hide the notice mid-assertion.
+    new_images = {"workspace_id": live_server["db"].active_workspace_id, "new_count": 0}
+    page.route("**/api/workspaces/active/new-images", lambda route: route.fulfill(json=new_images))
+    # Folder health checks must not change the badge's baseline asynchronously.
+    page.route("**/api/folders/missing", lambda route: route.fulfill(json=[]))
+    page.route("**/api/photos/missing", lambda route: route.fulfill(json=[]))
+
     page.set_viewport_size({"width": 890, "height": 600})
     page.route("https://unpkg.com/**", _stub_leaflet)
     page.goto(f"{live_server['url']}/browse")
@@ -2090,18 +2098,13 @@ def test_location_review_keeps_its_height_when_a_notice_appears(live_server, pag
     top_before = page.evaluate(review_top)
     navbar_bottom = page.evaluate("document.querySelector('.navbar').getBoundingClientRect().bottom")
     assert top_before == navbar_bottom
-    # The seeded folders are not on disk, so a missing-folders notice may
-    # already be counted.
-    showing = "[...document.getElementById('standingNotices').children].filter(e => e.style.display === 'flex').length"
-    notices_before = page.evaluate(showing)
+    page.wait_for_function("!_newImagesInFlight")
+    expect(page.locator("#notificationBadge")).to_have_text("0")
 
-    page.evaluate(
-        """() => {
-          document.getElementById('newImagesMsg').textContent = '7 new images';
-          document.getElementById('newImagesBanner').style.display = 'flex';
-        }"""
-    )
-    expect(page.locator("#notificationBadge")).to_have_text(str(notices_before + 1))
+    new_images["new_count"] = 7
+    page.evaluate("checkNewImages()")
+    expect(page.locator("#newImagesMsg")).to_contain_text("7 new images")
+    expect(page.locator("#notificationBadge")).to_have_text("1")
 
     positions = page.evaluate(
         """() => ({

@@ -52,9 +52,11 @@ def fill(route):
 def test_quick_preview_then_native_refinement(page, live_server, preview_photo, record_property):
     open_photo(page, live_server, preview_photo)
     requests = []
-    # Version-card thumbnails share this endpoint but are not editor renders.
+    # Version thumbnails and source-status receipts share this endpoint.
+    # Count only editor image requests, not the metadata fetch after refinement.
     page.on('request', lambda request: requests.append(request.url)
-            if '/edit-preview?' in request.url and 'preview_session' in query(request.url) else None)
+            if request.resource_type == 'image' and '/edit-preview?' in request.url
+            and 'preview_session' in query(request.url) else None)
     page.evaluate("editorState.zoomMode='custom'; editorState.zoomPercent=100; setAdjustment('exposure', 0.8)")
     page.wait_for_function('editorState.previewTimings.some(t => t.interactive)')
     page.wait_for_function('editorState.previewTimings.some(t => !t.interactive && t.requestedSize === 3072)')
