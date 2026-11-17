@@ -6,24 +6,46 @@ import { VireoViewPreferences, isAdvancedMode, safeFetch } from './shared.js';
 import { hideHighlightUndo, updateHighlightsLightboxControls } from './lightbox.js';
 import { removeRejectedPhotoFromModel } from './rejects.js';
 import { render } from './render.js';
-import { appendHighlightFilterParams, requestScopeParams } from './scope.js';
+import { highlightsScopeParams } from './scope.js';
 import { WORKSPACE_SCOPE, state } from './state.js';
 
 export async function loadHighlights() {
-  var params = requestScopeParams();
+  var params = highlightsScopeParams();
+  var scope = params.toString();
   var folderSelect = /** @type {HTMLSelectElement} */ (document.getElementById('folderSelect'));
   params.set('limit_per_bucket', String(Math.max(20, parseInt(/** @type {HTMLInputElement} */ (document.getElementById('perRowSlider')).value))));
-  appendHighlightFilterParams(params);
 
   // Capture the issue-time sequence so the prune below can tell rejections that
   // happened after this request was sent (response is stale for them) from
   // older ones the backend already excludes — or out-of-band restores it now
   // includes and we must not strip.
+  var refetchSeqAtLoad = { ...state.bucketRefetchSeq };
   var loadSeq = ++state.highlightsLoadSeq;
   /** @type {HighlightsData} */
   var data = await safeFetch('/api/highlights?' + params);
   if (loadSeq !== state.highlightsLoadSeq) return;
+  // A Pick/Unpick after this request began can make its prefix stale against
+  // the backend tail. Fetch again before replacing buckets or settling their
+  // guards; that bucket refetch still targets the currently displayed data.
+  if (Object.keys(state.bucketRefetchSeq).some(function(key) {
+    return state.bucketRefetchSeq[key] !== refetchSeqAtLoad[key];
+  })) return loadHighlights();
   state.currentData = data;
+  state.loadedHighlightsScope = scope;
+  // No refetch began after this reload was issued, so its replacement buckets
+  // can clear prior refetch failures and resume pagination. Mark every
+  // outstanding refetch seq as settled too: an in-flight (or hung)
+  // refetch would otherwise leave bucketRefetchSeq > bucketRefetchDone, and
+  // loadMoreBucket's guard would then reject pagination against the new,
+  // authoritative bucket until that obsolete request finally returns. Its own
+  // finally only bumps `done` past our write, so this does not race it.
+  Object.keys(state.bucketRefetchSeq).forEach(function(key) {
+    var pendingSeq = state.bucketRefetchSeq[key] || 0;
+    if (pendingSeq > (state.bucketRefetchDone[key] || 0)) {
+      state.bucketRefetchDone[key] = pendingSeq;
+    }
+  });
+  state.bucketRefetchFailed = {};
 
   // Guard against a reload issued against backend state from before a rejection
   // landed (e.g. un-reject starts a restore reload, then the photo is rejected

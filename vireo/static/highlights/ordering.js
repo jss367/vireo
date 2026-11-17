@@ -110,37 +110,55 @@ export async function refetchBucketFromZero(target, isUnidentified) {
   var targetLen = currentLen;
   if (targetLen <= 0) return true;
   // Stamp this refetch so a slower earlier one for the same bucket can't
-  // clobber a newer response (Pick → Unpick before the first GET resolves).
+  // clobber a newer response (Pick → Unpick before the first GET resolves),
+  // and so loadMoreBucket can tell a current-seq refetch is still pending
+  // (seq > done) from one that has already settled.
   var seq = (state.bucketRefetchSeq[speciesKey] || 0) + 1;
   state.bucketRefetchSeq[speciesKey] = seq;
-  /** @type {HighlightsPhoto[]} */
-  var allPhotos = [];
-  /** @type {HighlightsBucketPage | null} */
-  var lastPage = null;
-  for (var offset = 0; offset < targetLen; offset += 500) {
-    var params = requestScopeParams();
-    appendHighlightFilterParams(params);
-    // appendHighlightFilterParams may set 'species' for the species-search
-    // filter; force it back to the target species/unidentified sentinel so
-    // the endpoint returns the right bucket, not whatever the search box holds.
-    params.set('species', speciesKey);
-    params.set('offset', String(offset));
-    params.set('limit', String(Math.min(500, targetLen - offset)));
+  // The server's order already changed. Only a current-seq authoritative
+  // replacement can make this prefix safe for pagination again; rejection
+  // and unusable responses leave it invalid, even after the request settles.
+  state.bucketRefetchFailed[speciesKey] = true;
+  try {
+    /** @type {HighlightsPhoto[]} */
+    var allPhotos = [];
     /** @type {HighlightsBucketPage | null} */
-    var page = await safeFetch('/api/highlights/bucket?' + params);
+    var lastPage = null;
+    for (var offset = 0; offset < targetLen; offset += 500) {
+      var params = requestScopeParams();
+      appendHighlightFilterParams(params);
+      // appendHighlightFilterParams may set 'species' for the species-search
+      // filter; force it back to the target species/unidentified sentinel so
+      // the endpoint returns the right bucket, not whatever the search box holds.
+      params.set('species', speciesKey);
+      params.set('offset', String(offset));
+      params.set('limit', String(Math.min(500, targetLen - offset)));
+      /** @type {HighlightsBucketPage | null} */
+      var page = await safeFetch('/api/highlights/bucket?' + params);
+      if (state.bucketRefetchSeq[speciesKey] !== seq) return false;
+      if (!page || !Array.isArray(page.photos)) return true;
+      lastPage = page;
+      if (page.photos.length === 0) break;
+      allPhotos = allPhotos.concat(page.photos);
+      if (!page.has_more) break;
+    }
+    if (!lastPage) return true;
     if (state.bucketRefetchSeq[speciesKey] !== seq) return false;
-    if (!page || !Array.isArray(page.photos)) return true;
-    lastPage = page;
-    if (page.photos.length === 0) break;
-    allPhotos = allPhotos.concat(page.photos);
-    if (!page.has_more) break;
+    target.photos = allPhotos;
+    target.loaded_count = allPhotos.length;
+    target.has_more = !!lastPage.has_more;
+    if (typeof lastPage.photo_count === 'number') target.photo_count = lastPage.photo_count;
+    applyBucketOrderingKeysFromPage(target, lastPage);
+    // A successful write replaces the stale prefix, so pagination may run
+    // against the fresh server order again.
+    delete state.bucketRefetchFailed[speciesKey];
+    return true;
+  } finally {
+    // Record this seq as settled regardless of outcome so an older refetch
+    // still in flight does not strand pagination on this bucket after the
+    // current-seq refetch is already done.
+    if (seq > (state.bucketRefetchDone[speciesKey] || 0)) {
+      state.bucketRefetchDone[speciesKey] = seq;
+    }
   }
-  if (!lastPage) return true;
-  if (state.bucketRefetchSeq[speciesKey] !== seq) return false;
-  target.photos = allPhotos;
-  target.loaded_count = allPhotos.length;
-  target.has_more = !!lastPage.has_more;
-  if (typeof lastPage.photo_count === 'number') target.photo_count = lastPage.photo_count;
-  applyBucketOrderingKeysFromPage(target, lastPage);
-  return true;
 }

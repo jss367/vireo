@@ -10,6 +10,7 @@ export var WORKSPACE_SCOPE = '__workspace__';
 /**
  * @typedef {object} HighlightsState
  * @property {HighlightsData | null} currentData The last API response.
+ * @property {string | null} loadedHighlightsScope The filters and folder of that response.
  * @property {Set<string>} expandedBuckets Species names whose row is expanded.
  * @property {boolean} unidentifiedExpanded Whether the unidentified row is expanded.
  * @property {string} currentFolderName The selected folder's name, for the Save default.
@@ -39,11 +40,26 @@ export var WORKSPACE_SCOPE = '__workspace__';
  *   leave two /api/highlights/bucket refetches in flight; without a stamp, an
  *   older response can arrive after a newer one and overwrite the fresher
  *   photos/ordering keys.
+ * @property {Record<string, number>} bucketRefetchDone Per-bucket highest seq
+ *   whose refetchBucketFromZero has settled (returned or threw). Paired with
+ *   bucketRefetchSeq so loadMoreBucket bails when the current-seq refetch is
+ *   still pending (seq > done) and resumes once it settles — even when an
+ *   older, slower refetch is still outstanding. A pure in-flight count would
+ *   leave a bucket stranded for pagination after a newer refetch has already
+ *   applied the server's post-pick order.
+ * @property {Record<string, boolean>} bucketRefetchFailed Per-bucket flag set
+ *   before refetchBucketFromZero starts, and cleared only when the current
+ *   refetch writes target.photos. A rejection or unusable response leaves it
+ *   set: the server already applied the Pick/Unpick, so target holds the
+ *   pre-pick order while the backend's tail is reordered. Pagination stays disabled for
+ *   this bucket until a successful refetch rewrites target.photos or the next
+ *   full reload replaces state.currentData.
  */
 
 /** @type {HighlightsState} */
 export const state = {
   currentData: null,
+  loadedHighlightsScope: null,
   expandedBuckets: new Set(),
   unidentifiedExpanded: false,
   currentFolderName: '',
@@ -59,4 +75,6 @@ export const state = {
   highlightsLoadSeq: 0,
   rejectedAtLoadSeq: {},
   bucketRefetchSeq: {},
+  bucketRefetchDone: {},
+  bucketRefetchFailed: {},
 };

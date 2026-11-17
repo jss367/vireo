@@ -14,12 +14,18 @@ import hashlib
 import logging
 import os
 import shutil
+import stat
+import sys
 import threading
 import time
 import uuid
 from typing import TYPE_CHECKING
 
+from file_replace import NoReplaceRenameUnsupported, rename_no_replace
 from import_dedup import compute_file_hash
+
+if sys.platform != "win32":
+    import fcntl
 
 if TYPE_CHECKING:
     from import_job.import_types import StopCheck
@@ -27,61 +33,34 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-# POSIX advisory lock used by the hardlinkless-FS promote fallback (see
-# copy_and_hash_verify below). Unavailable on Windows; Vireo targets
-# macOS/Linux so this import normally succeeds. If it fails, the
-# fallback promote path degrades gracefully to the previous
-# check-then-rename behavior (documented in that block).
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - Windows fallback
-    fcntl = None
+# FAT/exFAT and some network shares reject hard links. A verified temp
+# still needs no-overwrite publication on those destinations.
+_HARDLINK_UNSUPPORTED_ERRNOS = frozenset(
+    getattr(errno, name)
+    for name in ("EPERM", "ENOTSUP", "EOPNOTSUPP", "EACCES", "EXDEV")
+    if hasattr(errno, name)
+)
 
 
-def copy_and_hash_verify(src: str, dst: str, *, src_hash: str | None = None) -> tuple[bool, str | None]:
-    """Copy ``src`` to ``dst`` and verify the landed bytes by content hash.
+def copy_and_hash_verify(
+    src: str, dst: str, *, src_hash: str | None = None, raise_on_io_error: bool = False,
+) -> tuple[bool, str | None]:
+    """Stage, verify and publish a sibling copy without overwriting a destination.
 
-    The copy goes to a hidden sibling temp path first; only a copy whose
-    hash matches the source is promoted into ``dst``. Promotion prefers a
-    no-overwrite ``os.link`` (atomic on POSIX same-FS) over ``os.replace``
-    — imports have no pipeline-slot lock, so two concurrent jobs targeting
-    the same destination/date folder with the same filename can both pass
-    their pre-copy collision check before either promotes; ``os.replace``
-    would silently overwrite the first job's already-verified archive
-    copy, and its ``safe_to_format`` would still report green after the
-    bytes it verified are gone. A raced promote is surfaced as a copy
-    failure instead.
-
-    When the destination filesystem does not support hard links (exFAT/FAT,
-    some SMB/NFS mounts — os.link raises OSError with EPERM/ENOTSUP/
-    EOPNOTSUPP), fall back to a check-then-rename promotion serialized on
-    a directory-level ``fcntl.flock`` of the destination folder. That
-    preserves both crash-safety (no zero-byte placeholder file) and
-    no-overwrite race protection against concurrent imports targeting the
-    same destination/date folder — the fallback block below documents the
-    tradeoffs. Imports do not fail across every file on FAT-family
-    archives or hardlinkless NAS shares.
-
-    On mismatch (or race) the temp copy is removed and any pre-existing
-    ``dst`` is left untouched.
-
-    Args:
-        src: source file path (e.g. on the card)
-        dst: final destination path in the archive
-        src_hash: optional already-computed source hash (e.g. the
-            DuplicateChecker's cached value) to avoid re-reading the
-            source.
-
-    Returns:
-        (True, file_hash) on verified success, (False, None) on failure.
+    The temporary name has a fixed length so any valid destination basename
+    can be copied. Publishing uses a hard link; on filesystems without links
+    it uses an atomic no-replace rename, and where that is missing too (macOS
+    SMB shares) a check-then-rename under a shared lock file in the destination
+    folder. The lock coordinates Vireo publishers. An interrupted copy can
+    leave a hidden temp file. By default all failures return (False, None).
+    Callers setting ``raise_on_io_error`` get the filesystem error so
+    they can distinguish it from a hash mismatch.
     """
     dst_dir = os.path.dirname(dst)
-    if dst_dir:
-        os.makedirs(dst_dir, exist_ok=True)
-    tmp = os.path.join(
-        dst_dir, f".{os.path.basename(dst)}.{uuid.uuid4().hex}.tmp"
-    )
+    tmp = os.path.join(dst_dir, f".vireo-import-{uuid.uuid4().hex}.tmp")
     try:
+        if dst_dir:
+            os.makedirs(dst_dir, exist_ok=True)
         shutil.copy2(src, tmp)
         copied_hash = compute_file_hash(tmp)
         expected = src_hash if src_hash is not None else compute_file_hash(src)
@@ -90,140 +69,107 @@ def copy_and_hash_verify(src: str, dst: str, *, src_hash: str | None = None) -> 
                 "Hash verification failed for %s -> %s (expected %s, got %s)",
                 src, dst, expected, copied_hash,
             )
-            return (False, None)
-        # Atomic no-overwrite promote: os.link raises FileExistsError if
-        # ``dst`` was created between the caller's collision check and
-        # this instant. tmp lives in the same directory as dst, so link
-        # stays same-filesystem and portable across the NAS mounts that
-        # are the real archive target.
+            return False, None
         try:
             os.link(tmp, dst)
-        except FileExistsError:
-            log.warning(
-                "Destination raced during copy (concurrent import?): %s",
-                dst,
-            )
-            return (False, None)
-        except OSError as link_err:
-            # Hard links unsupported on this destination filesystem
-            # (FAT/exFAT return EPERM; some SMB/NFS mounts return
-            # ENOTSUP/EOPNOTSUPP; Windows exFAT can return EACCES).
-            # Without a fallback promotion path every file on
-            # hardlinkless archives buckets as a copy failure and
-            # imports are unusable on those destinations. See
-            # ``_rename_promote_locked`` for the fallback.
-            if not _fs_lacks_hardlinks(link_err):
+        except OSError as exc:
+            if exc.errno not in _HARDLINK_UNSUPPORTED_ERRNOS:
                 raise
-            log.info(
-                "os.link unsupported on %s (%s); using rename fallback",
-                dst_dir, link_err,
-            )
-            if not _rename_promote_locked(src, tmp, dst, dst_dir):
-                return (False, None)
+            _publish_without_links(tmp, dst, dst_dir)
             tmp = None
-            return (True, copied_hash)
-        os.unlink(tmp)
-        tmp = None
-        return (True, copied_hash)
-    except OSError as e:
-        log.warning("Copy failed for %s -> %s: %s", src, dst, e)
-        return (False, None)
+        return True, copied_hash
+    except OSError as exc:
+        if raise_on_io_error:
+            raise
+        log.warning("Copy failed for %s -> %s: %s", src, dst, exc)
+        return False, None
     finally:
         if tmp is not None:
             with contextlib.suppress(OSError):
                 os.unlink(tmp)
 
 
-def _rename_promote_locked(src: str, tmp: str, dst: str, dst_dir: str) -> bool:
-    """Promote the verified ``tmp`` to ``dst`` without a hard link.
-
-    Returns True once ``tmp`` has been renamed onto ``dst`` (the temp no
-    longer exists), False when ``dst`` appeared first or the rename
-    failed (the caller's cleanup removes ``tmp``).
-    """
-    # Fall back to existence-check + os.rename, wrapped in a
-    # directory-level POSIX advisory lock. The verified temp
-    # stays hidden until it moves atomically over to ``dst``.
-    # Do NOT reserve the final path as an O_EXCL placeholder
-    # before renaming — a crash between placeholder creation
-    # and os.replace would leave a zero-byte stray at the
-    # intended archive name, and a retry treats that
-    # placeholder as "existing archive file", suffixes the
-    # real photo to ``name_1.ext``, and orphans the empty
-    # file. That violates the crash-recovery invariant that a
-    # dead run leaves only valid archive copies or hidden
-    # temps.
-    #
-    # A bare check-then-rename loses a concurrent-import race:
-    # two hardlinkless-FS jobs targeting the same
-    # destination/date folder could both pass exists() before
-    # either rename(), and the later rename would silently
-    # overwrite the first job's already-verified archive copy
-    # (its ``safe_to_format`` would still report green after
-    # its bytes are gone). Serialize the critical section on
-    # an exclusive ``fcntl.flock`` of the destination
-    # directory: FD-scoped, so a crash releases it
-    # automatically — no placeholder cleanup burden, and the
-    # zero-byte crash-safety invariant is preserved. On mounts
-    # where flock silently no-ops (some remote FSes mounted
-    # ``nolock``) this degrades to a bare check-then-rename;
-    # per-workspace/per-date destinations make overlapping runs
-    # unusual there.
-    lock_fd = None
+def _publish_without_links(tmp: str, dst: str, dst_dir: str) -> None:
+    """Rename the verified ``tmp`` onto a free ``dst``; FileExistsError if taken."""
     try:
+        rename_no_replace(tmp, dst)
+    except NoReplaceRenameUnsupported:
+        log.info("No atomic no-replace rename on %s; using a locked rename", dst_dir or ".")
+        _locked_rename_no_replace(tmp, dst, dst_dir)
+
+
+_PUBLISH_LOCK_BUSY = {errno.EBUSY, errno.EAGAIN, errno.EWOULDBLOCK}
+_PUBLISH_LOCK_TIMEOUT = 5.0
+
+
+def _try_publish_lock(path: str) -> int:
+    """Return a descriptor holding the lock, or raise without waiting."""
+    flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK
+    if sys.platform == "darwin":
+        # smbfs rejects flock on directories. O_EXLOCK on a regular file
+        # uses an exclusive open on both the client and the SMB server.
+        flags |= os.O_EXLOCK
+    fd = os.open(path, flags, 0o666)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(errno.EINVAL, "The import lock must be a regular file", path)
+        if sys.platform != "darwin":
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _acquire_publish_lock(path: str) -> int:
+    deadline = time.monotonic() + _PUBLISH_LOCK_TIMEOUT
+    while True:
         try:
-            lock_fd = os.open(dst_dir, os.O_RDONLY)
-        except OSError:
-            lock_fd = None
-        if lock_fd is not None and fcntl is not None:
-            with contextlib.suppress(OSError):
-                fcntl.flock(lock_fd, fcntl.LOCK_EX)
-        if os.path.exists(dst):
-            log.warning(
-                "Destination raced during copy "
-                "(concurrent import?): %s",
-                dst,
-            )
-            return False
+            return _try_publish_lock(path)
+        except OSError as exc:
+            if exc.errno not in _PUBLISH_LOCK_BUSY or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.05)
+
+
+def _verify_publish_lock(path: str) -> None:
+    """An independent open must be excluded before publication may proceed."""
+    try:
+        probe_fd = _try_publish_lock(path)
+    except OSError as exc:
+        if exc.errno in _PUBLISH_LOCK_BUSY:
+            return
+        raise
+    os.close(probe_fd)
+    raise OSError(errno.ENOLCK, "The filesystem did not enforce the exclusive lock", path)
+
+
+def _locked_rename_no_replace(tmp: str, dst: str, dst_dir: str) -> None:
+    """Serialize Vireo publishers on filesystems without an exclusive rename."""
+    if sys.platform == "win32":
+        os.rename(tmp, dst)
+        return
+
+    # Keep the hidden lock file so waiters always lock the same inode. A
+    # process exit releases its open descriptor without leaving a lock held.
+    lock_path = os.path.join(dst_dir, ".vireo-import.lock")
+    with contextlib.ExitStack() as resources:
         try:
-            os.rename(tmp, dst)
-        except OSError as rep_err:
-            log.warning(
-                "Fallback promote failed for %s -> %s: %s",
-                src, dst, rep_err,
-            )
-            return False
-        return True
-    finally:
-        if lock_fd is not None:
-            with contextlib.suppress(OSError):
-                os.close(lock_fd)
-
-
-# errno values that mean "this filesystem doesn't support hard links",
-# not "the operation was denied for some other reason". Kept narrow so a
-# genuine permission error on a link-supporting FS still surfaces as a
-# copy failure instead of silently falling back to the placeholder path.
-# EPERM is the canonical Linux answer for FAT/exFAT; ENOTSUP/EOPNOTSUPP
-# come from various BSD-family kernels and userspace filesystems; EACCES
-# has been observed on Windows exFAT via WSL. EXDEV (cross-device link)
-# also lands here — same-directory tmp should never trip it, but treating
-# it as "hard link not usable here" and using the O_EXCL fallback is
-# strictly safer than propagating.
-_HARDLINK_UNSUPPORTED_ERRNOS = frozenset(
-    e for e in (
-        getattr(errno, "EPERM", None),
-        getattr(errno, "ENOTSUP", None),
-        getattr(errno, "EOPNOTSUPP", None),
-        getattr(errno, "EACCES", None),
-        getattr(errno, "EXDEV", None),
-    ) if e is not None
-)
-
-
-def _fs_lacks_hardlinks(err: OSError) -> bool:
-    """True when ``err`` from os.link indicates a hardlinkless target FS."""
-    return getattr(err, "errno", None) in _HARDLINK_UNSUPPORTED_ERRNOS
+            lock_fd = _acquire_publish_lock(lock_path)
+            resources.callback(os.close, lock_fd)
+            _verify_publish_lock(lock_path)
+        except OSError as exc:
+            detail = exc.strerror or str(exc)
+            raise OSError(
+                exc.errno, f"Could not lock the destination folder for a safe import: {detail}", lock_path,
+            ) from exc
+        try:
+            os.lstat(dst)
+        except FileNotFoundError:
+            pass
+        else:
+            raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), dst)
+        os.rename(tmp, dst)
 
 
 # Seconds a destination-side hash read may go without producing a single

@@ -65,7 +65,18 @@ registers them, and `frontend-module-pages.json` lists the same names.
 - `refetchBucketFromZero` stamps each bucket's refetch in
   `state.bucketRefetchSeq` so a slower Pick refetch cannot overwrite a newer
   Unpick's order; it resolves `false` when superseded so its caller skips the
-  render.
+  render. It also records the highest settled seq in `state.bucketRefetchDone`
+  so `loadMoreBucket` can bail only while the current-seq refetch is pending
+  (`seq > done`): a hung older refetch no longer strands pagination once a
+  newer refetch has already applied, while a pagination started mid-refetch
+  that captured the already-bumped seq still bails because the current-seq
+  refetch has not settled yet. Each refetch sets
+  `state.bucketRefetchFailed[speciesKey]` before it requests the new order: the
+  Pick/Unpick already reordered the backend tail while the client holds the
+  pre-pick prefix. Rejected, null and malformed responses keep pagination
+  disabled until a current-seq refetch rewrites the prefix or `loadHighlights`
+  replaces `state.currentData`. An older request's failure cannot invalidate a
+  newer successful replacement.
 
 ## Why the first photo leads
 
