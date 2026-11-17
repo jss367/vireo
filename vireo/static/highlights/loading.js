@@ -19,15 +19,22 @@ export async function loadHighlights() {
   // happened after this request was sent (response is stale for them) from
   // older ones the backend already excludes — or out-of-band restores it now
   // includes and we must not strip.
+  var refetchSeqAtLoad = { ...state.bucketRefetchSeq };
   var loadSeq = ++state.highlightsLoadSeq;
   /** @type {HighlightsData} */
   var data = await safeFetch('/api/highlights?' + params);
   if (loadSeq !== state.highlightsLoadSeq) return;
+  // A Pick/Unpick after this request began can make its prefix stale against
+  // the backend tail. Fetch again before replacing buckets or settling their
+  // guards; that bucket refetch still targets the currently displayed data.
+  if (Object.keys(state.bucketRefetchSeq).some(function(key) {
+    return state.bucketRefetchSeq[key] !== refetchSeqAtLoad[key];
+  })) return loadHighlights();
   state.currentData = data;
   state.loadedHighlightsScope = scope;
-  // A full reload rebases every bucket on the backend's current order, so any
-  // prior refetch failure no longer applies and pagination may resume. Mark
-  // every outstanding refetch seq as settled too: an in-flight (or hung)
+  // No refetch began after this reload was issued, so its replacement buckets
+  // can clear prior refetch failures and resume pagination. Mark every
+  // outstanding refetch seq as settled too: an in-flight (or hung)
   // refetch would otherwise leave bucketRefetchSeq > bucketRefetchDone, and
   // loadMoreBucket's guard would then reject pagination against the new,
   // authoritative bucket until that obsolete request finally returns. Its own

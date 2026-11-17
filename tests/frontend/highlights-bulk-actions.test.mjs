@@ -28,7 +28,7 @@ function harness(safeFetch, isUnidentified = false) {
   return {
     bucket, state, toasts, getIds: () => isUnidentified ? context.unidPhotoIds() : context.bucketPhotoIds(bucket),
     refetch: () => context.refetchBucketFromZero(bucket, isUnidentified),
-    getIdsFor: target => context.bucketPhotoIds(target),
+    getIdsFor: target => isUnidentified ? context.ensureFullBucketLoaded(target, null) : context.bucketPhotoIds(target),
     selectFolder: id => { folderId = id; },
     reload: () => {
       const url = new URL('../../vireo/static/highlights/loading.js', import.meta.url);
@@ -403,3 +403,40 @@ test('an old refetch rejection cannot invalidate a completed full reload', async
   if (pending.length > 2) pending[2].resolve({photos: [{id: 1}], loaded_count: 2, has_more: false});
   assert.deepEqual(Array.from(await action || []), [2, 1]);
 });
+
+for (const isUnidentified of [false, true]) {
+  for (const outcome of ['pending', 'success', 'reject', 'null']) {
+    test(`a reload issued before a ${isUnidentified ? 'unidentified' : 'species'} refetch cannot rebase its ${outcome} result`, async () => {
+      const {pending, getIdsFor, refetch, reload, state} = deferredHarness(isUnidentified);
+      const loaded = reload();
+      const refresh = refetch();
+      if (outcome === 'success') {
+        pending[1].resolve({photos: [{id: 2}], loaded_count: 1, has_more: true});
+        await refresh;
+      } else if (outcome !== 'pending') {
+        await failRefetch(pending[1], refresh, outcome);
+      }
+      const stale = {species: 'Hawk', photos: [{id: 1}], has_more: true};
+      const staleData = {buckets: isUnidentified ? [] : [stale], unidentified: isUnidentified ? stale : null, folders: []};
+      pending[0].resolve(staleData);
+      // All responses are controlled promises; drain their continuations before
+      // checking that the stale reload was discarded and a fresh one requested.
+      await new Promise(setImmediate);
+      assert.notEqual(state.currentData, staleData);
+      assert.equal(pending.length, 3);
+      assert.equal(pending[2].params.has('limit_per_bucket'), true);
+      const fresh = {species: 'Hawk', photos: [{id: 2}], has_more: true};
+      pending[2].resolve({buckets: isUnidentified ? [] : [fresh], unidentified: isUnidentified ? fresh : null, folders: []});
+      await loaded;
+      const action = getIdsFor(fresh);
+      assert.equal(pending[3].params.get('offset'), '1');
+      pending[3].resolve({photos: [{id: 1}], loaded_count: 2, has_more: false});
+      assert.deepEqual(Array.from(await action), [2, 1]);
+      if (outcome === 'pending') {
+        pending[1].resolve({photos: [{id: 99}], loaded_count: 1, has_more: true});
+        await refresh;
+      }
+      assert.deepEqual(Array.from(fresh.photos, p => p.id), [2, 1]);
+    });
+  }
+}

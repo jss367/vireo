@@ -163,7 +163,11 @@ def _locked_rename_no_replace(tmp: str, dst: str, dst_dir: str) -> None:
             raise OSError(
                 exc.errno, f"Could not lock the destination folder for a safe import: {detail}", lock_path,
             ) from exc
-        if os.path.lexists(dst):
+        try:
+            os.lstat(dst)
+        except FileNotFoundError:
+            pass
+        else:
             raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), dst)
         os.rename(tmp, dst)
 

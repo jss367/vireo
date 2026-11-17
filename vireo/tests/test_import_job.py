@@ -1,4 +1,5 @@
 """Import job: copy card -> archive with hash verification."""
+import errno
 import os
 import sys
 from datetime import datetime
@@ -3646,6 +3647,59 @@ def test_locked_fallback_refuses_an_existing_destination(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Windows renames never overwrite, so it has no locked fallback")
+@pytest.mark.parametrize("lookup_errno", [errno.EIO, errno.EACCES])
+@pytest.mark.parametrize("raise_on_io_error", [False, True])
+def test_locked_fallback_preserves_destination_on_lookup_error(
+        tmp_path, monkeypatch, lookup_errno, raise_on_io_error):
+    from import_job import copy_verify
+
+    src = tmp_path / "card.jpg"
+    src.write_bytes(b"synthetic card bytes")
+    dst = tmp_path / "archive" / "photo.jpg"
+    dst.parent.mkdir()
+    archived = b"already verified synthetic archive bytes"
+    dst.write_bytes(archived)
+    _no_links_or_no_replace_rename(monkeypatch)
+    real_lstat = os.lstat
+
+    def failed_destination_lookup(path, *args, **kwargs):
+        if os.fspath(path) == str(dst):
+            raise OSError(lookup_errno, "synthetic destination lookup failure", str(dst))
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(copy_verify.os, "lstat", failed_destination_lookup)
+    if raise_on_io_error:
+        with pytest.raises(OSError) as failure:
+            copy_verify.copy_and_hash_verify(str(src), str(dst), raise_on_io_error=True)
+        assert failure.value.errno == lookup_errno
+    else:
+        assert copy_verify.copy_and_hash_verify(str(src), str(dst)) == (False, None)
+    assert dst.read_bytes() == archived
+    assert src.read_bytes() == b"synthetic card bytes"
+    assert not list(dst.parent.glob(".vireo-import-*.tmp"))
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows renames never overwrite, so it has no locked fallback")
+def test_locked_fallback_refuses_a_dangling_destination_symlink(tmp_path, monkeypatch):
+    from import_job import copy_verify
+
+    src = tmp_path / "card.jpg"
+    src.write_bytes(b"synthetic card bytes")
+    dst = tmp_path / "archive" / "photo.jpg"
+    dst.parent.mkdir()
+    target = tmp_path / "missing.jpg"
+    dst.symlink_to(target)
+    _no_links_or_no_replace_rename(monkeypatch)
+
+    with pytest.raises(FileExistsError):
+        copy_verify.copy_and_hash_verify(str(src), str(dst), raise_on_io_error=True)
+    assert dst.is_symlink()
+    assert dst.readlink() == target
+    assert not target.exists()
+    assert not list(dst.parent.glob(".vireo-import-*.tmp"))
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows renames never overwrite, so it has no locked fallback")
 def test_locked_fallback_allows_one_concurrent_publisher(tmp_path, monkeypatch):
     """Two imports publishing the same name hold the folder lock in turn.
 
@@ -3665,16 +3719,17 @@ def test_locked_fallback_allows_one_concurrent_publisher(tmp_path, monkeypatch):
     dst = tmp_path / "archive" / "same.jpg"
     _no_links_or_no_replace_rename(monkeypatch)
     after_check = threading.Barrier(2)
-    real_lexists = os.path.lexists
+    real_lstat = os.lstat
 
-    def lexists_then_wait(path):
-        found = real_lexists(path)
-        if os.fspath(path) == str(dst):
-            with contextlib.suppress(threading.BrokenBarrierError):
-                after_check.wait(timeout=1.0)
-        return found
+    def lstat_then_wait(path, *args, **kwargs):
+        try:
+            return real_lstat(path, *args, **kwargs)
+        finally:
+            if os.fspath(path) == str(dst):
+                with contextlib.suppress(threading.BrokenBarrierError):
+                    after_check.wait(timeout=1.0)
 
-    monkeypatch.setattr(copy_verify.os.path, "lexists", lexists_then_wait)
+    monkeypatch.setattr(copy_verify.os, "lstat", lstat_then_wait)
     with ThreadPoolExecutor(max_workers=2) as pool:
         first, second = pool.map(
             lambda source: copy_verify.copy_and_hash_verify(str(source), str(dst)),
