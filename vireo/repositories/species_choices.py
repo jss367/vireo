@@ -138,7 +138,12 @@ class SpeciesChoiceRepository:
         if comparisons_changed:
             # Folding two photo IDs can create self-comparisons and cycles.
             # Resolve them by the same newest-choice rule as a new decision.
-            _, contradicted = split_contradictions(self.comparisons())
+            dropped = {pid for pid, target in mapping.items() if target is None}
+            surviving = [
+                c for c in self.comparisons()
+                if c.better not in dropped and c.worse not in dropped
+            ]
+            _, contradicted = split_contradictions(surviving)
             self.delete_comparisons(contradicted)
 
     def rename(self, old_species: str, new_species: str) -> int:

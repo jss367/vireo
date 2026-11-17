@@ -4,10 +4,10 @@ import {test} from 'node:test';
 import vm from 'node:vm';
 import {moduleAsScript} from './module-source.mjs';
 
-function harness(safeFetch) {
+function harness(safeFetch, isUnidentified = false) {
   const bucket = {species: 'Hawk', photos: [{id: 1}], has_more: true};
-  const data = {buckets: [bucket], unidentified: null};
-  const state = {currentData: data, loadedHighlightsScope: 'folder_id=1', highlightsLoadSeq: 1};
+  const data = {buckets: isUnidentified ? [] : [bucket], unidentified: isUnidentified ? bucket : null};
+  const state = {currentData: data, loadedHighlightsScope: 'folder_id=1', highlightsLoadSeq: 1, bucketRefetchSeq: {}};
   let folderId = 1;
   const toasts = [];
   const context = vm.createContext({
@@ -15,13 +15,16 @@ function harness(safeFetch) {
     safeFetch,
     showToast: (message, kind) => toasts.push({message, kind}),
     highlightsScopeParams: () => new URLSearchParams({folder_id: folderId}),
+    requestScopeParams: () => new URLSearchParams({folder_id: folderId}),
+    appendHighlightFilterParams: () => {},
   });
-  for (const file of ['render.js', 'species.js']) {
+  for (const file of ['render.js', 'species.js', 'ordering.js']) {
     const url = new URL('../../vireo/static/highlights/' + file, import.meta.url);
     vm.runInContext(moduleAsScript(readFileSync(url, 'utf8')), context);
   }
   return {
-    bucket, state, toasts, getIds: () => context.bucketPhotoIds(bucket),
+    bucket, state, toasts, getIds: () => isUnidentified ? context.unidPhotoIds() : context.bucketPhotoIds(bucket),
+    refetch: () => context.refetchBucketFromZero(bucket, isUnidentified),
     selectFolder: id => { folderId = id; },
   };
 }
@@ -84,4 +87,39 @@ test('a page that claims more photos but makes no progress ends the bulk action'
 
   assert.equal(await getIds(), null);
   assertToldNothingChanged(toasts);
+});
+
+for (const isUnidentified of [false, true]) {
+  for (const refetchFirst of [false, true]) {
+    test(`a ${isUnidentified ? 'unidentified' : 'species'} refetch invalidates pending pagination (${refetchFirst ? 'refetch' : 'page'} resolves first)`, async () => {
+      const pending = [];
+      const {bucket, getIds, refetch} = harness(url => new Promise(resolve => {
+        pending.push({params: new URL(url, 'http://localhost').searchParams, resolve});
+      }), isUnidentified);
+      const action = getIds();
+      const refresh = refetch();
+      assert.equal(pending.length, 2);
+      assert.equal(pending[0].params.get('offset'), '1');
+      assert.equal(pending[1].params.get('offset'), '0');
+      assert.equal(pending[0].params.get('species'), isUnidentified ? '__unidentified__' : 'Hawk');
+      const finishRefresh = () => pending[1].resolve({photos: [{id: 2}], loaded_count: 1, has_more: true});
+      if (refetchFirst) { finishRefresh(); assert.equal(await refresh, true); }
+      pending[0].resolve({photos: [{id: 2}], loaded_count: 2, has_more: false});
+      assert.equal(await action, null);
+      if (!refetchFirst) { finishRefresh(); assert.equal(await refresh, true); }
+      assert.deepEqual(Array.from(bucket.photos, photo => photo.id), [2]);
+      assert.equal(bucket.loaded_count, 1);
+      assert.equal(bucket.has_more, true);
+      assert.equal(pending.length, 2);
+    });
+  }
+}
+
+test('refetching a different bucket does not invalidate pagination', async () => {
+  let finishPage;
+  const {getIds, state} = harness(() => new Promise(resolve => { finishPage = resolve; }));
+  const action = getIds();
+  state.bucketRefetchSeq.Owl = 1;
+  finishPage({photos: [{id: 2}], loaded_count: 2, has_more: false});
+  assert.deepEqual(Array.from(await action), [1, 2]);
 });

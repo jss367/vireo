@@ -13415,9 +13415,10 @@ def test_import_only_choice_skips_chaining(app_and_db, tmp_path):
         assert sorted(p["id"] for p in photos) == sorted(res["photo_ids"])
 
 
-def test_failed_import_does_not_chain(app_and_db, tmp_path):
+def test_failed_import_does_not_chain(app_and_db, tmp_path, monkeypatch):
     """A green processing run must not hide a failed import (rollup
     convention): any failed file suppresses chaining."""
+    from import_job import copy_verify
     from wait import wait_for_job_via_client
 
     app, db = app_and_db
@@ -13426,20 +13427,26 @@ def test_failed_import_does_not_chain(app_and_db, tmp_path):
     card = _chain_card(tmp_path)
     unreadable = card / "DSC_9999.jpg"
     Image.new("RGB", (16, 16), "blue").save(str(unreadable))
-    os.chmod(str(unreadable), 0)
-    try:
-        with app.test_client() as client:
-            job_id = _post_import(
-                client, card, tmp_path / "arch", quick_look_id,
-            )
-            job = wait_for_job_via_client(client, job_id)
-            res = job["result"]
-            assert res["failed"] >= 1
-            assert res.get("after_import_skipped") == "import failed"
-            assert "process_job_id" not in res
-            assert "collection_id" not in res
-    finally:
-        os.chmod(str(unreadable), 0o644)
+    real_copy2 = copy_verify.shutil.copy2
+
+    def copy2(src, dst, *args, **kwargs):
+        # chmod(0) does not deny reads on Windows or privileged runners.
+        if Path(src) == unreadable:
+            raise PermissionError("synthetic source is unreadable")
+        return real_copy2(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(copy_verify.shutil, "copy2", copy2)
+    with app.test_client() as client:
+        job_id = _post_import(
+            client, card, tmp_path / "arch", quick_look_id,
+        )
+        job = wait_for_job_via_client(client, job_id)
+        res = job["result"]
+        assert res["failed"] >= 1
+        assert res["copied"] >= 1
+        assert res.get("after_import_skipped") == "import failed"
+        assert "process_job_id" not in res
+        assert "collection_id" not in res
 
 
 def test_cancelled_import_does_not_create_collection(

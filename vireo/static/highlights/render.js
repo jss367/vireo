@@ -173,12 +173,15 @@ export async function loadMoreBucket(species, isUnidentified) {
   if (!target?.has_more || scope !== state.loadedHighlightsScope) return false;
   var loadSeq = state.highlightsLoadSeq;
   var offset = target.photos.length;
-  params.set('species', isUnidentified ? '__unidentified__' : String(species));
+  var speciesKey = isUnidentified ? '__unidentified__' : String(species);
+  var refetchSeq = state.bucketRefetchSeq[speciesKey] || 0;
+  params.set('species', speciesKey);
   params.set('offset', String(offset));
   params.set('limit', '500');
   /** @type {HighlightsBucketPage} */
   var page = await safeFetch('/api/highlights/bucket?' + params);
   if (state.currentData !== data || state.highlightsLoadSeq !== loadSeq
+      || (state.bucketRefetchSeq[speciesKey] || 0) !== refetchSeq
       || highlightsScopeParams().toString() !== scope || target.photos.length !== offset) return false;
   if (!page.photos?.length && page.has_more) return false;
   target.photos = target.photos.concat(page.photos || []);
