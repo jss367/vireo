@@ -12,6 +12,7 @@ mask-weighted ``local`` section, which left Browse showing pre-edit pixels for
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+from image_edits import EDIT_MATH_VERSION
 
 
 def _local_only_recipe(subject_exposure):
@@ -43,16 +44,16 @@ def test_local_only_edit_changes_the_grid_thumbnail_url(live_server, page):
 
     page.goto(live_server["url"] + "/browse")
     unedited = _grid_thumbnail_url(page, photo_id)
-    assert _render_fingerprint(unedited) is None, (
-        "an unedited photo should keep the bare thumbnail URL so the browser "
-        f"cache is usable, got {unedited!r}"
+    assert _render_fingerprint(unedited) == f"m{EDIT_MATH_VERSION}", (
+        "an unedited photo should carry the rendering math version so a "
+        f"renderer upgrade refreshes the browser cache, got {unedited!r}"
     )
 
     db.set_photo_edit_recipe(photo_id, _local_only_recipe(1.0))
     db.commit()
     page.goto(live_server["url"] + "/browse")
     first = _grid_thumbnail_url(page, photo_id)
-    assert _render_fingerprint(first), (
+    assert _render_fingerprint(first) and _render_fingerprint(first) != _render_fingerprint(unedited), (
         "a local-only edit left the thumbnail URL unchanged; the browser "
         f"would keep serving the pre-edit image for 24h ({first!r})"
     )
