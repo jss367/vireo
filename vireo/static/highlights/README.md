@@ -65,11 +65,16 @@ registers them, and `frontend-module-pages.json` lists the same names.
 - `refetchBucketFromZero` stamps each bucket's refetch in
   `state.bucketRefetchSeq` so a slower Pick refetch cannot overwrite a newer
   Unpick's order; it resolves `false` when superseded so its caller skips the
-  render. It also counts itself in `state.bucketRefetchInFlight` while it runs,
-  so `loadMoreBucket` can bail when a reorder is already pending — seq alone is
-  bumped at the refetch's start and a pagination started mid-refetch captures
-  the already-bumped value, so an inflight count is the only signal that
-  distinguishes "no refetch pending" from "refetch in flight".
+  render. It also records the highest settled seq in `state.bucketRefetchDone`
+  so `loadMoreBucket` can bail only while the current-seq refetch is pending
+  (`seq > done`): a hung older refetch no longer strands pagination once a
+  newer refetch has already applied, while a pagination started mid-refetch
+  that captured the already-bumped seq still bails because the current-seq
+  refetch has not settled yet. A refetch that rejects before writing
+  `target.photos` sets `state.bucketRefetchFailed[speciesKey]`: the Pick/Unpick
+  already reordered the backend tail while the client holds the pre-pick
+  prefix, so pagination must stay disabled for that bucket until a successful
+  refetch rewrites the prefix or `loadHighlights` replaces `state.currentData`.
 
 ## Why the first photo leads
 

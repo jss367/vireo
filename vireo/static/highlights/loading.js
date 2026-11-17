@@ -25,6 +25,9 @@ export async function loadHighlights() {
   if (loadSeq !== state.highlightsLoadSeq) return;
   state.currentData = data;
   state.loadedHighlightsScope = scope;
+  // A full reload rebases every bucket on the backend's current order, so any
+  // prior refetch failure no longer applies and pagination may resume.
+  state.bucketRefetchFailed = {};
 
   // Guard against a reload issued against backend state from before a rejection
   // landed (e.g. un-reject starts a restore reload, then the photo is rejected

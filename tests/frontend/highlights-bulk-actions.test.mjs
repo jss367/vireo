@@ -7,7 +7,10 @@ import {moduleAsScript} from './module-source.mjs';
 function harness(safeFetch, isUnidentified = false) {
   const bucket = {species: 'Hawk', photos: [{id: 1}], has_more: true};
   const data = {buckets: isUnidentified ? [] : [bucket], unidentified: isUnidentified ? bucket : null};
-  const state = {currentData: data, loadedHighlightsScope: 'folder_id=1', highlightsLoadSeq: 1, bucketRefetchSeq: {}, bucketRefetchInFlight: {}};
+  const state = {
+    currentData: data, loadedHighlightsScope: 'folder_id=1', highlightsLoadSeq: 1,
+    bucketRefetchSeq: {}, bucketRefetchDone: {}, bucketRefetchFailed: {},
+  };
   let folderId = 1;
   const toasts = [];
   const context = vm.createContext({
@@ -168,4 +171,69 @@ test('a settled refetch does not block later pagination', async () => {
   pending[1].resolve({photos: [{id: 10}], loaded_count: 2, has_more: false});
   assert.deepEqual(Array.from(await action), [9, 10]);
   assert.deepEqual(Array.from(bucket.photos, photo => photo.id), [9, 10]);
+});
+
+// The Pick/Unpick's server mutation already applied before safeFetch rejects.
+// target.photos still holds the pre-pick prefix while the backend's tail has
+// been reordered; pagination must stay disabled for this bucket until a
+// successful refetch or a full reload rebases it on the backend's new order.
+test('a failed refetch keeps pagination disabled against the stale prefix', async () => {
+  const pending = [];
+  const {bucket, state, toasts, getIds, refetch} = harness(url => new Promise((resolve, reject) => {
+    pending.push({params: new URL(url, 'http://localhost').searchParams, resolve, reject});
+  }));
+  const refresh = refetch();
+  assert.equal(pending.length, 1);
+  pending[0].reject(new Error('network'));
+  await refresh.catch(() => {});
+  // Even though no refetch is now outstanding, the bucket's loaded window is
+  // stale against the reordered backend tail; the bulk action must cancel.
+  const action = getIds();
+  assert.equal(pending.length, 1);
+  assert.equal(await action, null);
+  assertToldNothingChanged(toasts);
+  // target.photos was never overwritten by the failed refetch.
+  assert.deepEqual(Array.from(bucket.photos, photo => photo.id), [1]);
+  // A successful refetch replaces the prefix, so pagination may resume.
+  state.bucketRefetchFailed = {};
+  bucket.photos = [{id: 9}];
+  bucket.has_more = true;
+  const retry = refetch();
+  assert.equal(pending.length, 2);
+  pending[1].resolve({photos: [{id: 9}], loaded_count: 1, has_more: true});
+  assert.equal(await retry, true);
+  const resumed = getIds();
+  assert.equal(pending.length, 3);
+  assert.equal(pending[2].params.get('offset'), '1');
+  pending[2].resolve({photos: [{id: 10}], loaded_count: 2, has_more: false});
+  assert.deepEqual(Array.from(await resumed), [9, 10]);
+});
+
+// A pick that triggers refetch A; a quick unpick before A resolves starts
+// refetch B. B resolves first and writes target.photos. A is still pending
+// (slow or hung). target already reflects the backend's current order, so
+// pagination must not be stranded by A — the guard is based on the latest
+// settled seq, not an outstanding count.
+test('a hung older refetch does not block pagination after the newer one settles', async () => {
+  const pending = [];
+  const {bucket, getIds, refetch} = harness(url => new Promise(resolve => {
+    pending.push({params: new URL(url, 'http://localhost').searchParams, resolve});
+  }));
+  const refreshA = refetch();
+  const refreshB = refetch();
+  assert.equal(pending.length, 2);
+  // B (the newer refetch) resolves first and writes target.photos.
+  pending[1].resolve({photos: [{id: 42}], loaded_count: 1, has_more: true});
+  assert.equal(await refreshB, true);
+  assert.deepEqual(Array.from(bucket.photos, photo => photo.id), [42]);
+  // A is still pending (hung). Pagination must proceed against target.
+  const action = getIds();
+  assert.equal(pending.length, 3);
+  assert.equal(pending[2].params.get('offset'), '1');
+  pending[2].resolve({photos: [{id: 43}], loaded_count: 2, has_more: false});
+  assert.deepEqual(Array.from(await action), [42, 43]);
+  // A finally resolves but its seq check short-circuits before mutating.
+  pending[0].resolve({photos: [{id: 99}], loaded_count: 1, has_more: true});
+  assert.equal(await refreshA, false);
+  assert.deepEqual(Array.from(bucket.photos, photo => photo.id), [42, 43]);
 });

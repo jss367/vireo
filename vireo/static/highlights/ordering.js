@@ -110,13 +110,11 @@ export async function refetchBucketFromZero(target, isUnidentified) {
   var targetLen = currentLen;
   if (targetLen <= 0) return true;
   // Stamp this refetch so a slower earlier one for the same bucket can't
-  // clobber a newer response (Pick → Unpick before the first GET resolves).
+  // clobber a newer response (Pick → Unpick before the first GET resolves),
+  // and so loadMoreBucket can tell a current-seq refetch is still pending
+  // (seq > done) from one that has already settled.
   var seq = (state.bucketRefetchSeq[speciesKey] || 0) + 1;
   state.bucketRefetchSeq[speciesKey] = seq;
-  // Count this refetch as in flight so loadMoreBucket can bail when a reorder
-  // is already pending: seq alone doesn't tell it (seq is bumped at the start,
-  // so pagination started mid-refetch captures the already-bumped value).
-  state.bucketRefetchInFlight[speciesKey] = (state.bucketRefetchInFlight[speciesKey] || 0) + 1;
   try {
     /** @type {HighlightsPhoto[]} */
     var allPhotos = [];
@@ -147,8 +145,24 @@ export async function refetchBucketFromZero(target, isUnidentified) {
     target.has_more = !!lastPage.has_more;
     if (typeof lastPage.photo_count === 'number') target.photo_count = lastPage.photo_count;
     applyBucketOrderingKeysFromPage(target, lastPage);
+    // A successful write replaces the stale prefix, so pagination may run
+    // against the fresh server order again.
+    delete state.bucketRefetchFailed[speciesKey];
     return true;
+  } catch (err) {
+    // The server already applied the Pick/Unpick that triggered this refetch,
+    // so its ordering moved; target.photos still holds the pre-pick prefix.
+    // Keep the bucket out of bounds for pagination until a successful refetch
+    // or a full reload replaces target.photos — otherwise loadMoreBucket would
+    // join this stale prefix with the newly reordered backend tail.
+    state.bucketRefetchFailed[speciesKey] = true;
+    throw err;
   } finally {
-    state.bucketRefetchInFlight[speciesKey] = (state.bucketRefetchInFlight[speciesKey] || 0) - 1;
+    // Record this seq as settled regardless of outcome so an older refetch
+    // still in flight does not strand pagination on this bucket after the
+    // current-seq refetch is already done.
+    if (seq > (state.bucketRefetchDone[speciesKey] || 0)) {
+      state.bucketRefetchDone[speciesKey] = seq;
+    }
   }
 }

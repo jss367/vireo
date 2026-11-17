@@ -40,13 +40,19 @@ export var WORKSPACE_SCOPE = '__workspace__';
  *   leave two /api/highlights/bucket refetches in flight; without a stamp, an
  *   older response can arrive after a newer one and overwrite the fresher
  *   photos/ordering keys.
- * @property {Record<string, number>} bucketRefetchInFlight Per-bucket count of
- *   refetchBucketFromZero calls currently in flight. The seq counter alone
- *   cannot tell loadMoreBucket that a refetch is pending: seq is bumped at the
- *   start, so a loadMoreBucket started mid-refetch captures the already-bumped
- *   value and the equality check still passes. The in-flight count lets
- *   pagination bail when a reorder is already pending, so it never appends a
- *   newly reordered backend tail to the old client prefix.
+ * @property {Record<string, number>} bucketRefetchDone Per-bucket highest seq
+ *   whose refetchBucketFromZero has settled (returned or threw). Paired with
+ *   bucketRefetchSeq so loadMoreBucket bails when the current-seq refetch is
+ *   still pending (seq > done) and resumes once it settles — even when an
+ *   older, slower refetch is still outstanding. A pure in-flight count would
+ *   leave a bucket stranded for pagination after a newer refetch has already
+ *   applied the server's post-pick order.
+ * @property {Record<string, boolean>} bucketRefetchFailed Per-bucket flag set
+ *   when a refetchBucketFromZero rejects before writing target.photos: the
+ *   server already applied the Pick/Unpick, so target holds the pre-pick order
+ *   while the backend's tail is reordered. Pagination must stay disabled for
+ *   this bucket until a successful refetch rewrites target.photos or the next
+ *   full reload replaces state.currentData.
  */
 
 /** @type {HighlightsState} */
@@ -68,5 +74,6 @@ export const state = {
   highlightsLoadSeq: 0,
   rejectedAtLoadSeq: {},
   bucketRefetchSeq: {},
-  bucketRefetchInFlight: {},
+  bucketRefetchDone: {},
+  bucketRefetchFailed: {},
 };
