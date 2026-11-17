@@ -183,7 +183,7 @@ class _LocalTransport:
                 if checker is not None else None
             )
             ok, file_hash = copy_and_hash_verify(
-                str(source_file), dest_file, src_hash=src_hash,
+                str(source_file), dest_file, src_hash=src_hash, raise_on_io_error=True,
             )
         except DestReadCancelled:
             # Stop arrived mid-read against the destination (adopt/

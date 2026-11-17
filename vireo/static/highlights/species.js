@@ -6,31 +6,33 @@ import { safeFetch, showToast } from './shared.js';
 import { updateHighlightsLightboxControls } from './lightbox.js';
 import { loadHighlights } from './loading.js';
 import { loadMoreBucket } from './render.js';
-import { representativeToast, selectedFolderId } from './scope.js';
+import { highlightsScopeParams, representativeToast, selectedFolderId } from './scope.js';
 import { state } from './state.js';
 
-/** @param {string | null} species @param {boolean} isUnidentified @returns {Promise<HighlightsPhoto[]>} */
-export async function ensureFullBucketLoaded(species, isUnidentified) {
-  var target = isUnidentified
-    ? (state.currentData && state.currentData.unidentified)
-    : (state.currentData && state.currentData.buckets || []).find(function(b) { return b.species === species; });
-  if (!target) return [];
+/**
+ * Resolve one displayed bucket before mutating its photos. A view change
+ * cancels the action and discards its pending page.
+ * @param {HighlightsSection | null | undefined} target
+ * @param {string | null} species
+ * @returns {Promise<number[] | null>}
+ */
+export async function ensureFullBucketLoaded(target, species) {
+  var data = state.currentData;
+  var current = species === null ? data?.unidentified : data?.buckets?.find(function(b) { return b.species === species; });
+  if (!target || current !== target || state.loadedHighlightsScope !== highlightsScopeParams().toString()) return null;
   while (target.has_more) {
-    await loadMoreBucket(species, isUnidentified);
+    if (!await loadMoreBucket(species, species === null)) return null;
   }
-  return target.photos || [];
+  return target.photos.map(function(p) { return p.id; });
 }
 
 /** @param {HighlightsBucket} bucket */
-export async function bucketPhotoIds(bucket) {
-  var photos = await ensureFullBucketLoaded(bucket.species, false);
-  return photos.map(function(p) { return p.id; });
+export function bucketPhotoIds(bucket) {
+  return ensureFullBucketLoaded(bucket, bucket.species);
 }
 
-export async function unidPhotoIds() {
-  var photos = await ensureFullBucketLoaded(null, true);
-  return photos
-    .map(function(p) { return p.id; });
+export function unidPhotoIds() {
+  return ensureFullBucketLoaded(state.currentData?.unidentified, null);
 }
 
 /**

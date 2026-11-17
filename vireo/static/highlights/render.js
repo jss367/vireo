@@ -6,7 +6,7 @@ import { escapeAttr, safeFetch } from './shared.js';
 import { attachCardClicks, attachHighlightOrderButtons, renderCard } from './cards.js';
 import { updateHighlightsLightboxControls } from './lightbox.js';
 import { isHighlightsAdvancedMode, sortedBuckets } from './loading.js';
-import { appendHighlightFilterParams, formatPercent, formatScore, requestScopeParams } from './scope.js';
+import { formatPercent, formatScore, highlightsScopeParams } from './scope.js';
 import { bucketPhotoIds, confirmPhotoIds, showSpeciesModal, unidPhotoIds } from './species.js';
 import { state } from './state.js';
 
@@ -166,21 +166,25 @@ export function renderUnidentified() {
 
 /** @param {string | null} species @param {boolean} isUnidentified */
 export async function loadMoreBucket(species, isUnidentified) {
-  var params = requestScopeParams();
-  var data = /** @type {HighlightsData} */ (state.currentData);
-  var target = isUnidentified ? data.unidentified : (data.buckets || []).find(function(b) { return b.species === species; });
-  if (!target || !target.has_more) return;
-  var speciesKey = isUnidentified ? '__unidentified__' : String(species);
-  params.set('species', speciesKey);
-  appendHighlightFilterParams(params);
-  params.set('species', speciesKey);
-  params.set('offset', String(target.photos.length));
+  var data = state.currentData;
+  var target = isUnidentified ? data?.unidentified : data?.buckets?.find(function(b) { return b.species === species; });
+  var params = highlightsScopeParams();
+  var scope = params.toString();
+  if (!target?.has_more || scope !== state.loadedHighlightsScope) return false;
+  var loadSeq = state.highlightsLoadSeq;
+  var offset = target.photos.length;
+  params.set('species', isUnidentified ? '__unidentified__' : String(species));
+  params.set('offset', String(offset));
   params.set('limit', '500');
   /** @type {HighlightsBucketPage} */
   var page = await safeFetch('/api/highlights/bucket?' + params);
+  if (state.currentData !== data || state.highlightsLoadSeq !== loadSeq
+      || highlightsScopeParams().toString() !== scope || target.photos.length !== offset) return false;
+  if (!page.photos?.length && page.has_more) return false;
   target.photos = target.photos.concat(page.photos || []);
   target.loaded_count = page.loaded_count;
   target.has_more = page.has_more;
+  return true;
 }
 
 /** "N species with … · X of Y photos scored", naming the active filters. @param {number} bucketCount */
@@ -240,12 +244,15 @@ export function bindBucketActionButtons(content, buckets) {
         if (action === 'confirm-bucket') {
           var species = btn.getAttribute('data-species');
           var bucket = buckets.find(function(b) { return b.species === species; });
-          if (bucket) await confirmPhotoIds(await bucketPhotoIds(bucket), bucket.species, btn);
+          if (!bucket) return;
+          var confirmIds = await bucketPhotoIds(bucket);
+          if (confirmIds) await confirmPhotoIds(confirmIds, bucket.species, btn);
         } else if (action === 'change-bucket') {
           var changeSpecies = btn.getAttribute('data-species');
           var changeBucket = buckets.find(function(b) { return b.species === changeSpecies; });
           if (changeBucket) {
             var changeIds = await bucketPhotoIds(changeBucket);
+            if (!changeIds) return;
             showSpeciesModal(
               'Change species',
               changeIds.length + ' photo' + (changeIds.length === 1 ? '' : 's'),
@@ -256,6 +263,7 @@ export function bindBucketActionButtons(content, buckets) {
           }
         } else if (action === 'change-unidentified') {
           var ids = await unidPhotoIds();
+          if (!ids) return;
           showSpeciesModal(
             'Set species',
             ids.length + ' unidentified photo' + (ids.length === 1 ? '' : 's'),

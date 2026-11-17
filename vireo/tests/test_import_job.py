@@ -1117,7 +1117,7 @@ def test_catalog_never_references_missing_files(tmp_path, monkeypatch):
 
     def flaky_copy2(s, d):
         real_copy2(s, d)
-        if "DSC_0011" in str(d):
+        if Path(s).name == "DSC_0011.jpg":
             with open(d, "r+b") as f:
                 f.write(b"CORRUPT")
 
@@ -1681,7 +1681,7 @@ def test_copy_and_hash_verify_detects_corruption(tmp_path, monkeypatch):
     assert ok is False
     assert file_hash is None
     assert dst.read_bytes() == b"existing verified archive bytes"
-    assert not list(dst.parent.glob(".DSC_0002.jpg.*.tmp"))
+    assert not list(dst.parent.glob(".vireo-import-*.tmp"))
 
 
 # --- working copies from the card (Task 2.5) -----------------------------
@@ -2137,7 +2137,7 @@ def test_copy_and_hash_verify_refuses_to_overwrite_existing_destination(
     # The pre-existing verified copy must survive the race.
     assert dst.read_bytes() == b"already-verified archive bytes"
     # And the temp file must be cleaned up.
-    assert not list(dst.parent.glob(".DSC_9001.jpg.*.tmp"))
+    assert not list(dst.parent.glob(".vireo-import-*.tmp"))
 
 
 def test_import_destination_with_dot_segments_normalizes_scan_root(tmp_path):
@@ -3426,9 +3426,8 @@ def test_copy_and_hash_verify_falls_back_when_hardlinks_unsupported(
         tmp_path, monkeypatch):
     """Destinations on FAT/exFAT and some SMB/NFS mounts reject os.link
     with EPERM/ENOTSUP. Without a fallback promotion path every file on
-    those archives buckets as a copy failure; with the fallback the
-    verified temp file lands via an atomic O_EXCL + os.replace and the
-    copy succeeds.
+    those archives would fail. Atomic no-replace rename publishes the
+    verified temp file on a filesystem that supports it.
     """
     import errno as errno_mod
 
@@ -3450,14 +3449,12 @@ def test_copy_and_hash_verify_falls_back_when_hardlinks_unsupported(
     assert file_hash == compute_file_hash(str(src))
     assert dst.read_bytes() == src.read_bytes()
     # No stray .tmp / empty-placeholder residue.
-    assert not list(dst.parent.glob(".DSC_9500.jpg.*.tmp"))
+    assert not list(dst.parent.glob(".vireo-import-*.tmp"))
 
 
 def test_copy_and_hash_verify_fallback_still_refuses_to_overwrite(
         tmp_path, monkeypatch):
-    """The O_EXCL fallback must preserve no-overwrite race protection: an
-    existing verified archive file must survive when os.link is not
-    available, mirroring the primary os.link path's FileExistsError."""
+    """An existing verified file survives when hard linking is unavailable."""
     import errno as errno_mod
 
     from import_job import copy_and_hash_verify
@@ -3478,12 +3475,10 @@ def test_copy_and_hash_verify_fallback_still_refuses_to_overwrite(
     ok, file_hash = copy_and_hash_verify(str(src), str(dst))
     assert ok is False
     assert file_hash is None
-    # The pre-existing verified copy must survive both the os.link race
-    # AND the fallback path — the existence check fires and we never
-    # touch dst.
+    # Publication leaves the existing file intact.
     assert dst.read_bytes() == b"already-verified archive bytes"
     # And the temp file must be cleaned up.
-    assert not list(dst.parent.glob(".DSC_9501.jpg.*.tmp"))
+    assert not list(dst.parent.glob(".vireo-import-*.tmp"))
 
 
 def test_copy_and_hash_verify_fallback_leaves_no_placeholder_at_dst_on_promote_failure(
@@ -3494,7 +3489,7 @@ def test_copy_and_hash_verify_fallback_leaves_no_placeholder_at_dst_on_promote_f
     name is occupied by a stray empty file, retry treats it as an
     existing archive, suffixes the real photo to ``name_1.ext``, and
     the invariant that a dead run leaves only valid archive copies or
-    hidden temps breaks. See PR #1107 review.
+    hidden temps breaks.
     """
     import errno as errno_mod
 
@@ -3512,7 +3507,7 @@ def test_copy_and_hash_verify_fallback_leaves_no_placeholder_at_dst_on_promote_f
         raise OSError(errno_mod.EIO, "simulated FS I/O error during promote")
 
     monkeypatch.setattr("import_job.copy_verify.os.link", unsupported_link)
-    monkeypatch.setattr("import_job.copy_verify.os.rename", failing_rename)
+    monkeypatch.setattr("import_job.copy_verify.rename_no_replace", failing_rename)
 
     ok, file_hash = copy_and_hash_verify(str(src), str(dst))
     assert ok is False
@@ -3524,58 +3519,88 @@ def test_copy_and_hash_verify_fallback_leaves_no_placeholder_at_dst_on_promote_f
         f"a zero-byte stray would trip crash-recovery retries"
     )
     # And the hidden temp must be cleaned up too.
-    assert not list(dst.parent.glob(".DSC_9502.jpg.*.tmp"))
+    assert not list(dst.parent.glob(".vireo-import-*.tmp"))
 
 
-def test_copy_and_hash_verify_fallback_serializes_via_directory_flock(
-        tmp_path, monkeypatch):
-    """The hardlinkless-FS fallback wraps its exists-check + rename in a
-    ``fcntl.flock`` on the destination directory. Without this, two
-    concurrent imports targeting the same date folder could both pass
-    exists() before either rename(), and the later rename would silently
-    overwrite the first job's already-verified archive copy — its
-    ``safe_to_format`` would still report green after its bytes are
-    gone. See PR #1107 review.
-    """
-    import errno as errno_mod
+def test_copy_and_hash_verify_fallback_allows_one_concurrent_publisher(tmp_path, monkeypatch):
+    import errno
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
 
-    from import_job import copy_and_hash_verify
+    from import_job import copy_verify
 
-    src = tmp_path / "card" / "DSC_9503.jpg"
-    src.parent.mkdir()
-    src.write_bytes(b"card bytes for lock test" * 50)
-    dst = tmp_path / "archive" / "DSC_9503.jpg"
+    sources = [tmp_path / "first.jpg", tmp_path / "second.jpg"]
+    for source in sources:
+        source.write_bytes(source.name.encode())
+    dst = tmp_path / "archive" / "same.jpg"
+    gate = Barrier(2)
+    rename = copy_verify.rename_no_replace
 
-    def unsupported_link(a, b):
-        raise OSError(errno_mod.EPERM, "operation not permitted")
+    def unsupported_link(_src, _dst):
+        raise OSError(errno.EPERM, "hard links unavailable")
 
-    monkeypatch.setattr("import_job.copy_verify.os.link", unsupported_link)
+    def publish(src, dst):
+        gate.wait(timeout=synchronization_timeout(5))
+        rename(src, dst)
 
-    flock_calls = []
-
-    real_flock = None
-    try:
-        import fcntl as fcntl_mod
-        real_flock = fcntl_mod.flock
-
-        def spy_flock(fd, op):
-            flock_calls.append((fd, op))
-            return real_flock(fd, op)
-
-        monkeypatch.setattr("import_job.copy_verify.fcntl.flock", spy_flock)
-    except ImportError:  # pragma: no cover - Windows
-        pass
-
-    ok, _ = copy_and_hash_verify(str(src), str(dst))
-    assert ok is True
-    # LOCK_EX must have been requested exactly once during the fallback
-    # promote critical section — the exists+rename window is serialized.
-    if real_flock is not None:
-        assert len(flock_calls) == 1, (
-            f"expected one flock(LOCK_EX) on fallback path; got {flock_calls}"
+    monkeypatch.setattr(copy_verify.os, "link", unsupported_link)
+    monkeypatch.setattr(copy_verify, "rename_no_replace", publish)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first, second = pool.map(
+            lambda source: copy_verify.copy_and_hash_verify(str(source), str(dst)),
+            sources,
         )
-        _, op = flock_calls[0]
-        assert op == fcntl_mod.LOCK_EX
+
+    assert [first[0], second[0]].count(True) == 1
+    winner = sources[0] if first[0] else sources[1]
+    assert dst.read_bytes() == winner.read_bytes()
+    assert not list(dst.parent.glob(".vireo-import-*.tmp"))
+
+
+def test_local_import_reports_publication_error_and_keeps_card_unsafe(tmp_path, monkeypatch):
+    import errno
+
+    from import_job import ImportParams, copy_verify
+
+    filename = "photo.jpg"
+    card = _make_card(tmp_path, [(filename, datetime(2025, 4, 3))])
+    destination = tmp_path / "archive"
+
+    def unsupported_link(_src, _dst):
+        raise OSError(errno.EPERM, "hard links unavailable")
+
+    def unsupported_rename(_src, _dst):
+        raise OSError(errno.ENOSYS, "atomic no-replace rename unavailable")
+
+    monkeypatch.setattr(copy_verify.os, "link", unsupported_link)
+    monkeypatch.setattr(copy_verify, "rename_no_replace", unsupported_rename)
+    db, _, result = _run_import(tmp_path, ImportParams(
+        sources=[str(card)], destination=str(destination),
+    ))
+    db.close()
+
+    assert (result["copied"], result["failed"], result["safe_to_format"]) == (0, 1, False)
+    assert "atomic no-replace rename unavailable" in result["unsafe_files"][0]["reason"]
+    assert (card / filename).is_file()
+    assert not list(destination.rglob(filename))
+    assert not list(destination.rglob(".vireo-import-*.tmp"))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Scratch path plus basename can exceed the legacy Windows path limit")
+def test_local_import_accepts_a_long_valid_basename(tmp_path):
+    from import_job import ImportParams
+
+    filename = "a" * 216 + ".jpg"
+    card = _make_card(tmp_path, [(filename, datetime(2025, 4, 3))])
+    destination = tmp_path / "archive"
+    db, _, result = _run_import(tmp_path, ImportParams(
+        sources=[str(card)], destination=str(destination),
+    ))
+    db.close()
+
+    assert (result["copied"], result["failed"], result["safe_to_format"]) == (1, 0, True)
+    assert (destination / "2025" / "2025-04-03" / filename).read_bytes() == (card / filename).read_bytes()
+    assert not list(destination.rglob(".vireo-import-*.tmp"))
 
 
 def test_landed_file_failed_after_scan_is_not_double_counted(

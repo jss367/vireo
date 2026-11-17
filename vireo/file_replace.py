@@ -1,18 +1,17 @@
-"""``os.replace`` that survives Windows' transient file locks.
+"""Publish a file by renaming it.
 
-On Windows, ``os.replace`` raises ``PermissionError`` ([WinError 5] /
-[WinError 32]) while another handle holds the destination open: Defender or
-the Search indexer scanning a file Vireo just wrote, a thumbnail viewer, or an
-external editor that still has the previous handoff open. Those locks are
-usually released within moments, so every publish-by-rename in Vireo goes
-through :func:`replace_file`, which retries with bounded backoff there and is
-exactly ``os.replace`` everywhere else. GitHub's Windows runners can hold a
-fresh file for several seconds, hence the ~6 s budget.
+``replace_file`` retries transient locks on Windows, where a virus scanner or
+another viewer can briefly hold the destination open. GitHub's Windows runners
+can lock a fresh file for several seconds, hence the six-second retry budget.
+``rename_no_replace`` uses the platform's atomic no-overwrite operation.
 """
 
+import ctypes
+import errno
 import os
 import sys
 import time
+from functools import cache
 
 _WINDOWS_RETRY_DELAYS = (0.0, 0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 3.2)
 
@@ -32,3 +31,44 @@ def replace_file(src, dst):
         except PermissionError as exc:
             last_exc = exc
     raise last_exc
+
+
+@cache
+def _process_libc() -> ctypes.CDLL:
+    return ctypes.CDLL(None, use_errno=True)
+
+
+def rename_no_replace(src: str, dst: str) -> None:
+    """Atomically rename a file, raising FileExistsError if the name is taken."""
+    if sys.platform == "win32":
+        os.rename(src, dst)
+        return
+
+    src_bytes, dst_bytes = os.fsencode(src), os.fsencode(dst)
+    libc = _process_libc()
+    if sys.platform == "darwin" and hasattr(libc, "renamex_np"):
+        rename = libc.renamex_np
+        rename.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        rename.restype = ctypes.c_int
+        result = rename(src_bytes, dst_bytes, 0x00000004)  # RENAME_EXCL
+    elif sys.platform == "linux" and hasattr(libc, "renameat2"):
+        rename = libc.renameat2
+        rename.argtypes = [
+            ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint,
+        ]
+        rename.restype = ctypes.c_int
+        at_fdcwd = -100
+        rename_noreplace = 1
+        result = rename(at_fdcwd, src_bytes, at_fdcwd, dst_bytes, rename_noreplace)
+    else:
+        result = -1
+        ctypes.set_errno(errno.ENOSYS)
+
+    if result == 0:
+        return
+    code = ctypes.get_errno()
+    if code in {errno.EINVAL, errno.ENOSYS, errno.ENOTSUP, errno.EOPNOTSUPP}:
+        raise OSError(
+            code, "Destination does not support publishing a copy without overwriting an existing file", dst,
+        )
+    raise OSError(code, os.strerror(code), dst)

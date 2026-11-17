@@ -28,10 +28,10 @@ No method here commits: the caller owns the transaction.
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
-from species_preference import Comparison
+from species_preference import Comparison, split_contradictions
 
 
 class SpeciesChoiceRepository:
@@ -99,6 +99,47 @@ class SpeciesChoiceRepository:
             [(c.choice_id, c.worse) for c in comparisons],
         )
         return cur.rowcount
+
+    def remap_photos(self, mapping: Mapping[int, int | None]) -> None:
+        """Carry representatives and their choices onto surviving catalog photos."""
+        comparisons_changed = False
+        for source, target in mapping.items():
+            if target is None or source == target:
+                continue
+            self.conn.execute(
+                """INSERT INTO species_representatives
+                       (species, photo_id, selected_order, created_at, updated_at)
+                   SELECT species, ?, selected_order, created_at, updated_at
+                   FROM species_representatives WHERE photo_id = ?
+                   ON CONFLICT(species, photo_id) DO UPDATE SET
+                       selected_order = excluded.selected_order,
+                       updated_at = excluded.updated_at
+                   WHERE excluded.selected_order > species_representatives.selected_order""",
+                (target, source),
+            )
+            self.conn.execute(
+                """UPDATE photo_preferences SET photo_id = ? WHERE photo_id = ?
+                   AND purpose IN ('species_representative', 'life_list', 'highlights')""",
+                (target, source),
+            )
+            choices = self.conn.execute(
+                "UPDATE species_choices SET photo_id = ? WHERE photo_id = ?",
+                (target, source),
+            )
+            losers = self.conn.execute(
+                "UPDATE OR IGNORE species_choice_losers SET photo_id = ? WHERE photo_id = ?",
+                (target, source),
+            )
+            self.conn.execute(
+                "DELETE FROM species_choice_losers WHERE photo_id = ?", (source,),
+            )
+            comparisons_changed |= bool(choices.rowcount or losers.rowcount)
+
+        if comparisons_changed:
+            # Folding two photo IDs can create self-comparisons and cycles.
+            # Resolve them by the same newest-choice rule as a new decision.
+            _, contradicted = split_contradictions(self.comparisons())
+            self.delete_comparisons(contradicted)
 
     def rename(self, old_species: str, new_species: str) -> int:
         """Carry a keyword rename through stored choices.

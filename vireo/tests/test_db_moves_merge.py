@@ -992,6 +992,55 @@ def _collision_tree(db, tmp_path, *, same_hash=True):
 
 
 
+def test_duplicate_archive_merge_preserves_representative_choice(db, tmp_path):
+    from services.species_choices import choose_best
+
+    tree = _collision_tree(db, tmp_path)
+    staged, survivor, other = (tree[key] for key in ("staged", "survivor", "fresh"))
+    species = "Tropical Kingbird"
+    workspace = db.require_workspace_id()
+    db.photo_visibility.grant(workspace, [staged, other])
+    keyword = db.keywords.add(species, is_species=True)
+    for pid in (staged, survivor, other):
+        keyword_tagging.tag_photo(db, pid, keyword)
+    for pid in (staged, survivor):
+        db.photo_review.set_flag(pid, "none")
+    db.commit()
+
+    with db.transaction():
+        choose_best(db, species, survivor, over=[])
+        choose_best(db, species, other, over=[survivor])
+        choice = choose_best(db, species, staged, over=[survivor, other],
+                             source="reviewer", reason="Sharper eye")
+    assert db.get_species_representatives(eligible_only=True)[species] == staged
+
+    counts = moves_merge.merge_staged_tree_into_archive(db, tree["stage_root"], tree["arch"])
+
+    assert staged in counts["dropped_photo_ids"]
+    assert db.species_curation.get_representative_lists(eligible_only=True)[species] == [survivor, other]
+    assert db.species_curation.get_photo_preferences("species_representative")[species] == survivor
+    assert db.species_choices.notes()[survivor][-1]["reason"] == "Sharper eye"
+    assert db.species_choices.notes()[survivor][-1]["source"] == "reviewer"
+    assert [(edge.choice_id, edge.better, edge.worse) for edge in db.species_choices.comparisons()] == [
+        (choice["choice_id"], survivor, other),
+    ]
+
+
+def test_duplicate_archive_merge_preserves_comparison_against_staged_photo(db, tmp_path):
+    from services.species_choices import choose_best
+
+    tree = _collision_tree(db, tmp_path)
+    staged, survivor, other = (tree[key] for key in ("staged", "survivor", "fresh"))
+    species = "Tropical Kingbird"
+    with db.transaction():
+        choose_best(db, species, staged, over=[])
+        choose_best(db, species, other, over=[staged, survivor])
+
+    moves_merge.merge_staged_tree_into_archive(db, tree["stage_root"], tree["arch"])
+
+    assert [(edge.better, edge.worse) for edge in db.species_choices.comparisons()] == [(other, survivor)]
+
+
 @pytest.mark.parametrize('same_hash', [True, False])
 @pytest.mark.parametrize('status', ['unresolved', 'resolved'])
 def test_duplicate_merge_preserves_global_identity_and_retargets_audit(db, tmp_path, same_hash, status):

@@ -10,6 +10,7 @@ export var WORKSPACE_SCOPE = '__workspace__';
 /**
  * @typedef {object} HighlightsState
  * @property {HighlightsData | null} currentData The last API response.
+ * @property {string | null} loadedHighlightsScope The filters and folder of that response.
  * @property {Set<string>} expandedBuckets Species names whose row is expanded.
  * @property {boolean} unidentifiedExpanded Whether the unidentified row is expanded.
  * @property {string} currentFolderName The selected folder's name, for the Save default.
@@ -44,6 +45,7 @@ export var WORKSPACE_SCOPE = '__workspace__';
 /** @type {HighlightsState} */
 export const state = {
   currentData: null,
+  loadedHighlightsScope: null,
   expandedBuckets: new Set(),
   unidentifiedExpanded: false,
   currentFolderName: '',

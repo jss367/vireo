@@ -73,3 +73,9 @@ export function appendHighlightFilterParams(params) {
     );
   }
 }
+
+export function highlightsScopeParams() {
+  var params = requestScopeParams();
+  appendHighlightFilterParams(params);
+  return params;
+}
