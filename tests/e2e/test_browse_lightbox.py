@@ -2923,6 +2923,8 @@ def test_browse_lightbox_holds_off_center_transform_until_next_photo_is_ready(
     page.goto(f"{url}/browse")
     page.locator(".grid-card").nth(1).wait_for(state="visible")
     next_id = page.evaluate("browseState.photos[1].id")
+    # Keep the incoming preview cold so navigation waits for the held original.
+    page.route(f"**/photos/{next_id}/full*", lambda route: route.abort())
     held_original = {}
 
     def hold_next_original(route):
@@ -3129,6 +3131,8 @@ def test_browse_lightbox_resize_deferred_during_transition_reapplies_after_load(
     page.goto(f"{url}/browse")
     page.locator(".grid-card").nth(1).wait_for(state="visible")
     next_id = page.evaluate("browseState.photos[1].id")
+    # Keep the incoming preview cold so navigation waits for the held original.
+    page.route(f"**/photos/{next_id}/full*", lambda route: route.abort())
     held_original = {}
 
     def hold_next_original(route):
@@ -3267,6 +3271,8 @@ def test_browse_lightbox_mid_transition_save_keeps_navigation_handoff(
     page.goto(f"{url}/browse")
     page.locator(".grid-card").nth(1).wait_for(state="visible")
     next_id = page.evaluate("browseState.photos[1].id")
+    # Keep the incoming preview cold so navigation waits for the held original.
+    page.route(f"**/photos/{next_id}/full*", lambda route: route.abort())
     held_original = {}
 
     def hold_next_original(route):
@@ -3484,6 +3490,8 @@ def test_browse_lightbox_defers_overlays_while_visual_transition_pending(
     page.goto(f"{url}/browse")
     page.locator(".grid-card").nth(1).wait_for(state="visible")
     next_id = page.evaluate("browseState.photos[1].id")
+    # Keep the incoming preview cold so navigation waits for the held original.
+    page.route(f"**/photos/{next_id}/full*", lambda route: route.abort())
 
     held_original = {}
 
