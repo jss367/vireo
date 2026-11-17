@@ -26,7 +26,18 @@ export async function loadHighlights() {
   state.currentData = data;
   state.loadedHighlightsScope = scope;
   // A full reload rebases every bucket on the backend's current order, so any
-  // prior refetch failure no longer applies and pagination may resume.
+  // prior refetch failure no longer applies and pagination may resume. Mark
+  // every outstanding refetch seq as settled too: an in-flight (or hung)
+  // refetch would otherwise leave bucketRefetchSeq > bucketRefetchDone, and
+  // loadMoreBucket's guard would then reject pagination against the new,
+  // authoritative bucket until that obsolete request finally returns. Its own
+  // finally only bumps `done` past our write, so this does not race it.
+  Object.keys(state.bucketRefetchSeq).forEach(function(key) {
+    var pendingSeq = state.bucketRefetchSeq[key] || 0;
+    if (pendingSeq > (state.bucketRefetchDone[key] || 0)) {
+      state.bucketRefetchDone[key] = pendingSeq;
+    }
+  });
   state.bucketRefetchFailed = {};
 
   // Guard against a reload issued against backend state from before a rejection

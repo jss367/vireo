@@ -361,6 +361,36 @@ test('a null later refetch page cannot validate a partially refreshed window', a
   assert.equal(bucket.photos[0].id, 1);
 });
 
+// A Pick that triggers refetchBucketFromZero for Hawk; before its /bucket
+// request resolves, the user changes scope and the full reload completes with
+// a fresh Hawk bucket. The reload rebases every bucket on the backend's
+// current order, so the still-pending (or hung) refetch no longer governs
+// pagination — the newly loaded bucket must accept Load more and bulk
+// Confirm/Change immediately, not wait for the obsolete request to settle.
+test('a hung older refetch does not block pagination after a full reload', async () => {
+  const {bucket, pending, getIdsFor, refetch, reload, state} = deferredHarness();
+  const old = refetch();
+  assert.equal(pending.length, 1);
+  const replacement = {species: 'Hawk', photos: [{id: 2}], has_more: true};
+  const loaded = reload();
+  pending[1].resolve({buckets: [replacement], unidentified: null, folders: []});
+  await loaded;
+  // The reload cleared the Hawk failure flag and marked the pending refetch
+  // as settled, so pagination on the newly loaded bucket proceeds immediately
+  // even though the old /bucket response hasn't arrived.
+  assert.equal(state.bucketRefetchFailed.Hawk, undefined);
+  const action = getIdsFor(replacement);
+  assert.equal(pending[2].params.get('offset'), '1');
+  pending[2].resolve({photos: [{id: 1}], loaded_count: 2, has_more: false});
+  assert.deepEqual(Array.from(await action || []), [2, 1]);
+  // The old refetch eventually resolves and writes to its captured (now
+  // orphaned) bucket target, but the replacement the user sees is untouched.
+  pending[0].resolve({photos: [{id: 99}], loaded_count: 1, has_more: true});
+  await old;
+  assert.deepEqual(Array.from(replacement.photos, p => p.id), [2, 1]);
+  assert.deepEqual(Array.from(bucket.photos, p => p.id), [99]);
+});
+
 test('an old refetch rejection cannot invalidate a completed full reload', async () => {
   const {pending, getIdsFor, refetch, reload} = deferredHarness();
   const old = refetch();
