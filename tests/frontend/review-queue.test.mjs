@@ -21,7 +21,7 @@ function harness() {
     getVisibleItems: () => [], allPredictions: [], _predictionsReloading: false,
     reviewErrorMessage: (e, fallback) => e?.message || fallback,
   });
-  for (const file of ['queue-state', 'queue-focus', 'queue']) {
+  for (const file of ['queue-state', 'queue-coverage', 'queue-focus', 'queue']) {
     vm.runInContext(readFileSync('vireo/static/review/' + file + '.js', 'utf8'), ctx);
   }
   return {ctx, storage, element};

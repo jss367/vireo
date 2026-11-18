@@ -83,10 +83,11 @@ function rqRenderSubjects() {
     select.add(new Option('Subject ' + (index + 1) + ' · left ' + Math.round(subject.box_x * 100) + '% · top ' +
       Math.round(subject.box_y * 100) + '%' +
       (Number.isFinite(subject.detector_confidence) ? ' · detector ' + Math.round(/** @type {number} */ (subject.detector_confidence) * 100) + '%' : '') +
-      (subject.is_primary ? ' · saved primary' : ''), String(subject.id)));
+      (subject.inspection_reason ? ' · ' + subject.inspection_reason : '') + (subject.is_primary ? ' · saved primary' : ''), String(subject.id)));
   });
   select.value = String(item.subject || '');
   var chosen = reviewQueue.subjects.find(function(s) { return s.id === item.subject; });
+  rqRenderCoverage();
   var hasBox = rqOutlineSubject(chosen);
   rqElement('rqAnalysis').textContent = (chosen?.analysis ? 'Cached box analysis is recorded for this subject; freshness is not checked here.' :
     'No cached box analysis is recorded for this subject.') +
@@ -118,7 +119,10 @@ function rqPlaceCenter(event) {
   var image = /** @type {HTMLImageElement} */ (rqElement('rqFull'));
   if (!image.complete || !image.naturalWidth) return;
   var rect = image.getBoundingClientRect();
-  rqItem(reviewQueue.current.id).center = [Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)),
+  var item = rqItem(reviewQueue.current.id);
+  item.center = [Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)),
     Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height))];
+  var note = item.entry === undefined ? null : rqActiveCoverage()?.notes[item.entry];
+  if (note) note.center = item.center;
   rqSave(); rqRenderSubjects(); rqLoadCrop();
 }

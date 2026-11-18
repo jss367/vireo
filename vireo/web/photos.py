@@ -1563,9 +1563,10 @@ def create_photos_blueprint(
     def api_photo_subjects(photo_id: int) -> ResponseReturnValue:
         from subjects import payload
         db = get_db()
-        if db.photos.get(photo_id, verify_workspace=True) is None:
+        photo = db.photos.get(photo_id, verify_workspace=True)
+        if photo is None:
             return json_error("not found", 404)
-        return jsonify(payload(db, photo_id))
+        return jsonify(payload(db, photo_id, inspection_photo=photo if request.args.get("coverage") == "1" else None))
 
     @blueprint.route("/api/photos/<int:photo_id>/subjects/analyze", methods=["POST"])
     @background_job

@@ -29,11 +29,15 @@ interface DocumentEventMap {'lightbox:renderchanged':CustomEvent<{photoIds?:numb
 
 declare function checkPendingSync():void;
 
-interface ReviewQueueItemState {inspected:boolean;unresolved:boolean;subject:number|null;center:[number,number]|null;pendingFlag?:'flagged'|'rejected'|'none'|null}
+interface ReviewAnimalNote {center?:[number,number]|null;state:string; evidence:string; label:string; region:number|null}
+interface ReviewAnimalCoverage {confirmed:boolean; notes:ReviewAnimalNote[]}
+interface ReviewInspection {generation:string; additional:ReviewQueueSubject[]; previous_photo_id:number|null; previous_primary:number|null; min_overlap:number; previous_regions:{id:number;x:number;y:number;w:number;h:number}[]}
+interface ReviewQueueItemState {entry?:number;generation?:string; coverage?:Record<string,ReviewAnimalCoverage>;inspected:boolean;unresolved:boolean;subject:number|null;center:[number,number]|null;pendingFlag?:'flagged'|'rejected'|'none'|null}
 interface ReviewQueueSession {photoId:number|null;items:Record<string,ReviewQueueItemState>;followUpOnly:boolean}
 interface ReviewQueuePhoto {id:number;flag?:string;flag_note?:{description?:string}|null}
-interface ReviewQueueSubject {id:number;box_x:number;box_y:number;box_w:number;box_h:number;detector_confidence?:number;is_primary?:boolean;analysis?:unknown}
-interface ReviewQueueState {savedRules:ReviewRule[]|{rules?:ReviewRule[]}|null;savedVisual:unknown;workspace:number|null;key:string;session:ReviewQueueSession;enabled:boolean;items:ReviewPrediction[];current:ReviewQueuePhoto|null;subjects:ReviewQueueSubject[];sequence:number;cropSequence:number;source:string;manual:boolean;busy:boolean;storageError:boolean}
+interface ReviewQueueSubject {inspection_reason?:string;id:number;box_x:number;box_y:number;box_w:number;box_h:number;detector_confidence?:number;is_primary?:boolean;analysis?:unknown}
+interface ReviewQueuePhotoSummary {photo_id:number;filename:string;flag?:string}
+interface ReviewQueueState {linkedPhoto?:ReviewQueuePhotoSummary|null;inspection?:ReviewInspection|null;savedRules:ReviewRule[]|{rules?:ReviewRule[]}|null;savedVisual:unknown;workspace:number|null;key:string;session:ReviewQueueSession;enabled:boolean;items:ReviewQueuePhotoSummary[];current:ReviewQueuePhoto|null;subjects:ReviewQueueSubject[];sequence:number;cropSequence:number;source:string;manual:boolean;busy:boolean;storageError:boolean}
 
 interface ReviewPredictionEvidence {
   score:{model:string;kind:string;value:number;label_count:number|null;raw_value:number|null;raw_kind:string|null;calibrated_correctness:boolean;explanation:string};

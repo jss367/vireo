@@ -719,3 +719,26 @@ def test_subject_selection_and_replaced_box_roundtrip_through_undo(app_and_db):
     assert payload(db, pid)['primary_detection_id'] == first['primary_detection_id']
     assert client.post('/api/redo').status_code == 200
     assert payload(db, pid)['primary_detection_id'] == second['primary_detection_id']
+
+
+def test_inspection_inventory_includes_filtered_regions_and_tracks_generation(db, subject_photo):
+    photo_id, ids, _ = subject_photo
+    photo = db.photos.get(photo_id, verify_workspace=True)
+
+    def inventory():
+        return payload(db, photo_id, inspection_photo=photo)["inspection"]
+
+    first = inventory()
+    assert {row["id"]: row["inspection_reason"] for row in first["additional"]} == {
+        ids[2]: "Below detector confidence threshold", ids[3]: "Detector category: person",
+    }
+    select_primary(db, photo_id, ids[0])
+    assert inventory()["generation"] == first["generation"]
+    db.conn.execute("UPDATE detections SET subject_verdict='not_animal' WHERE id=?", (ids[1],))
+    changed = inventory()
+    assert changed["generation"] != first["generation"]
+    assert any(r["id"] == ids[1] and r["inspection_reason"] == "Catalog verdict: background"
+               for r in changed["additional"])
+    db.detections.clear(photo_id)
+    assert inventory()["additional"] == []
+    assert inventory()["generation"] != changed["generation"]

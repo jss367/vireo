@@ -27,6 +27,7 @@
       <button type="button" id="rqManual" aria-pressed="false">Inspect head / eye (click full frame)</button>
       <button type="button" id="rqResetCenter">Use subject center</button>
     </div>
+    <p id="rqComparison"></p>
     <p id="rqAnalysis"></p>
     <p>Default crops can omit the head or show another animal or background. Inspect the intended animal in the full frame and head-centered view before rejecting the whole photo.</p>
     <div class="rq-images">
@@ -39,5 +40,17 @@
         <p id="rqCropStatus" aria-live="polite"></p>
       </figure>
     </div>
+    <section id="rqCoverage" hidden aria-label="Animal coverage">
+      <h3>Animal coverage</h3>
+      <p id="rqCoverageStatus" aria-live="polite"></p>
+      <div id="rqAnimals"></div>
+      <div class="rq-toolbar">
+        <button type="button" id="rqSplit">Add another animal in the selected region</button>
+        <button type="button" id="rqUnlocalized">Add unlocalized animal</button>
+        <button type="button" id="rqClipped">Add source-clipped animal</button>
+        <label><input type="checkbox" id="rqConfirmCoverage">I checked the full frame and accounted for every visible animal</label>
+      </div>
+      <details id="rqPrior" hidden><summary>Earlier region generations</summary><pre id="rqPriorNotes"></pre></details>
+    </section>
   </div>
 </section>

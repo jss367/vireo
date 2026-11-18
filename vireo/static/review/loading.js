@@ -27,6 +27,22 @@ var _predictionsReloading = false;
   return epoch !== _loadPredictionsEpoch;
 }
 
+/** @param {URLSearchParams} params */
+async function fetchReviewScope(params) {
+  var photoId = currentPhotoIdFilter;
+  var qs = params.toString();
+  /** @type {{predictions?:ReviewPrediction[];visual?:unknown}} */
+  var predData = await safeFetch('/api/predictions' + (qs ? '?' + qs : ''), {}, {toast: false});
+  var linkedPhoto = null;
+  if (!predData.predictions?.length && photoId && currentCollection === 'all' && !params.has('rules') && !params.has('visual')) {
+    // Browse can open a photo with no predictions to inspect.
+    /** @type {{id:number;filename:string;flag?:string}} */
+    var linked = await safeFetch('/api/photos/' + photoId, {}, {toast: false});
+    linkedPhoto = {photo_id: linked.id, filename: linked.filename, flag: linked.flag};
+  }
+  return {predData, linkedPhoto};
+}
+
 async function loadPredictions() {
   var myEpoch = ++_loadPredictionsEpoch;
   rqBeginReload();
@@ -64,9 +80,9 @@ async function loadPredictions() {
       if (!isNaN(collId)) params.set('collection_id', String(collId));
     }
     if (currentPhotoIdFilter != null) params.set('photo_ids', String(currentPhotoIdFilter));
-    var qs = params.toString();
-    /** @type {{predictions?:ReviewPrediction[];visual?:unknown}} */ var predData = await safeFetch('/api/predictions' + (qs ? '?' + qs : ''), {}, { toast: false });
-    if (myEpoch !== _loadPredictionsEpoch) return;  // superseded — drop
+    const {predData, linkedPhoto} = await fetchReviewScope(params);
+    if (myEpoch !== _loadPredictionsEpoch) return;
+    reviewQueue.linkedPhoto = linkedPhoto;
     allPredictions = predData.predictions || [];
     if (window.VireoFilter && VireoFilter.setResultTotal) {
       /** @type {Record<number,boolean>} */ var uniquePhotos = {};

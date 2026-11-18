@@ -195,3 +195,72 @@ def test_review_queue_workspace_and_collection_inspection_do_not_leak(page, live
     expect(page.locator('#collectionFilter')).to_have_value('all')
     page.locator('#rqEnabled').check()
     expect(page.locator('#rqProgress')).to_contain_text('inspected here: 0')
+
+
+def test_flock_coverage_survives_reload_and_reopens_on_region_change(page, live_server, tmp_path):
+    from subjects import select_primary
+
+    db = live_server["db"]
+    pids, subjects, collection = seed_queue(live_server, tmp_path)
+    for index, pid in enumerate(pids):
+        db.conn.execute("UPDATE photos SET timestamp=?, burst_id='flight' WHERE id=?",
+                        (f"2025-01-01 10:00:00.{index}00", pid))
+        select_primary(db, pid, subjects[index][index])
+    extra, = db.detections.save(pids[0], [
+        {"box": {"x": .11, "y": .11, "w": .2, "h": .2}, "confidence": .01, "category": "animal"},
+    ], detector_model="secondary")
+    db.commit()
+    open_queue(page, live_server, collection)
+    rows = page.locator("#rqAnimals > div")
+    expect(rows).to_have_count(3)
+    expect(rows.last).to_contain_text("Below detector confidence threshold")
+    rows.last.get_by_role("button").click()
+    expect(page.locator("#rqSubject")).to_have_value(str(extra))
+    rows.last.get_by_role("combobox").select_option("Excluded duplicate")
+    page.locator("#rqSubject").select_option(str(subjects[0][0]))
+    page.locator("#rqSplit").click()
+    page.locator("#rqClipped").click()
+    expect(rows).to_have_count(5)
+    for i in (0, 1, 3, 4):
+        rows.nth(i).get_by_role("combobox").select_option("Inspected animal")
+    rows.nth(3).get_by_role("textbox").fill("Upper bird in overlapping pair")
+    expect(page.locator("#rqCoverageStatus")).to_contain_text("Incomplete · 3 region candidates · 4 inspected animals")
+    page.locator("#rqConfirmCoverage").check()
+    page.reload()
+    expect(page.locator("#rqConfirmCoverage")).to_be_checked()
+    expect(rows.nth(3).get_by_role("textbox")).to_have_value("Upper bird in overlapping pair")
+    page.locator("#rqNext").click()
+    expect(page.locator("#rqComparison")).to_contain_text(f"crop of region {subjects[1][1]}")
+    expect(page.locator("#rqComparison")).to_contain_text("Possible subject switch")
+    page.locator("#rqSubject").select_option(str(subjects[1][0]))
+    expect(page.locator("#rqComparison")).to_contain_text("Boxes overlap")
+    db.detections.save(pids[0], [
+        {"box": {"x": .4, "y": .1, "w": .1, "h": .1}, "confidence": .7, "category": "animal"},
+    ], detector_model="new")
+    db.commit()
+    page.locator("#rqPrevious").click()
+    expect(page.locator("#rqCoverageStatus")).to_contain_text("Incomplete · 4 region candidates · 0 inspected animals")
+    expect(page.locator("#rqConfirmCoverage")).to_be_disabled()
+    page.locator("#rqPrior summary").click()
+    expect(page.locator("#rqPriorNotes")).to_contain_text("Upper bird in overlapping pair")
+    assert [db.photos.get(pid)["flag"] for pid in pids] == ["flagged", "rejected"]
+
+
+def test_empty_photo_needs_full_frame_confirmation(page, live_server, tmp_path):
+    db = live_server["db"]
+    folder = workspace_folders.add_folder(db, str(tmp_path), name="Empty sky")
+    path = tmp_path / "sky.jpg"
+    Image.new("RGB", (320, 240), "skyblue").save(path)
+    pid = photo_ingest.add_photo(db, folder_id=folder, filename=path.name, extension=".jpg",
+                                 file_size=path.stat().st_size, file_mtime=path.stat().st_mtime)
+    db.commit()
+    page.goto(live_server["url"] + f"/review?photo_id={pid}")
+    page.locator("#rqEnabled").check()
+    expect(page.locator("#rqCoverageStatus")).to_contain_text("Incomplete · 0 region candidates")
+    page.locator("#rqInspected").click()
+    expect(page.locator("#rqConfirmCoverage")).not_to_be_checked()
+    page.locator("#rqConfirmCoverage").check()
+    expect(page.locator("#rqCoverageStatus")).to_contain_text("full frame confirmed empty")
+    page.locator("#rqUnlocalized").click()
+    expect(page.locator("#rqConfirmCoverage")).to_be_disabled()
+    expect(page.locator("#rqCoverageStatus")).to_contain_text("1 unresolved")
