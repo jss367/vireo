@@ -435,7 +435,7 @@ def test_reviewer_box_save_preserves_recipe_and_records_undo(app_and_db):
     for x in (.1, .6):
         result = client.put(url, json={'box': dict(x=x, y=.1, w=.2, h=.2)})
         assert result.status_code == 200
-        assert client.get('/api/undo/status').json['description'] == 'Selected animal region'
+        assert client.get('/api/undo/status').json['description'] == 'Added animal region'
         assert not client.get('/api/redo/status').json['available']
         assert db.get_photo_edit_recipe(pid)['adjustments']['exposure'] == .5
     assert client.post('/api/undo').status_code == 200

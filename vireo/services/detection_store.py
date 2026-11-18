@@ -113,11 +113,11 @@ def with_reviewer_regions(
             and d["id"] not in reviewer_ids] + reviewer
 
 
-def reviewer_box_snapshot(detection: Mapping[str, Any]) -> tuple[float, ...] | None:
-    """Keep exact coordinates; content-addressed IDs quantize small edits."""
+def reviewer_box_snapshot(detection: Mapping[str, Any]) -> tuple[float | str, ...] | None:
+    """Bind results to the exact coordinates and rendition of the reviewer crop."""
     if detection.get("detector_model") != "reviewer-selected":
         return None
-    return tuple(detection[key] for key in ("box_x", "box_y", "box_w", "box_h"))
+    return tuple(detection[key] for key in ("box_x", "box_y", "box_w", "box_h", "runtime_fingerprint"))
 
 
 def reviewer_result_is_current(db: Database, entry: Mapping[str, Any]) -> bool:

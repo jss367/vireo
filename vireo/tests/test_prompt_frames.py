@@ -179,7 +179,8 @@ def test_redrawing_on_aligned_original_repairs_legacy_reviewer_box(app_and_db, c
         assert frame.size == (1600, 1000)
         assert frame.getpixel((800, 700))[0] > 200
     token = response.headers["X-Vireo-Subject-Frame"]
-    result = client.put(url, json={"box": box, "frame_token": token}).get_json()
+    result = client.put(url, json={"operation": "edit", "revision": client.get(f"/api/photos/{pid}/subjects").json["subjects"][0]["revision"],
+                                   "detection_id": previous, "box": box, "frame_token": token}).get_json()
     assert result["primary_detection_id"] == previous
     assert analyze_photo(db, pid, path, detection_id=previous) == 1
     assert client.post("/api/undo").status_code == 200

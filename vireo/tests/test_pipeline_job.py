@@ -4467,7 +4467,7 @@ def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch, 
         writer = Database(db_path)
         writer.set_active_workspace(ws_id)
         replacement.append(confirmed_reviewer_box(
-            writer, photo_id, dict(x=redraw[1], y=.2, w=.2, h=.2)))
+            writer, photo_id, dict(x=redraw[1], y=.2, w=.2, h=.2), edit=chosen))
         writer.close()
 
     class RedrawingClassifier(_RobinClassifier):
@@ -4539,7 +4539,7 @@ def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch, 
     if redraw:
         assert replacement
         current = replacement[0]
-        assert (current == chosen) == (redraw[1] == .20001)
+        assert current == chosen
         assert verify_db.subjects.choice(photo_id)['detection_id'] == current
         predictions = detection_store.get_predictions_for_detection(
             verify_db, current, classifier_model='BioCLIP')

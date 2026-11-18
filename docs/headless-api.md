@@ -212,9 +212,16 @@ concrete examples.
 ### Correcting the selected animal
 
 `PUT /api/photos/<id>/primary-subject` accepts `detection_id` (a retained
-animal from this photo, or null for automatic selection).
+animal from this photo, or null for automatic selection). Send the optional
+`expected_primary_detection_id` to refuse a concurrent primary change.
 `PUT /api/photos/<id>/subjects/reviewer-box` accepts `box: {x,y,w,h}` in
-normalized upright source coordinates. To record verified analysis-frame coordinates,
+normalized upright source coordinates. The default operation, `add`, selects
+the new region as primary. For `operation: "edit"` or `operation: "remove"`,
+send the region's `detection_id` and its current `revision` from
+`GET /api/photos/<id>/subjects`. Omit the box when removing a region.
+Pass this revision as `expected_reviewer_revision` on a selected analysis retry
+to pin the job to the box you reviewed. An outdated edit or remove returns HTTP 409. Edits keep the same detection ID.
+To record verified analysis-frame coordinates,
 fetch `GET /photos/<id>/preview?view=subject&size=1920`, draw on its returned
 image, and include its `X-Vireo-Subject-Frame` response header as `frame_token`
 with the box. The signed token is bound to the photo, workspace and actual

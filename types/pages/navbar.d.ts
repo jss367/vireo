@@ -149,6 +149,9 @@ interface NavLightboxToken {
   readonly generation: number;
 }
 interface NavSubject {
+  revision?: string;
+  box_w: number;
+  box_h: number;
   evidence_basis?: string;
   /** The detector's own label ('person' or 'vehicle') for a region kept as an animal subject. */
   detector_category?: string | null;

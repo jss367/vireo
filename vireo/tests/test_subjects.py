@@ -509,7 +509,7 @@ def test_replaced_reviewer_box_rejects_inflight_analysis(db, subject_photo, monk
     original = subjects.analyze_image
     def replace(image, detections):
         results = original(image, detections)
-        replacement = confirmed_reviewer_box(db, photo_id, dict(x=replacement_x, y=.1, w=.1, h=.1))
+        replacement = confirmed_reviewer_box(db, photo_id, dict(x=replacement_x, y=.1, w=.1, h=.1), edit=chosen)
         if replacement_x == .10001:
             assert replacement == chosen
         return results
@@ -569,10 +569,13 @@ def test_resaving_reviewer_box_invalidates_only_its_cached_measurements(
     predictions = payload(db, photo_id)['subjects'][0]['predictions']
     if source_changed:
         Image.new('RGB', (320, 160), (240, 240, 240)).save(path)
-    # Content-addressed IDs quantize boxes to four decimals. Both an exact
-    # re-save and a sub-quantization adjustment must retire the old analysis.
+    # Even a subpixel edit changes the inputs to the analysis.
     box['x'] += coordinate_delta
-    assert select_reviewer_box(db, photo_id, box) == chosen
+    assert select_reviewer_box(db, photo_id, box, edit=chosen) == chosen
+    if not coordinate_delta and not source_changed:
+        assert db.subjects.analysis(chosen)["source_key"] == old_source_key
+        assert analyze_photo(db, photo_id, path, detection_id=chosen) == 0
+        return
     result = payload(db, photo_id)
     assert result['primary_detection_id'] == chosen
     assert result['subjects'][0]['analysis'] is None
@@ -603,7 +606,9 @@ def test_reviewer_box_resave_response_has_no_cached_analysis(app_and_db):
                          subject_clip_high=0, subject_clip_low=0, subject_y_median=100),
     }])
     db.commit()
-    response = client.put(url, json={'box': box})
+    revision = payload(db, pid)['subjects'][0]['revision']
+    response = client.put(url, json={'box': dict(box, x=.3), 'operation': 'edit',
+                                    'revision': revision, 'detection_id': chosen})
     assert response.status_code == 200
     assert response.get_json()['primary_detection_id'] == chosen
     assert response.get_json()['subjects'][0]['analysis'] is None
@@ -636,7 +641,7 @@ def test_classification_publication_blocks_reviewer_redraw(app_and_db):
     client = app.test_client()
     url = f'/api/photos/{pid}/subjects/reviewer-box'
     chosen = client.put(url, json={'box': dict(x=.1, y=.1, w=.2, h=.2)}).json['primary_detection_id']
-    entries = [{'photo': {'id': pid}, 'detection_id': chosen, '_reviewer_box': (.1, .1, .2, .2)}]
+    entries = [{'photo': {'id': pid}, 'detection_id': chosen, '_reviewer_box': (.1, .1, .2, .2, 'reviewer-v1')}]
     with detection_store.guard_reviewer_results(db, entries):
         assert len(entries) == 1
         assert client.put(url, json={'box': dict(x=.6, y=.1, w=.2, h=.2)}).status_code == 409
@@ -652,11 +657,14 @@ def test_reviewer_redraw_invalidates_classifier_embeddings(db, subject_photo, re
         for variant in ('', f'det:{chosen}', f'det:{automatic_ids[0]}'):
             db.masks_features.upsert_embedding(pid, 'BioCLIP', b'old-crop', variant)
         db.masks_features.upsert_embedding(pid, 'Unrelated model', b'other')
-    select_reviewer_box(db, pid, dict(x=replacement_x, y=.1, w=.2, h=.2))
+        db.masks_features.upsert_embedding(pid, 'Second classifier', b'sibling')
+        db.masks_features.upsert_embedding(pid, 'Second classifier', b'old-crop', f'det:{chosen}')
+    select_reviewer_box(db, pid, dict(x=replacement_x, y=.1, w=.2, h=.2), edit=chosen)
     assert db.masks_features.get_embedding(pid, 'BioCLIP') is None
     assert db.masks_features.get_embedding(pid, 'BioCLIP', f'det:{chosen}') is None
     assert db.masks_features.get_embedding(pid, 'BioCLIP', f'det:{automatic_ids[0]}') == b'old-crop'
     assert db.masks_features.get_embedding(pid, 'Unrelated model') == b'other'
+    assert db.masks_features.get_embedding(pid, 'Second classifier') == b'sibling'
 
 
 @pytest.mark.parametrize('replacement_x', [.10001, .6])
@@ -673,8 +681,8 @@ def test_cached_only_reviewer_results_reject_redraw(db, subject_photo, monkeypat
     raw, _, _ = cached_only._cached_only_raw_results(
         db, [db.photos.get(pid)], {}, {pid: detections}, 'BioCLIP', 'legacy')
     assert len(raw) == 1
-    assert raw[0]['_reviewer_box'] == (.1, .1, .2, .2)
-    select_reviewer_box(db, pid, dict(x=replacement_x, y=.1, w=.2, h=.2))
+    assert raw[0]['_reviewer_box'] == (.1, .1, .2, .2, detections[0]['runtime_fingerprint'])
+    select_reviewer_box(db, pid, dict(x=replacement_x, y=.1, w=.2, h=.2), edit=chosen)
     before = tuple(db.conn.iterdump())
     result = _store_grouped_predictions(raw, 'cached', 'BioCLIP', 10, .85, None, db)
     assert result['predictions_stored'] == 0
@@ -719,3 +727,31 @@ def test_subject_selection_and_replaced_box_roundtrip_through_undo(app_and_db):
     assert payload(db, pid)['primary_detection_id'] == first['primary_detection_id']
     assert client.post('/api/redo').status_code == 200
     assert payload(db, pid)['primary_detection_id'] == second['primary_detection_id']
+
+
+def test_legacy_reviewer_history_restores_original_id_and_rejects_conflicting_redraw(app_and_db):
+    import json
+
+    from subjects import REVIEWER_MODEL, sync_primary
+
+    app, db = app_and_db
+    client = app.test_client()
+    pid = db.photos.list_page()[0]["id"]
+    box = dict(x=.4, y=.2, w=.3, h=.4)
+    with db.transaction():
+        did, = db.detections.upsert_rows(pid, REVIEWER_MODEL, [{"box": box, "confidence": 1}], "reviewer-v1")
+        db.subjects.set_choice(pid, did)
+        sync_primary(db, pid)
+        # Older history identified the region by its content-addressed coordinates.
+        old = json.dumps({"choice": None, "boxes": []})
+        new = json.dumps({"choice": did, "boxes": [{"box": box, "verdict": None}]})
+        db.record_edit("subject_selection", "Selected animal region", new,
+                       [{"photo_id": pid, "old_value": old, "new_value": new}])
+    assert client.post("/api/undo").status_code == 200
+    assert db.detections.row(did) is None
+    assert client.post("/api/redo").status_code == 200
+    assert payload(db, pid)["primary_detection_id"] == did
+    with db.transaction():
+        db.detections.update_reviewer_region(did, dict(box, x=.35), "reviewer-v1", None)
+    assert client.post("/api/undo").status_code == 409
+    assert db.detections.row(did)["box_x"] == .35

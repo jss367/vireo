@@ -26,7 +26,7 @@ import logging
 import os
 import sqlite3
 import time
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, fields
 from typing import Any
 
@@ -183,10 +183,11 @@ class MasksFeaturesRepository:
         """Delete a mask file, only inside the masks directory."""
         safe_remove_mask_file(self.masks_dir, path)
 
-    def retire_prompt_masks(self, photo_id: int, detector_model: str) -> None:
-        """Retire derived cache rows while preserving immutable mask files/history."""
-        self.conn.execute("DELETE FROM photo_masks WHERE photo_id=? AND detector_model=?",
-                          (photo_id, detector_model))
+    def retire_prompt_masks(self, photo_id: int, detector_model: str, box: Mapping[str, float]) -> None:
+        """Retire the changed prompt while preserving other regions and immutable files."""
+        self.conn.execute("""DELETE FROM photo_masks WHERE photo_id=? AND detector_model=?
+            AND prompt_x=? AND prompt_y=? AND prompt_w=? AND prompt_h=?""",
+            (photo_id, detector_model, *(box[k] for k in "xywh")))
 
     def drop_cache_entry(
         self, photo_id: int, variant: str, path: str | None,
@@ -1040,15 +1041,14 @@ class MasksFeaturesRepository:
         models remain available; the default vector has no source-detection key.
         """
         variant = f"det:{detection_id}"
-        models = self.conn.execute(
-            "SELECT model FROM photo_embeddings WHERE photo_id=? AND variant=?",
-            (photo_id, variant),
-        ).fetchall()
-        for row in models:
-            self.conn.execute(
-                "DELETE FROM photo_embeddings WHERE photo_id=? AND model=? AND variant IN ('', ?)",
-                (photo_id, row["model"], variant),
-            )
+        # Classification mirrors the last crop's bytes into the default variant.
+        # A different vector in that slot came from another input.
+        self.conn.execute("""DELETE FROM photo_embeddings AS projection
+            WHERE photo_id=? AND variant='' AND EXISTS (
+                SELECT 1 FROM photo_embeddings AS crop
+                WHERE crop.photo_id=projection.photo_id AND crop.model=projection.model
+                  AND crop.variant=? AND crop.embedding=projection.embedding)""", (photo_id, variant))
+        self.conn.execute("DELETE FROM photo_embeddings WHERE photo_id=? AND variant=?", (photo_id, variant))
 
     def photos_with_embedding(
         self, model: str, variant: str = '', photo_ids: Sequence[int] | None = None,

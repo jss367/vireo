@@ -1538,10 +1538,13 @@ def create_photos_blueprint(
             return json_error("expected_primary_detection_id must be a positive integer", 400)
         effective = db.get_effective_config(cfg.load())
         cache_dir = media_root(config["THUMB_CACHE_DIR"])
+        revision = body.get("expected_reviewer_revision")
+        if revision is not None and (expected_primary is None or not isinstance(revision, str)):
+            return json_error("A reviewer revision requires the selected detection ID", 400)
         return ctx.start("analysis-retry",
                          lambda job: run_retry(ctx, job, ids, effective, cache_dir,
                                                results_dir=os.path.dirname(db_path),
-                                               expected_primary_detection_id=expected_primary),
+                                               expected_primary_detection_id=expected_primary, expected_reviewer_revision=revision),
                          config={"photo_ids": ids, "workspace_id": db.require_workspace_id()},
                          extra={"photo_ids": ids, "workspace_id": db.require_workspace_id()})
 
@@ -1623,8 +1626,10 @@ def create_photos_blueprint(
         from subjects import payload
         db = get_db()
         body = request.get_json(silent=True)
-        required = "box" if reviewer_box else "detection_id"
-        if not isinstance(body, dict) or required not in body:
+        if not isinstance(body, dict):
+            return json_error("Expected a JSON object")
+        required = "box" if reviewer_box and body.get("operation") != "remove" else "detection_id"
+        if required not in body:
             return json_error(f"{required} is required")
         try:
             source, reason = subject_verdicts.validate_provenance(body)
