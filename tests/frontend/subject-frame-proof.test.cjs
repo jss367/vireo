@@ -10,14 +10,15 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
 
 function harness(options = {}) {
   const puts = [], created = [], revoked = [], saved = [], documentEvents = {};
-  const status = {textContent: ''}, save = {disabled: true}, cancel = {};
+  const status = {textContent: ''}, save = {disabled: true}, cancel = {}, remove = {};
   const canvas = {events: {}, getContext: () => ({drawImage() {}, strokeRect() {}}),
     addEventListener(name, callback) { this.events[name] = callback; }, setPointerCapture() {},
     getBoundingClientRect: () => ({left: 0, top: 0, width: 100, height: 100})};
   save.addEventListener = (_name, callback) => { save.click = callback; };
+  remove.addEventListener = (_name, callback) => { remove.click = callback; };
   cancel.addEventListener = () => {};
   const dialog = {isConnected: false, events: {},
-    querySelector(selector) { return selector === 'canvas' ? canvas : selector === '[role="status"]' ? status : selector === '[data-save]' ? save : cancel; },
+    querySelector(selector) { return selector === 'canvas' ? canvas : selector === '[role="status"]' ? status : selector === '[data-save]' ? save : selector === '[data-remove]' ? remove : cancel; },
     addEventListener(name, callback) { this.events[name] = callback; }, setAttribute() {}, showModal() {},
     close() { this.isConnected = false; this.events.close?.(); }, remove() { this.isConnected = false; }};
   class SyntheticImage {
@@ -39,8 +40,8 @@ function harness(options = {}) {
     canvas.events.pointermove({clientX: 60, clientY: 70});
     canvas.events.pointerup();
   }
-  controller.openSubjectBox(7, data => saved.push(data));
-  return {puts, created, revoked, saved, status, save, dialog, draw, response,
+  controller.openSubjectBox(7, data => saved.push(data), options.subject);
+  return {puts, created, revoked, saved, status, save, remove, dialog, draw, response,
     reset: () => documentEvents['lightbox:subjectreset']()};
 }
 
@@ -74,4 +75,16 @@ test('a stale confirmation reports the server error without minting a replacemen
   const h = harness({saveError: 'Original frame changed; reload it'}); await tick(); h.draw(); await h.save.click();
   assert.match(h.status.textContent, /Original frame changed/); assert.equal(h.dialog.isConnected, true);
   assert.equal(h.saved.length, 0); assert.equal(h.puts[0].frame_token, 'issued-frame-proof');
+});
+
+test('edit and remove target the region version that opened the dialog', async () => {
+  const subject = {id: 19, revision: 'old-box', box_x: .1, box_y: .1, box_w: .4, box_h: .5};
+  for (const operation of ['edit', 'remove']) {
+    const h = harness({subject}); await tick();
+    if (operation === 'edit') { h.draw(); await h.save.click(); }
+    else await h.remove.click();
+    assert.equal(h.puts[0].operation, operation);
+    assert.equal(h.puts[0].detection_id, subject.id);
+    assert.equal(h.puts[0].revision, subject.revision);
+  }
 });

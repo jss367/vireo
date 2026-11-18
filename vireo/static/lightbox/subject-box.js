@@ -1,16 +1,17 @@
 /* Draw in upright source coordinates, independent of the saved edit recipe. */
 import { safeFetch, fetchResponse } from '../navbar-shared-helpers.js';
 
-/** @param {number} photoId @param {(data: NavSubjectData) => void} saved */
-export function openSubjectBox(photoId, saved) {
+/** @param {number} photoId @param {(data: NavSubjectData) => void} saved @param {NavSubject} [subject] */
+export function openSubjectBox(photoId, saved, subject) {
   const dialog = document.createElement('dialog');
   dialog.className = 'lb-subject-box-dialog';
   dialog.setAttribute('aria-label', 'Select animal region');
   dialog.innerHTML = '<h2>Select animal region</h2><p>Drag a box around the visible animal on the unedited image. '
     + 'This records your region, without assigning a species.</p>'
-    + '<p>Saving replaces the previous reviewer box. Undo restores your previous selection.</p>'
+    + (subject ? '<p>Redraw this region or remove it. You can undo either change.</p>' : '<p>The new region becomes primary.</p>')
     + '<canvas aria-label="Drag to select animal region"></canvas>'
     + '<p role="status">Loading source image…</p><button type="button" data-save disabled>Save subject box</button> '
+    + (subject ? '<button type="button" data-remove>Remove box</button> ' : '')
     + '<button type="button" data-cancel>Cancel</button>';
   const canvas = /** @type {HTMLCanvasElement} */ (dialog.querySelector('canvas'));
   const context = canvas.getContext('2d');
@@ -33,6 +34,11 @@ export function openSubjectBox(photoId, saved) {
     if (!dialog.isConnected || !context) return;
     canvas.width = image.naturalWidth; canvas.height = image.naturalHeight;
     context.drawImage(image, 0, 0);
+    if (subject) {
+      context.strokeStyle = '#ffdf40'; context.lineWidth = Math.max(2, canvas.width / 500);
+      context.strokeRect(subject.box_x * canvas.width, subject.box_y * canvas.height,
+        subject.box_w * canvas.width, subject.box_h * canvas.height);
+    }
     status.textContent = 'Drag around the animal. Measurements will apply only to this box.';
   };
   image.onerror = () => { status.textContent = 'Source image unavailable. No region has been saved.'; };
@@ -61,19 +67,25 @@ export function openSubjectBox(photoId, saved) {
     save.disabled = !box || box.w * canvas.width < 2 || box.h * canvas.height < 2;
   });
   canvas.addEventListener('pointercancel', () => { start = null; box = null; save.disabled = true; });
-  save.addEventListener('click', async () => {
-    if (!box || !frameToken || saving) return;
+  save.addEventListener('click', () => submit(false));
+  if (subject) dialog.querySelector('[data-remove]')?.addEventListener('click', () => submit(true));
+  /** @param {boolean} remove */
+  async function submit(remove) {
+    if ((!remove && (!box || !frameToken)) || saving) return;
     saving = true; save.disabled = true;
     status.textContent = 'Saving selected subject…';
     try {
       const result = /** @type {NavSubjectData} */ (await safeFetch('/api/photos/' + photoId + '/subjects/reviewer-box', {
-        method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({box, frame_token: frameToken})
+        method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({
+          operation: remove ? 'remove' : subject ? 'edit' : 'add',
+          detection_id: subject?.id, revision: subject?.revision, box, frame_token: frameToken
+        })
       }, {toast: false}));
       if (dialog.isConnected) { saved(result); close(); }
     } catch (error) {
       status.textContent = error instanceof Error ? error.message : String(error);
     } finally { saving = false; save.disabled = false; }
-  });
+  }
   document.body.append(dialog); dialog.showModal();
   loadSubjectFrame(photoId).then(({blob, token}) => {
     if (!dialog.isConnected) return;

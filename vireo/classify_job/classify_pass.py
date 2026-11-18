@@ -525,7 +525,7 @@ class _ClassifyPhotosPass:
 
     def _enqueue(
         self, photo: sqlite3.Row, detection_id: int, folder_path: str, image_path: str,
-        img: Image.Image, reviewer_box: tuple[float, ...] | None = None,
+        img: Image.Image, reviewer_box: tuple[float | str, ...] | None = None,
     ) -> None:
         """Queue one prepared image, flushing once the batch is full."""
         self.batch.append({

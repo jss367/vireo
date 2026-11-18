@@ -318,10 +318,12 @@
     ]
   },
   "reversible_reviews": {
-    "description": "Same-shot reviews can be reopened. GPS jump corrections preserve camera coordinates and can be reversed with Restore camera GPS.",
+    "description": "Same-shot reviews can be reopened. GPS jump corrections preserve camera coordinates and can be reversed with Restore camera GPS. Mask-review verdicts bind to the exact mask bytes and expose a revision so the reviewer can re-decide.",
     "routes": [
       "POST /api/audit/gps-jumps",
-      "POST /api/duplicates/same-shot/review"
+      "POST /api/duplicates/same-shot/review",
+      "PUT /api/photos/<int:photo_id>/mask-review",
+      "PUT /api/v1/photos/<int:photo_id>/mask-review"
     ]
   },
   "local_history": {

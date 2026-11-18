@@ -325,7 +325,7 @@ body {
   <div class="best-actions" style="justify-content:flex-start; margin-bottom:14px;">
     <label>Species to compare <input id="requestedSpecies" type="text" placeholder="Optional species name" maxlength="300"></label>
     <button class="best-btn" id="compareSubjectsBtn" type="button">Compare subjects</button>
-    <button class="best-btn" id="analyzeSubjectsBtn" type="button" disabled>Analyze selected subjects</button>
+    <button class="best-btn" id="analyzeSubjectsBtn" type="button" disabled>Analyze missing selected subjects</button>
     <span id="comparisonStatus" class="section-note" role="status"></span>
   </div>
   <p id="comparisonNotice" class="section-note" role="status" hidden></p>
@@ -367,6 +367,15 @@ body {
         <section id="subjectPanel" hidden>
           <label>Subject for this comparison <select id="subjectChoices"></select></label>
           <img id="chosenSubjectImg" alt="Selected subject detail" style="max-width:100%;max-height:400px;object-fit:contain;">
+          <div id="maskReview" hidden>
+            <p id="maskVerdict" role="status"></p>
+            <a id="inspectMask" target="_blank">Inspect masked crop</a>
+            <a id="inspectFullMask" target="_blank">Full mask</a>
+            <button id="validMask" type="button">Confirm animal mask</button>
+            <button id="invalidMask" type="button">Exclude incorrect mask</button>
+            <button id="refineMask" type="button">Refine region and analyze</button>
+          </div>
+          <div id="maskHistory"></div>
           <p id="subjectEvidenceStatus" class="section-note"></p>
         </section>
         <div class="section-head">

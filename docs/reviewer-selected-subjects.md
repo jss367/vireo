@@ -10,9 +10,10 @@ full-image classification from localized evidence; a missing region does not
 establish animal absence. Drawing a region does not assign or confirm a species.
 
 Reviewer boxes are stored under `reviewer-selected`, separate from detector
-output, and become the primary subject. A new box replaces the previous
-reviewer box for that photo. Detector reruns and Reclassify leave it intact.
-Both Process and standalone Classify include the current reviewer box alongside
+output. Draw a box for each animal, including overlapping animals. Adding a
+region makes it primary. Click a subject thumbnail to select a different
+primary. Choose **Edit box** on a reviewer region to redraw or remove it.
+Both Process and standalone Classify include the reviewer regions alongside
 automatic animal boxes, even when detection returns no animals. Reclassification
 refreshes matching species scores while retaining their accepted/rejected decisions.
 If the reviewer redraws during classification, results from the old coordinates
@@ -22,10 +23,9 @@ The internal confidence value of 1 preserves the explicit region through
 confidence filtering; it is not a model probability. The lightbox labels the
 region as reviewer-selected instead of displaying a detector percentage.
 
-Saving a box, including re-saving the same coordinates, clears its cached box
-analysis and previous subject measurements, mask, embedding, and eye state.
-It also retires classifier vectors for the previous reviewer crop and their
-photo-level projections; sibling detection vectors and unrelated models survive. Box measurements use the existing subject-analysis path at up to 1024
+Redrawing a region on different coordinates or a different source frame retires
+its incompatible analysis. Other regions keep their cached measurements.
+Box measurements use the existing subject-analysis path at up to 1024
 pixels on the long edge: sharpness, area, clipping, median brightness, quality,
 and an exposure suggestion. They include background inside the rectangle.
 They do not constitute segmentation or eye analysis, and do not mark the Full
@@ -33,10 +33,9 @@ pipeline complete. Applying crop or exposure suggestions remains a separate
 explicit action.
 
 The catalog stores the region and its measurements; saved image edits and
-species decisions are unchanged. Reviewer-box saves currently have no Undo/Redo,
-like primary-subject selection. Replacing a reviewer box cannot be reversed
-through edit history; the drawing dialog states this before saving. Existing read-only review views disable the
-new write controls. API routes verify workspace visibility, validate normalized
+species decisions are unchanged. Adding, editing, removing and choosing a primary each support Undo and Redo.
+A restored region may need reanalysis. Read-only views disable these controls.
+API routes verify workspace visibility, validate normalized
 coordinates, and reject a scoped retry if its region was replaced during work.
 
 ## Verification on the reported kinglet frames

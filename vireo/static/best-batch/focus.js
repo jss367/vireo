@@ -34,7 +34,7 @@ function showFocusEvidence(headers) {
     disabled: 'Eye analysis is off.', model_unavailable: 'Eye model is unavailable.',
     identity_unavailable: 'Eye analysis needs a supported species identification.', not_located: 'No reliable eye located.'};
   var eyeText = eyeMessages[eyes || ''];
-  var label = basis === 'eye' ? 'Eye-centered window.' : basis === 'subject' ?
+  var label = basis === 'head' ? 'Centered on estimated head landmarks. Verify visibility in the full frame.' : basis === 'eye' ? 'Eye-centered window.' : basis === 'subject' ?
     'Subject-box-centered window; the head or eye may be outside this crop.' : basis === 'point' ?
       'Manual inspection center; eye visibility is for you to verify.' : 'Frame-centered window; no animal location was used.';
   byId('focusEvidenceStatus').textContent = label + ' ' +
@@ -90,12 +90,24 @@ async function loadFocus(url) {
     var headers = response.headers;
     showFocusEvidence(headers);
     // Only generation-bound eye locations authorize an automatic head/eye view.
-    eyeUrl = headers.get('X-Vireo-Focus-Eye-Status') === 'located' && url.includes('analysis_key=') ? url : null;
+    eyeUrl = null;
+    if (headers.get('X-Vireo-Focus-Basis') === 'head' || headers.get('X-Vireo-Focus-Eye-Status') === 'located') {
+      var pinned = new URL(url, window.location.origin);
+      var key = headers.get('X-Vireo-Analysis-Key');
+      var id = headers.get('X-Vireo-Focus-Detection-Id');
+      if (key && id) {
+        pinned.searchParams.set('analysis_key', key);
+        pinned.searchParams.set('detection_id', id);
+      }
+      if (pinned.searchParams.has('analysis_key')) eyeUrl = pinned.pathname + pinned.search;
+    }
     var center = (headers.get('X-Vireo-Focus-Center') || '').split(',').map(Number);
     if (center.length === 2 && center.every(function(v) { return Number.isFinite(v) && v >= 0 && v <= 1; })) {
       markCenter(/** @type {[number, number]} */ (center));
     } else markCenter(null);
-    byId('focusRasterStatus').textContent = 'Basis: ' + headers.get('X-Vireo-Focus-Basis') +
+    var edges = headers.get('X-Vireo-Focus-Source-Edges');
+    byId('focusRasterStatus').textContent = (edges && edges !== 'none' ? 'Window reaches source edge (' + edges + '). ' : '') +
+      (headers.get('X-Vireo-Focus-Subject-Clipped') === '1' ? 'Part of the subject box lies outside the window. ' : '') + 'Basis: ' + headers.get('X-Vireo-Focus-Basis') +
       ' · source: ' + headers.get('X-Vireo-Focus-Source') +
       ' · raster: ' + headers.get('X-Vireo-Focus-Raster-Size') +
       ' · original scale: ' + headers.get('X-Vireo-Focus-Original-Scale') +
@@ -127,7 +139,11 @@ export function renderFocus(card) {
     if (controller) controller.abort();
     byId('inspectedFocusImg').hidden = true;
     byId('focusRasterStatus').textContent = 'Selected subject evidence is unavailable. Analyze it or place a manual center.';
-  } else loadFocus(card.focus_crop_url || '/photos/' + card.id + '/focus-crop?size=512');
+  } else {
+    var url = new URL(card.focus_crop_url || '/photos/' + card.id + '/focus-crop?size=512', window.location.origin);
+    url.searchParams.set('basis', 'head');
+    loadFocus(url.pathname + url.search);
+  }
 }
 
 export function bindFocusControls() {
@@ -137,7 +153,7 @@ export function bindFocusControls() {
       choosing = false;
       byId('manualFocusBtn').setAttribute('aria-pressed', 'false');
       var url = new URL(eyeUrl, window.location.origin);
-      url.searchParams.set('basis', 'eye');
+      url.searchParams.set('basis', 'head');
       loadFocus(url.pathname + url.search);
     } else {
       choosing = true;

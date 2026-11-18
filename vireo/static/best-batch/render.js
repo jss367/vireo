@@ -7,7 +7,7 @@ import { renderSubject } from './subjects.js';
 import { byId, state } from './state.js';
 import { escapeAttr, escapeHtml } from './shared.js';
 import {
-  hasEyeKeypoint, previewUrl, rankLabel, scoreText, thumbnailUrl,
+  previewUrl, rankLabel, scoreText, thumbnailUrl,
 } from './helpers.js';
 
 /** @param {string} message */
@@ -67,15 +67,13 @@ export function inspectPhoto(photoId) {
 
 /** @param {BestBatchCard} card */
 function focusCardHtml(card) {
-  var hasEye = Boolean(card.subject && card.focus_crop_url && card.eye_status === 'measured' && hasEyeKeypoint(card));
   return '<div class="focus-card ' + escapeAttr(card.role || '') + '" data-photo-id="' + card.id + '">' +
     '<div class="focus-crop native">' +
       '<img src="' + escapeAttr(card.focus_crop_url || card.crop_url || previewUrl(card.id, 1920)) + '" alt="' + escapeAttr(card.filename || '') + '" loading="lazy">' +
     '</div>' +
     '<div class="focus-meta">' +
-      '<div class="score">' + (card.focus_crop_url ? (hasEye ? 'Eye-centered window' :
-        'Subject/frame center · head may be outside crop') : 'Context preview · inspect focus below') + '</div>' +
-      (!hasEye ? '<div class="score">No verified eye evidence in this crop</div>' : '') +
+      '<div class="score">' + (card.focus_crop_url ? 'Native crop · inspect head placement below' :
+        'Context preview · inspect focus below') + '</div>' +
       '<div class="role ' + escapeAttr(card.role || '') + '">' + escapeHtml(rankLabel(card)) + '</div>' +
       '<div class="filename" title="' + escapeAttr(card.filename || '') + '">' + escapeHtml(card.filename || '') + '</div>' +
       '<div class="score">' + escapeHtml(scoreText(card)) + '</div>' +
@@ -85,7 +83,7 @@ function focusCardHtml(card) {
 
 /** @param {BestBatchCard} card */
 function rankCardHtml(card) {
-  var reasons = (card.reasons || []).slice(0, 2).join(' · ');
+  var reasons = [card.mask_review?.verdict === 'unreviewed' && card.mask_review.hint, ...(card.reasons || [])].filter(Boolean).slice(0, 2).join(' · ');
   return '<div class="rank-card ' + escapeAttr(card.role || '') + '" data-photo-id="' + card.id + '">' +
     '<img src="' + thumbnailUrl(card) + '" alt="' + escapeAttr(card.filename || '') + '" loading="lazy">' +
     '<div class="rank-meta">' +
@@ -125,7 +123,8 @@ export function renderBatch(data) {
 
   /** @type {HTMLButtonElement} */ (byId('reviewBtn')).disabled = !!data.comparison || !data.photo_ids || data.photo_ids.length < 2;
   byId('reviewBtn').title = data.comparison ? 'Review the selected subjects with the comparison controls below.' : '';
-  /** @type {HTMLButtonElement} */ (byId('analyzeSubjectsBtn')).disabled = !data.comparison;
+  /** @type {HTMLButtonElement} */ (byId('analyzeSubjectsBtn')).disabled = !data.comparison ||
+    !(data.cards || []).some(card => card.subject?.detection_id && card.evidence_status === 'subject_analysis_missing');
   /** @type {HTMLButtonElement} */ (byId('flagBtn')).disabled = false;
   /** @type {HTMLButtonElement} */ (byId('rejectBtn')).disabled = !data.best_photo_id;
   var inspected = cards.find(function(c) { return c.id === state.inspectedId; });

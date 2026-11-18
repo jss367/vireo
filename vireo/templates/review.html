@@ -907,6 +907,7 @@
     <summary>Scores are relative shares, not probabilities</summary>
     <p>Species scores are softmax shares within each model’s candidate list, not calibrated probabilities of correct identification. Scores from different models or label lists are not directly comparable. Inspect the subject before confirming its name.</p>
   </details>
+  <span class="kbd-hint">You can save species before grouping. They will be attached to encounters when grouping finishes.</span>
   <span class="kbd-hint" id="kbdHintReview">Keyboard: A = accept, S = skip</span>
 </div>
 
@@ -940,6 +941,7 @@
 <script defer src="/static/review/group-changes.js"></script>
 <script defer src="/static/review/identity-alternatives.js"></script>
 <script defer src="/static/review/queue-state.js"></script>
+<script defer src="/static/review/queue-coverage.js"></script>
 <script defer src="/static/review/queue-focus.js"></script>
 <script defer src="/static/review/queue.js"></script>
 <script defer src="/static/review/tool-reorder.js"></script>

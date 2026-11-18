@@ -185,7 +185,7 @@ Current stable set:
 | GET  | `/api/v1/photos/<id>/burst-evidence` | The burst around a photo as an evidence pack: ranked frames, feature coverage, ambiguity reasons, 1:1 crop URLs. `margin`, `focus_size`, `gap_seconds`, `max_photos`. |
 | POST | `/api/v1/photos/burst-evidence` | The same pack for an explicit `{"photo_ids": [...]}` selection (2–500 ids). |
 | POST | `/api/v1/photos/species-evidence` | Read-only identification evidence for 1–100 exact unique `photo_ids`: subjects, model candidates, score meanings, uncertainty, list provenance and bound crop URLs. No automatic continuity or assignment claim. |
-| GET  | `/api/v1/photos/<id>/focus-crop` | Unresampled JPEG window around the scored focus point. `size` (128–1024, default 512); `basis` (`auto`, `eye`, `subject`, `frame`); `center=x,y` uses normalized coordinates in the unedited upright source raster, before any crop/rotation recipe; `source` (`auto` default, `working`, `original`): working requires a usable working copy and returns 404 without decoding an original when absent; auto serves the working copy unless it is downsized against the catalog dimensions and the original can be decoded; `mask=1` shades pixels outside the SAM mask at the default or manual center. An unavailable, stale, or geometry-incompatible mask returns a JSON error (404). An empty valid mask shades the entire window. Headers: `X-Vireo-Focus-Basis` (`eye`, `subject`, `frame`, `point`), `X-Vireo-Focus-Center`, `X-Vireo-Focus-Window`, `X-Vireo-Focus-Source` (`working_copy`, `original`), `X-Vireo-Focus-Raster-Size`, `X-Vireo-Focus-Original-Scale` (decoded pixels per original pixel, `unknown` without catalog dimensions), `X-Vireo-Focus-Mask`. |
+| GET  | `/api/v1/photos/<id>/focus-crop` | Unresampled JPEG inspection window. Unmasked crops default to head inspection for the active subject or a pinned subject generation. `size` (128–1024, default 512); `basis` (`auto`, `head`, `eye`, `subject`, `frame`); `basis=head` inspects current head landmarks or the measured eye for `detection_id` (defaults to the active subject) on the matching original rendition, falling back to the subject center when unavailable. Pass `analysis_key` to pin the generation. `X-Vireo-Focus-Source-Edges` lists the source boundaries reached by the window. `center=x,y` uses normalized coordinates in the unedited upright source raster, before any crop/rotation recipe; `source` (`auto` default, `working`, `original`): working requires a usable working copy and returns 404 without decoding an original when absent; auto prefers the aligned original for RAW photos, selected subjects, and masks. For other crops it prefers the working copy unless it is downsized; `mask=1` shades pixels outside the SAM mask at the default or manual center. An unavailable, stale, or geometry-incompatible mask returns a JSON error (404). An empty valid mask shades the entire window. Headers: `X-Vireo-Focus-Basis` (`head`, `eye`, `subject`, `frame`, `point`), `X-Vireo-Focus-Center`, `X-Vireo-Focus-Window`, `X-Vireo-Focus-Source` (`working_copy`, `original`), `X-Vireo-Focus-Raster-Size`, `X-Vireo-Focus-Original-Scale` (decoded pixels per original pixel, `unknown` without catalog dimensions), `X-Vireo-Focus-Mask`. |
 | GET  | `/api/v1/species-best` | The best photos of each species within a scope, each with the decision behind its first photo. See [the best photo of each species](#the-best-photo-of-each-species). |
 | POST | `/api/v1/species-best/choose` | Record that one photo is the best of a species among others: `{"species": str, "photo_id": int, "over"?: [int], "folder_id"?, "collection_id"?, "rules"?, "source"?: str, "reason"?: str}`. |
 | GET  | `/api/v1/folders/<id>/bursts` | Every burst in one folder with coverage, the scorer's pick and ambiguity; folder-level coverage too. `margin` (relative sharpness gap for a close call, default 0.10). Folders over 5000 photos answer 400. |
@@ -212,9 +212,16 @@ concrete examples.
 ### Correcting the selected animal
 
 `PUT /api/photos/<id>/primary-subject` accepts `detection_id` (a retained
-animal from this photo, or null for automatic selection).
+animal from this photo, or null for automatic selection). Send the optional
+`expected_primary_detection_id` to refuse a concurrent primary change.
 `PUT /api/photos/<id>/subjects/reviewer-box` accepts `box: {x,y,w,h}` in
-normalized upright source coordinates. To record verified analysis-frame coordinates,
+normalized upright source coordinates. The default operation, `add`, selects
+the new region as primary. For `operation: "edit"` or `operation: "remove"`,
+send the region's `detection_id` and its current `revision` from
+`GET /api/photos/<id>/subjects`. Omit the box when removing a region.
+Pass this revision as `expected_reviewer_revision` on a selected analysis retry
+to pin the job to the box you reviewed. An outdated edit or remove returns HTTP 409. Edits keep the same detection ID.
+To record verified analysis-frame coordinates,
 fetch `GET /photos/<id>/preview?view=subject&size=1920`, draw on its returned
 image, and include its `X-Vireo-Subject-Frame` response header as `frame_token`
 with the box. The signed token is bound to the photo, workspace and actual
@@ -456,6 +463,30 @@ only evidence belonging to the selected subject. Unresolved or unanalyzed
 subjects do not enter score percentiles or rejection suggestions. At least two
 analyzed subjects are required for a relative comparison, and an all-rejected
 comparison has no suggested best frame.
+
+A ready card can still segment a reed or another animal. Inspect its
+`focus_crop_mask_url` and `mask_url`. To record the result, PUT
+`detection_id`, `analysis_key`, `mask_digest` (from `card.mask_review`), and
+`verdict` (`valid` or `invalid`), and `expected_revision` (from
+`card.mask_review.revision`) to `/api/v1/photos/<id>/mask-review`.
+A stale generation or review revision returns HTTP 409 without changing the
+verdict. Reload the comparison before submitting another decision. Invalid masks remain inspectable and
+count toward analysis coverage but are excluded from selected-subject scoring.
+Unreviewed masks retain provisional scoring. Best Batch lets you draw a tighter
+reviewer box on the original and analyze that region. Earlier reviewed mask
+PNGs and boxes are available in `mask_review.history` for that photo.
+
+
+The `evidence_owner` on a scored card identifies the detection, normalized
+region, model, raster, and measurement generation used for its subject scores.
+Photo-level eye evidence is unbound. Selected cards also include
+`comparison_evidence.status` and a readable `evidence_reason`. For example,
+`compatible_primary` means the selected animal can use the recorded primary
+measurements without creating a second cache entry. `other_animal`,
+`scale_mismatch`, and `primary_unverified` explain why fresh analysis is
+needed. Older primary masks can lack raster and model-generation records.
+`comparison_evidence.selected_cache` is `stale` when an earlier selected
+generation exists and neither route supplies current measurements.
 
 To compute missing evidence, POST the same comparison to
 `/api/v1/photos/burst-evidence` with `"analyze": true`. It returns `job_id`;

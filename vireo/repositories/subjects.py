@@ -5,8 +5,7 @@ retained animal box), ``photo_subject_state`` (the detection currently
 projected as the photo's primary) and ``photo_subject_choices`` (a manual
 primary override) are catalog-wide: a subject's analysis is a pure function
 of the photo and its detection, so nothing here resolves the active
-workspace. The one workspace-dependent read, the visible predictions listed
-beside each subject, takes the workspace id from its caller.
+workspace. Workspace-scoped reads take the workspace id from the caller.
 
 Callers reach it as ``db.subjects`` (a fresh repository per access, see
 ``Database.subjects``); there are no forwarding wrappers on ``Database``.
@@ -28,6 +27,14 @@ from repositories.prediction_review import prediction_review_join, prediction_re
 class SubjectsRepository:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
+
+    def visible_inspection_source(self, workspace_id: int, photo_id: int) -> sqlite3.Row | None:
+        """Return the catalog source identity only for a visible photo."""
+        return self.conn.execute(
+            """SELECT p.id, p.file_hash, p.file_size, p.file_mtime, p.width, p.height
+               FROM photos p JOIN photo_workspace_visibility v ON v.photo_id=p.id
+               WHERE p.id=? AND v.workspace_id=?""", (photo_id, workspace_id),
+        ).fetchone()
 
     def focus_point(self, photo_id):
         from focus_point import focus_point
@@ -54,14 +61,22 @@ class SubjectsRepository:
             (photo_id,)).fetchone()
         return row[0] if row else None
 
+    def visible_burst_source(self, photo_id: int, workspace_id: int) -> sqlite3.Row | None:
+        previous = self.burst_neighbor(photo_id)
+        return None if previous is None else self.visible_inspection_source(workspace_id, previous)
+
     def following_burst_frames(self, photo_id: int) -> Iterator[int]:
         """Walk ahead in capture order until the first gap in the burst."""
         while (successor := self.burst_neighbor(photo_id, following=True)) is not None:
             yield successor
             photo_id = successor
 
-    def previous_burst_subject(self, photo_id):
-        previous = self.burst_neighbor(photo_id)
+    def previous_burst_subject(self, photo_id, *, workspace_id=None):
+        if workspace_id is None:
+            previous = self.burst_neighbor(photo_id)
+        else:
+            source = self.visible_burst_source(photo_id, workspace_id)
+            previous = source["id"] if source is not None else None
         if previous is None:
             return None
         return self.conn.execute("""SELECT d.* FROM photo_subject_state st
@@ -164,13 +179,55 @@ class SubjectsRepository:
             "SELECT s.* FROM detection_subjects s JOIN detections d ON d.id=s.detection_id WHERE d.photo_id=?",
             (photo_id,))}
 
+    def mask_reviews(self, photo_id: int) -> list[dict[str, Any]]:
+        return [dict(row) for row in self.conn.execute(
+            "SELECT id, detection_id, source_key, mask_digest, verdict, revision, box FROM subject_mask_reviews "
+            "WHERE photo_id=? ORDER BY id DESC", (photo_id,),
+        )]
+
+    def reviewed_mask(self, photo_id: int, review_id: int) -> bytes | None:
+        row = self.conn.execute("SELECT mask_png FROM subject_mask_reviews WHERE photo_id=? AND id=?",
+                                (photo_id, review_id)).fetchone()
+        return row[0] if row else None
+
+    def save_mask_review(self, photo_id: int, detection_id: int, key: str, digest: str,
+                         verdict: str, box: dict, mask_png: bytes, *, expected_revision: int) -> int:
+        """Compare the displayed review revision under the caller's write transaction."""
+        binding = (photo_id, detection_id, key, digest)
+        if expected_revision == 0:
+            row = self.conn.execute(
+                "INSERT INTO subject_mask_reviews(photo_id,detection_id,source_key,mask_digest,verdict,box,mask_png) "
+                "VALUES (?,?,?,?,?,?,?) ON CONFLICT(photo_id,detection_id,source_key,mask_digest) DO NOTHING "
+                "RETURNING revision", (*binding, verdict, json.dumps(box), mask_png),
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                "UPDATE subject_mask_reviews SET verdict=?, revision=revision+1 "
+                "WHERE photo_id=? AND detection_id=? AND source_key=? AND mask_digest=? AND revision=? "
+                "RETURNING revision", (verdict, *binding, expected_revision),
+            ).fetchone()
+        if row is None:
+            raise ValueError("Mask review changed. Reload the comparison before choosing again.")
+        return row[0]
+
     def ranking_analysis(self, detection_id: int, source_key: str) -> dict[str, Any] | None:
         """One immutable analysis generation, including its exact mask bytes."""
         row = self.conn.execute(
             "SELECT features, mask_png FROM subject_ranking_analysis "
             "WHERE detection_id=? AND source_key=?", (detection_id, source_key),
         ).fetchone()
-        return {"features": json.loads(row["features"]), "mask_png": row["mask_png"]} if row else None
+        if row is None:
+            return None
+        try:
+            features = json.loads(row["features"])
+        except (json.JSONDecodeError, TypeError):
+            return None
+        return {"features": features, "mask_png": row["mask_png"]}
+
+    def has_ranking_analysis(self, detection_id: int) -> bool:
+        return self.conn.execute(
+            "SELECT 1 FROM subject_ranking_analysis WHERE detection_id=? LIMIT 1", (detection_id,),
+        ).fetchone() is not None
 
     def save_ranking_analysis(
         self, detection_id: int, source_key: str, features: Mapping[str, Any], mask_png: bytes,

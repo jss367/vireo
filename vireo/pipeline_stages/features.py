@@ -10,6 +10,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Any, Protocol, TypedDict
 
 import numpy as np
@@ -20,6 +21,7 @@ from pipeline_locks import (
 )
 from pipeline_stages.context import PipelineRun
 from pipeline_stages.outcomes import StageOutcomes
+from primary_comparison import measurement_inputs
 from repositories.masks_features import MaskQuality, PipelineFeatures
 from resource_ledger import (
     ResourceWaitCancelled,
@@ -262,6 +264,7 @@ class _MaskPhoto:
     image_path: str
     # The photo's stored ``photo_masks`` row for this SAM variant, if any.
     existing: dict[str, Any] | None = None
+    comparison_inputs: str | None = None
     mask_file_stage: _MaskFileStage | None = None
     detector_runtime: str | None = None
     frame_id: str | None = None
@@ -1128,7 +1131,12 @@ class _MaskPass:
         )
         if existing is None:
             return False
-        self.require_original_reviewer_frame(item.image_path, item.detector_runtime, detector_model=item.entry.get("detector_model"))
+        from masking import cached_mask_frame_matches
+
+        frame_id = self.require_original_reviewer_frame(
+            item.image_path, item.detector_runtime,
+            detector_model=item.entry.get("detector_model"), verify_mask_frame=True,
+        )
         cached_prompt = (
             existing["prompt_x"], existing["prompt_y"],
             existing["prompt_w"], existing["prompt_h"],
@@ -1137,7 +1145,8 @@ class _MaskPass:
                 == entry["detector_model"]
                 and cached_prompt == entry["prompt"]
                 and existing["path"]
-                and os.path.isfile(existing["path"])):
+                and os.path.isfile(existing["path"])
+                and cached_mask_frame_matches(existing["path"], frame_id)):
             return False
         # The cheap skip (re-activate only) is correct
         # ONLY when the photos row is already fully
@@ -1214,7 +1223,9 @@ class _MaskPass:
         with self._timed("segment"):
             item.frame_id = getattr(proxy, "info", {}).get("vireo_subject_frame_id")
             self.require_aligned_detector_prompt(proxy, item.detector_runtime, detector_model=item.entry.get("detector_model"))
-            return self.generate_mask(proxy, item.det_box, variant=self.sam2_variant)
+            mask = self.generate_mask(proxy, item.det_box, variant=self.sam2_variant)
+            item.comparison_inputs = measurement_inputs(proxy, item.entry["detection_id"], item.detector_runtime, getattr(proxy, "info", {}).get("vireo_sam_generation"))
+            return mask
 
     def _analyze_and_embed(
         self, item: _MaskPhoto, proxy: Image.Image, mask: np.ndarray,
@@ -1381,7 +1392,7 @@ class _MaskPass:
             self.masks_dir,
             photo_id,
             self.sam2_variant,
-            self.save_mask,
+            partial(self.save_mask, frame_id=item.frame_id) if item.frame_id else self.save_mask,
             previous_path=(
                 item.existing["path"] if item.existing else None
             ),
@@ -1394,6 +1405,7 @@ class _MaskPass:
             detector_model=entry["detector_model"],
             prompt=entry["prompt"],
             quality=MaskQuality(
+                comparison_inputs=item.comparison_inputs,
                 subject_size=mask_subject_size,
                 subject_tenengrad=mask_subject_tenengrad,
                 bg_tenengrad=mask_bg_tenengrad,

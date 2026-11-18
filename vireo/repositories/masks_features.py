@@ -26,7 +26,7 @@ import logging
 import os
 import sqlite3
 import time
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, fields
 from typing import Any
 
@@ -59,6 +59,7 @@ class MaskQuality:
     noise_estimate: float | None = None
     subject_detail: float | None = None
     subject_detail_px: float | None = None
+    comparison_inputs: str | None = None
 
 
 @dataclass(frozen=True)
@@ -183,10 +184,11 @@ class MasksFeaturesRepository:
         """Delete a mask file, only inside the masks directory."""
         safe_remove_mask_file(self.masks_dir, path)
 
-    def retire_prompt_masks(self, photo_id: int, detector_model: str) -> None:
-        """Retire derived cache rows while preserving immutable mask files/history."""
-        self.conn.execute("DELETE FROM photo_masks WHERE photo_id=? AND detector_model=?",
-                          (photo_id, detector_model))
+    def retire_prompt_masks(self, photo_id: int, detector_model: str, box: Mapping[str, float]) -> None:
+        """Retire the changed prompt while preserving other regions and immutable files."""
+        self.conn.execute("""DELETE FROM photo_masks WHERE photo_id=? AND detector_model=?
+            AND prompt_x=? AND prompt_y=? AND prompt_w=? AND prompt_h=?""",
+            (photo_id, detector_model, *(box[k] for k in "xywh")))
 
     def drop_cache_entry(
         self, photo_id: int, variant: str, path: str | None,
@@ -260,6 +262,16 @@ class MasksFeaturesRepository:
             (photo_id, variant),
         ).fetchone()
         return dict(row) if row else None
+
+    def active_measurements(self, photo_ids: Sequence[int]) -> dict[int, dict[str, Any]]:
+        """Read active per-mask measurements for a comparison (at most 500 photos)."""
+        placeholders = ",".join("?" for _ in photo_ids)
+        rows = self.conn.execute(
+            f"""SELECT pm.* FROM photos p JOIN photo_masks pm
+                ON pm.photo_id=p.id AND pm.variant=p.active_mask_variant AND pm.path=p.mask_path
+                WHERE p.id IN ({placeholders})""", photo_ids,
+        )
+        return {row["photo_id"]: dict(row) for row in rows}
 
     def list_masks_for_photo(self, photo_id: int) -> list[dict[str, Any]]:
         """Every ``photo_masks`` row of one photo as dicts, newest first."""
@@ -749,9 +761,9 @@ class MasksFeaturesRepository:
                 detector_model, prompt_x, prompt_y, prompt_w, prompt_h,
                 subject_size, subject_tenengrad, bg_tenengrad, crop_complete, quality_input_recipe,
                 subject_clip_high, subject_clip_low, subject_y_median, bg_separation, phash_crop, noise_estimate,
-                subject_detail, subject_detail_px
+                subject_detail, subject_detail_px, comparison_inputs
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(photo_id, variant) DO UPDATE SET
                 path=excluded.path,
                 created_at=excluded.created_at,
@@ -772,13 +784,14 @@ class MasksFeaturesRepository:
                 phash_crop=excluded.phash_crop,
                 noise_estimate=excluded.noise_estimate,
                 subject_detail=excluded.subject_detail,
-                subject_detail_px=excluded.subject_detail_px
+                subject_detail_px=excluded.subject_detail_px,
+                comparison_inputs=excluded.comparison_inputs
             """,
             (photo_id, variant, path, int(time.time()),
              detector_model, prompt_x, prompt_y, prompt_w, prompt_h,
              q.subject_size, q.subject_tenengrad, q.bg_tenengrad, q.crop_complete, q.quality_input_recipe,
              q.subject_clip_high, q.subject_clip_low, q.subject_y_median, q.bg_separation, q.phash_crop,
-             q.noise_estimate, q.subject_detail, q.subject_detail_px),
+             q.noise_estimate, q.subject_detail, q.subject_detail_px, q.comparison_inputs),
         )
 
     def save_subject_raw_analysis(self, detection_id: int, report: dict[str, Any]) -> None:
@@ -1040,15 +1053,14 @@ class MasksFeaturesRepository:
         models remain available; the default vector has no source-detection key.
         """
         variant = f"det:{detection_id}"
-        models = self.conn.execute(
-            "SELECT model FROM photo_embeddings WHERE photo_id=? AND variant=?",
-            (photo_id, variant),
-        ).fetchall()
-        for row in models:
-            self.conn.execute(
-                "DELETE FROM photo_embeddings WHERE photo_id=? AND model=? AND variant IN ('', ?)",
-                (photo_id, row["model"], variant),
-            )
+        # Classification mirrors the last crop's bytes into the default variant.
+        # A different vector in that slot came from another input.
+        self.conn.execute("""DELETE FROM photo_embeddings AS projection
+            WHERE photo_id=? AND variant='' AND EXISTS (
+                SELECT 1 FROM photo_embeddings AS crop
+                WHERE crop.photo_id=projection.photo_id AND crop.model=projection.model
+                  AND crop.variant=? AND crop.embedding=projection.embedding)""", (photo_id, variant))
+        self.conn.execute("DELETE FROM photo_embeddings WHERE photo_id=? AND variant=?", (photo_id, variant))
 
     def photos_with_embedding(
         self, model: str, variant: str = '', photo_ids: Sequence[int] | None = None,

@@ -32,6 +32,7 @@ separate implementations: a fix in one does not reach the other.
 | `group-changes.js` | Zone moves, the Apply label, applying the burst, and the modal's keyboard |
 | `identity-alternatives.js` | Catalog-backed unresolved identities, evidence, and reversible single-species resolution; independently binds after DOMContentLoaded |
 | `queue-state.js` | Browser-local, workspace-and-filter-scoped resume state; unique-photo inspection progress, separate from catalog flags |
+| `queue-coverage.js` | Per-animal inspection notes, region generation history, and neighboring burst selections |
 | `queue-focus.js` | Upright full-frame/manual center and native 512-pixel crop inspection; source and pixel-scale headers |
 | `queue.js` | Sequential per-photo inspection, retained subjects and explicit conflict-checked catalog flag changes |
 | `boot.js` | The shortcut config fetch, the bootstrap requests and filter bar, and every listener |
@@ -253,8 +254,14 @@ Mark inspected, Needs follow-up, or a successful explicit flag write does.
 Decided counts catalog keep/reject flags at the last refresh; follow-up remains
 independent and can overlap prior decisions.
 
-Subjects are retained detector boxes, with a local selection that leaves the
-saved primary unchanged. The crop uses the chosen box's center or a manual
+Animal coverage includes retained and filtered candidates. Each inspection note
+can reference a region, a shared region in an overlapping pair, or a visual
+observation without a box. Whole-frame confirmation requires a loaded preview
+and a disposition for every entry. Earlier observations remain available when
+source or region evidence changes. A crop comparison identifies the selected
+region and checks overlap against the previous burst frame's local selection
+or catalog primary. A photo opened by ID can be inspected with zero predictions
+in the unfiltered workspace view. The crop uses the chosen box's center or a manual
 center in the upright, unedited source frame. It does not run or imply new RAW
 analysis. A native crop is not enlarged or fitted; a narrow panel scrolls.
 Source, decoded raster dimensions and decoded-to-original scale come from the

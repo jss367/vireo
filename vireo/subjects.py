@@ -202,7 +202,7 @@ def _refresh_focus(db, photo_id):
 def selection_evidence(db, photo_id, detections):
     point = db.subjects.focus_point(photo_id)
     missed = bool(point and not any(point.match(_box(d)) == FocusMatch.CENTER for d in detections))
-    previous = db.subjects.previous_burst_subject(photo_id)
+    previous = db.subjects.previous_burst_subject(photo_id, workspace_id=db.require_workspace_id())
     switched = bool(previous and detections and _burst_overlap(previous, detections[0]) < BURST_SUBJECT_MIN_IOU)
     reason = ""
     if detections:
@@ -356,7 +356,63 @@ def select_primary(db, photo_id, detection_id):
     db.commit_with_retry()
 
 
+def _region_inventory(photo, regions, retained_ids):
+    """Bind browser-local observations to the source and exact region inventory."""
+    extra = []
+    evidence = []
+    for region in regions:
+        if region["detector_model"] == "full-image":
+            continue
+        region = dict(region)
+        reason = None
+        if region["subject_verdict"]:
+            reason = "Catalog verdict: background"
+        elif region["category"] != "animal":
+            reason = f"Detector category: {region['category']}"
+        elif region["id"] not in retained_ids:
+            reason = "Below detector confidence threshold"
+        if reason:
+            extra.append(dict(region, inspection_reason=reason))
+        evidence.append((region["id"], region["frame_id"], region["runtime_fingerprint"],
+                         region["created_at"], _box(region), region["detector_confidence"], reason))
+    source = [photo[key] for key in ("file_hash", "file_size", "file_mtime", "width", "height")]
+    generation = hashlib.sha256(json.dumps([source, sorted(evidence)]).encode()).hexdigest()
+    return generation, extra
+
+
+def inspection_candidates(db, photo, regions, retained_ids):
+    generation, extra = _region_inventory(photo, regions, retained_ids)
+    previous_source = db.subjects.visible_burst_source(photo["id"], db.require_workspace_id())
+    previous_id = previous_source["id"] if previous_source is not None else None
+    previous_generation = None
+    previous = []
+    primary_id = None
+    if previous_id:
+        previous = detection_store.get_detections(db, previous_id, min_conf=0, include_rejected=True)
+        previous_retained = retained(db, previous_id)
+        primary_id = previous_retained[0]["id"] if previous_retained else None
+        previous_generation, _ = _region_inventory(previous_source, previous, {d["id"] for d in previous_retained})
+    return {"generation": generation, "additional": extra, "previous_photo_id": previous_id,
+            "previous_generation": previous_generation, "previous_primary": primary_id, "min_overlap": BURST_SUBJECT_MIN_IOU,
+            "previous_regions": [{"id": r["id"], **_box(r)} for r in previous if r["detector_model"] != "full-image"]}
+
+
+def visible_payload(db, photo_id, *, coverage=False):
+    with db.transaction(join=True):
+        db.hold_read_snapshot()
+        source = db.subjects.visible_inspection_source(db.require_workspace_id(), photo_id)
+        if source is None:
+            return None
+        return _subject_payload(db, photo_id, source if coverage else None)
+
+
 def payload(db, photo_id):
+    with db.transaction(join=True):
+        db.hold_read_snapshot()
+        return _subject_payload(db, photo_id, None)
+
+
+def _subject_payload(db, photo_id, inspection_photo):
     detections = retained(db, photo_id)
     choice = db.subjects.choice(photo_id)
     analyses = db.subjects.analyses_for_photo(photo_id)
@@ -377,20 +433,27 @@ def payload(db, photo_id):
             "quality_score": analysis["quality_score"], "exposure_ev": analysis["exposure_ev"],
             "basis": "detection_box", "source_key": analysis["source_key"]} if analysis else None)
         detection["evidence_basis"] = "reviewer_box" if detection["detector_model"] == REVIEWER_MODEL else "detector_box"
+        if detection["detector_model"] == REVIEWER_MODEL:
+            detection["revision"] = reviewer_revision(detection)
         detection["predictions"] = grouped.get(detection["id"], [])
         detection["is_primary"] = detection is detections[0]
     primary_id = detections[0]["id"] if detections else None
     rejected = []
     for row in db.subjects.rejected_regions(photo_id):
         region = dict(row)
+        if region["detector_model"] == REVIEWER_MODEL:
+            region["revision"] = reviewer_revision(region)
         region["predictions"] = grouped.get(region["id"], [])
         rejected.append(region)
-    full_image_ids = {d["id"] for d in detection_store.get_detections(db, photo_id, min_conf=0)
-                      if d["detector_model"] == "full-image"}
+    regions = detection_store.get_detections(db, photo_id, min_conf=0, include_rejected=inspection_photo is not None)
+    full_image_ids = {d["id"] for d in regions
+                      if d["detector_model"] == "full-image" and not d["subject_verdict"]}
     return {"photo_id": photo_id, "workspace_id": db.require_workspace_id(), "subjects": detections,
             "full_image_predictions": [p for did in full_image_ids for p in grouped.get(did, [])],
             "primary_detection_id": primary_id,
             **selection_evidence(db, photo_id, detections),
+            **({"inspection": inspection_candidates(db, inspection_photo, regions, {d["id"] for d in detections})}
+               if inspection_photo is not None else {}),
             "selection": "manual" if choice else "automatic",
             "choice_unavailable": bool(choice and choice["detection_id"] != primary_id),
             # Regions the user rejected as background: not retained, shown
@@ -398,14 +461,13 @@ def payload(db, photo_id):
             "rejected": rejected}
 
 
-def select_reviewer_box(db, photo_id, box, *, frame_runtime=None):
-    """Save an explicit human region separately from model output, then select it.
+def reviewer_revision(row):
+    """Input token for an optimistic edit to this reviewer region."""
+    values = [row[key] for key in ("id", "runtime_fingerprint", "box_x", "box_y", "box_w", "box_h", "subject_verdict")]
+    return hashlib.sha256(json.dumps(values).encode()).hexdigest()
 
-    Coordinates use the upright, unedited source frame. The stored confidence
-    of 1 keeps the explicit choice above detector thresholds; it is not a
-    model probability. No detector run or species prediction is manufactured.
-    Caller holds the photo lock.
-    """
+
+def validate_reviewer_box(box):
     if not isinstance(box, dict) or set(box) != set("xywh"):
         raise ValueError("box must contain x, y, w and h")
     if any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in box.values()):
@@ -419,20 +481,28 @@ def select_reviewer_box(db, photo_id, box, *, frame_runtime=None):
     x, y, w, h = (box[k] for k in "xywh")
     if min(x, y) < 0 or min(w, h) <= 0 or x + w > 1 or y + h > 1:
         raise ValueError("Choose a nonempty box inside the source image")
+
+
+def select_reviewer_box(db, photo_id, box, *, frame_runtime=None):
+    """Add and select a reviewer region. Its identity survives subsequent redraws."""
+    import secrets
+
+    validate_reviewer_box(box)
     with db.transaction(immediate=True):
-        previous_ids = [d["id"] for d in detection_store.get_detections(
-            db, photo_id, min_conf=0, detector_model=REVIEWER_MODEL, include_rejected=True)]
-        for previous_id in previous_ids:
-            db.masks_features.clear_detection_embeddings(photo_id, previous_id)
-        # Clear previous measurements even if a legacy catalog lacks primary state.
-        db.subjects.clear_primary_features(photo_id)
-        db.masks_features.retire_prompt_masks(photo_id, REVIEWER_MODEL)
-        ids = db.detections.upsert_rows(photo_id, REVIEWER_MODEL, [
-            {"box": box, "confidence": 1.0, "category": "animal"}], frame_runtime or "reviewer-v1")
-        detection_store.delete_detections_by_ids(db, set(previous_ids).difference(ids))
-        # Re-saving an identical or quantization-equivalent box reuses its ID.
-        # Retire that ID's cached box analysis before sync_primary can project it.
-        db.subjects.clear_analysis(ids[0])
-        db.subjects.set_choice(photo_id, ids[0])
+        existing = detection_store.get_detections(db, photo_id, 0, REVIEWER_MODEL, include_rejected=True)
+        for row in existing:
+            if _box(row) == box:
+                if row["runtime_fingerprint"] != (frame_runtime or "reviewer-v1") or row["subject_verdict"]:
+                    raise ValueError("Edit the existing reviewer region to change this box")
+                db.subjects.set_choice(photo_id, row["id"])
+                sync_primary(db, photo_id)
+                return row["id"]
+        region_id = secrets.randbelow(2**52 - 1) + 1
+        while db.detections.row(region_id) is not None:
+            region_id = secrets.randbelow(2**52 - 1) + 1
+        db.detections.insert_reviewer_region(photo_id, region_id, box, frame_runtime or "reviewer-v1", None)
+        if db.subjects.primary_state(photo_id) is None:
+            db.subjects.clear_primary_features(photo_id)
+        db.subjects.set_choice(photo_id, region_id)
         sync_primary(db, photo_id)
-    return ids[0]
+    return region_id

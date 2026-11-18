@@ -1,18 +1,18 @@
 """Background, detection-scoped comparison analysis at a fixed 1024px scale."""
 import io
-import json
 import os
 
 import numpy as np
 from config import config_value
 from detection_id import detection_prompt_runtime, require_original_box
 from PIL import Image
-from subject_ranking import analysis_key, resolve_subject, source_path
+from subject_ranking import analysis_key, comparison_analysis, resolve_subject, source_path
+from subject_readiness import usable_selected_analysis
 
 
 def measure_eye(db, photo_id, detection, image, mask, effective_cfg):
     import keypoints as kp
-    from pipeline import _best_eye_by_tenengrad, _eye_candidates_in_mask, _resolve_keypoint_model
+    from pipeline import _best_eye_by_tenengrad, _eye_candidates_in_mask, _keypoints_in_mask, _resolve_keypoint_model
 
     settings = effective_cfg.get("pipeline", {})
     result = dict.fromkeys(("eye_x", "eye_y", "eye_conf", "eye_tenengrad"))
@@ -35,7 +35,12 @@ def measure_eye(db, photo_id, detection, image, mask, effective_cfg):
     x, y, w, h = (detection["box_" + k] for k in "xywh")
     bbox = tuple(int(round(v)) for v in (x * iw, y * ih, (x + w) * iw, (y + h) * ih))
     points = kp.detect_keypoints(image, bbox, model)
-    eyes = _eye_candidates_in_mask(points, mask, config_value(settings, "eye_detection_conf_gate", section="pipeline"))
+    threshold = config_value(settings, "eye_detection_conf_gate", section="pipeline")
+    eyes = _eye_candidates_in_mask(points, mask, threshold)
+    if model == "superanimal-bird":
+        head = _keypoints_in_mask(points, mask, threshold, {"bill", "crown", "forehead", "nape"})
+        result["head_landmarks"] = {p["name"]: [p["x"] / iw, p["y"] / ih] for p in head}
+
     result["eye_status"] = "not_located"
     if eyes:
         eye, score = _best_eye_by_tenengrad(image, eyes, bbox, config_value(settings, "eye_window_k", section="pipeline"))
@@ -51,14 +56,16 @@ def analyze_detection(db, photo, detection, effective_cfg, checkpoint, *, force=
         render_proxy,
         require_aligned_detector_prompt,
         require_original_reviewer_frame,
+        sam_generation,
         write_mask_png,
     )
+    from primary_comparison import measurement_inputs
     from quality import compute_all_quality_features, saved_mask_matches_frame
 
     path = source_path(db, photo)
     require_original_box(dict(detection).get("runtime_fingerprint"))
     key = analysis_key(path, detection, effective_cfg)
-    if not force and _usable_analysis(_existing_analysis(db, detection["id"], key)):
+    if not force and usable_selected_analysis(db.subjects.ranking_analysis(detection["id"], key)):
         require_original_reviewer_frame(path, detection_prompt_runtime(detection), detector_model=detection["detector_model"])
         return False
     checkpoint()
@@ -70,29 +77,39 @@ def analyze_detection(db, photo, detection, effective_cfg, checkpoint, *, force=
         if existing_mask_path:
             with Image.open(existing_mask_path) as saved_mask:
                 if saved_mask_matches_frame(saved_mask.size, saved_mask.info.get("vireo_mask_frame"), image,
-                                            prompt_frame=saved_mask.info.get("vireo_prompt_frame")):
+                                            prompt_frame=saved_mask.info.get("vireo_prompt_frame"),
+                                            mask_frame_id=saved_mask.info.get("vireo_subject_frame_id")):
                     mask = np.asarray(saved_mask.convert("L").resize(image.size, Image.Resampling.NEAREST)) > 0
                 else:
                     existing_mask_path = None
+        variant = effective_cfg.get("pipeline", {}).get("sam2_variant") or "sam2-small"
         if not existing_mask_path:
             mask = generate_mask(image, {k: detection["box_" + k] for k in "xywh"},
-                                 variant=effective_cfg.get("pipeline", {}).get("sam2_variant") or "sam2-small")
+                                 variant=variant)
+        inputs = None
+        if defer_publication:
+            generation = sam_generation(variant) if existing_mask_path else image.info.get("vireo_sam_generation")
+            inputs = measurement_inputs(image, detection["id"], detection_prompt_runtime(detection), generation)
         if mask is None or not np.any(mask):
             raise ValueError("No subject mask was produced")
         checkpoint()
         features = compute_all_quality_features(image, mask)
         features.update(subject_size=float(mask.mean()), crop_complete=crop_completeness(mask))
-        features.update(_measure_detail(path, mask, photo, image.info.get("vireo_subject_frame_id")))
+        frame_id = image.info.get("vireo_subject_frame_id")
+        features.update(_measure_detail(path, mask, photo, frame_id))
         features.update(measure_eye(db, photo["id"], detection, image, mask, effective_cfg))
         features["analysis"] = {"source": "original", "width": image.width, "height": image.height,
+                                "frame_id": frame_id,
+                                "source_generation": image.info.get("vireo_source_generation"),
                                 "longest_edge_limit": 1024, "measurement_basis": "subject_mask"}
         buffer = io.BytesIO()
-        write_mask_png(mask, buffer)
+        write_mask_png(mask, buffer, frame_id=frame_id)
         checkpoint()
         analysis = {"source_key": key, "features": features, "mask_png": buffer.getvalue()}
-        if not _usable_analysis(analysis):
+        if not usable_selected_analysis(analysis):
             raise ValueError("Required subject measurements are still incomplete")
         if defer_publication:
+            analysis["comparison_inputs"] = inputs
             analysis["existing_mask_path"] = existing_mask_path
             return analysis
         with db.transaction(immediate=True):
@@ -114,34 +131,6 @@ def _measure_detail(path, mask, photo, frame_id=None):
     return measure_subject_detail(mask, source_path=path, frame_size=frame_size(photo), **proof)
 
 
-def _existing_analysis(db, detection_id, key):
-    try:
-        return db.subjects.ranking_analysis(detection_id, key)
-    except (json.JSONDecodeError, TypeError):
-        return None  # malformed cached output may be repaired after fresh work succeeds
-
-
-def _usable_analysis(analysis):
-    from subject_readiness import subject_analysis_readiness
-    if not isinstance(analysis, dict) or not isinstance(analysis.get("features"), dict):
-        return False
-    ready = subject_analysis_readiness({**analysis["features"], "subject_present": True,
-                                       "subject_mask_available": bool(analysis.get("mask_png"))})
-    if not ready["eligible"]:
-        return False
-    try:
-        basis = analysis["features"].get("analysis")
-        if not isinstance(basis, dict) or basis.get("source") != "original" or basis.get("measurement_basis") != "subject_mask":
-            return False
-        with Image.open(io.BytesIO(analysis["mask_png"])) as image:
-            if image.size != (basis.get("width"), basis.get("height")):
-                return False
-            pixels = np.asarray(image)
-            return pixels.ndim == 2 and bool(np.any(pixels))
-    except (OSError, ValueError, TypeError):
-        return False
-
-
 def publish_analysis(db, photo, detection, analysis, effective_cfg):
     """Publish inside the caller's transaction; valid generations stay immutable."""
     from subject_ranking import SubjectComparison
@@ -152,11 +141,13 @@ def publish_analysis(db, photo, detection, analysis, effective_cfg):
     key = analysis["source_key"]
     if current is None or analysis_key(source_path(db, current_photo), current, effective_cfg) != key:
         raise ValueError("Subject analysis inputs changed; retry this frame")
-    if not _usable_analysis(analysis):
+    if not usable_selected_analysis(analysis):
         raise ValueError("Required subject measurements are still incomplete")
+    if analysis.get("existing_mask_path") and not analysis.get("comparison_inputs"):
+        return  # Quality-only work can refresh primary scores without proving selected-cache compatibility.
     # Retire only unusable cache entries, after fresh work and input validation.
     # Valid bytes are immutable, and a failed outer publication rolls this back.
-    if not _usable_analysis(_existing_analysis(db, detection["id"], key)):
+    if not usable_selected_analysis(db.subjects.ranking_analysis(detection["id"], key)):
         db.subjects.discard_ranking_analysis(detection["id"], key)
     db.subjects.save_ranking_analysis(detection["id"], key, analysis["features"], analysis["mask_png"])
 
@@ -167,6 +158,20 @@ def analyze_selected_subject(db, photo, comparison, effective_cfg, checkpoint):
     if detection is None:
         return {"status": "skipped", "reason": selection["selection"]}
     key = analysis_key(source_path(db, photo), detection, effective_cfg)
+    with db.transaction():
+        db.hold_read_snapshot()
+        generation, analysis, _ = comparison_analysis(db, photo, detection, effective_cfg)
+        if analysis and analysis["owner"]["kind"] == "primary":
+            # Revalidate against snapshot state: the detection id alone cannot
+            # tell whether prediction state or inputs changed between the first
+            # resolution and the snapshot open, which would leave ``generation``
+            # paired with a stale key downstream readers would not reproduce.
+            current_photo = db.photos.get(photo["id"], verify_workspace=True)
+            current, _ = resolve_subject(db, photo["id"], comparison)
+            if (current_photo is None or not current or current["id"] != detection["id"]
+                    or analysis_key(source_path(db, current_photo), current, effective_cfg) != key):
+                raise ValueError("Selected subject changed during analysis")
+            return {"status": "cached", "detection_id": detection["id"], "analysis_key": generation}
     changed = analyze_detection(db, photo, detection, effective_cfg, checkpoint)
     verify_selected_analysis(db, photo["id"], comparison, effective_cfg, detection["id"], key)
     return {"status": "analyzed" if changed else "cached", "detection_id": detection["id"], "analysis_key": key}
@@ -179,7 +184,7 @@ def verify_selected_analysis(db, photo_id, comparison, effective_cfg, detection_
         current, _ = resolve_subject(db, photo_id, comparison)
         if (current_photo is None or current is None or current["id"] != detection_id
                 or analysis_key(source_path(db, current_photo), current, effective_cfg) != key
-                or not _usable_analysis(_existing_analysis(db, detection_id, key))):
+                or not usable_selected_analysis(db.subjects.ranking_analysis(detection_id, key))):
             raise ValueError("Selected subject evidence changed during analysis; retry this frame")
 
 

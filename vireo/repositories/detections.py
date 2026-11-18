@@ -57,6 +57,29 @@ class DetectionsRepository:
 
     # -- writes -------------------------------------------------------------
 
+    def insert_reviewer_region(
+        self, photo_id: int, region_id: int, box: Mapping[str, float], runtime: str, verdict: str | None,
+    ) -> None:
+        self.conn.execute("""INSERT INTO detections
+            (id, photo_id, detector_model, runtime_fingerprint, box_x, box_y, box_w, box_h,
+             detector_confidence, category, subject_verdict)
+            VALUES (?, ?, 'reviewer-selected', ?, ?, ?, ?, ?, 1, 'animal', ?)""",
+            (region_id, photo_id, runtime, *(box[k] for k in "xywh"), verdict))
+
+    def update_reviewer_region(
+        self, region_id: int, box: Mapping[str, float], runtime: str, verdict: str | None,
+    ) -> None:
+        self.conn.execute("""UPDATE detections SET box_x=?, box_y=?, box_w=?, box_h=?,
+            runtime_fingerprint=?, subject_verdict=? WHERE id=? AND detector_model='reviewer-selected'""",
+            (*(box[k] for k in "xywh"), runtime, verdict, region_id))
+        for table in ("detection_subjects", "subject_ranking_analysis", "subject_raw_analysis",
+                      "classifier_runs", "classifier_match_scores", "subject_focus",
+                      "detection_evidence_reviews"):
+            self.conn.execute(f"DELETE FROM {table} WHERE detection_id=?", (region_id,))
+        self.conn.execute("""DELETE FROM predictions WHERE detection_id=? AND NOT EXISTS
+            (SELECT 1 FROM prediction_review WHERE prediction_id=predictions.id AND status!='pending')""",
+            (region_id,))
+
     def save(
         self,
         photo_id: int,
