@@ -36,6 +36,9 @@ PHOTO_DETAIL_COLS = (
 )
 
 
+REVIEWED_GPS_EXISTS = "EXISTS (SELECT 1 FROM reviewed_gps g WHERE g.photo_id = p.id)"
+
+
 def location_keyword_exists_sql(*, with_coordinates: bool = False) -> str:
     """``EXISTS`` test: the photo aliased ``p`` carries a location keyword.
 

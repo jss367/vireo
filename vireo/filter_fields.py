@@ -127,6 +127,8 @@ FILTER_FIELDS = {
     # Location
     "has_gps": _field("Has GPS", "Location", "boolean", BOOLEAN_OPS,
                       changed_by=[]),
+    "has_reviewed_gps": _field("Has reviewed GPS", "Location", "boolean", BOOLEAN_OPS,
+                              changed_by=[]),
     "has_location_keyword": _field("Has named location", "Location", "boolean",
                                    BOOLEAN_OPS, changed_by=[MUTATION_KEYWORD]),
     # Distinct from ``has_location_keyword``: a free-text location keyword

@@ -2,7 +2,7 @@
 
 Audited on October 12, 2026. Undo and Redo work for many photo edits, but **not every reversible action is covered**. The audit follows saved writes from the browser through their routes, history records, replay handlers, sidecar queues, and page refreshes. An audit-log entry alone does not make an action undoable.
 
-The route inventory in [undo_coverage.json](../vireo/tests/contracts/undo_coverage.json) classifies all 257 registered POST, PUT, PATCH, and DELETE method/route pairs. Some are queries or previews rather than changes. A regression test compares the inventory with the live application so new write routes require an explicit undo decision. The inventory describes coverage; it does not claim that every listed route has a browser test.
+The route inventory in [undo_coverage.json](../vireo/tests/contracts/undo_coverage.json) classifies all registered POST, PUT, PATCH, and DELETE method/route pairs. Some are queries or previews rather than changes. A regression test compares the inventory with the live application so new write routes require an explicit undo decision. The inventory describes coverage; it does not claim that every listed route has a browser test.
 
 **Covered photo actions**
 
@@ -26,6 +26,8 @@ New location edits are recorded as `photo_location`, and new reject/review decis
 New location writes, pending sidecar work, and history recording now share a transaction. A failure while writing history rolls back the whole location batch. Reassigning an identical location or clearing an already empty assignment adds no history and preserves Redo, while still queueing a sidecar refresh so newly supplied saved-place coordinates can sync. A history action without a replay handler now fails without advancing the cursor.
 
 Life List and Location Review now refresh after global Undo/Redo. Location Review rebuilds its queue from the current source; partly completed assignments block history changes until retried or abandoned. Browse, Review, Highlights, the editor, culling, Misses, and pipeline review already provide history refresh hooks.
+
+In the GPS jump audit, **Restore camera GPS** removes the reviewed correction for the affected photos. The catalog then uses the original camera coordinates again. This control works independently of global Undo.
 
 **Reversible gaps that should be tracked**
 

@@ -31,6 +31,7 @@ from canonical_schema import (
     create_formerly_lazy_objects,
     create_identity_alternatives,
     create_photo_versions,
+    create_reviewed_gps,
     create_same_shot_reviews,
     create_species_choices,
     create_subject_candidates,
@@ -525,6 +526,13 @@ def _add_classifier_input_source(conn):
     _merge_species_highlights(conn)
 
 
+def _add_reviewed_gps(conn):
+    # Catalogs stamped 43 on the GPS branch already have reviewed locations
+    # but still need the classifier input source migration from main.
+    _add_classifier_input_source(conn)
+    create_reviewed_gps(conn)
+
+
 MIGRATIONS = (
     Migration(
         13, "companion_identities_file_mtime",
@@ -587,6 +595,7 @@ MIGRATIONS = (
         _merge_species_highlights, _validate_merged_species_highlights,
     ),
     Migration(43, "classifier_input_source", _add_classifier_input_source),
+    Migration(44, "reviewed_gps", _add_reviewed_gps),
 )
 
 

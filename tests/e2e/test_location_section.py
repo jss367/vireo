@@ -186,7 +186,7 @@ def test_browse_cards_and_inspector_distinguish_coordinate_sources(
 def test_browse_coordinate_filter_deep_link(live_server, page):
     """Map links can open Browse already filtered to photos without coordinates."""
     db = live_server["db"]
-    exif_id = live_server["data"]["photos"][0]
+    exif_id, reviewed_id = live_server["data"]["photos"][:2]
     with db.conn:
         db.conn.execute(
             "UPDATE photos SET latitude = 37.7749, longitude = -122.4194 "
@@ -194,12 +194,9 @@ def test_browse_coordinate_filter_deep_link(live_server, page):
             (exif_id,),
         )
 
+        db.audit.apply_gps_review([reviewed_id], "synthetic correction", 32, -117)
+
     page.goto(f"{live_server['url']}/browse?location_status=none")
-    # ?location_status=none historically means "no EXIF coords AND no
-    # coordinate-bearing location keyword" (a free-text location without
-    # lat/lng still leaves the photo unplaceable on the map). The legacy
-    # deep-link compiles to two rules — Has GPS is No AND
-    # Has location keyword with coordinates is No.
     page.wait_for_function(
         "document.querySelector('.vf-chips') && "
         "document.querySelector('.vf-chips').textContent.includes('Has GPS is No') && "
@@ -212,7 +209,12 @@ def test_browse_coordinate_filter_deep_link(live_server, page):
         f"!document.querySelector(\".grid-card[data-id='{exif_id}']\")",
         timeout=15000,
     )
+    assert page.locator(f".grid-card[data-id='{reviewed_id}']").count() == 0
     assert page.locator(".grid-location-status.none").count() > 0
+
+    page.goto(f"{live_server['url']}/browse?location_status=reviewed_gps")
+    expect(page.locator(f".grid-card[data-id='{reviewed_id}']")).to_be_visible()
+    expect(page.locator(".grid-card")).to_have_count(1)
 
 
 def test_freetext_enter_creates_location(live_server, page):

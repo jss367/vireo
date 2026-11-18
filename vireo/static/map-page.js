@@ -329,6 +329,8 @@ function makePhotoMarker(p) {
   if (p.coord_source === 'keyword' && p.keyword_location_name) {
     provenanceLine = '<div class="popup-provenance">\u{1F4CD} from assigned location: '
       + escapeHtml(p.keyword_location_name) + '</div>';
+  } else if (p.coord_source === 'reviewed_gps') {
+    provenanceLine = '<div class="popup-provenance">Reviewed GPS correction</div>';
   } else if (p.coord_source === 'exif') {
     provenanceLine = '<div class="popup-provenance">\u{1F4CD} from EXIF GPS</div>';
   }
