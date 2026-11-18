@@ -143,14 +143,16 @@ def _focus_mask_bytes(db_path: str, db: Database, photo_id: int, boxes: Sequence
 
 
 
-def _focus_masked_crop(img: Image.Image, window: tuple[int, int, int, int], mask_bytes: bytes | None) -> Image.Image:
+def _focus_masked_crop(img: Image.Image, window: tuple[int, int, int, int], mask_bytes: bytes | None,
+                       require_frame_id: bool = False) -> Image.Image:
     from focus_crop import shade_focus_mask
     from PIL import Image
 
     crop = img.crop(window).convert("RGB")
     if mask_bytes is not None:
         try:
-            crop = shade_focus_mask(crop, mask_bytes, img.size, window, Image)
+            crop = shade_focus_mask(crop, mask_bytes, img.size, window, Image,
+                                    frame_id=img.info.get("vireo_subject_frame_id"), require_frame_id=require_frame_id)
         except (OSError, ValueError, Image.DecompressionBombError) as exc:
             raise ValueError("Subject mask is unavailable: unreadable or incompatible with the source raster") from exc
     return crop
@@ -179,10 +181,14 @@ def _validated_focus_source(
     source_choice: str, boxes: Sequence[Row | JsonDict] = (), basis: str = "auto",
 ) -> tuple[Image.Image | None, str | None]:
     """Decoding may outlive a source replacement; revalidate pinned evidence."""
-    img, source = _focus_source_image(config, photo, db.folders.get(photo["folder_id"]), source_choice)
+    img, source = _focus_source_image(config, photo, db.folders.get(photo["folder_id"]), source_choice,
+                                      args.get("mask") == "1" or args.get("detection_id") is not None)
     if img is not None and args.get("detection_id") is not None:
         try:
-            _comparison_media_subject(db, photo, args, effective)
+            _, analysis = _comparison_media_subject(db, photo, args, effective)
+            frame_id = analysis["features"]["analysis"].get("frame_id")
+            if frame_id and img.info.get("vireo_subject_frame_id") != frame_id:
+                raise ValueError("Subject analysis uses a different frame. Inspect the original or analyze the subject again.")
         except ValueError:
             img.close()
             raise
@@ -215,9 +221,11 @@ def _focus_response(img: Image.Image, source: str | None, photo: JsonDict, boxes
     import io
 
     from focus_crop import focus_evidence_headers, focus_headers, focus_window, original_scale
+    from image_loader import RAW_EXTENSIONS
 
     window, center = focus_window(img.size, center, size)
-    crop = _focus_masked_crop(img, window, mask_bytes)
+    require_frame_id = os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
+    crop = _focus_masked_crop(img, window, mask_bytes, require_frame_id)
     buf = io.BytesIO()
     crop.save(buf, format="JPEG", quality=config_value(effective, "preview_quality"))
     response = Response(buf.getvalue(), mimetype="image/jpeg")

@@ -120,11 +120,14 @@ def focus_window(image_size, center, size):
     return (x1, y1, min(iw, x1 + size), min(ih, y1 + size)), (cx, cy)
 
 
-def shade_focus_mask(crop, mask_bytes, image_size, window, image_api):
+def shade_focus_mask(crop, mask_bytes, image_size, window, image_api, *, frame_id=None, require_frame_id=False):
     """Use the same raster coordinates for the pipeline mask and focus window."""
     import io
 
     mask = image_api.open(io.BytesIO(mask_bytes)).convert("L")
+    mask_id = mask.info.get("vireo_subject_frame_id")
+    if (require_frame_id or mask_id is not None) and (not mask_id or mask_id != frame_id):
+        raise ValueError("Mask and source do not share a verified frame")
     mask_ratio = mask.size[0] / mask.size[1]
     if abs(mask_ratio / (image_size[0] / image_size[1]) - 1) > ASPECT_TOLERANCE:
         raise ValueError("Mask geometry differs from the upright source")

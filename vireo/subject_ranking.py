@@ -133,7 +133,8 @@ def source_path(db, photo):
 # 7: reviewer coordinates are bound to the actual original frame generation.
 # 8: retire analyses that may have reused masks across reviewer history frames.
 # 9: detector prompts are bound to their actual decoded rendition.
-ANALYSIS_RECIPE_VERSION = 9
+# 10: bind saved mask pixels to the actual decoded source frame.
+ANALYSIS_RECIPE_VERSION = 10
 
 
 def analysis_key(path, detection, effective_cfg):

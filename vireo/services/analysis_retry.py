@@ -10,6 +10,7 @@ import os
 import sqlite3
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from functools import partial
 from typing import TYPE_CHECKING, Protocol
 
 from config import config_value
@@ -324,9 +325,12 @@ def _publish_features(db: Database, pid: int, detection: JsonDict, analysis: Jso
     if existing_mask_path is None:
         with Image.open(io.BytesIO(analysis["mask_png"])) as image:
             mask = np.asarray(image).astype(bool)
+            frame_id = image.info.get("vireo_subject_frame_id")
         previous = db.masks_features.get_mask(pid, variant)
-        stage = _StagedMaskFile.create(mask, os.path.join(cache_dir, "masks"), pid, variant, save_mask,
-                                      previous_path=previous["path"] if previous else None)
+        stage = _StagedMaskFile.create(
+            mask, os.path.join(cache_dir, "masks"), pid, variant, partial(save_mask, frame_id=frame_id),
+            previous_path=previous["path"] if previous else None,
+        )
     mask_path = stage.final_path if stage else existing_mask_path
     if mask_path is None:
         raise ValueError("Current subject mask is unavailable")

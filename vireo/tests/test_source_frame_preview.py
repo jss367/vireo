@@ -82,7 +82,7 @@ def test_source_frame_working_copy_survives_offline_original(app_and_db, tmp_pat
     assert Image.open(io.BytesIO(response.data)).size == (300, 200)
 
 
-def test_source_frame_raw_uses_jpeg_first_loader_and_caches_result(app_and_db, tmp_path, monkeypatch):
+def test_source_frame_raw_uses_aligned_loader_and_caches_result(app_and_db, tmp_path, monkeypatch):
     import image_loader
     app, db, pid, path = _source_photo(app_and_db, tmp_path)
     raw = path.with_suffix('.NEF')
@@ -100,7 +100,7 @@ def test_source_frame_raw_uses_jpeg_first_loader_and_caches_result(app_and_db, t
     url = f'/photos/{pid}/preview?size=1920&view=source'
     assert client.get(url).status_code == 200
     assert client.get(url).status_code == 200
-    assert calls == [(str(raw), None, {})]  # Default JPEG-first, never the linear edit worker.
+    assert calls == [(str(raw), None, {"raw_decode": image_loader.RAW_DECODE_ALIGNED})]
 
 
 def test_source_change_during_decode_never_publishes_stale_frame(app_and_db, tmp_path, monkeypatch):

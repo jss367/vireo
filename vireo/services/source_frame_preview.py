@@ -1,7 +1,7 @@
 """Cache upright, unedited inspection frames alongside the shared preview LRU.
 
 Unlike ordinary previews, these frames ignore saved crop/rotation recipes and
-use the same JPEG-first original/working-copy loader as native focus crops.
+use the same upright original/working-copy loader as native focus crops.
 """
 from __future__ import annotations
 
@@ -66,7 +66,7 @@ class _SourceFrame:
             'working_copy_path', 'width', 'height',
         )}
         key = hashlib.sha256(json.dumps(
-            [1, identity, original, _file_state(original), working, _file_state(working), self.size, self.quality],
+            [2, identity, original, _file_state(original), working, _file_state(working), self.size, self.quality],
             sort_keys=True,
         ).encode()).hexdigest()
         return photo, folder, key

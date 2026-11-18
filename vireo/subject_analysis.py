@@ -75,7 +75,8 @@ def analyze_detection(db, photo, detection, effective_cfg, checkpoint, *, force=
         if existing_mask_path:
             with Image.open(existing_mask_path) as saved_mask:
                 if saved_mask_matches_frame(saved_mask.size, saved_mask.info.get("vireo_mask_frame"), image,
-                                            prompt_frame=saved_mask.info.get("vireo_prompt_frame")):
+                                            prompt_frame=saved_mask.info.get("vireo_prompt_frame"),
+                                            mask_frame_id=saved_mask.info.get("vireo_subject_frame_id")):
                     mask = np.asarray(saved_mask.convert("L").resize(image.size, Image.Resampling.NEAREST)) > 0
                 else:
                     existing_mask_path = None
@@ -87,13 +88,14 @@ def analyze_detection(db, photo, detection, effective_cfg, checkpoint, *, force=
         checkpoint()
         features = compute_all_quality_features(image, mask)
         features.update(subject_size=float(mask.mean()), crop_complete=crop_completeness(mask))
-        features.update(_measure_detail(path, mask, photo, image.info.get("vireo_subject_frame_id")))
+        frame_id = image.info.get("vireo_subject_frame_id")
+        features.update(_measure_detail(path, mask, photo, frame_id))
         features.update(measure_eye(db, photo["id"], detection, image, mask, effective_cfg))
         features["analysis"] = {"source": "original", "width": image.width, "height": image.height,
-                                "frame_id": image.info.get("vireo_subject_frame_id"),
+                                "frame_id": frame_id,
                                 "longest_edge_limit": 1024, "measurement_basis": "subject_mask"}
         buffer = io.BytesIO()
-        write_mask_png(mask, buffer)
+        write_mask_png(mask, buffer, frame_id=frame_id)
         checkpoint()
         analysis = {"source_key": key, "features": features, "mask_png": buffer.getvalue()}
         if not _usable_analysis(analysis):
@@ -140,6 +142,8 @@ def _usable_analysis(analysis):
         if not isinstance(basis, dict) or basis.get("source") != "original" or basis.get("measurement_basis") != "subject_mask":
             return False
         with Image.open(io.BytesIO(analysis["mask_png"])) as image:
+            if image.info.get("vireo_subject_frame_id") != basis.get("frame_id"):
+                return False
             if image.size != (basis.get("width"), basis.get("height")):
                 return False
             pixels = np.asarray(image)
