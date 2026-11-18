@@ -444,17 +444,13 @@ def load_detail_source(source_path, needed, frame_size=None):
     A RAW holds two renderings, the camera's embedded JPEG and a libraw
     demosaic, and their gradients differ by a factor that varies from file
     to file (the demosaic is auto-brightened and unsharpened), so values
-    read from one cannot be compared with values read from the other. The
-    loader hands back the embedded JPEG only when it covers the size asked
-    for. A subject smaller than DETAIL_SCALE_PX asks for more than the frame
-    holds, which no preview covers, so that request is made for the whole
-    camera rendering instead: every subject of a camera with a full-size
-    preview is then measured on the same rendering, whatever its size.
+    read from one cannot be compared with values read from the other.
 
-    ``frame_size`` is the source's native ``(width, height)``; without it
-    the whole rendering is read, since a sized request cannot be told from
-    one that exceeds the frame. A RAW with no near-full preview is demosaiced
-    at every requested size, falling back to its JPEG only if decode fails.
+    Camera-rendered reads use the embedded JPEG when it covers at least
+    99% of each sensor dimension. Otherwise they request a full-resolution
+    demosaic before resizing, with the JPEG as fallback on decode failure.
+    Read the whole rendering when frame dimensions are unknown or the
+    requested edge approaches native size.
     """
     from image_loader import NEAR_FULL_PREVIEW, RAW_DECODE_CAMERA_RENDERED, load_image
 

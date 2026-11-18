@@ -1183,7 +1183,7 @@ def _load_raw(path, max_size, raw_decode=RAW_DECODE_JPEG_FIRST):
 
     Camera-rendered:
       1. Use a near-full embedded JPEG regardless of the requested size.
-      2. Otherwise demosaic, falling back to the JPEG only if decode fails.
+      2. Otherwise demosaic at full resolution before resizing, falling back to the JPEG only if decode fails.
 
     Preserve-highlights:
       1. Demosaic the RAW with auto-bright disabled and highlight blending on.
@@ -1209,7 +1209,7 @@ def _load_raw(path, max_size, raw_decode=RAW_DECODE_JPEG_FIRST):
                 return _postprocess_raw_linear(raw)
             return _postprocess_raw(
                 raw,
-                max_size,
+                None if raw_decode == RAW_DECODE_CAMERA_RENDERED else max_size,
                 preserve_highlights=raw_decode == RAW_DECODE_PRESERVE_HIGHLIGHTS,
             )
         except Exception as e:  # broad: libraw raises undocumented errors; the embedded JPEG is the fallback, else re-raise

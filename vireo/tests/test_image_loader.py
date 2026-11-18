@@ -232,6 +232,8 @@ def test_detail_source_preview_eligibility_is_independent_of_request_size(
 
     with load_detail_source(str(source), needed, (6000, 4000)) as image:
         assert fake.postprocess_calls == (0 if uses_preview else 1)
+        if not uses_preview:
+            assert fake.postprocess_kwargs[0]["half_size"] is False
         # The synthetic demosaic is black; the embedded JPEG is green.
         assert (image.getpixel((0, 0))[1] > 100) == uses_preview
         source_edge = preview_size[0] if uses_preview else 6000

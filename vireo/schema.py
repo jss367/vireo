@@ -312,6 +312,12 @@ def _validate_subject_detail(conn):
             raise RuntimeError(f"{table} is missing {', '.join(missing)}")
 
 
+def _repair_alternate_branch_schemas(conn):
+    """Restore main's migrations skipped by alternate version 39 and 40 catalogs."""
+    _add_job_history_errors(conn)
+    create_subject_focus(conn)
+
+
 def _clear_subject_detail_from_other_read_paths(conn):
     """Unmeasure detail whose source rendering was not recorded.
 
@@ -322,13 +328,7 @@ def _clear_subject_detail_from_other_read_paths(conn):
     files and other features; NULL makes Process remeasure cached masks
     without rerunning SAM. Empty masks (zero detail, no subject size) and
     measurements already pending remain unchanged.
-
-    Earlier versions of this branch stamped catalogs 39 or 40 before those
-    numbers belonged to main's job-history and subject-focus migrations.
-    Repair both idempotently so those catalogs converge on the same schema.
     """
-    _add_job_history_errors(conn)
-    create_subject_focus(conn)
     for table in ("photo_masks", "photos"):
         conn.execute(
             f"UPDATE {table} SET subject_detail=NULL, subject_detail_px=NULL "
@@ -482,7 +482,8 @@ MIGRATIONS = (
     Migration(39, "job_history_errors", _add_job_history_errors),
     Migration(40, "subject_focus", create_subject_focus),
     Migration(41, "primary_projection_policy", _add_primary_projection_policy),
-    Migration(42, "subject_detail_one_read_path", _clear_subject_detail_from_other_read_paths),
+    Migration(42, "repair_alternate_branch_schemas", _repair_alternate_branch_schemas),
+    Migration(43, "subject_detail_full_resolution", _clear_subject_detail_from_other_read_paths),
 )
 
 

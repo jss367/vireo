@@ -127,7 +127,8 @@ def source_path(db, photo):
 # generations made before stop matching and the subject is analysed again.
 # 2: subject detail is read from the camera's rendering at every subject size.
 # 3: reduced/cropped RAW previews demosaic at every subject size.
-ANALYSIS_RECIPE_VERSION = 3
+# 4: always use a full-resolution demosaic before resizing.
+ANALYSIS_RECIPE_VERSION = 4
 
 
 def analysis_key(path, detection, effective_cfg):
