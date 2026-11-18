@@ -7,6 +7,8 @@ from PIL import Image
 from playwright.sync_api import expect
 from services import detection_store, photo_ingest, workspace_folders
 
+from vireo.tests.reviewer_helpers import original_frame_detections
+
 
 def test_species_comparison_selects_ambiguous_bird_and_analyzes_it(page, live_server, tmp_path, monkeypatch):
     db = live_server["db"]
@@ -20,10 +22,10 @@ def test_species_comparison_selects_ambiguous_bird_and_analyzes_it(page, live_se
         Image.fromarray(pixels).save(path)
         pid = photo_ingest.add_photo(db, folder_id=folder, filename=path.name, extension=".png",
                                     file_size=path.stat().st_size, file_mtime=path.stat().st_mtime)
-        ids = detection_store.write_detection_batch(db, pid, "megadetector-v6", [
+        ids = detection_store.write_detection_batch(db, pid, "megadetector-v6", original_frame_detections(path, [
             {"box": {"x": .05, "y": .1, "w": .34, "h": .8}, "confidence": .9, "category": "animal"},
             {"box": {"x": .6, "y": .1, "w": .34, "h": .8}, "confidence": .95, "category": "animal"},
-        ])
+        ]))
         for i, did in enumerate(ids):
             species = "Vermilion Flycatcher" if index == 0 or i == 0 else "Sparrow"
             db.predictions.add(did, species, .95, "test", status="accepted")
