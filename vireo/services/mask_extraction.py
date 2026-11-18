@@ -418,6 +418,7 @@ class _MaskExtractionRun:
         if not current:
             return False
         selected = current[0]
+        photo["detection_id"] = selected["id"]
         photo["detector_runtime"] = detection_prompt_runtime(dict(selected))
         photo["detector_model"] = selected["detector_model"]
         photo["prompt"] = tuple(selected["box_" + k] for k in "xywh")
@@ -527,6 +528,9 @@ class _MaskExtractionRun:
         self.thread_db.masks_features.set_subject_detail(
             item.photo_id, self.sam2_variant, measured["subject_detail"], measured["subject_detail_px"],
         )
+        subject_masks.require_current_prompt(
+            self.thread_db, item.photo["detection_id"], item.photo["detector_runtime"], item.photo["prompt"],
+        )
         self.thread_db.commit_with_retry()
         self.detail_measured += 1
         return False
@@ -616,6 +620,9 @@ class _MaskExtractionRun:
                 subject_detail=features.pop("subject_detail", None),
                 subject_detail_px=features.pop("subject_detail_px", None),
             ),
+        )
+        subject_masks.require_current_prompt(
+            thread_db, photo["detection_id"], photo["detector_runtime"], photo["prompt"],
         )
         subject_masks.set_active_mask_variant(
             thread_db, photo_id, self.sam2_variant,

@@ -1012,6 +1012,7 @@ class _MaskPass:
             self.skipped += 1
             return _NEXT_PHOTO
         selected = current[0]
+        item.entry["detection_id"] = selected["id"]
         item.detector_runtime = detection_prompt_runtime(selected)
         item.det_box = {k: selected["box_" + k] for k in "xywh"}
         item.entry["detector_model"] = selected["detector_model"]
@@ -1030,17 +1031,8 @@ class _MaskPass:
             self.processed = i + 1
             return _NEXT_PHOTO
 
-        # Past the cache check, so this photo genuinely
-        # needs a source read. If its folder was already
-        # proven unreachable, account for it without
-        # paying for a read we know will fail — but only
-        # here, after the cache branch: a cached mask
-        # only stats the local mask file, so it succeeds
-        # even when the source volume is gone and must
-        # still count as masked. Progress
-        # is pushed too, otherwise the bar freezes on the
-        # photo the outage started on while the stage
-        # walks the rest of the worklist.
+        # Check the offline latch after the local mask cache so an unreachable
+        # source still counts as masked when its cached result is usable.
         if item.photo["folder_id"] in self.em_offline_folder_ids:
             self.outcomes.record(item.photo_id, "source_offline")
             self.em_unreadable += 1
@@ -1357,6 +1349,9 @@ class _MaskPass:
         self.thread_db.masks_features.set_subject_detail(
             item.photo_id, self.sam2_variant, measured["subject_detail"], measured["subject_detail_px"],
         )
+        subject_masks.require_current_prompt(
+            self.thread_db, item.entry["detection_id"], item.detector_runtime, item.entry["prompt"],
+        )
         self.thread_db.commit_with_retry()
         self.detail_measured += 1
         return False
@@ -1412,6 +1407,9 @@ class _MaskPass:
                 subject_detail=features.pop("subject_detail", None),
                 subject_detail_px=features.pop("subject_detail_px", None),
             ),
+        )
+        subject_masks.require_current_prompt(
+            thread_db, entry["detection_id"], item.detector_runtime, entry["prompt"],
         )
         subject_masks.set_active_mask_variant(
             thread_db, photo_id, self.sam2_variant,

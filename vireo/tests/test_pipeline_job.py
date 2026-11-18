@@ -24,7 +24,7 @@ from pipeline_job import (
     run_pipeline_job,
 )
 from repositories.masks_features import PipelineFeatures
-from reviewer_helpers import confirmed_reviewer_box
+from reviewer_helpers import confirmed_reviewer_box, original_frame_detections
 from services import detection_store, photo_ingest, subject_masks, workspace_folders
 
 
@@ -48,11 +48,11 @@ def stub_subject_detail(monkeypatch):
 
     monkeypatch.setattr(
         quality, "measure_subject_detail",
-        lambda mask, *, source_path, frame_size=None: {"subject_detail": 100.0, "subject_detail_px": 40.0},
+        lambda mask, *, source_path, frame_size=None, expected_frame_id=None: {"subject_detail": 100.0, "subject_detail_px": 40.0},
     )
     monkeypatch.setattr(
         quality, "measure_cached_subject_detail",
-        lambda mask_path, source_path, frame_size=None: {"subject_detail": 100.0, "subject_detail_px": 40.0},
+        lambda mask_path, source_path, frame_size=None, *, expected_frame_id=None: {"subject_detail": 100.0, "subject_detail_px": 40.0},
     )
 
 
@@ -6506,7 +6506,7 @@ def test_extract_masks_stage_warns_on_mixed_already_masked_and_subthreshold(
     import classifier as classifier_mod
     import classify_job
 
-    _stub_extract_masks_heavy_ops(monkeypatch)
+    _stub_extract_masks_heavy_ops(monkeypatch, original_proxy=True)
 
     db_path, db, ws_id = _open_db(tmp_path)
 
@@ -6521,8 +6521,8 @@ def test_extract_masks_stage_warns_on_mixed_already_masked_and_subthreshold(
     _drop_jpeg(folder_path, "masked.jpg")
     db.detections.save(
         masked_id,
-        [{"box": {"x": 0, "y": 0, "w": 100, "h": 100},
-          "confidence": 0.9, "category": "animal"}],
+        original_frame_detections(os.path.join(folder_path, "masked.jpg"), [
+            {"box": {"x": 0, "y": 0, "w": 100, "h": 100}, "confidence": 0.9, "category": "animal"}]),
         detector_model="megadetector-v6",
     )
     db.model_runs.record_detector_run(masked_id, "megadetector-v6", box_count=1)
@@ -8983,7 +8983,7 @@ def test_emit_progress_clears_stale_phase_in_merged_job_progress():
 # ---------------------------------------------------------------------------
 
 
-def _stub_extract_masks_heavy_ops(monkeypatch):
+def _stub_extract_masks_heavy_ops(monkeypatch, *, original_proxy=False):
     """Stub the SAM2 + DINOv2 helpers extract_masks_stage imports so the loop
     body runs in microseconds. Returns a dict with the proxy-call counter so
     the test can assert how many photos the loop touched.
@@ -8994,9 +8994,12 @@ def _stub_extract_masks_heavy_ops(monkeypatch):
     import quality
 
     state = {"proxy_calls": 0}
+    render_proxy = masking.render_proxy
 
     def fake_render_proxy(image_path, longest_edge=None):
         state["proxy_calls"] += 1
+        if original_proxy:
+            return render_proxy(image_path, longest_edge=longest_edge)
         return np.zeros((16, 16, 3), dtype=np.uint8)
 
     monkeypatch.setattr(masking, "render_proxy", fake_render_proxy)
@@ -9069,11 +9072,11 @@ def test_extract_masks_stage_gates_weak_detection_on_matching_anchor_species(
         detection_id = detection_store.write_detection_batch(
             db, photo_id,
             "megadetector-v6",
-            [{
+            original_frame_detections(os.path.join(folder_path, filename), [{
                 "box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
                 "confidence": confidence,
                 "category": "animal",
-            }],
+            }]),
         )[0]
         photo_ids.append(photo_id)
         detection_ids.append(detection_id)
@@ -9098,7 +9101,7 @@ def test_extract_masks_stage_gates_weak_detection_on_matching_anchor_species(
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
     db.commit()
-    state = _stub_extract_masks_heavy_ops(monkeypatch)
+    state = _stub_extract_masks_heavy_ops(monkeypatch, original_proxy=True)
 
     params = PipelineParams(
         collection_id=collection_id,
@@ -9143,8 +9146,9 @@ def test_extract_masks_stage_masks_full_image_rescued_dropout(tmp_path, monkeypa
         _drop_jpeg(folder_path, filename)
         detection_id = detection_store.write_detection_batch(
             db, photo_id, "megadetector-v6",
-            [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
-              "confidence": confidence, "category": "animal"}],
+            original_frame_detections(os.path.join(folder_path, filename), [
+                {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": confidence, "category": "animal"},
+            ]),
         )[0]
         photo_ids.append(photo_id)
         detection_ids.append(detection_id)
@@ -9161,7 +9165,7 @@ def test_extract_masks_stage_masks_full_image_rescued_dropout(tmp_path, monkeypa
         json.dumps([{"field": "photo_ids", "value": photo_ids}]),
     )
     db.commit()
-    state = _stub_extract_masks_heavy_ops(monkeypatch)
+    state = _stub_extract_masks_heavy_ops(monkeypatch, original_proxy=True)
     params = PipelineParams(
         collection_id=collection_id, skip_classify=True,
         skip_extract_masks=False, skip_regroup=True,
@@ -9193,8 +9197,9 @@ def _mask_stage_photos(tmp_path, count):
         _drop_jpeg(folder_path, filename)
         detection_store.write_detection_batch(
             db, photo_id, "megadetector-v6",
-            [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
-              "confidence": 0.9, "category": "animal"}],
+            original_frame_detections(os.path.join(folder_path, filename), [
+                {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9, "category": "animal"},
+            ]),
         )
         photo_ids.append(photo_id)
     collection_id = db.collections.add(
@@ -9206,6 +9211,60 @@ def _mask_stage_photos(tmp_path, count):
         skip_extract_masks=False, skip_regroup=True,
     )
     return db_path, db, ws_id, photo_ids, params
+
+
+@pytest.mark.parametrize("entry_point", ["process", "extract"])
+def test_mask_publication_refuses_reclassified_frame(tmp_path, monkeypatch, caplog, entry_point):
+    from contextlib import closing
+
+    import masking
+    from db import Database
+    from PIL import Image
+    from services.mask_extraction import MaskExtractionOptions, extract_masks
+    from test_mask_extraction_service import Runner as ExtractionRunner
+
+    db_path, db, ws_id, (pid,), params = _mask_stage_photos(tmp_path, 1)
+    _stub_extract_masks_heavy_ops(monkeypatch)
+    box = dict(x=.1, y=.1, w=.5, h=.5)
+
+    def write_frame(writer, frame):
+        return detection_store.write_detection_batch(writer, pid, "megadetector-v6", [
+            {"box": box, "confidence": .9, "category": "animal", "frame_id": frame},
+        ])
+
+    ids = write_frame(db, "a" * 64)
+    proxy = Image.new("RGB", (16, 16))
+    proxy.info["vireo_subject_frame_id"] = "a" * 64
+    monkeypatch.setattr(masking, "render_proxy", lambda *args, **kwargs: proxy)
+    save_mask = masking.save_mask
+
+    def reclassify_after_segmentation(*args):
+        with closing(Database(db_path)) as writer:
+            assert write_frame(writer, "b" * 64) == ids
+        return save_mask(*args)
+
+    monkeypatch.setattr(masking, "save_mask", reclassify_after_segmentation)
+
+    def run_masks():
+        if entry_point == "process":
+            _, result = _run_extract_masks_only(db_path, ws_id, params.collection_id)
+            return result["stages"]["extract_masks"]
+        return extract_masks(
+            dict(_make_job(), errors=[]), db_path, runner=ExtractionRunner(), open_db=lambda: Database(db_path),
+            options=MaskExtractionOptions(params.collection_id, "sam2-small", "dinov2-base", 512, .2),
+        )
+
+    result = run_masks()
+    assert result["failed"] == 1 and result["masked"] == 0
+    assert "Subject detection changed during mask extraction" in caplog.text
+    assert not list(tmp_path.rglob("*.generation-*.png"))
+    assert db.detections.row(ids[0])["frame_id"] == "b" * 64
+    assert db.conn.execute("SELECT path FROM photo_masks WHERE photo_id=?", (pid,)).fetchone() is None
+    assert db.conn.execute("SELECT mask_path FROM photos WHERE id=?", (pid,)).fetchone()[0] is None
+
+    monkeypatch.setattr(masking, "save_mask", save_mask)
+    proxy.info["vireo_subject_frame_id"] = "b" * 64
+    assert run_masks()["masked"] == 1
 
 
 def test_extract_masks_overlaps_quality_analysis_with_embedding(tmp_path, monkeypatch):
@@ -9220,7 +9279,7 @@ def test_extract_masks_overlaps_quality_analysis_with_embedding(tmp_path, monkey
     import quality
 
     db_path, db, ws_id, photo_ids, params = _mask_stage_photos(tmp_path, 2)
-    _stub_extract_masks_heavy_ops(monkeypatch)
+    _stub_extract_masks_heavy_ops(monkeypatch, original_proxy=True)
     embedding_started = threading.Event()
     analysis_threads = set()
 
@@ -9255,7 +9314,7 @@ def test_extract_masks_analysis_failure_fails_only_that_photo(tmp_path, monkeypa
     import quality
 
     db_path, db, ws_id, photo_ids, params = _mask_stage_photos(tmp_path, 2)
-    _stub_extract_masks_heavy_ops(monkeypatch)
+    _stub_extract_masks_heavy_ops(monkeypatch, original_proxy=True)
     calls = []
 
     def fake_quality(proxy, mask):
@@ -9936,7 +9995,7 @@ def test_extract_masks_no_subject_still_counts_as_benign_skip(
 
 def _run_extract_masks_for_test(
     tmp_path, monkeypatch, sam2_variant, photo_specs,
-    *, runner=None, on_generate_mask=None,
+    *, runner=None, on_generate_mask=None, source_image=None,
 ):
     """Drive a single pipeline run with extract_masks enabled and the heavy
     SAM2/DINOv2 calls stubbed.  Returns (db, runner, generate_mask_calls)
@@ -9974,14 +10033,16 @@ def _run_extract_masks_for_test(
     photo_ids = []
     for spec in photo_specs:
         pid = photo_ingest.add_photo(db, folder_id, spec["filename"], ".jpg", 1000, 1.0)
-        _drop_jpeg(folder_path, spec["filename"])
+        path = os.path.join(folder_path, spec["filename"])
+        if source_image is None:
+            _drop_jpeg(folder_path, spec["filename"])
+        else:
+            source_image.save(path)
         x, y, w, h = spec["box"]
-        db.detections.save(
-            pid,
-            [{"box": {"x": x, "y": y, "w": w, "h": h},
-              "confidence": 0.9, "category": "animal"}],
-            detector_model=spec["model"],
-        )
+        boxes = [{"box": {"x": x, "y": y, "w": w, "h": h}, "confidence": 0.9, "category": "animal"}]
+        if spec["model"] == "megadetector-v6":
+            boxes = original_frame_detections(path, boxes)
+        db.detections.save(pid, boxes, detector_model=spec["model"])
         db.commit()
         photo_ids.append(pid)
 
@@ -9992,9 +10053,6 @@ def _run_extract_masks_for_test(
 
     generate_mask_calls = []
 
-    def fake_render_proxy(image_path, longest_edge=None):
-        return np.zeros((4, 4, 3), dtype=np.uint8)
-
     def fake_generate_mask(proxy, det_box, variant=None):
         # Track every (variant, det_box) we get asked about — the cache
         # short-circuit must skip past this entirely on a hit.
@@ -10003,7 +10061,6 @@ def _run_extract_masks_for_test(
             on_generate_mask()
         return np.ones((4, 4), dtype=bool)
 
-    monkeypatch.setattr(masking, "render_proxy", fake_render_proxy)
     monkeypatch.setattr(masking, "generate_mask", fake_generate_mask)
     monkeypatch.setattr(masking, "crop_completeness", lambda m: 0.9)
     monkeypatch.setattr(masking, "crop_subject", lambda p, m, margin=0.15: None)
@@ -10058,9 +10115,9 @@ def test_raw_analysis_quality_recomputes_and_restores_normal_scores(tmp_path, mo
     db, _, calls, ids = _run_extract_masks_for_test(
         tmp_path, monkeypatch, "sam2-small",
         [{"filename": "bird.jpg", "box": (0.1, 0.1, 0.8, 0.8), "model": "megadetector-v6"}],
+        source_image=Image.new("RGB", (64, 64), (30, 30, 30)),
     )
     monkeypatch.setattr(quality, "compute_all_quality_features", real_quality)
-    monkeypatch.setattr(masking, "render_proxy", lambda *a, **k: Image.new("RGB", (64, 64), (30, 30, 30)))
     monkeypatch.setattr(masking, "generate_mask", lambda *a, **k: np.ones((64, 64), dtype=bool))
     linear = np.random.default_rng(7).uniform(0.005, 0.02, (64, 64, 3)).astype(np.float32)
     monkeypatch.setattr(raw_analysis, "decode_linear", lambda *a: linear)
