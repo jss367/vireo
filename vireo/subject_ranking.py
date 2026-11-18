@@ -131,7 +131,8 @@ def source_path(db, photo):
 # 5: segment and measure the same camera-rendered frame.
 # 6: detector boxes and SAM prompts share a verified camera-rendered frame.
 # 7: reviewer coordinates are bound to the actual original frame generation.
-ANALYSIS_RECIPE_VERSION = 7
+# 8: retire analyses that may have reused masks across reviewer history frames.
+ANALYSIS_RECIPE_VERSION = 8
 
 
 def analysis_key(path, detection, effective_cfg):

@@ -330,6 +330,24 @@ def _unmeasure_unverified_reviewer_detail(conn):
                  "AND d.detector_model='reviewer-selected')")
 
 
+def _retire_reviewer_frame_caches(conn):
+    """Old history replay could retain a mask from a different reviewer frame."""
+    from repositories.subjects import SubjectsRepository
+
+    reviewer = "SELECT id FROM detections WHERE detector_model='reviewer-selected'"
+    projected = conn.execute(
+        f"SELECT photo_id FROM photo_subject_state WHERE detection_id IN ({reviewer}) "
+        "UNION SELECT p.id FROM photos p JOIN photo_masks m ON m.photo_id=p.id AND p.mask_path=m.path "
+        "WHERE m.detector_model='reviewer-selected'"
+    ).fetchall()
+    subjects = SubjectsRepository(conn)
+    for photo_id, in projected:
+        subjects.clear_primary_features(photo_id)
+    for table in ("detection_subjects", "subject_ranking_analysis", "subject_raw_analysis"):
+        conn.execute(f"DELETE FROM {table} WHERE detection_id IN ({reviewer})")
+    conn.execute("DELETE FROM photo_masks WHERE detector_model='reviewer-selected'")
+
+
 def _repair_alternate_branch_schemas(conn):
     """Repair main migrations skipped by branch catalogs stamped 39–47."""
     _add_classifier_input_source(conn)
@@ -671,6 +689,7 @@ MIGRATIONS = (
     Migration(49, "verified_reviewer_frame", _unmeasure_unverified_reviewer_detail),
     # Alternate v47 catalogs used that slot for reviewer frames and can already be at v49.
     Migration(50, "reconcile_companion_box_frames", _invalidate_ambiguous_companion_boxes),
+    Migration(51, "reviewer_history_mask_frames", _retire_reviewer_frame_caches),
 )
 
 

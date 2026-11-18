@@ -200,7 +200,8 @@ def test_detail_measurement_refuses_a_different_frame_on_reload(tmp_path, monkey
                                           expected_frame_id="segmented-frame") == {}
 
 
-def test_migration_retires_derived_box_scores_but_preserves_human_data(original_photo, tmp_path):
+@pytest.mark.parametrize("legacy_version", [48, 50])
+def test_migration_retires_derived_box_scores_but_preserves_human_data(original_photo, tmp_path, legacy_version):
     import sqlite3
 
     import schema
@@ -214,13 +215,81 @@ def test_migration_retires_derived_box_scores_but_preserves_human_data(original_
     db.masks_features.upsert_mask(pid, "sam2-small", str(path), "reviewer-selected", (.2, .2, .4, .4),
                                   MaskQuality(subject_detail=123, subject_detail_px=40))
     db.conn.execute("INSERT INTO detection_subjects VALUES (?, 'old-alias', '{}', 90, 1, '{}')", (did,))
+    db.conn.execute("INSERT INTO subject_ranking_analysis VALUES (?, 'old-frame', '{}', ?)", (did, b"synthetic"))
+    db.conn.execute("INSERT INTO subject_raw_analysis VALUES (?, 'old-frame', '{}', 0)", (did,))
+    db.predictions.add(did, "Synthetic bird", .9, "synthetic-classifier", status="accepted")
+    other, = db.detections.upsert_rows(pid, "megadetector-v6", [{"box": {"x": .1, "y": .1, "w": .1, "h": .1}, "confidence": .9}], "current")
+    db.conn.execute("INSERT INTO subject_ranking_analysis VALUES (?, 'unrelated', '{}', ?)", (other, b"unrelated"))
+
     db.conn.execute("UPDATE photos SET rating=5, quality_score=90, subject_sharpness=123, subject_detail=123 WHERE id=?", (pid,))
-    db.conn.execute("PRAGMA user_version=48")
+    db.conn.execute(f"PRAGMA user_version={legacy_version}")
     db.commit()
     schema.ensure_schema(db.job_history.catalog_file())
     with sqlite3.connect(db.job_history.catalog_file()) as conn:
         assert conn.execute("SELECT COUNT(*) FROM detection_subjects").fetchone()[0] == 0
         assert conn.execute("SELECT rating, quality_score, subject_sharpness, subject_detail FROM photos WHERE id=?", (pid,)).fetchone() == (5, None, None, None)
         assert conn.execute("SELECT detection_id FROM photo_subject_choices WHERE photo_id=?", (pid,)).fetchone()[0] == did
-        assert conn.execute("SELECT path, subject_detail FROM photo_masks WHERE photo_id=?", (pid,)).fetchone() == (str(path), None)
+        assert conn.execute("SELECT path FROM photo_masks WHERE photo_id=?", (pid,)).fetchone() is None
+        assert conn.execute("SELECT detection_id, source_key FROM subject_ranking_analysis").fetchall() == [(other, "unrelated")]
+        assert conn.execute("SELECT COUNT(*) FROM subject_raw_analysis").fetchone()[0] == 0
+        assert conn.execute("SELECT species FROM predictions WHERE detection_id=?", (did,)).fetchone()[0] == "Synthetic bird"
+
     assert path.exists()
+
+
+def test_history_retires_masks_from_a_different_verified_rendition(original_photo, tmp_path, monkeypatch):
+    import image_loader
+    from repositories.masks_features import MaskQuality
+
+    app, db, pid, _source = original_photo
+    actual_load = image_loader.load_image
+    rendition = ["embedded-preview"]
+
+    def load(path, max_size=1024, raw_decode=image_loader.RAW_DECODE_JPEG_FIRST):
+        image = actual_load(path, max_size=None, raw_decode=raw_decode)
+        if image is not None and raw_decode == image_loader.RAW_DECODE_ALIGNED:
+            # A transient preview extraction failure can switch an unchanged
+            # RAW between its eligible embedded preview and sensor rendering.
+            image.info["vireo_aligned_rendition"] = rendition[0]
+            image.info["vireo_subject_frame_id"] = image_loader.aligned_frame_identity(
+                path, image, image_loader.aligned_source_state(path))
+        if image is not None and max_size:
+            image.thumbnail((max_size, max_size))
+        return image
+
+    monkeypatch.setattr(image_loader, "load_image", load)
+    client = app.test_client()
+    first = _save(client, pid, _token(client, pid)).get_json()["primary_detection_id"]
+    before = db.conn.execute("SELECT runtime_fingerprint FROM detections WHERE id=?", (first,)).fetchone()[0]
+    rendition[0] = "sensor"
+    assert _save(client, pid, _token(client, pid)).status_code == 200
+    mask = tmp_path / "sensor-mask.png"
+    Image.new("L", (320, 200), 255).save(mask)
+    db.masks_features.upsert_mask(pid, "sam2-small", str(mask), "reviewer-selected", (.2, .2, .4, .4),
+                                  MaskQuality(subject_detail=123, subject_detail_px=100))
+    db.commit()
+    rendition[0] = "embedded-preview"
+    assert client.post("/api/undo").status_code == 200
+    assert db.conn.execute("SELECT runtime_fingerprint FROM detections WHERE id=?", (first,)).fetchone()[0] == before
+    # Same numeric box and photo are insufficient to reuse the sensor mask
+    # during a quality-only retry after restoring the preview-frame proof.
+    assert db.masks_features.get_mask(pid, "sam2-small") is None
+    assert mask.exists()
+    import subject_analysis
+    from services.analysis_retry import retry_features
+
+    def analyze(*args, existing_mask_path=None, **kwargs):
+        assert existing_mask_path is None
+        raise ValueError("synthetic analysis boundary")
+
+    monkeypatch.setattr(subject_analysis, "analyze_detection", analyze)
+    with pytest.raises(ValueError, match="synthetic analysis boundary"):
+        retry_features(db, pid, db.get_effective_config({}), str(tmp_path), lambda: None, quality_only=True)
+    # Redo must retire any newly computed cache for the restored A frame too.
+    db.masks_features.upsert_mask(pid, "sam2-small", str(mask), "reviewer-selected", (.2, .2, .4, .4),
+                                  MaskQuality(subject_detail=456, subject_detail_px=100))
+    db.commit()
+    rendition[0] = "sensor"
+    assert client.post("/api/redo").status_code == 200
+    assert db.masks_features.get_mask(pid, "sam2-small") is None
+    assert mask.exists()

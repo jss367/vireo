@@ -93,7 +93,7 @@ unverified box cannot be reused. Coordinate-bearing analysis uses the strict
 preview is not substituted. Browsing keeps its usual preview fallback;
 analysis stays pending instead of silently changing its frame. The comparison
 analyses (`subject_ranking_analysis`) store the detail too; their key carries
-`subject_ranking.ANALYSIS_RECIPE_VERSION` (7), raised with this change, so an
+`subject_ranking.ANALYSIS_RECIPE_VERSION` (8), raised with this change, so an
 analysis made before it no longer matches and the subject is analysed again.
 
 `photos.subject_detail_px` is the subject box's longer side in native pixels,
@@ -237,3 +237,11 @@ choices, predictions, ratings, history and mask files. All coordinate analysis
 resolves the catalog original, including JPEG originals, rather than a working-copy
 alias. Offline browsing still uses existing previews; analysis waits for the
 original. General working-copy provenance recovery remains outside this change.
+
+Undo/redo also retires reviewer mask cache rows when restoring a different
+reviewer state. An identical numeric box can belong to another rendering; its
+PNG cannot prove that it matches the restored frame. Migration 51 retires
+reviewer mask/analysis caches that older history replay may have mixed, while
+keeping immutable PNGs and human decisions. Recipe 8 prevents reuse of old
+comparison generations. Migration 50 separately repairs companion provenance
+for alternate-version catalogs already upgraded through versions 48 or 49.

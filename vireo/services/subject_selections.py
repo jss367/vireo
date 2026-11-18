@@ -75,6 +75,9 @@ def replay_history(db: Database, items: Sequence[Mapping], *, undo: bool) -> Non
             for entry in restored:
                 entry.setdefault("runtime", "reviewer-v1")
             if previous != restored:
+                # A matching numeric box can belong to another verified rendition.
+                # Retire derived rows; history and immutable PNGs remain intact.
+                db.masks_features.retire_prompt_masks(photo_id, REVIEWER_MODEL)
                 if [entry["box"] for entry in previous] != [entry["box"] for entry in restored]:
                     db.detections.clear(photo_id, REVIEWER_MODEL)
                 for entry in restored:
