@@ -1,6 +1,7 @@
 """Camera-clock detection: shot order, time-zone switches, GPS error, location."""
 
 from datetime import datetime, timedelta
+from itertools import pairwise
 
 import camera_clock
 from camera_clock import ClockFrame, analyze_camera, estimate_clock_error, find_clock_problems
@@ -264,3 +265,16 @@ def test_one_offset_across_two_real_zones_gets_a_fix_per_zone():
     [fix] = problem.fixes
     assert {f.ref for f in fix.frames} == {f.ref for f in evening}
     assert fix.target_offset == -480
+
+
+def test_repeated_resets_after_a_gps_verified_clock_move_forward():
+    first = frames_at(datetime(2026, 4, 1, 12), 6, first_count=1, offset=0, gps_error=0)
+    middle = frames_at(datetime(2026, 4, 1, 10), 3, first_count=7, offset=0)
+    last = frames_at(datetime(2026, 4, 1, 8), 3, first_count=10, offset=0)
+    frames = first + middle + last
+    problem = analyze_camera(frames)
+    assert problem is not None
+    shifts = {f.ref: fix.shift_minutes for fix in problem.fixes for f in fix.frames}
+    assert set(shifts) == {f.ref for f in middle + last}
+    corrected = [f.captured + timedelta(minutes=shifts.get(f.ref, 0)) for f in frames]
+    assert all(a < b for a, b in pairwise(corrected))

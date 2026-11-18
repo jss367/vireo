@@ -689,20 +689,18 @@ def _fixes_across_resets(clock: _CameraClock, nearby_error: tuple[int, str] | No
             settled.update(f.ref for f in epoch)
         stretch_of.update({f.ref: epoch for f in epoch})
     resets = [j for j in clock.jumps if j.kind == "reset"]
-    # Last reset first, so a stretch before several resets moves by all of
-    # them: each backward fix composes with the shift already chosen for the
-    # stretch after it. Then first reset first for stretches that move
-    # forward past a stretch GPS shows was right.
+    # Propagate known shifts forward from an anchored stretch first. For
+    # the remaining unanchored prefix, work backward from its final epoch.
+    for jump in resets:
+        after = [f for f in stretch_of[jump.after.ref] if f.ref not in settled]
+        if after and jump.before.ref in settled:
+            _add_reset_fix(fixes, shifts, settled,
+                           _reset_fix(jump, after, shifts.get(jump.before.ref, 0), move_before=False))
     for jump in reversed(resets):
         before = [f for f in stretch_of[jump.before.ref] if f.ref not in settled]
         if before:
             _add_reset_fix(fixes, shifts, settled,
                            _reset_fix(jump, before, shifts.get(jump.after.ref, 0), move_before=True))
-    for jump in resets:
-        after = [f for f in stretch_of[jump.after.ref] if f.ref not in settled]
-        if after:
-            _add_reset_fix(fixes, shifts, settled,
-                           _reset_fix(jump, after, shifts.get(jump.before.ref, 0), move_before=False))
     return fixes
 
 
