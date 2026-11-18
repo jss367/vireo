@@ -13,10 +13,13 @@ import logging
 import os
 import sqlite3
 import sys
+import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from config import config_value
+from file_replace import replace_file
 from image_loader import (
     RAW_EXTENSIONS,
     extract_working_copy,
@@ -24,7 +27,9 @@ from image_loader import (
 )
 from PIL import Image
 from render_source import is_undersized
+from resource_ledger import ResourceWaitCancelled
 from scanner.exif_fields import _oriented_dimensions, _scaled_dimensions
+from scanner.hashing import _claim_worker_count
 from scanner.status import _call_status_callback, _status_callback_supports_phase
 
 if TYPE_CHECKING:
@@ -337,24 +342,73 @@ class _WorkingCopyBatch:
         # encode, multi-second per file on a slow disk) hold the writer lock
         # for the whole batch, starving any concurrent writer (e.g. a parallel
         # pipeline's add_photo INSERT past the 30s busy_timeout).
-        for i, row in enumerate(self.rows, 1):
-            if self.cancel_check is not None and self.cancel_check():
-                log.info(
-                    "Working-copy extraction cancelled after %d/%d rows",
-                    i - 1, self.total,
-                )
-                break
-            if not self._process_row(i, row):
-                continue
-            if self.stop_after_current and not self._resume_after_stop(i):
-                break
+        if self.source_paths and self.total > 1:
+            self._run_import_rows()
+        else:
+            for i, row in enumerate(self.rows, 1):
+                if not self._finish_row(i, row):
+                    break
 
         self._trim_overshoot()
         self._enforce_final_quota()
 
+    def _run_import_rows(self) -> None:
+        # Decode into private sibling files. Only the coordinator touches
+        # SQLite, publishes canonical paths and applies the quota in order.
+        working = os.path.join(self.vireo_dir, "working")
+        os.makedirs(working, exist_ok=True)
+        index = 0
+        while index < self.total:
+            if self.cancel_check and self.cancel_check():
+                return
+            with tempfile.TemporaryDirectory(prefix=".import-", dir=working) as scratch:
+                # Size the CPU lease from the unprocessed tail, not the full
+                # row list: on an odd-sized import the final iteration would
+                # otherwise request two permits while only one row remains to
+                # decode, pinning a permit that a concurrent pipeline could
+                # use while the last RAW extracts.
+                remaining = self.rows[index:]
+                try:
+                    with _claim_worker_count(
+                        remaining, self.cancel_check, limit=2,
+                        label="import working copies", min_parallel_files=2,
+                    ) as workers:
+                        rows = remaining[:workers]
+                        prepared = self._prepare_working_copies(rows, scratch)
+                except ResourceWaitCancelled:
+                    return
+                # Park or cancel only after the workers have drained and
+                # released their permits. Unused scratch files are discarded.
+                for row in rows:
+                    index += 1
+                    if not self._finish_row(index, row, prepared.get(row["id"])):
+                        return
+
+    def _prepare_working_copies(
+        self, rows: list[sqlite3.Row], scratch: str,
+    ) -> dict[int, tuple[str, _RowExtraction]]:
+        with ThreadPoolExecutor(max_workers=len(rows)) as pool:
+            pending = {}
+            for row in rows:
+                if not _snapshot_row_still_current(self.db, row) or is_excluded_scan_path(row["folder_path"]):
+                    continue
+                path = os.path.join(scratch, f"{row['id']}.jpg")
+                pending[row["id"]] = (path, pool.submit(self._extract_row, row, path))
+            return {
+                photo_id: (path, future.result())
+                for photo_id, (path, future) in pending.items()
+            }
+
+    def _finish_row(self, i: int, row: sqlite3.Row, prepared: tuple[str, _RowExtraction] | None = None) -> bool:
+        if self.cancel_check is not None and self.cancel_check():
+            log.info("Working-copy extraction cancelled after %d/%d rows", i - 1, self.total)
+            return False
+        processed = self._process_row(i, row, prepared)
+        return not (processed and self.stop_after_current) or self._resume_after_stop(i)
+
     # -- one row -----------------------------------------------------
 
-    def _process_row(self, i: int, row: sqlite3.Row) -> bool:
+    def _process_row(self, i: int, row: sqlite3.Row, prepared: tuple[str, _RowExtraction] | None = None) -> bool:
         """Extract and publish one row; ``False`` when it ended early."""
         # ``cancel_check`` parks the worker on a pause request via
         # ``wait_if_paused``, so this snapshot row may have been picked up
@@ -387,7 +441,15 @@ class _WorkingCopyBatch:
         wc_rel = f"working/{row['id']}.jpg"
         wc_abs = os.path.join(self.vireo_dir, "working", f"{row['id']}.jpg")
 
-        extraction = self._extract_row(row, wc_abs)
+        if prepared is None:
+            extraction = self._extract_row(row, wc_abs)
+        else:
+            path, extraction = prepared
+            if extraction.ok:
+                with self.publication_guard():
+                    replace_file(path, wc_abs)
+                    extraction.published_identities.clear()
+                    _record_published_identity(extraction.published_identities, wc_abs)
         publication = _RowPublication()
         if extraction.ok:
             publication = self._publish_row(row, wc_rel, wc_abs, extraction)

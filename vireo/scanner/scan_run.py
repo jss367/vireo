@@ -283,6 +283,7 @@ class _ScanRun:
             permission_error_callback=hooks.permission_error,
         )
         self.hasher = _FeatureHasher(
+            verified_destinations=options.verified_destinations,
             signals=self.signals,
             pause_check=control.pause_check,
             cancel_only_check=control.cancel_only_check,

@@ -378,3 +378,90 @@ def test_a_renamed_files_own_rsync_counts_it_only_when_it_exits_cleanly():
     sent.single(900)
     sent.settle(completed=True)
     assert state.transferred_bytes == 700
+
+
+def test_live_copy_rate_includes_current_batch_and_excludes_pauses(monkeypatch):
+    from import_job import timing
+
+    state = _state(copy=5.0)
+    state.transferred_bytes = 10 * 1024 ** 2
+    state.copy_clock = (20.0, 100.0)
+    state.paused_seconds = lambda: 110.0
+    monkeypatch.setattr(timing.time, "monotonic", lambda: 35.0)
+
+    assert timing.live_copy_rate(state) == {"copy_mib_per_second": 1.0}
+
+
+def test_verified_import_independently_hashes_scanned_destinations(tmp_path, monkeypatch):
+    from import_job import ImportParams
+    from scanner import hashing
+    from test_import_job import FakeRunner
+
+    reads = []
+    real_hash = hashing.compute_file_hash
+
+    def record_read(path):
+        reads.append(path)
+        return real_hash(path)
+
+    monkeypatch.setattr(hashing, "compute_file_hash", record_read)
+    runner = FakeRunner()
+    _, _, result = _run_import(tmp_path, ImportParams(
+        sources=[str(_card(tmp_path))], destination=str(tmp_path / "archive"),
+    ), runner=runner)
+
+    assert result["verified"] == 3
+    assert result["ok"]
+    assert len(reads) == 3
+    assert any(data.get("copy_mib_per_second", 0) > 0 for _, _, data in runner.events)
+
+
+@pytest.mark.parametrize("changed", ["size", "mtime", "same_stat"])
+def test_scan_rehashes_even_when_verified_stat_is_preserved(tmp_path, changed):
+    import hashlib
+    import os
+
+    from scanner.hashing import _compute_file_features
+
+    photo = tmp_path / "photo.nef"
+    photo.write_bytes(b"original")
+    verified = photo.stat()
+    digest = hashlib.sha256(photo.read_bytes()).hexdigest()
+    replacement = b"new" if changed == "size" else b"replaced"
+    photo.write_bytes(replacement)
+    mtime = verified.st_mtime_ns + (1_000_000_000 if changed == "mtime" else 0)
+    os.utime(photo, ns=(mtime, mtime))
+
+    _, catalog_hash = _compute_file_features(str(photo), (digest, verified.st_size, verified.st_mtime_ns))
+    assert catalog_hash == hashlib.sha256(replacement).hexdigest()
+
+
+def test_import_rejects_substitution_preserving_size_and_mtime(tmp_path, monkeypatch):
+    import os
+    from pathlib import Path
+
+    import scanner
+    from import_job import ImportParams
+
+    real_scan = scanner.scan
+    replaced = []
+
+    def substitute_before_scan(root, db, **kwargs):
+        for path in kwargs["options"].restrict_files or ():
+            path = Path(path)
+            stat = path.stat()
+            replacement = path.with_suffix(".replacement")
+            replacement.write_bytes(path.read_bytes()[::-1])
+            os.utime(replacement, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+            os.replace(replacement, path)
+            assert (path.stat().st_size, path.stat().st_mtime_ns) == (stat.st_size, stat.st_mtime_ns)
+            replaced.append(path)
+        return real_scan(root, db, **kwargs)
+
+    monkeypatch.setattr(scanner, "scan", substitute_before_scan)
+    _, _, result = _run_import(tmp_path, ImportParams(
+        sources=[str(_card(tmp_path))], destination=str(tmp_path / "archive"),
+    ))
+    assert len(replaced) == 3
+    assert result["safe_to_format"] is False
+    assert result["failed"] == 3

@@ -796,9 +796,9 @@ def _count_feature_computations(monkeypatch):
     read_paths = []
     real = scanner.hashing._compute_file_features
 
-    def _counting(path_str):
+    def _counting(path_str, verified=None):
         read_paths.append(path_str)
-        return real(path_str)
+        return real(path_str, verified)
 
     monkeypatch.setattr(scanner.features, "_compute_file_features", _counting)
     return read_paths
@@ -15853,3 +15853,42 @@ def test_rejected_landing_leaves_the_resume_record():
     )
     _reclassify_landed_failed(state, "2026", entry, "hash mismatch", True)
     assert state.landed_files == {}
+
+
+def test_import_decodes_in_parallel_and_discards_uncommitted_copy_on_stop(tmp_path, monkeypatch):
+    import contextlib
+    import threading
+
+    from import_job import ImportParams
+    from scanner import working_copy_batch
+
+    runner = FakeRunner()
+    job = _make_job()
+    card = tmp_path / "card"
+    card.mkdir()
+    for n in range(2):
+        (card / f"{n}.nef").write_bytes(bytes([n]))
+    both_decoding = threading.Barrier(2)
+
+    def decode(source, output, **kwargs):
+        both_decoding.wait(timeout=synchronization_timeout())
+        Path(output).write_bytes(Path(source).read_bytes())
+        return True
+
+    publish_progress = working_copy_batch._WorkingCopyBatch._emit_progress
+
+    def stop_after_first(batch, current):
+        publish_progress(batch, current)
+        if current == 1:
+            runner.cancelled_ids.add(job["id"])
+
+    monkeypatch.setattr(working_copy_batch, "_claim_worker_count", lambda *a, **kw: contextlib.nullcontext(2))
+    monkeypatch.setattr(working_copy_batch, "extract_working_copy", decode)
+    monkeypatch.setattr(working_copy_batch._WorkingCopyBatch, "_emit_progress", stop_after_first)
+    db, _, result = _run_import(tmp_path, ImportParams(
+        sources=[str(card)], destination=str(tmp_path / "archive"), vireo_dir=str(tmp_path / "vireo"),
+    ), runner=runner, job=job)
+
+    assert result["verified"] == 2
+    saved, = db.conn.execute("SELECT working_copy_path FROM photos WHERE working_copy_path IS NOT NULL")
+    assert list((tmp_path / "vireo" / "working").iterdir()) == [tmp_path / "vireo" / saved[0]]

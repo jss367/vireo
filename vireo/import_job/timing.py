@@ -3,8 +3,7 @@
 An import does four kinds of work, and on a slow destination their shares
 differ by an order of magnitude: finding the files on the card, copying
 them (and, on the local transport, reading every copy back to verify it),
-cataloging each batch (the scan hashes each new file at the destination
-again), and building working copies after the last batch. The job has one
+cataloging each batch, and building working copies after the last batch. The job has one
 step, so without these numbers a slow import reads as one long "Copy &
 catalog" with no way to tell which part was slow.
 
@@ -60,14 +59,31 @@ def timed(state: _ImportRunState, phase: str) -> Iterator[None]:
     """
     started = time.monotonic()
     paused_before = state.paused_seconds()
+    if phase == COPY:
+        state.copy_clock = (started, paused_before)
     try:
         yield
     finally:
+        if phase == COPY:
+            state.copy_clock = None
         elapsed = time.monotonic() - started
         paused = max(0.0, state.paused_seconds() - paused_before)
         state.phase_seconds[phase] = (
             state.phase_seconds.get(phase, 0.0) + max(0.0, elapsed - paused)
         )
+
+
+def live_copy_rate(state: _ImportRunState) -> dict[str, float]:
+    """Effective payload throughput, including verification and excluding pauses."""
+    seconds = state.phase_seconds.get(COPY, 0.0)
+    if not state.transferred_bytes:
+        return {}
+    if state.copy_clock is not None:
+        started, paused_before = state.copy_clock
+        seconds += max(0.0, time.monotonic() - started - (state.paused_seconds() - paused_before))
+    if seconds <= 0:
+        return {}
+    return {"copy_mib_per_second": state.transferred_bytes / (1024 ** 2 * seconds)}
 
 
 def timing_result(state: _ImportRunState) -> JsonDict:

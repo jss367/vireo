@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING, Any
 
+from import_job.timing import live_copy_rate
 from job_contract import progress_event
 
 if TYPE_CHECKING:
@@ -324,6 +325,7 @@ def _make_emitter(job: JobDict, runner: JobRunner, state: _ImportRunState, eta: 
         # since local progress events never carry them.
         for key in _IMPORT_ETA_PROGRESS_KEYS + _IMPORT_TRANSFER_PROGRESS_KEYS:
             job["progress"].pop(key, None)
+        eta_fields.update(live_copy_rate(state))
         job["progress"].update(eta_fields)
         runner.update_step(
             job["id"], "import",

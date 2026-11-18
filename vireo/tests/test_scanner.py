@@ -1497,7 +1497,7 @@ def test_incremental_scan_retries_after_hash_failure(tmp_path, monkeypatch):
     Image.new('RGB', (150, 150)).save(path)
 
     # Scan with feature computation failing (simulated unreadable file)
-    monkeypatch.setattr(scanner.features, '_compute_file_features', lambda p: (None, None))
+    monkeypatch.setattr(scanner.features, '_compute_file_features', lambda p, verified=None: (None, None))
     scan(root, db, options=ScanOptions(incremental=True))
     photo = _row()
     assert photo['file_hash'] == old_row['file_hash']  # hash untouched
@@ -2445,8 +2445,8 @@ def test_recovered_companion_waits_for_a_readable_scan_before_synchronizing(
     recovered = [tuple(row) for row in cat.identity()]
     real_features = scanner.hashing._compute_file_features
 
-    def unreadable_jpeg(path):
-        phash, file_hash = real_features(path)
+    def unreadable_jpeg(path, verified=None):
+        phash, file_hash = real_features(path, verified)
         return (phash, None) if path.endswith(".jpg") else (phash, file_hash)
 
     with monkeypatch.context() as patch:
@@ -2474,8 +2474,8 @@ def test_unreadable_companion_keeps_its_stored_identity(tmp_path, monkeypatch):
     os.utime(cat.jpeg, (future, future))
     real_features = scanner.hashing._compute_file_features
 
-    def unreadable_jpeg(path_str):
-        phash, file_hash = real_features(path_str)
+    def unreadable_jpeg(path_str, verified=None):
+        phash, file_hash = real_features(path_str, verified)
         return (phash, None) if path_str.endswith(".jpg") else (phash, file_hash)
 
     monkeypatch.setattr(scanner.features, "_compute_file_features", unreadable_jpeg)
@@ -5537,7 +5537,8 @@ def test_scan_does_not_construct_worker_pool_while_pause_remains_pending(
             pool_pause_states.append(pause_active.is_set())
             self._processes = {}
 
-        def submit(self, function, path):
+        def submit(self, function, path, verified):
+            assert verified is None
             return ReadyFuture(function, path)
 
         def shutdown(self, wait=True, cancel_futures=False):
@@ -5816,7 +5817,8 @@ def test_scan_pause_requeues_worker_result(
         def __init__(self, *args, **kwargs):
             self._processes = {}
 
-        def submit(self, function, path):
+        def submit(self, function, path, verified):
+            assert verified is None
             return PendingFuture(function, path)
 
         def shutdown(self, wait=True, cancel_futures=False):
@@ -5864,8 +5866,8 @@ def test_sequential_scan_pause_after_compute_releases_lease(tmp_path, monkeypatc
     pause_state = {"active": False, "triggered": False}
     parking_alloc = []
 
-    def compute_then_pause(path):
-        result = original_compute(path)
+    def compute_then_pause(path, verified=None):
+        result = original_compute(path, verified)
         if not pause_state["triggered"]:
             pause_state["triggered"] = True
             pause_state["active"] = True
@@ -5921,7 +5923,8 @@ def test_scan_consumer_pause_resumes_generator_before_parking(
         def __init__(self, *args, **kwargs):
             self._processes = {}
 
-        def submit(self, function, path):
+        def submit(self, function, path, verified):
+            assert verified is None
             return ReadyFuture(function, path)
 
         def shutdown(self, wait=True, cancel_futures=False):

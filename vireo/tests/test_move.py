@@ -6945,9 +6945,9 @@ def _count_feature_computations(monkeypatch):
     computed = []
     real = scanner.hashing._compute_file_features
 
-    def counting(path_str):
+    def counting(path_str, verified=None):
         computed.append(os.path.basename(path_str))
-        return real(path_str)
+        return real(path_str, verified)
 
     monkeypatch.setattr(scanner.features, "_compute_file_features", counting)
     return computed

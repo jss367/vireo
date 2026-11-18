@@ -31,6 +31,34 @@ def _selected(module, names, namespace, owner=None):
     return result
 
 
+@pytest.mark.parametrize("count", [1, 3, 5])
+def test_import_cpu_leases_only_request_remaining_rows(tmp_path, count):
+    import os
+    import tempfile
+
+    requested = []
+    finished = []
+
+    @contextlib.contextmanager
+    def claim(rows, *args, **kwargs):
+        requested.append(len(rows))
+        yield min(2, len(rows))
+
+    ns = _selected("working_copy_batch.py", {"_run_import_rows"}, {
+        "os": os, "tempfile": tempfile, "_claim_worker_count": claim,
+        "ResourceWaitCancelled": RuntimeError,
+    }, "_WorkingCopyBatch")
+    subject = SimpleNamespace(
+        vireo_dir=str(tmp_path), rows=[{"id": i} for i in range(count)],
+        total=count, cancel_check=None,
+        _prepare_working_copies=lambda rows, scratch: {},
+        _finish_row=lambda index, row, prepared: finished.append(row["id"]) or True,
+    )
+    ns["_run_import_rows"](subject)
+    assert requested == list(range(count, 0, -2))
+    assert finished == list(range(count))
+
+
 @pytest.mark.parametrize("boundary", ["window", "first", "pending", "normal", "cancel"])
 def test_pool_pause_requeues_and_joins_before_return(boundary):
     class Pause(Exception):
@@ -65,7 +93,7 @@ def test_pool_pause_requeues_and_joins_before_return(boundary):
         "_compute_file_features": object(),
     }, "_FeatureHasher")
     queue = deque([(PurePosixPath("/invented/a"), "/invented/a")])
-    subject = SimpleNamespace(_check_cancelled_no_park=check, _pause_pending=lambda: False,
+    subject = SimpleNamespace(verified_destinations={}, _check_cancelled_no_park=check, _pause_pending=lambda: False,
                               _feature_result=lambda _: ("fake phash", "fake hash"))
     generator = ns["_pool_features"](subject, Workers(2), queue)
     if boundary == "cancel":
@@ -109,7 +137,7 @@ def test_restricted_generator_survives_discovery_for_empty_leaf_status(leaves):
     control = SimpleNamespace(cancel_check=None, pause_check=None, cancel_only_check=None)
     ns["__init__"](subject, "/invented/root", resolved, object(), {},
                    catalog_folder_path=object(), catalog_folder_aliases=object(),
-                   options=SimpleNamespace(recursive=True), hooks=hooks, control=control)
+                   options=SimpleNamespace(recursive=True, verified_destinations=None), hooks=hooks, control=control)
     assert observed == leaves
     assert tuple(subject.restrict_dirs) == tuple(leaves)
     registered, stamps, stats = [], [], []

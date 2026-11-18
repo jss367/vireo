@@ -8926,9 +8926,9 @@ def test_import_in_place_reuses_catalog_across_workspaces(
     real_features = scanner.hashing._compute_file_features
     real_metadata = scanner.scan_run.extract_metadata
 
-    def compute_features(path):
+    def compute_features(path, verified=None):
         feature_reads.append(path)
-        return real_features(path)
+        return real_features(path, verified)
 
     def extract_metadata(paths, **kwargs):
         metadata_reads.extend(paths)
