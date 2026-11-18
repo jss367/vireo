@@ -410,7 +410,7 @@ def generate_mask(image, detection_box, variant="sam2-small"):
         return None
 
 
-def save_mask(mask, masks_dir, photo_id, variant):
+def save_mask(mask, masks_dir, photo_id, variant, *, frame_id=None):
     """Save a boolean mask as a single-channel PNG.
 
     Filename: ``{photo_id}.{variant}.png`` so multiple SAM variants per
@@ -427,15 +427,17 @@ def save_mask(mask, masks_dir, photo_id, variant):
     """
     os.makedirs(masks_dir, exist_ok=True)
     path = os.path.join(masks_dir, f"{photo_id}.{variant}.png")
-    write_mask_png(mask, path)
+    write_mask_png(mask, path, frame_id=frame_id)
     return path
 
 
-def write_mask_png(mask, destination):
+def write_mask_png(mask, destination, *, frame_id=None):
     """Encode the segmented frame provenance with the mask pixels."""
     from PIL.PngImagePlugin import PngInfo
 
     metadata = PngInfo()
+    if frame_id is not None:
+        metadata.add_text("vireo_subject_frame_id", frame_id)
     metadata.add_text("vireo_mask_frame", "camera_rendered")
     metadata.add_text("vireo_prompt_frame", "camera_rendered")
     Image.fromarray(mask.astype(np.uint8) * 255).save(destination, format="PNG", pnginfo=metadata)
@@ -471,11 +473,17 @@ def require_aligned_detector_prompt(image, detector_runtime, *, detector_model=N
         raise PromptFrameError("Detector coordinates use an unverified RAW frame; enable Re-classify to rerun detection before subject analysis")
 
 
-def require_original_reviewer_frame(image_path, runtime, *, detector_model=None):
-    """Cached measurements cannot bypass a prompt's original-frame proof."""
+def require_original_reviewer_frame(image_path, runtime, *, detector_model=None, verify_mask_frame=False):
+    """Validate the prompt and return the decoded identity for cached-mask checks."""
     from detection_id import prompt_frame_id
+    from image_loader import RAW_EXTENSIONS
 
-    if prompt_frame_id(runtime) is None and detector_model != "megadetector-v6" and (not isinstance(runtime, str) or not runtime.startswith("reviewer")):
+    needs_proof = (
+        (verify_mask_frame and os.path.splitext(image_path)[1].lower() in RAW_EXTENSIONS)
+        or prompt_frame_id(runtime) is not None or detector_model == "megadetector-v6"
+        or (isinstance(runtime, str) and runtime.startswith("reviewer"))
+    )
+    if not needs_proof:
         return
     from image_loader import RAW_DECODE_ALIGNED, load_image
 
@@ -484,6 +492,18 @@ def require_original_reviewer_frame(image_path, runtime, *, detector_model=None)
         raise PromptFrameError("Original prompt frame unavailable; reconnect the original before analysis")
     with image:
         require_aligned_detector_prompt(image, runtime, detector_model=detector_model)
+        return image.info.get("vireo_subject_frame_id")
+
+
+def cached_mask_frame_matches(path, frame_id):
+    """A validated prompt may still have an older mask at the same box."""
+    if frame_id is None:
+        return True
+    try:
+        with Image.open(path) as mask:
+            return mask.info.get("vireo_subject_frame_id") == frame_id
+    except (OSError, ValueError, Image.DecompressionBombError):
+        return False
 
 
 def load_mask(masks_dir, photo_id, variant):

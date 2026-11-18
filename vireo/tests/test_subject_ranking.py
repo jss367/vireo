@@ -198,14 +198,16 @@ def test_single_subject_frames_and_existing_decisions(comparison_library):
 
 
 @pytest.mark.parametrize("center", ["", "&center=.25,.5"])
-def test_selected_mask_focus_and_measurements_share_generation(comparison_library, monkeypatch, center):
+def test_selected_mask_focus_and_measurements_share_generation(comparison_library, center):
     app, db, pids, ids = comparison_library
     import config as cfg
     _analyze(db, pids, SubjectComparison(TARGET), cfg.load())
     pack = _pack(app, pids, requested_species=TARGET)
     card = pack["cards"][0]
-    # Observe geometry/selection independently of disk decode plumbing.
-    monkeypatch.setattr("web.media_crops._focus_source_image", lambda *args: (Image.new("RGB", (320, 160), "white"), "original"))
+    from subject_ranking import source_path
+    with Image.open(source_path(db, db.photos.get(card["id"]))) as image:
+        subject_pixel = image.getpixel((70, 80))[0]
+        background_pixel = image.getpixel((240, 80))[0]
     client = app.test_client()
     mask = client.get(card["mask_url"])
     assert mask.status_code == 200
@@ -218,14 +220,16 @@ def test_selected_mask_focus_and_measurements_share_generation(comparison_librar
     assert focus.headers["X-Vireo-Focus-Mask"] == "1"
     assert focus.headers["X-Vireo-Analysis-Key"] == card["subject"]["analysis_key"]
     crop = np.asarray(Image.open(io.BytesIO(focus.data)))
-    assert crop[80, 70, 0] > 240 and crop[80, 240, 0] < 100
+    assert abs(int(crop[80, 70, 0]) - subject_pixel) < 15
+    assert abs(int(crop[80, 240, 0]) - background_pixel * .35) < 15
     assert focus.headers["X-Vireo-Focus-Detection-Id"] == str(ids[card["id"]][0])
     assert focus.headers["X-Vireo-Focus-Eye-Status"] == "disabled"
     manual = client.get(card["focus_crop_mask_url"] + "&center=.5,.5")
     assert manual.headers["X-Vireo-Analysis-Key"] == card["subject"]["analysis_key"]
     assert manual.headers["X-Vireo-Focus-Mask"] == "1"
     crop = Image.open(io.BytesIO(manual.data))
-    assert crop.getpixel((70, 80))[0] > 240 and crop.getpixel((240, 80))[0] < 100
+    assert abs(crop.getpixel((70, 80))[0] - subject_pixel) < 15
+    assert abs(crop.getpixel((240, 80))[0] - background_pixel * .35) < 15
     # Foreign detection ids and a different generation cannot borrow the primary mask.
     assert client.get(card["mask_url"].replace(card["subject"]["analysis_key"], "wrong")).status_code == 404
     assert client.get(card["focus_crop_url"].replace(f"detection_id={ids[card['id']][0]}", f"detection_id={ids[pids[0]][1]}&unused=1")).status_code == 404

@@ -258,36 +258,36 @@ def _comparison_media_subject(
 
 
 def _focus_source_image(
-    config: AppConfig, photo: JsonDict, folder: JsonDict | Row | None, source_choice: str,
+    config: AppConfig, photo: JsonDict, folder: JsonDict | Row | None, source_choice: str, subject_evidence: bool = False,
 ) -> tuple[Image.Image | None, str | None]:
-    """``(image, source)`` the focus crop is cut from, or ``(None, None)``.
-
-    ``working`` requires the working copy, with no original fallback.
-    ``auto`` permits original fallback. A working copy is capped at
-    ``working_copy_max_size``, so on a large sensor its pixels are not
-    the original's: when the reviewer asked for ``original``, or left it
-    to ``auto`` and the copy is downsized against the catalog
-    dimensions, the original is decoded instead (JPEG-first, the
-    embedded full-size JPEG of a RAW) and used when it is larger.
-    """
+    """Use the upright analysis rendition for original-scale subject evidence."""
     from focus_crop import prefer_original
-    from image_loader import load_image, load_working_image
+    from image_loader import RAW_DECODE_ALIGNED, RAW_EXTENSIONS, load_image, load_working_image
 
-    folders = {photo["folder_id"]: folder["path"]} if folder else {}
     original_path = os.path.join(folder["path"], photo["filename"]) if folder else None
-    img, source = None, None
-    if source_choice != "original":
-        img, source = load_working_image(
-            dict(photo), media_root(config["THUMB_CACHE_DIR"]), max_size=None,
-            folders=None if source_choice == "working" else folders,
-            record_access=True, return_source=True,
-        )
-    wants_original = source_choice == "original" or (
-        source_choice == "auto" and img is not None and source == "working_copy"
-        and prefer_original(img.size, photo)
+    raw_source = os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
+    prefer_evidence = source_choice == "auto" and (subject_evidence or raw_source)
+    if source_choice == "original" or prefer_evidence:
+        if original_path and os.path.isfile(original_path):
+            original = load_image(original_path, max_size=None, raw_decode=RAW_DECODE_ALIGNED)
+            if original is not None:
+                return original, "original"
+        if source_choice == "original":
+            return None, None
+
+    img, source = load_working_image(
+        dict(photo), media_root(config["THUMB_CACHE_DIR"]), max_size=None,
+        folders=None, record_access=True, return_source=True,
     )
-    if wants_original and original_path and os.path.isfile(original_path):
-        original = load_image(original_path, max_size=None)
-        if original is not None and (img is None or max(original.size) > max(img.size)):
-            img, source = original, "original"
+    if source_choice == "auto" and not prefer_evidence and original_path and (
+        img is None or prefer_original(img.size, photo)
+    ) and os.path.isfile(original_path):
+        original = load_image(original_path, max_size=None, raw_decode=RAW_DECODE_ALIGNED)
+        if original is not None:
+            if img is None:
+                return original, "original"
+            if max(original.size) > max(img.size):
+                img.close()
+                return original, "original"
+            original.close()
     return img, source

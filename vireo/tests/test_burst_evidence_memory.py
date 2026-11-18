@@ -187,6 +187,7 @@ class Image:
     NEAREST = 0
 
     def __init__(self, size=(3000, 2000), events=None, kind="image"):
+        self.info = {}
         self.size, self.mode, self.events, self.kind = size, "RGB", events if events is not None else [], kind
 
     def crop(self, box):
@@ -259,8 +260,9 @@ def focus(photo=None, args=None, size=(3000, 2000), enabled=True, mask_path=None
             numeric_query_arg=pure["numeric_query_arg"],
         ),
         "image_loader": types.SimpleNamespace(
+            RAW_EXTENSIONS={".nef"}, RAW_DECODE_ALIGNED="aligned_camera_rendered",
             load_working_image=loader,
-            load_image=lambda path, max_size=None: events.append(("original", path)) or Image(original_size or size, events, "original"),
+            load_image=lambda path, max_size=None, raw_decode=None: events.append(("original", path)) or Image(original_size or size, events, "original"),
         ),
         "PIL": types.SimpleNamespace(Image=pil),
         "io": io,
@@ -276,7 +278,7 @@ def focus(photo=None, args=None, size=(3000, 2000), enabled=True, mask_path=None
         },
         "os": types.SimpleNamespace(
             path=types.SimpleNamespace(
-                dirname=posixpath.dirname, join=posixpath.join, realpath=posixpath.normpath,
+                dirname=posixpath.dirname, join=posixpath.join, splitext=posixpath.splitext, realpath=posixpath.normpath,
                 isfile=lambda path: original_size is not None,
             ),
             sep="/",
@@ -741,7 +743,7 @@ def test_forced_working_source_cannot_decode_original():
     helper_ns = {"os": types.SimpleNamespace(path=posixpath), "config": {"THUMB_CACHE_DIR": "/invented/thumbs"},
                  "media_root": posixpath.dirname}
     modules = {"focus_crop": types.SimpleNamespace(prefer_original=forbidden),
-               "image_loader": types.SimpleNamespace(load_image=forbidden,
+               "image_loader": types.SimpleNamespace(RAW_EXTENSIONS={".nef"}, RAW_DECODE_ALIGNED="aligned_camera_rendered", load_image=forbidden,
                    load_working_image=lambda *a, **kw: events.append(kw) or (None, "original"))}
     helper_ns["__builtins__"] = {**vars(builtins), "__import__": lambda name, *a, **kw: modules[name]}
     nested("web/media_common.py", helper_ns, {"_focus_source_image"})
