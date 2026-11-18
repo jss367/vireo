@@ -666,3 +666,42 @@ def test_primary_policy_migration_preserves_projected_subject(tmp_path):
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT detection_id, min_conf, detector_model, refresh_pending "
                             "FROM photo_subject_state WHERE photo_id=10").fetchone() == (20, None, None, 0)
+
+
+@pytest.mark.parametrize("layout", ["main", "classifier_source"])
+def test_alternate_version_42_layouts_preserve_data_and_converge(tmp_path, layout):
+    path = str(tmp_path / "synthetic-v42.db")
+    schema.ensure_schema(path)
+    with sqlite3.connect(path) as conn:
+        folder = conn.execute("INSERT INTO folders(path, name) VALUES ('synthetic', 'synthetic')").lastrowid
+        photo = conn.execute("INSERT INTO photos(folder_id, filename) VALUES (?, 'synthetic.jpg')", (folder,)).lastrowid
+        detection = conn.execute(
+            "INSERT INTO detections(photo_id, detector_model, detector_confidence, category, box_x, box_y, box_w, box_h) "
+            "VALUES (?, 'synthetic', .9, 'animal', .1, .1, .2, .2)", (photo,),
+        ).lastrowid
+        conn.execute(
+            "INSERT INTO classifier_runs(detection_id, classifier_model, labels_fingerprint, prediction_count, input_source) "
+            "VALUES (?, 'synthetic', 'synthetic', 7, 'working_copy')", (detection,),
+        )
+        if layout == "main":
+            conn.execute("ALTER TABLE classifier_runs DROP COLUMN input_source")
+        else:
+            conn.execute("DROP TABLE species_choice_winners")
+            conn.execute("CREATE TABLE species_highlights (workspace_id INTEGER, species TEXT, photo_id INTEGER, "
+                         "rank INTEGER, created_at TEXT)")
+            conn.execute("INSERT INTO species_highlights VALUES (1, 'Synthetic species', ?, 1, 'synthetic')", (photo,))
+        conn.execute("PRAGMA user_version=42")
+    schema.ensure_schema(path)
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert conn.execute("SELECT prediction_count, input_source FROM classifier_runs WHERE detection_id=?",
+                            (detection,)).fetchone() == (7, None if layout == "main" else "working_copy")
+        assert conn.execute("SELECT 1 FROM sqlite_master WHERE name='species_highlights'").fetchone() is None
+        assert conn.execute("SELECT 1 FROM sqlite_master WHERE name='species_choice_winners'").fetchone() is not None
+        if layout == "classifier_source":
+            assert conn.execute("SELECT photo_id FROM species_representatives WHERE species='Synthetic species'").fetchone() == (photo,)
+        assert not list(conn.execute("PRAGMA foreign_key_check"))
+        migrated = list(conn.iterdump())
+        schema._add_classifier_input_source(conn)
+        schema._apply_pending(conn)
+        assert list(conn.iterdump()) == migrated

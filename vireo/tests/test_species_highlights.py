@@ -763,4 +763,3 @@ def test_the_merge_keeps_a_transitive_rep_chain_against_a_reversed_legacy_rank()
     # The chain 10 > 11 > 12 must still beat the ranked list's 12 > 10.
     assert ranking.order[0] == 10
     assert ranking.order[-1] == 12
-

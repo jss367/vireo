@@ -148,6 +148,8 @@ class PipelineRun:
     control: PipelineControl
     notes: list[str] = field(default_factory=list)
 
+    effective_vireo_dir: str | None = None
+
     def note(self, message: str) -> None:
         """Record why a stage skipped without counting it as a failure."""
         self.errors.append(message)

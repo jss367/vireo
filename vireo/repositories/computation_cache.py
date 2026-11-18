@@ -541,8 +541,8 @@ class ComputationCacheRepository:
             """INSERT INTO classifier_runs
                  (detection_id, classifier_model, labels_fingerprint,
                   labels_fingerprint_full, runtime_fingerprint,
-                  input_fingerprint, prediction_count, input_recipe)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                  input_fingerprint, prediction_count, input_recipe, input_source)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'original')
                ON CONFLICT(detection_id, classifier_model,
                            labels_fingerprint)
                DO UPDATE SET
@@ -551,6 +551,7 @@ class ComputationCacheRepository:
                  input_fingerprint = excluded.input_fingerprint,
                  prediction_count = excluded.prediction_count,
                  input_recipe = excluded.input_recipe,
+                 input_source = excluded.input_source,
                  run_at = datetime('now')""",
             (
                 detection_id, classifier_model,
