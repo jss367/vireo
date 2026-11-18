@@ -23,8 +23,10 @@
   </div>
   <span class="nav-cmd-hint" title="Open command palette (⌘K)" data-navbar-on="click:openCommandPalette">⌘K</span>
   <span id="navTabStrip" class="nav-tab-strip"></span>
-  <button type="button" class="nav-overflow-btn" id="navOverflowBtn" hidden data-navbar-on="click:toggleOverflowMenu">&hellip;</button>
-  <div class="nav-overflow-menu" id="navOverflowMenu" hidden></div>
+  <div class="nav-pages">
+    <button type="button" class="nav-overflow-btn" id="navOverflowBtn" aria-expanded="false" aria-controls="navOverflowMenu" data-navbar-on="click:toggleOverflowMenu">Pages ▾</button>
+    <div class="nav-overflow-menu" id="navOverflowMenu" hidden></div>
+  </div>
   <span class="nav-spacer"></span>
   <button type="button" class="nav-icon notification-toggle" id="notificationsToggle" aria-label="Notifications" aria-expanded="false" aria-controls="notificationHistory" title="Notifications">&#128276;<span id="notificationBadge" hidden></span></button>
   <span class="nav-icon" title="Report Issue" id="reportToggle" data-navbar-on="click:openReportModal">&#9888;</span>

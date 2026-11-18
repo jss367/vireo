@@ -25,6 +25,7 @@ from canonical_schema import (
     JOB_HISTORY_LINEAGE_COLUMNS,
     JOB_HISTORY_PARENT_INDEX,
     JOB_HISTORY_WORKSPACE_OBJECTS,
+    create_assignment_reviews,
     create_current_flag_attribution,
     create_detection_evidence_reviews,
     create_formerly_lazy_objects,
@@ -445,8 +446,9 @@ MIGRATIONS = (
     Migration(35, "subject_detail", _add_subject_detail, _validate_subject_detail),
     Migration(36, "species_choices", create_species_choices),
     Migration(37, "subject_candidates", create_subject_candidates),
-    Migration(38, "subject_focus", create_subject_focus),
-    Migration(39, "primary_projection_policy", _add_primary_projection_policy),
+    Migration(38, "assignment_reviews", create_assignment_reviews),
+    Migration(39, "subject_focus", create_subject_focus),
+    Migration(40, "primary_projection_policy", _add_primary_projection_policy),
 )
 
 

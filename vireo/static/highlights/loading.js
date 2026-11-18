@@ -9,10 +9,39 @@ import { render } from './render.js';
 import { highlightsScopeParams } from './scope.js';
 import { WORKSPACE_SCOPE, state } from './state.js';
 
-export async function loadHighlights() {
+/** @param {HTMLSelectElement} folderSelect @param {HighlightsData['folders']} folderRows
+ * @param {NonNullable<HighlightsData['collections']>} collectionRows */
+function populateScopePicker(folderSelect, folderRows, collectionRows) {
+  var firstLoad = !folderSelect.options.length;
+  var saved = firstLoad ? VireoViewPreferences.read('vireo.highlights.folder') : folderSelect.value;
+  folderSelect.replaceChildren(new Option('All folders in this workspace', WORKSPACE_SCOPE));
+  var folders = document.createElement('optgroup');
+  folders.label = 'Folders';
+  folderRows.forEach(function(f) {
+    var option = new Option(f.name + ' (' + f.photo_count + ')', String(f.id));
+    option.dataset.name = f.name;
+    folders.appendChild(option);
+  });
+  folderSelect.appendChild(folders);
+  var collections = document.createElement('optgroup');
+  collections.label = 'Collections';
+  collectionRows.forEach(function(c) {
+    var option = new Option(c.name + (c.degraded ? ' (unavailable — rule error)' : ''), 'collection:' + c.id);
+    option.disabled = c.degraded;
+    collections.appendChild(option);
+  });
+  folderSelect.appendChild(collections);
+  if (saved && Array.from(folderSelect.options).some(o => o.value === saved && !o.disabled)) {
+    folderSelect.value = saved;
+  }
+}
+
+/** @param {boolean} [refreshCollections] */
+export async function loadHighlights(refreshCollections = false) {
   var params = highlightsScopeParams();
   var scope = params.toString();
   var folderSelect = /** @type {HTMLSelectElement} */ (document.getElementById('folderSelect'));
+  if (!folderSelect.options.length || refreshCollections) params.set('include_collections', '1');
   params.set('limit_per_bucket', String(Math.max(20, parseInt(/** @type {HTMLInputElement} */ (document.getElementById('perRowSlider')).value))));
 
   // Capture the issue-time sequence so the prune below can tell rejections that
@@ -22,14 +51,25 @@ export async function loadHighlights() {
   var refetchSeqAtLoad = { ...state.bucketRefetchSeq };
   var loadSeq = ++state.highlightsLoadSeq;
   /** @type {HighlightsData} */
-  var data = await safeFetch('/api/highlights?' + params);
+  var data;
+  try {
+    data = await safeFetch('/api/highlights?' + params);
+  } catch (error) {
+    if (loadSeq === state.highlightsLoadSeq && params.has('collection_id')) {
+      // safeFetch has shown the failure. Return the selector and grid to a usable scope.
+      folderSelect.value = WORKSPACE_SCOPE;
+      VireoViewPreferences.write('vireo.highlights.folder', WORKSPACE_SCOPE);
+      return loadHighlights(true);
+    }
+    throw error;
+  }
   if (loadSeq !== state.highlightsLoadSeq) return;
   // A Pick/Unpick after this request began can make its prefix stale against
   // the backend tail. Fetch again before replacing buckets or settling their
   // guards; that bucket refetch still targets the currently displayed data.
   if (Object.keys(state.bucketRefetchSeq).some(function(key) {
     return state.bucketRefetchSeq[key] !== refetchSeqAtLoad[key];
-  })) return loadHighlights();
+  })) return loadHighlights(refreshCollections);
   state.currentData = data;
   state.loadedHighlightsScope = scope;
   // No refetch began after this reload was issued, so its replacement buckets
@@ -56,29 +96,14 @@ export async function loadHighlights() {
     if ((state.rejectedAtLoadSeq[id] || 0) >= loadSeq) removeRejectedPhotoFromModel(id);
   });
 
-  // Populate folder dropdown on first load.
-  if (!folderSelect.options.length) {
-    var wsOpt = document.createElement('option');
-    wsOpt.value = WORKSPACE_SCOPE;
-    wsOpt.textContent = 'All folders in this workspace';
-    folderSelect.appendChild(wsOpt);
-    data.folders.forEach(function(f) {
-      var opt = document.createElement('option');
-      opt.value = String(f.id);
-      opt.textContent = f.name + ' (' + f.photo_count + ')';
-      folderSelect.appendChild(opt);
-    });
-    // Restore only folders available in this workspace, and fetch their data
-    // before rendering so the selected scope always matches the visible photos.
-    var savedFolder = VireoViewPreferences.read('vireo.highlights.folder');
-    if (savedFolder && data.folders.some(function(f) { return String(f.id) === savedFolder; })) {
-      folderSelect.value = savedFolder;
-      return loadHighlights();
-    }
+  if (data.collections) {
+    var firstLoad = !folderSelect.options.length;
+    populateScopePicker(folderSelect, data.folders, data.collections);
+    if (firstLoad && folderSelect.value !== WORKSPACE_SCOPE) return loadHighlights();
   }
   var selectedOption = folderSelect.options[folderSelect.selectedIndex];
-  state.currentFolderName = selectedOption
-    ? (selectedOption.textContent || '').replace(/\s*\(\d+\)$/, '')
+  state.currentScopeName = selectedOption
+    ? (selectedOption.dataset?.name || selectedOption.textContent || '')
     : '';
 
   render();

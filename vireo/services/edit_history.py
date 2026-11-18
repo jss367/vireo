@@ -7,10 +7,11 @@ use separate types so replay never guesses at those old entries' before-state.
 from __future__ import annotations
 
 import contextlib
+import json
 from functools import wraps
 from typing import TYPE_CHECKING, Any, TypedDict, cast
 
-from services import subject_selections, subject_verdicts
+from services import assignment_reviews, subject_selections, subject_verdicts
 from services.pending_changes import queue_location_sync_if_enabled
 
 if TYPE_CHECKING:
@@ -135,7 +136,7 @@ _CACHE_LINKED = frozenset({'pipeline_grouping', 'species_confirm_cache'})
 # Actions this module replays itself rather than through ``Database``'s
 # setter and handler tables.
 SERVICE_REPLAYED_ACTIONS = frozenset({
-    *_CACHE_LINKED, 'identity_alternatives', 'photo_location', subject_verdicts.ACTION_TYPE, subject_selections.ACTION_TYPE,
+    *_CACHE_LINKED, 'identity_alternatives', assignment_reviews.ACTION, 'photo_location', subject_verdicts.ACTION_TYPE, subject_selections.ACTION_TYPE,
 })
 
 
@@ -214,7 +215,7 @@ def _replay_or_retire(
         history.retire_stale_grouping_entry(entry['id'])
         return GroupingHistoryStale(_GROUPING_STALE)
     except IdentityHistoryStale:
-        if action != 'identity_alternatives':
+        if action not in ('identity_alternatives', assignment_reviews.ACTION):
             raise
         history.retire_superseded_identity_entry(entry['id'])
         return IdentityHistoryStale(_IDENTITY_STALE)
@@ -246,6 +247,11 @@ def _replay_entry(
         elif action == 'species_confirm_cache':
             with restore_species_confirm_cache_edit(db, entry, undo=undo, cache_restore=cache_restore):
                 _flip_cursor(history, entry, undo=undo)
+        elif action == assignment_reviews.ACTION:
+            for item in items:
+                old, new = json.loads(item['old_value']), json.loads(item['new_value'])
+                assignment_reviews.replay(db, item['photo_id'], new if undo else old, old if undo else new)
+            _flip_cursor(history, entry, undo=undo)
         elif action == 'identity_alternatives':
             _apply_identity_items(db, items, undo=undo)
             _flip_cursor(history, entry, undo=undo)

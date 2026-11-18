@@ -47,6 +47,11 @@ class PhotoRowDeletion:
         cost N passes over every collection.
         """
         remap_photo_identities(self.conn, mapping)
+        for losing, survivor in mapping.items():
+            if survivor is not None and survivor != losing:
+                self.conn.execute('UPDATE assignment_reviews SET photo_id=? WHERE photo_id=?', (survivor, losing))
+                self.conn.execute("UPDATE edit_history_items SET photo_id=? WHERE photo_id=? AND edit_id IN "
+                                  "(SELECT id FROM edit_history WHERE action_type='assignment_review')", (survivor, losing))
         remap_photo_versions(self.conn, mapping)
         remap_flag_attribution_keepers(self.conn, mapping)
         SpeciesChoiceRepository(self.conn).remap_photos(mapping)

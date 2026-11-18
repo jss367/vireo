@@ -20,13 +20,13 @@ from web.request_args import request_bool_arg
 
 if TYPE_CHECKING:
     from flask.typing import ResponseReturnValue
-    from services.service_types import JsonDict
+    from services.service_types import ErrorResponse, JsonDict, JsonError
     from web.web_types import GetDb
 
 log = logging.getLogger(__name__)
 
 
-def create_species_blueprint(get_db: GetDb) -> Blueprint:
+def create_species_blueprint(get_db: GetDb, json_error: JsonError, db_path: str) -> Blueprint:
     """Build the species blueprint.
 
     Only the database accessor is injected; label sets and the text matcher
@@ -79,6 +79,40 @@ def create_species_blueprint(get_db: GetDb) -> Blueprint:
             return jsonify({"error": "Another review decision is in progress; try again"}), 503
         # The unit adopts the BEGIN IMMEDIATE just taken; a refusal rolls back.
         return run_atomic_edit(db, review)
+
+    @blueprint.get("/api/species/assignment-conflicts")
+    def outstanding_assignment_conflicts() -> ResponseReturnValue:
+        db = get_db()
+        return jsonify(assignments=db.species_provenance.outstanding_reviews(db.require_workspace_id()))
+
+    @blueprint.post("/api/photos/<int:photo_id>/species/<int:keyword_id>/review")
+    def review_assignment(photo_id: int, keyword_id: int) -> ResponseReturnValue:
+        from services import assignment_reviews, prediction_decisions
+        from services.identity_alternatives import IdentityHistoryConflict, refresh_species_caches
+
+        db = get_db()
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict) or max(photo_id, keyword_id) >= 2**63:
+            return json_error('Invalid assignment review request')
+
+        def write() -> JsonDict | ErrorResponse:
+            ws = body.get('observed_workspace_id')
+            if type(ws) is not int or ws != db.require_workspace_id() or ws != db.workspaces.most_recently_opened_id():
+                return json_error('Workspace changed. Reload before reviewing.', 409)
+            if not db.photos.get(photo_id, verify_workspace=True):
+                return json_error('Photo not found', 404)
+            try:
+                return {'entry_id': assignment_reviews.decide(db, photo_id, keyword_id, body)}
+            except ValueError as exc:
+                return json_error(str(exc))
+            except IdentityHistoryConflict as exc:
+                return json_error(str(exc), 409)
+        result = prediction_decisions.under_prediction_decision_lock(db, write, json_error=json_error)
+        if not isinstance(result, dict):
+            return result
+        if body.get('action') in ('amend', 'remove'):
+            result['pipeline_cache_stale'] = bool(refresh_species_caches(db, os.path.dirname(db_path), [photo_id]))
+        return jsonify(result)
 
     @blueprint.route("/api/species")
     def api_species() -> ResponseReturnValue:
