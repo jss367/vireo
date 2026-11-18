@@ -1420,82 +1420,58 @@ def test_detect_batch_scores_normally_when_primary_at_threshold(
     assert row["subject_size"] is not None
 
 
-def test_detect_batch_subject_analysis_uses_working_copy_when_source_offline(
-    tmp_path, monkeypatch
-):
-    """When ``vireo_dir`` is supplied and a cached-detection photo's source
-    folder is offline, the subject-analysis loop must resolve the image
-    through the working-copy JPEG rather than the source path. Without
-    this the automatic backfill fails at ``os.stat`` and the photo never
-    gets subject quality, crop, or exposure data — even though the
-    on-demand Analyze route can process it just fine.
-    """
-    from unittest.mock import patch
-
+def test_detect_batch_retries_cached_box_analysis_when_original_reconnects(tmp_path, monkeypatch):
+    import subjects
     from classify_job import _detect_batch
     from db import Database
+    from image_loader import get_canonical_image_path
 
     db = Database(str(tmp_path / "test.db"))
-    offline_dir = "/mnt/offline-nas/photos"
-    folder_id = workspace_folders.add_folder(db, offline_dir)
+    source_dir = tmp_path / "originals"
+    folder_id = workspace_folders.add_folder(db, str(source_dir))
     ws = db.create_workspace("A")
     db.commit()
     db._active_workspace_id = ws
     workspace_folders.add_workspace_folder(db, ws, folder_id)
 
-    # Working copy lives under vireo_dir. Source folder does NOT exist.
-    vireo_dir = tmp_path / "vireo"
-    wc_dir = vireo_dir / "working"
-    wc_dir.mkdir(parents=True)
-    wc_rel = "working/bird.jpg"
-    Image.new("RGB", (200, 200), color="green").save(str(vireo_dir / wc_rel))
-
-    photo_id = photo_ingest.add_photo(
-        db, folder_id, "bird.jpg", extension=".jpg",
-        file_size=100, file_mtime=1.0,
-    )
-    db.conn.execute(
-        "UPDATE photos SET working_copy_path=? WHERE id=?", (wc_rel, photo_id),
-    )
-    db.conn.commit()
-
-    # Seed a cached detector run so this photo goes through the
-    # already-detected branch — the exact case where the source is
-    # offline but subject analysis should still succeed.
-    detection_store.write_detection_batch(
+    working_copy = tmp_path / "working" / "bird.jpg"
+    working_copy.parent.mkdir()
+    Image.new("RGB", (200, 200), "green").save(working_copy)
+    photo_id = photo_ingest.add_photo(db, folder_id, "bird.jpg", ".jpg", 100, 1.0)
+    db.conn.execute("UPDATE photos SET working_copy_path=? WHERE id=?", ("working/bird.jpg", photo_id))
+    det_id, = detection_store.write_detection_batch(
         db, photo_id, "megadetector-v6",
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
           "confidence": 0.9, "category": "animal"}],
     )
+    db.commit()
 
-    photo = dict(db.photos.get(photo_id))
-    photos = [photo]
-    folders = {folder_id: offline_dir}
-    already_detected_ids = db.model_runs.get_detector_run_photo_ids("megadetector-v6")
+    folders = {folder_id: str(source_dir)}
+    assert Path(get_canonical_image_path(db.photos.get(photo_id), str(tmp_path), folders)) == working_copy
+    original_analysis = subjects.analyze_photo
+    analysis_paths = []
 
-    seen_paths = []
-    def fake_analyze_photo(db_arg, photo_arg, image_path, **kwargs):
-        seen_paths.append(image_path)
-        return 0
+    def record_analysis(db_arg, pid, path, **kwargs):
+        analysis_paths.append(Path(path))
+        return original_analysis(db_arg, pid, path, **kwargs)
 
-    with patch("subjects.analyze_photo", side_effect=fake_analyze_photo):
+    monkeypatch.setattr(subjects, "analyze_photo", record_analysis)
+
+    def run_cached_batch():
         _detect_batch(
-            photos=photos, folders=folders, runner=None, job={"id": 0},
-            reclassify=False, db=db,
-            det_conf_threshold=0.2,
-            already_detected_ids=already_detected_ids,
-            vireo_dir=str(vireo_dir),
+            photos=[dict(db.photos.get(photo_id))], folders=folders,
+            runner=None, job={"id": 0}, reclassify=False, db=db, det_conf_threshold=0.2,
+            already_detected_ids={photo_id}, vireo_dir=str(tmp_path),
         )
 
-    assert seen_paths, "subject analysis loop did not run"
-    # Compare as paths, not strings: the DB stores ``working_copy_path``
-    # POSIX-style and product code joins it with ``os.path.join``, which on
-    # Windows yields a valid mixed-separator path (``...\vireo\working/bird.jpg``)
-    # that a string compare against ``str(vireo_dir / wc_rel)`` would reject.
-    assert Path(seen_paths[0]) == vireo_dir / wc_rel, (
-        "subject analysis must resolve through the working-copy JPEG "
-        "when the source folder is offline"
-    )
+    run_cached_batch()
+    assert db.subjects.analysis(det_id) is None
+
+    source_dir.mkdir()
+    Image.new("RGB", (400, 300), "blue").save(source_dir / "bird.jpg")
+    run_cached_batch()
+    assert db.subjects.analysis(det_id) is not None
+    assert analysis_paths == [source_dir / "bird.jpg"] * 2
 
 
 def test_classify_photos_reclassifies_when_gate_has_no_cached_rows(tmp_path):
