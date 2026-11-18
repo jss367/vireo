@@ -79,6 +79,7 @@ AMBIGUITY_CODES = (
     "subject_identity_conflict",
     "multiple_matching_subjects",
     "subject_analysis_missing",
+    "invalid_subject_mask",
 )
 
 
@@ -236,6 +237,8 @@ def assess_ambiguity(cards, coverage, *, eye_detect_enabled, margin=DEFAULT_CLOS
 
     cards = list(cards or [])
     for card in cards:
+        if (card.get("mask_review") or {}).get("verdict") == "invalid":
+            reasons.append({"code": "invalid_subject_mask", "detail": f"{card.get('filename')}: reviewer excluded this mask"})
         status = card.get("evidence_status")
         if status and status != "ready":
             reasons.append({"code": status, "detail": f"{card.get('filename')}: {status.replace('_', ' ')}"})

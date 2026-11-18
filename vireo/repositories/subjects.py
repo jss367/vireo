@@ -179,6 +179,37 @@ class SubjectsRepository:
             "SELECT s.* FROM detection_subjects s JOIN detections d ON d.id=s.detection_id WHERE d.photo_id=?",
             (photo_id,))}
 
+    def mask_reviews(self, photo_id: int) -> list[dict[str, Any]]:
+        return [dict(row) for row in self.conn.execute(
+            "SELECT id, detection_id, source_key, mask_digest, verdict, revision, box FROM subject_mask_reviews "
+            "WHERE photo_id=? ORDER BY id DESC", (photo_id,),
+        )]
+
+    def reviewed_mask(self, photo_id: int, review_id: int) -> bytes | None:
+        row = self.conn.execute("SELECT mask_png FROM subject_mask_reviews WHERE photo_id=? AND id=?",
+                                (photo_id, review_id)).fetchone()
+        return row[0] if row else None
+
+    def save_mask_review(self, photo_id: int, detection_id: int, key: str, digest: str,
+                         verdict: str, box: dict, mask_png: bytes, *, expected_revision: int) -> int:
+        """Compare the displayed review revision under the caller's write transaction."""
+        binding = (photo_id, detection_id, key, digest)
+        if expected_revision == 0:
+            row = self.conn.execute(
+                "INSERT INTO subject_mask_reviews(photo_id,detection_id,source_key,mask_digest,verdict,box,mask_png) "
+                "VALUES (?,?,?,?,?,?,?) ON CONFLICT(photo_id,detection_id,source_key,mask_digest) DO NOTHING "
+                "RETURNING revision", (*binding, verdict, json.dumps(box), mask_png),
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                "UPDATE subject_mask_reviews SET verdict=?, revision=revision+1 "
+                "WHERE photo_id=? AND detection_id=? AND source_key=? AND mask_digest=? AND revision=? "
+                "RETURNING revision", (verdict, *binding, expected_revision),
+            ).fetchone()
+        if row is None:
+            raise ValueError("Mask review changed. Reload the comparison before choosing again.")
+        return row[0]
+
     def ranking_analysis(self, detection_id: int, source_key: str) -> dict[str, Any] | None:
         """One immutable analysis generation, including its exact mask bytes."""
         row = self.conn.execute(

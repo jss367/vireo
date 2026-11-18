@@ -202,7 +202,7 @@ def test_ambiguity_codes_are_the_documented_set():
         "positive_keep_not_validated",
         "unanalyzed_frames", "close_call", "no_eye_located",
         "subject_touches_edge", "multiple_subjects", "all_rejected", "subject_identity_uncertain", "subject_identity_conflict",
-        "multiple_matching_subjects", "subject_analysis_missing",
+        "multiple_matching_subjects", "subject_analysis_missing", "invalid_subject_mask",
     }
     assert DEFAULT_CLOSE_CALL_MARGIN == 0.10
 

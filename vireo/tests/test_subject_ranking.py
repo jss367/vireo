@@ -748,6 +748,48 @@ def test_cached_subject_changed_during_readback_is_reported_failed(comparison_li
     assert _pack(app, [pid], **scope)["cards"][0]["evidence_status"] == "subject_analysis_missing"
 
 
+def test_review_excludes_only_exact_mask_and_retains_evidence_after_refinement(comparison_library):
+    import config as cfg
+    app, db, pids, ids = comparison_library
+    pid = pids[0]
+    client = app.test_client()
+    headers = {"X-Vireo-Token": app.config["API_TOKEN"]}
+    _analyze(db, pids, SubjectComparison(TARGET), cfg.load())
+    before = next(c for c in _pack(app, pids, requested_species=TARGET)["cards"] if c["id"] == pid)
+    original = client.get(before["mask_url"]).data
+    binding = {"detection_id": ids[pid][0], "analysis_key": before["subject"]["analysis_key"],
+               "mask_digest": before["mask_review"]["mask_digest"]}
+    url = f"/api/v1/photos/{pid}/mask-review"
+    assert before["mask_review"]["verdict"] == "unreviewed"
+    for verdict in ("invalid", "valid", "invalid"):
+        response = client.put(url, json={**binding, "verdict": verdict, "expected_revision": before["mask_review"]["revision"]}, headers=headers)
+        assert response.status_code == 200, response.get_json()
+        pack = _pack(app, pids, requested_species=TARGET)
+        card = next(c for c in pack["cards"] if c["id"] == pid)
+        assert card["evidence_status"] == "ready" and pack["coverage"]["with_quality"] == 3
+        before = card
+        assert card["mask_review"]["verdict"] == verdict
+        assert (card["rank"] is None) == (verdict == "invalid")
+        assert (pid in pack["focus_cohorts"]["detail"]["photo_ids"]) == (verdict == "valid")
+        assert client.get(card["focus_crop_mask_url"]).status_code == 200
+    assert client.put(url, json={**binding, "mask_digest": "stale", "verdict": "valid", "expected_revision": before["mask_review"]["revision"]}, headers=headers).status_code == 409
+
+    token = client.get(f"/photos/{pid}/preview?view=subject&size=1920").headers["X-Vireo-Subject-Frame"]
+    saved = client.put(f"/api/photos/{pid}/subjects/reviewer-box", json={
+        "frame_token": token, "box": {"x": .10, "y": .2, "w": .15, "h": .5}}, headers=headers)
+    assert saved.status_code == 200, saved.get_json()
+    refined = saved.get_json()["primary_detection_id"]
+    overrides = {pid: refined}
+    _analyze(db, [pid], SubjectComparison(subject_overrides=overrides), cfg.load())
+    after = _pack(app, [pid], subject_overrides=overrides)["cards"][0]
+    assert after["mask_review"]["verdict"] == "unreviewed"
+    assert after["flag"] == before["flag"] and after["rating"] == before["rating"]
+    previous, = after["mask_review"]["history"]
+    assert previous["verdict"] == "invalid" and previous["detection_id"] == binding["detection_id"]
+    assert client.get(previous["url"]).data == original
+    assert client.get(after["mask_url"]).data != original
+
+
 def test_primary_measurements_shared_only_with_the_measured_animal(comparison_library, monkeypatch, tmp_path):
     import json
     from pathlib import Path

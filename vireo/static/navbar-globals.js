@@ -24,6 +24,7 @@ import {
 } from './navbar-report-context-menu.js';
 import { vireoRefreshNavigationHrefs } from './navbar-tabs.js';
 import { vireoWorkspaceSwitcher } from './navbar-workspace-switcher-init.js';
+import { openSubjectBox } from './lightbox/subject-box.js';
 import { lbState } from './lightbox/shared-state.js';
 import { setLightboxReadOnlyMode, vireoLightboxSession } from './lightbox/state.js';
 import { buildSpeciesHighlightMenuItems, buildSpeciesRepresentativeMenuItems } from './lightbox/curation.js';
@@ -108,6 +109,7 @@ Object.assign(window, {
 /* ---------- Lightbox ---------- */
 Object.assign(window, {
   openLightbox: openLightbox,
+  openVireoSubjectBox: openSubjectBox,
   closeLightbox: closeLightbox,
   lightboxNav: lightboxNav,
   requestLightboxFullscreen: requestLightboxFullscreen,

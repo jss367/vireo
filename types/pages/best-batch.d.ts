@@ -10,7 +10,11 @@ interface BestBatchCard {
   sharpness?: number | null; eye_x?: number | null; eye_y?: number | null;
   crop_url?: string | null; focus_crop_url?: string | null; evidence_status?: string; evidence_reason?: string;
   eye_status?: string | null; analysis?: {width: number; height: number} | null;
-  subject?: {detection_id: number | null; selection: string; candidates: {
+  mask_url?: string; focus_crop_mask_url?: string;
+  mask_review?: {revision: number; verdict: string; mask_digest: string | null; hint?: string; history: {
+    detection_id: number; verdict: string; url: string;
+  }[]};
+  subject?: {analysis_key?: string; detection_id: number | null; selection: string; candidates: {
     detection_id: number; detector_confidence: number; box: {x: number; y: number; w: number; h: number};
     predictions: {species: string; status: string}[];
   }[]};
@@ -25,6 +29,7 @@ interface BestBatchResponse {
   suggested_reject_ids?: number[]; scope_method?: string;
 }
 interface Window {
+  openVireoSubjectBox: (id: number, saved: (result: {primary_detection_id?: number | null}) => void) => void;
   escapeHtml(value: unknown): string;
   escapeAttr(value: unknown): string;
   showToast?(message: string, kind?: string): void;

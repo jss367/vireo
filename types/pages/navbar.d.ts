@@ -179,6 +179,7 @@ interface NavSubjectData {
 // Real window properties the navbar reads: help.js and vendor globals, and
 // server config from /config-defaults.js.
 interface Window {
+  openVireoSubjectBox: (id: number, saved: (result: NavSubjectData) => void) => void;
   _helpEscToken?: number | null;
   openHelpModal(): void;
   closeHelpModal(): void;

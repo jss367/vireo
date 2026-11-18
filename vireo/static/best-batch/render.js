@@ -83,7 +83,7 @@ function focusCardHtml(card) {
 
 /** @param {BestBatchCard} card */
 function rankCardHtml(card) {
-  var reasons = (card.reasons || []).slice(0, 2).join(' · ');
+  var reasons = [card.mask_review?.verdict === 'unreviewed' && card.mask_review.hint, ...(card.reasons || [])].filter(Boolean).slice(0, 2).join(' · ');
   return '<div class="rank-card ' + escapeAttr(card.role || '') + '" data-photo-id="' + card.id + '">' +
     '<img src="' + thumbnailUrl(card) + '" alt="' + escapeAttr(card.filename || '') + '" loading="lazy">' +
     '<div class="rank-meta">' +
