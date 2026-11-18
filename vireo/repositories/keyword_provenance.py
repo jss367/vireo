@@ -229,7 +229,7 @@ def _fold_keyword_metadata(conn, src, dst, dst_id):
 
 def _retarget_source_spelling(
     conn, src, dst, src_id, dst_id, *, pending_source_only, chunks,
-    rename_species_highlights_species, rename_photo_preferences_species,
+    rename_photo_preferences_species,
 ):
     """Repoint rows keyed on the source's *name* onto the destination's name.
 
@@ -249,7 +249,6 @@ def _retarget_source_spelling(
             )
             _retarget_species_curation(
                 conn, src, dst, src_name, dst_name, src_id, dst_id,
-                rename_species_highlights_species=rename_species_highlights_species,
                 rename_photo_preferences_species=rename_photo_preferences_species,
             )
 
@@ -311,7 +310,7 @@ def _retarget_pending_changes(
 
 def _retarget_species_curation(
     conn, src, dst, src_name, dst_name, src_id, dst_id, *,
-    rename_species_highlights_species, rename_photo_preferences_species,
+    rename_photo_preferences_species,
 ):
     """Rename species curation rows keyed to the source name onto the survivor.
 
@@ -341,10 +340,6 @@ def _retarget_species_curation(
             (r["photo_id"], r["workspace_id"]) for r in tag_rows
         ]
         if photo_workspace_pairs:
-            rename_species_highlights_species(
-                src_name, dst_name,
-                photo_workspace_pairs=photo_workspace_pairs,
-            )
             rename_photo_preferences_species(
                 src_name, dst_name,
                 photo_workspace_pairs=photo_workspace_pairs,
@@ -1225,7 +1220,6 @@ class KeywordProvenanceRepository:
             self.conn, src, dst, src_id, dst_id,
             pending_source_only=pending_source_only,
             chunks=chunks,
-            rename_species_highlights_species=self._species_curation().rename_highlights,
             rename_photo_preferences_species=self._species_curation().rename_photo_preferences,
         )
         _retarget_edit_history(
@@ -1954,7 +1948,6 @@ class KeywordProvenanceRepository:
                 remove_pending_changes=self._pending_changes().cancel,
                 queue_change=self._pending_changes().queue,
                 species_root_name_for_taxon=KeywordTaxonRepository(self.conn).species_root_name_for_taxon,
-                rename_species_highlights_species=self._species_curation().rename_highlights,
                 rename_photo_preferences_species=self._species_curation().rename_photo_preferences,
             )
         changed_tag = not already_has_species
@@ -2389,8 +2382,7 @@ def _reject_detection_alternatives(conn, ws, this_pred_id):
 def _strip_replaced_species(
     conn, ws, photo_id, this_pred_id, kid, species, replace_taxonomy, *,
     effective_config, remove_pending_changes, queue_change,
-    species_root_name_for_taxon, rename_species_highlights_species,
-    rename_photo_preferences_species,
+    species_root_name_for_taxon, rename_photo_preferences_species,
 ):
     """Strip the photo's stale species keywords for ``replace_species``.
 
@@ -2419,7 +2411,6 @@ def _strip_replaced_species(
     _migrate_replaced_species_curation(
         ws, photo_id, to_remove, species,
         species_root_name_for_taxon=species_root_name_for_taxon,
-        rename_species_highlights_species=rename_species_highlights_species,
         rename_photo_preferences_species=rename_photo_preferences_species,
     )
     return old_species
@@ -2661,26 +2652,20 @@ def _queue_replaced_species_removals(
 
 def _migrate_replaced_species_curation(
     ws, photo_id, to_remove, species, *, species_root_name_for_taxon,
-    rename_species_highlights_species, rename_photo_preferences_species,
+    rename_photo_preferences_species,
 ):
     """Move the photo's curated species state onto the new species.
 
-    Migrate curated species state (representatives and
-    ordered highlights) alongside the replaced species
-    tag. Without this, a photo highlighted or set as
-    representative under the old species keeps rows in
-    species_highlights / photo_preferences under a name
-    it no longer carries, so it stops driving Highlights
-    and Life List for the new species. Mirrors the
-    migration in api_highlights_relabel.
+    Migrate the photo's highlights alongside the replaced species tag.
+    Without this, a photo highlighted under the old species keeps rows in
+    species_representatives / photo_preferences under a name it no longer
+    carries, so it stops driving Highlights and Life List for the new
+    species. Mirrors the migration in api_highlights_relabel.
     """
     curation_sources = _curation_source_names(
         to_remove, species_root_name_for_taxon,
     )
     for source_name in curation_sources:
-        rename_species_highlights_species(
-            source_name, species, [(photo_id, ws)],
-        )
         rename_photo_preferences_species(
             source_name, species, [(photo_id, ws)],
         )

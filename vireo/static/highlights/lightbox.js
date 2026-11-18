@@ -5,7 +5,7 @@
 import { closeLightbox, escapeAttr, lightboxPhotoList, lightboxRequestedPhotoId, openLightbox, safeFetch, showToast } from './shared.js';
 import { loadHighlights } from './loading.js';
 import { findHighlightPhoto } from './ordering.js';
-import { addSpeciesHighlight, confirmPhotoIds, moveSpeciesHighlight, photoCurrentLabel, photoSpeciesName, removeSpeciesHighlight, setSpeciesRepresentative, showSpeciesModal } from './species.js';
+import { addSpeciesHighlight, confirmPhotoIds, makeTopHighlight, moveSpeciesHighlight, photoCurrentLabel, photoSpeciesName, removeSpeciesHighlight, showSpeciesModal } from './species.js';
 import { state } from './state.js';
 
 /** @param {number} photoId */
@@ -99,7 +99,7 @@ export function ensureHighlightsLightboxPanel() {
 export function updateHighlightsLightboxControls(photoId) {
   var panel = ensureHighlightsLightboxPanel();
   if (!panel) return;
-  // The shared lifelist panel's "Set Representative" posts without a folder
+  // The shared lifelist panel's "Make Top Highlight" posts without a folder
   // scope; on Highlights that would quietly override the folder-scoped choice
   // this page's own panel records, so hide the duplicate here.
   var sharedLifeList = document.getElementById('lifeListLightboxPanel');
@@ -124,11 +124,11 @@ export function updateHighlightsLightboxControls(photoId) {
       } else {
         html += '<button data-lb-action="add-highlight">Add to Highlights</button>';
       }
-    }
-    if (photo.has_accepted_species && photo.species) {
-      html += '<button data-lb-action="set-representative"'
-        + (photo.is_species_representative ? ' class="primary"' : '') + '>'
-        + (photo.is_species_representative ? 'Representative' : 'Set Representative') + '</button>';
+      // Leads this row already: the button still works, and settles a tie
+      // with the row's other highlights in this photo's favor.
+      var isTop = photo.is_highlighted && photo.highlight_rank === 1;
+      html += '<button data-lb-action="make-top-highlight"' + (isTop ? ' class="primary"' : '') + '>'
+        + (isTop ? 'Top Highlight' : 'Make Top Highlight') + '</button>';
     }
     if (photo.is_confirmable_prediction) {
       html += '<button class="primary" data-lb-action="confirm">Confirm</button>';
@@ -157,8 +157,8 @@ export function updateHighlightsLightboxControls(photoId) {
         moveSpeciesHighlight(photoSpeciesName(photo), photo.id, 'up', btn);
       } else if (action === 'highlight-down') {
         moveSpeciesHighlight(photoSpeciesName(photo), photo.id, 'down', btn);
-      } else if (action === 'set-representative') {
-        setSpeciesRepresentative(photo.species, photo.id, btn);
+      } else if (action === 'make-top-highlight') {
+        makeTopHighlight(photoSpeciesName(photo), photo.id, btn);
       } else {
         var modalTitle = (photo.is_confirmable_prediction || photo.has_accepted_species)
           ? 'Change species'

@@ -55,6 +55,7 @@ _TEMPLATES = {
     "/duplicates": "duplicates.html",
     "/move": "move.html",
     "/highlights": "highlights.html",
+    "/inaturalist": "inaturalist.html",
     "/life-list": "life_list.html",
     "/locations/review": "location_review.html",
     "/misses": "misses.html",

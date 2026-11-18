@@ -746,7 +746,7 @@ def test_best_tools_list_choose_and_scope_by_date(mcp):
     }
     listed = call(server, "best_of_each_species", species="Bald Eagle")
     decision = listed["species"][0]["decision"]
-    assert (decision["kind"], decision["photo_id"]) == ("chosen", old)
+    assert (decision["kind"], decision["photo_id"]) == ("highlight", old)
     assert (decision["source"], decision["reason"]) == ("claude", "sharper eye")
 
     year = call(
@@ -754,7 +754,7 @@ def test_best_tools_list_choose_and_scope_by_date(mcp):
         date_from="2025-01-01", date_to="2025-12-31",
     )
     assert [p["id"] for p in year["species"][0]["photos"]] == [new]
-    assert year["species"][0]["decision"]["kind"] != "chosen"
+    assert year["species"][0]["decision"]["kind"] != "highlight"
 
 
 def test_choose_best_photo_requires_a_reason_and_reports_the_apps_refusal(mcp):

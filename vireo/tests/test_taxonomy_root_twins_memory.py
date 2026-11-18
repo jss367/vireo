@@ -178,7 +178,7 @@ def setup():
         ).fetchone(),
     )
     prov._species_curation = lambda: types.SimpleNamespace(
-        rename_highlights=forbidden, rename_photo_preferences=forbidden,
+        rename_photo_preferences=forbidden,
     )
     prov._resolve_workspace_id = forbidden
     ns["KeywordTreeRepository"].__init__ = lambda self, conn, resolve_workspace_id: None

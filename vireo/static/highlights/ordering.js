@@ -84,9 +84,9 @@ export function applyBucketOrderingKeysFromPage(bucket, page) {
 // Refetch a bucket (or the unidentified section) from offset 0 so the loaded
 // window matches the backend's post-pick ordering. A pick mutates
 // highlight_score (the +0.08 bonus, clamped to [0, 1]) and can flip ordering
-// against representatives, curated species_highlights, or the has_more tail;
-// rather than mirror `_highlight_score_bucket` / `_apply_ordered_highlights` /
-// `_apply_highlight_preferences` in JS (repeatedly getting it wrong on subtle
+// against the species' highlights or the has_more tail; rather than mirror
+// `_highlight_score_bucket` / `apply_highlight_preferences` in JS (repeatedly
+// getting it wrong on subtle
 // edge cases), let the server compute the authoritative order and copy it
 // back. Pages in up-to-500-row chunks so the final iteration only asks for
 // the remainder of the loaded window (`targetLen - offset`) — a full 500-row

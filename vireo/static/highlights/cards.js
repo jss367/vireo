@@ -89,14 +89,9 @@ export function renderCard(p, idx) {
   var title = advanced ? (p.reasons || []).join(', ') : '';
   var ribbon = p.is_highlighted
     ? '<div class="best-ribbon">Highlight ' + escapeAttr(p.highlight_rank || '') + '</div>'
-    : (p.is_species_representative
-      ? '<div class="best-ribbon">Representative</div>'
-      : (advanced && idx === 0 ? '<div class="best-ribbon">Best</div>' : ''));
+    : (advanced && idx === 0 ? '<div class="best-ribbon">Best</div>' : '');
   var flagBadge = pickBadge(p);
   var presence = presenceChip(p);
-  var rep = p.is_species_representative
-    ? '<span class="card-chip reason">Representative</span>'
-    : '';
   var others = otherTaggedSpecies(p);
   var alsoTagged = others.length
     ? '<span class="card-chip reason" title="' + escapeAttr('Also tagged: ' + others.join(', ')) + '">+'
@@ -120,7 +115,7 @@ export function renderCard(p, idx) {
     + order
     + '<img src="' + thumbSrc + '" alt="' + escapeAttr(p.filename) + '" loading="lazy">'
     + '<div class="card-filename" title="' + escapeAttr(p.filename) + '">' + escapeAttr(p.filename) + '</div>'
-    + '<div class="card-info">' + scoreChip + conf + presence + rep + alsoTagged + reasons + '</div>'
+    + '<div class="card-info">' + scoreChip + conf + presence + alsoTagged + reasons + '</div>'
     + '</div>';
 }
 

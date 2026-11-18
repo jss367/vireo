@@ -70,7 +70,7 @@ Nine of those bursts had frames on both sides of the 512 px line, so frames
 of one burst were being ranked on two renderings. A RAW without a full-size
 preview is demosaiced at full resolution before resizing, falling back to its embedded
 JPEG only if libraw cannot decode it.
-None of this catalog's cameras (D7200, D850, Z 8) is one. Migration 45
+None of this catalog's cameras (D7200, D850, Z 8) is one. Migration 46
 returns every nonempty historical detail measurement to "not measured".
 Preview dimensions were not recorded with the score: even a middle-band
 subject could have used a cropped or reduced JPEG that now demosaics, so

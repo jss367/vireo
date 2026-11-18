@@ -202,6 +202,7 @@
     </label>
   </div>
   <div class="lifelist-actions">
+    <a class="publish-btn" href="/inaturalist">Missing from iNaturalist</a>
     <button class="publish-btn" data-life-on="click:openExportModal">Export...</button>
     <button class="publish-btn" data-life-on="click:openPublishModal">Publish Site</button>
     <button class="publish-btn" data-life-on="click:openSiteExportModal">Export Entire Site</button>
@@ -233,7 +234,7 @@
       <div id="exportPhotosWrap">
         <label class="modal-label" for="exportPhotos">Photos</label>
         <select id="exportPhotos" class="modal-input">
-          <option value="best">Representative photo per species</option>
+          <option value="best">Top photo per species</option>
           <option value="all">All listed photos</option>
         </select>
       </div>
@@ -274,7 +275,7 @@
           <span>Include Life List</span>
         </label>
         <select id="publishLifeListPhotos" class="modal-input" aria-label="Life List photos per species" data-life-on="change:publishSettingsChanged">
-          <option value="1">Representative photo only</option>
+          <option value="1">Top photo only</option>
           <option value="3">Up to 3 per species</option>
           <option value="12">Up to 12 per species</option>
         </select>

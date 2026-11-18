@@ -283,8 +283,8 @@ def _sort_highlight_bucket(photos, picked_first):
         )
 
 
-def _sort_photos_with_representatives_first(photos, representative_order):
-    """Promote representative photos while preserving ranked order otherwise."""
+def _sort_highlights_first(photos, representative_order):
+    """Put the highlights first, in their order, keeping the rest as ranked."""
     ranked_position = {photo["id"]: idx for idx, photo in enumerate(photos)}
     photos.sort(key=lambda photo: (
         0 if photo["id"] in representative_order else 1,
@@ -318,9 +318,9 @@ def _bucket_unanalyzed_count(photos):
 
     Only the trailing run is counted (not every unscored non-pick in the
     bucket) so that curated ordering — where
-    :func:`apply_ordered_highlights` or :func:`apply_highlight_preferences`
+    :func:`apply_highlight_preferences`
     can promote an unscored, non-flagged photo to the front as a species
-    highlight or representative — doesn't inflate the count with photos that
+    highlight — doesn't inflate the count with photos that
     now live above the divider. Unscored picks are excluded because they
     stay grouped with the other picks at the front regardless. The photos
     the species is not the subject of trail the bucket under their own
@@ -344,19 +344,18 @@ def _bucket_unanalyzed_count(photos):
 def best_decision(top, ranking, note, fallback_kind=None):
     """Why ``top`` is the photo shown first for its species in this set.
 
-    ``chosen``: it is the one chosen photo here that no other chosen photo
-    beats. ``tie``: several chosen photos here have never been compared
-    (``tied_photo_ids``) and the newest choice is shown meanwhile. Otherwise
-    nobody chose a photo here, and ``fallback_kind`` (or, when None, the
-    Highlights page's own order) names what put it first: ``highlight`` (the
-    workspace's ranked highlights), ``in_frame`` or ``outside_crop`` (no
-    photo here has the species as its subject, so one where it is only in
-    frame, or cropped out, leads; ``species_presence``), ``pick`` (a flagged
+    ``highlight``: it is the one highlight here that no other highlight
+    beats. ``tie``: several highlights here have never been compared
+    (``tied_photo_ids``) and the newest one is shown meanwhile. Otherwise
+    nothing is highlighted here, and ``fallback_kind`` (or, when None, the
+    Highlights page's own order) names what put it first: ``pick`` (a flagged
     pick, by Vireo's score among picks), ``score`` (Vireo's score) or
-    ``unanalyzed`` (no score yet, so nothing but capture order).
+    ``unanalyzed`` (no score yet, so nothing but capture order). When no
+    photo has the species as its subject, ``in_frame`` or ``outside_crop``
+    names its presence instead of borrowing another species' pick or score.
 
-    ``note`` is the photo's newest recorded choice, None when it was chosen
-    before choices were recorded.
+    ``note`` is the choice that explains the photo's place
+    (``species_preference.choice_note``), None when none was recorded.
     """
     if not top:
         return None
@@ -369,15 +368,13 @@ def best_decision(top, ranking, note, fallback_kind=None):
         "chosen_at": None,
     }
     if ranking.order and ranking.order[0] == top["id"]:
-        decision["kind"] = "tie" if ranking.tied else "chosen"
+        decision["kind"] = "tie" if ranking.tied else "highlight"
         if ranking.tied:
             decision["tied_photo_ids"] = list(ranking.leaders)
         for key in ("source", "reason", "chosen_at"):
             decision[key] = (note or {}).get(key)
     elif fallback_kind is not None:
         decision["kind"] = fallback_kind
-    elif top.get("is_highlighted"):
-        decision["kind"] = "highlight"
     elif not _species_is_subject(top):
         decision["kind"] = top["species_presence"]
     elif top.get("flag") == "flagged":
@@ -390,123 +387,81 @@ def best_decision(top, ranking, note, fallback_kind=None):
 
 
 def apply_highlight_preferences(db, buckets):
-    preferences = db.species_curation.get_representative_lists(
-        eligible_only=True, ranked=False,
-    )
-    any_chosen = any(preferences.get(bucket["species"]) for bucket in buckets)
+    """Mark each bucket's highlights, number them and put them first.
+
+    A species' highlights are ranked within the bucket's own photos, so a
+    folder or filtered view leads with the best highlight it can show and
+    numbers the rest from there (``highlight_rank``, 1 first). The
+    species-level state (``preferred_photo_id``, ``has_highlight_selection``)
+    covers every highlight the workspace can see, so it stays true when the
+    highlight is outside the current folder or search result.
+    """
+    highlights = db.species_curation.get_highlights(eligible_only=True)
+    any_chosen = any(highlights.get(bucket["species"]) for bucket in buckets)
     choices = Preferences(db.species_choices.comparisons() if any_chosen else ())
     notes = db.species_choices.notes() if any_chosen else {}
-    # A representative visible only in another workspace is still chosen for
-    # the species, so comparisons chained through it settle a scoped pair.
-    # ``chosen_for_species`` must therefore include the catalog-wide eligible
-    # set, not just what this workspace can see.
+    # A highlight visible only in another workspace is still chosen for the
+    # species, so comparisons chained through it settle a pair shown here.
     globally_chosen = (
         db.species_curation.get_globally_eligible_representatives()
         if any_chosen else {}
     )
     for bucket in buckets:
         species = bucket["species"]
-        chosen_ids = preferences.get(species) or []
-        global_chosen = globally_chosen.get(species) or chosen_ids
-        visible_ids = {photo.get("id") for photo in bucket.get("photos") or []}
-        # Ranked within the bucket's own photos, so a folder or filtered view
-        # leads with the best chosen photo it can show; the species-level
-        # state below is ranked over every chosen photo in the workspace.
+        chosen_ids = highlights.get(species) or []
+        through = {*chosen_ids, *(globally_chosen.get(species) or ())}
+        photos = bucket.get("photos") or []
+        visible_ids = {photo.get("id") for photo in photos}
         ranking = choices.rank(
-            [pid for pid in chosen_ids if pid in visible_ids], global_chosen,
+            [pid for pid in chosen_ids if pid in visible_ids], through,
         )
-        representative_ids = list(ranking.order)
-        representative_set = set(representative_ids)
-        representative_order = {
-            photo_id: idx for idx, photo_id in enumerate(representative_ids)
-        }
-        workspace_order = choices.rank(chosen_ids, global_chosen).order
-        preferred_id = workspace_order[0] if workspace_order else None
-        applied = False
-        for photo in bucket.get("photos") or []:
-            is_rep = photo.get("id") in representative_set
-            photo["is_species_representative"] = is_rep
-            applied = applied or is_rep
-        # Promote representatives to the front so cross-workspace reps
-        # (visible via species_representatives but without a workspace-scoped
-        # species_highlights rank) become the bucket's primary photo.
-        # apply_ordered_highlights runs before this and only sorts when a
-        # visible photo has a workspace highlight rank, so without this pass
-        # a rep chosen in another workspace stays buried in score order.
-        # Matches the Life List behavior which also promotes reps over
-        # workspace highlights.
-        if applied:
-            _sort_photos_with_representatives_first(
-                bucket["photos"], representative_order
-            )
-        top = bucket["photos"][0] if bucket["photos"] else {}
-        bucket["preferred_photo_id"] = preferred_id
-        # Species-level state stays true even when the representative photo is
-        # outside the current folder or search result.
-        bucket["has_species_representative"] = preferred_id is not None
-        bucket["has_preferred_photo"] = applied
+        position = {photo_id: idx for idx, photo_id in enumerate(ranking.order)}
+        for photo in photos:
+            place = position.get(photo.get("id"))
+            photo["is_highlighted"] = place is not None
+            photo["highlight_rank"] = None if place is None else place + 1
+            photo["is_species_representative"] = place is not None
+        # Highlights lead the bucket; the picked-first and score order of
+        # _highlight_score_bucket stays for everything after them.
+        if position:
+            _sort_highlights_first(photos, position)
+        workspace_order = choices.rank(chosen_ids, through).order
+        top = photos[0] if photos else {}
+        bucket["preferred_photo_id"] = workspace_order[0] if workspace_order else None
+        bucket["has_highlight_selection"] = bool(chosen_ids)
+        bucket["has_species_representative"] = bool(chosen_ids)
+        bucket["has_preferred_photo"] = bool(position)
+        bucket["highlight_count"] = len(position)
         bucket["best_quality"] = top.get("quality_score")
-        # Rank by the highest-scored photo in the bucket, not photos[0].
-        # A picked (or manually preferred) photo may sit at photos[0] with a
-        # lower highlight_score; using its score for bucket ranking would
-        # demote the whole species below buckets with worse actual best
-        # photos.
-        bucket["best_score"] = bucket_best_score(bucket["photos"])
+        # Rank by the highest-scored photo in the bucket, not photos[0]: a
+        # highlight or pick may sit first with a lower highlight_score, and
+        # using its score would demote the whole species below buckets whose
+        # best photo is actually worse.
+        bucket["best_score"] = bucket_best_score(photos)
         bucket["best_timestamp"] = top.get("timestamp")
-        # Run last so curated promotion (an unscored rep pushed to the front)
-        # doesn't leave a stale tail count that anchors the divider above
+        # Run last so a highlight without a score, pushed to the front,
+        # does not leave a stale tail count anchoring the divider above
         # analyzed content.
-        bucket["unanalyzed_count"] = _bucket_unanalyzed_count(bucket.get("photos"))
+        bucket["unanalyzed_count"] = _bucket_unanalyzed_count(photos)
         bucket["best_decision"] = best_decision(
             top, ranking, choice_note(notes, species, top.get("id")),
         )
 
 
-def apply_ordered_highlights(db, buckets):
-    highlights = db.species_curation.get_highlights(eligible_only=True)
-    for bucket in buckets:
-        ranks = highlights.get(bucket["species"], {})
-        # Species-level state stays true even when every selected highlight is
-        # outside the current folder or search result.
-        bucket["has_highlight_selection"] = bool(ranks)
-        photos = bucket.get("photos") or []
-        matched = False
-        for p in photos:
-            rank = ranks.get(p.get("id"))
-            p["is_highlighted"] = rank is not None
-            p["highlight_rank"] = rank
-            if rank is not None:
-                matched = True
-        # Only re-sort when at least one visible photo actually maps to a
-        # stored highlight rank. `ranks` is workspace-scoped, so a folder
-        # or search view of the same species can be truthy here while none
-        # of its photos are highlights — re-sorting then discards the
-        # picked-first order that _highlight_score_bucket already applied.
-        if matched:
-            bucket["photos"].sort(
-                key=lambda p: (
-                    0 if p.get("is_highlighted") else 1,
-                    p.get("highlight_rank") if p.get("highlight_rank") is not None else 10**9,
-                    # A score describes the photo's own subject, so the
-                    # photos this species is not the subject of stay last.
-                    0 if _species_is_subject(p) else 1,
-                    -(p.get("highlight_score") or 0),
-                    -(p.get("predicted_confidence") or 0),
-                    -(p.get("quality_score") or 0),
-                    -(p.get("rating") or 0),
-                    p.get("id", 0),
-                )
-            )
-        best = bucket["photos"][0] if bucket.get("photos") else {}
-        bucket["highlight_count"] = sum(
-            1 for p in bucket.get("photos") or [] if p.get("is_highlighted")
-        )
-        # unanalyzed_count is assigned in apply_highlight_preferences instead:
-        # that runs after this pass and can still reorder photos, so anchoring
-        # the tail count here would be stale under curated ordering.
-        bucket["best_quality"] = best.get("quality_score")
-        bucket["best_score"] = best.get("highlight_score")
-        bucket["best_timestamp"] = best.get("timestamp")
+def _workspace_highlight_rank(db, species, photo_id):
+    """``photo_id``'s place (1 first) among the species' highlights the
+    workspace can see, or None when it is not one of them."""
+    photo_ids = db.species_curation.get_highlights(species, eligible_only=True).get(species, [])
+    if photo_id not in photo_ids:
+        return None
+    if len(photo_ids) == 1:
+        return 1
+    globally_chosen = db.species_curation.get_globally_eligible_representatives(species)
+    through = {*photo_ids, *globally_chosen.get(species, [])}
+    order = Preferences(db.species_choices.comparisons()).rank(
+        photo_ids, through,
+    ).order
+    return order.index(photo_id) + 1
 
 
 def photo_highlight_entries(db, photo_id):
@@ -528,11 +483,10 @@ def photo_highlight_entries(db, photo_id):
         species = bucket.get("species")
         if not species:
             continue
-        ranks = db.species_curation.get_highlights(species).get(species, {})
         for photo in bucket.get("photos") or []:
             if photo.get("id") != photo_id:
                 continue
-            rank = ranks.get(photo_id)
+            rank = _workspace_highlight_rank(db, species, photo_id)
             entries.append({
                 "species": species,
                 "is_highlighted": rank is not None,
@@ -879,32 +833,19 @@ def filter_highlight_curation_state(
     buckets,
     unidentified_photos,
     highlight_filter="all",
-    representative_filter="all",
 ):
+    """Keep the species that do (``yes``) or do not (``no``) have a highlight."""
     highlight_filter = _normalize_highlight_presence_filter(highlight_filter)
-    representative_filter = _normalize_highlight_presence_filter(
-        representative_filter
-    )
-
-    def matches(bucket, filter_value, field):
-        if filter_value == "all":
-            return True
-        return bool(bucket.get(field)) == (filter_value == "yes")
-
+    if highlight_filter == "all":
+        return buckets, unidentified_photos
+    wanted = highlight_filter == "yes"
     filtered = [
         bucket for bucket in buckets
-        if matches(bucket, highlight_filter, "has_highlight_selection")
-        and matches(
-            bucket,
-            representative_filter,
-            "has_species_representative",
-        )
+        if bool(bucket.get("has_highlight_selection")) == wanted
     ]
-    # These two states only apply to named species. Unidentified photos have
-    # neither a species highlight list nor a species representative assignment.
-    if highlight_filter != "all" or representative_filter != "all":
-        unidentified_photos = []
-    return filtered, unidentified_photos
+    # Only a named species has a highlight list, so unidentified photos match
+    # neither state.
+    return filtered, []
 
 
 _LIFE_LIST_LEADING_APOSTROPHE_RE = re.compile(
@@ -1000,7 +941,6 @@ class HighlightsQuery:
     """The free-text search over sections and photos."""
     confirmation_filter: str = "all"
     highlight_filter: str = "all"
-    representative_filter: str = "all"
     collection_id: int | None = None
     rules: object = None
     """Visual membership resolved for this collection, when applicable."""
@@ -1033,9 +973,6 @@ def build_highlights_payload(db, query=None):
         query.confirmation_filter
     )
     highlight_filter = _normalize_highlight_presence_filter(query.highlight_filter)
-    representative_filter = _normalize_highlight_presence_filter(
-        query.representative_filter
-    )
 
     candidates = query.candidates(db, folder_id)
     if query.collection_id is None:
@@ -1068,13 +1005,11 @@ def build_highlights_payload(db, query=None):
         query.search.match_case,
         query.search.whole_word,
     )
-    apply_ordered_highlights(db, buckets)
     apply_highlight_preferences(db, buckets)
     buckets, unidentified_photos = filter_highlight_curation_state(
         buckets,
         unidentified_photos,
         highlight_filter,
-        representative_filter,
     )
 
     limited_buckets, unidentified_limited = _limit_highlight_buckets(
@@ -1100,7 +1035,6 @@ def build_highlights_payload(db, query=None):
             "limit_per_bucket": limit_per_bucket,
             "confirmation": confirmation_filter,
             "highlight_selection": highlight_filter,
-            "species_representative": representative_filter,
             "search": (query.search.text or "").strip(),
         },
         "scope": scope_name,
@@ -1139,30 +1073,26 @@ def _merge_life_list_locations(identities, rows):
 
 
 def _life_list_selection_maps(db, identities, buckets, scoped):
-    """Apply selections saved under any alias, preserving representative order."""
+    """``{identity: [photo_id, ...]}``: the highlights saved under any alias
+    of each listed species, newest selection first."""
     species_names = None
     if scoped:
         species_names = {
             name for name, keys in identities.aliases.items()
             if keys.intersection(buckets)
         }
-    rep_rows, highlight_rows = db.species_curation.get_life_list_selections(species_names)
-    representatives, highlights = {}, {}
-    for rows, result in ((rep_rows, representatives), (highlight_rows, highlights)):
-        for row in rows:
-            keys = identities.aliases.get(row["species"], set())
-            for key in keys.intersection(buckets):
-                # Legacy curation keys contain only a name. A shared name
-                # must not move a selection onto a different taxon's photo.
-                if len(keys) > 1 and row["photo_id"] not in buckets[key]["seen_ids"]:
-                    continue
-                if result is representatives:
-                    ids = result.setdefault(key, [])
-                    if row["photo_id"] not in ids:
-                        ids.append(row["photo_id"])
-                else:
-                    result.setdefault(key, {}).setdefault(row["photo_id"], row["rank"])
-    return representatives, highlights
+    highlights = {}
+    for row in db.species_curation.get_life_list_selections(species_names):
+        keys = identities.aliases.get(row["species"], set())
+        for key in keys.intersection(buckets):
+            # Legacy curation keys contain only a name. A shared name
+            # must not move a selection onto a different taxon's photo.
+            if len(keys) > 1 and row["photo_id"] not in buckets[key]["seen_ids"]:
+                continue
+            ids = highlights.setdefault(key, [])
+            if row["photo_id"] not in ids:
+                ids.append(row["photo_id"])
+    return highlights
 
 
 def _life_list_buckets(rows, identities, class_by_taxon):
@@ -1176,6 +1106,7 @@ def _life_list_buckets(rows, identities, class_by_taxon):
             "scientific_name": None,
             "common_name": None,
             "taxon_id": None,
+            "inat_id": r.get("inat_id"),
             "taxon_rank": None,
             "taxonomic_class": None,
             "photos": [],
@@ -1239,7 +1170,7 @@ def _compact_life_list_photo(photo):
     }
 
 
-_LIFE_LIST_DECISION_KINDS = {"pick": "pick", "highlight": "highlight"}
+_LIFE_LIST_DECISION_KINDS = {"pick": "pick"}
 
 
 def _rank_listed_representatives(
@@ -1263,7 +1194,7 @@ def _rank_listed_representatives(
 
 
 def _life_list_species_entry(
-    species, entry, photos, representative_ids, highlight_ranks,
+    species, entry, photos, representative_ids,
     locations, photo_offset, photo_limit, choices,
 ):
     """Rank one species' photos and build its Life List entry.
@@ -1283,34 +1214,16 @@ def _life_list_species_entry(
         photo_id: idx for idx, photo_id in enumerate(representative_ids)
     }
     preferred_id = representative_ids[0] if representative_ids else None
+    listed_place = {photo_id: idx for idx, photo_id in enumerate(ranking.order)}
     for photo in photos:
-        rank = highlight_ranks.get(photo["id"])
-        photo["is_highlighted"] = rank is not None
-        photo["highlight_rank"] = rank
-        photo["is_species_representative"] = (
-            photo["id"] in representative_order
-        )
-    preferred_applied = any(
-        photo.get("is_species_representative") for photo in photos
-    )
-    if not preferred_applied and highlight_ranks:
-        valid_highlights = [
-            (highlight_ranks[p["id"]], p["id"])
-            for p in photos
-            if p["id"] in highlight_ranks
-        ]
-        if valid_highlights:
-            _, highlight_id = min(valid_highlights)
-            for idx, photo in enumerate(photos):
-                if photo["id"] == highlight_id:
-                    if idx:
-                        photos.insert(0, photos.pop(idx))
-                    break
-    # Life List curation order is explicit representative selection,
-    # then Picks (the P flag), then the existing highlight/algorithmic
-    # ranking. Keep ranked positions as the final tie-breaker so
-    # multiple Picks retain their quality order and non-Picks keep the
-    # highlight/algorithmic order.
+        place = listed_place.get(photo["id"])
+        photo["is_highlighted"] = place is not None
+        photo["highlight_rank"] = None if place is None else place + 1
+        photo["is_species_representative"] = place is not None
+    preferred_applied = bool(listed_place)
+    # Life List order is the highlights, in their order, then Picks (the P
+    # flag), then the algorithmic ranking. Ranked positions are the final
+    # tie-breaker, so several Picks keep their quality order.
     ranked_position = {
         photo["id"]: idx for idx, photo in enumerate(photos)
     }
@@ -1322,12 +1235,10 @@ def _life_list_species_entry(
         ranked_position.get(photo["id"], 0),
     ))
     best_photo = photos[0] if photos else {}
-    if best_photo.get("is_species_representative"):
-        best_source = "representative"
+    if best_photo.get("is_highlighted"):
+        best_source = "highlight"
     elif best_photo.get("flag") == "flagged":
         best_source = "pick"
-    elif best_photo.get("is_highlighted"):
-        best_source = "highlight"
     else:
         best_source = "algorithm"
     if photo_limit is None:
@@ -1340,6 +1251,7 @@ def _life_list_species_entry(
         "common_name": entry["common_name"],
         "taxon_id": entry["taxon_id"],
         "taxon_rank": entry["taxon_rank"],
+        "inat_id": entry["inat_id"],
         "taxonomic_class": entry["taxonomic_class"],
         "photo_count": len(photos),
         "first_seen": min(timestamps) if timestamps else None,
@@ -1390,7 +1302,7 @@ def build_life_list_payload(
     identities = _LifeListIdentities(db)
     locations = _merge_life_list_locations(identities, location_rows)
     buckets = _life_list_buckets(rows, identities, class_by_taxon)
-    representatives, highlights = _life_list_selection_maps(
+    representatives = _life_list_selection_maps(
         db, identities, buckets, scoped=species_filter is not None,
     )
     choices = (Preferences(), {}, {})
@@ -1408,8 +1320,7 @@ def build_life_list_payload(
         distinct_photo_ids.update(p["id"] for p in photos)
         species_entries.append(_life_list_species_entry(
             entry["species"], entry, photos, representatives.get(identity, []),
-            highlights.get(identity, {}), locations.get(identity, []),
-            photo_offset, photo_limit, choices,
+            locations.get(identity, []), photo_offset, photo_limit, choices,
         ))
 
     # Life-list numbering: chronological by first photographed date,

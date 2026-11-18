@@ -462,7 +462,8 @@ def test_a_chosen_highlight_leads_even_where_the_species_is_only_in_frame(app_an
         db, fid, "plover.jpg", ["Black-bellied Plover"],
         [("Black-bellied Plover", (0.3, 0.3, 0.4, 0.4), 0.9)],
     )
-    db.species_curation.add_highlight("Black-bellied Plover", flock)
+    from services.species_choices import add_highlight
+    add_highlight(db, "Black-bellied Plover", flock)
     db.commit()
 
     _data, buckets = _buckets(app.test_client(), fid)

@@ -17,7 +17,7 @@ from urllib.request import urlopen
 
 import pytest
 from playwright.sync_api import expect
-from services import keyword_tagging, photo_ingest
+from services import keyword_tagging, photo_ingest, species_choices
 
 from e2e.module_pages import expose_page_modules
 from e2e.viewport_test_support import install_viewport_test_helpers
@@ -415,7 +415,7 @@ def test_highlights_lightbox_pick_keeps_curated_highlight_first(live_server, pag
     so pressing ``P`` on an unhighlighted photo in a curated bucket shoved
     the stored highlight out of its top slot — changing the visible slice
     and the Save-as-Collection payload — until a full reload restored the
-    server's ``apply_ordered_highlights`` ordering.
+    server's ``apply_highlight_preferences`` ordering.
     """
     db = live_server["db"]
     data = live_server["data"]
@@ -423,10 +423,10 @@ def test_highlights_lightbox_pick_keeps_curated_highlight_first(live_server, pag
 
     # photos[1] is a lower-quality hawk than photos[0]; without the stored
     # highlight it would sort second. Marking it a species highlight promotes
-    # it to the top of the bucket via apply_ordered_highlights.
+    # it to the top of the bucket via apply_highlight_preferences.
     highlighted_id = data["photos"][1]
     unhighlighted_id = data["photos"][0]
-    db.species_curation.add_highlight("Red-tailed Hawk", highlighted_id)
+    species_choices.add_highlight(db, "Red-tailed Hawk", highlighted_id)
     db.commit()
 
     _goto_highlights(page, live_server["url"])
@@ -497,7 +497,7 @@ def test_highlights_lightbox_pick_applies_backend_score_bonus(live_server, page)
     )
     db.conn.commit()
 
-    db.species_curation.add_highlight("Red-tailed Hawk", highlighted_id)
+    species_choices.add_highlight(db, "Red-tailed Hawk", highlighted_id)
     db.commit()
 
     _goto_highlights(page, live_server["url"])
@@ -985,13 +985,11 @@ def test_highlights_species_search_filters_buckets(live_server, page):
     )
 
 
-def test_highlights_curation_filter_controls_combine(live_server, page):
+def test_highlights_selection_filter_control(live_server, page):
     db = live_server["db"]
     data = live_server["data"]
     _seed_quality_scores_and_species(db, data)
-    db.species_curation.add_highlight("Red-tailed Hawk", data["photos"][0])
-    db.species_curation.add_highlight("American Robin", data["photos"][3])
-    db.set_species_representative("American Robin", data["photos"][3])
+    species_choices.add_highlight(db, "Red-tailed Hawk", data["photos"][0])
     db.commit()
 
     _goto_highlights(page, live_server["url"])
@@ -999,27 +997,31 @@ def test_highlights_curation_filter_controls_combine(live_server, page):
     expect(page.locator("label[for='confirmationFilter']")).to_have_text(
         "Species keyword"
     )
-
-    with page.expect_response(
-        lambda response: (
-            "/api/highlights?" in response.url
-            and "highlight_selection=yes" in response.url
-        )
-    ):
-        page.locator("#highlightSelectionFilter").select_option("yes")
+    # One filter covers every highlight: there is no separate control for
+    # the photo that leads them.
+    expect(page.locator("#representativeFilter")).to_have_count(0)
     expect(page.locator(".bucket-title")).to_have_count(2)
 
     with page.expect_response(
         lambda response: (
             "/api/highlights?" in response.url
             and "highlight_selection=yes" in response.url
-            and "species_representative=no" in response.url
+            and "species_representative" not in response.url
         )
     ):
-        page.locator("#representativeFilter").select_option("no")
-
+        page.locator("#highlightSelectionFilter").select_option("yes")
     expect(page.locator(".bucket-title")).to_have_count(1)
     expect(page.locator(".bucket-title").first).to_contain_text("Red-tailed Hawk")
+
+    with page.expect_response(
+        lambda response: (
+            "/api/highlights?" in response.url
+            and "highlight_selection=no" in response.url
+        )
+    ):
+        page.locator("#highlightSelectionFilter").select_option("no")
+    expect(page.locator(".bucket-title")).to_have_count(1)
+    expect(page.locator(".bucket-title").first).to_contain_text("American Robin")
 
 
 def test_highlights_general_search_filters_by_filename_folder_and_keyword(live_server, page):
@@ -1106,7 +1108,7 @@ def test_ordered_highlight_updates_top_photo_timestamp(live_server):
     _seed_quality_scores_and_species(db, data)
 
     highlighted = data["photos"][2]
-    db.species_curation.add_highlight("Red-tailed Hawk", highlighted)
+    species_choices.add_highlight(db, "Red-tailed Hawk", highlighted)
     db.commit()
 
     base = live_server["url"]

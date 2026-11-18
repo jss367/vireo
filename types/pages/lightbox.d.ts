@@ -317,6 +317,7 @@ interface InatPreparedPhoto {
   existing_observation_url?: string; upload_url?: string;
 }
 interface InatQueueItem {
+  comparison?: {login: string; name: string; id: number};
   photo_id: number; taxon_name: string; observed_on: string; species_options?: InatSpeciesOption[];
   latitude: number | string; longitude: number | string;
   description: string; geoprivacy: string; filename: string;

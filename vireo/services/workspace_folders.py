@@ -270,8 +270,8 @@ def move_folders_to_workspace(
     """Move folders and their workspace-scoped data to another workspace.
 
     Moves: workspace_folders rows, pending_changes, prediction_review,
-    photo_preferences, and species_highlights. Detections and predictions
-    are global (no workspace_id), so they follow the folder via
+    and photo_preferences. Highlights are catalog-wide and need no move.
+    Detections and predictions are global (no workspace_id), so they follow the folder via
     workspace_folders membership rather than being reassigned. Collections
     and edit_history stay behind.
 
@@ -301,7 +301,6 @@ def move_folders_to_workspace(
             "folders_moved": 0,
             "pending_changes_moved": 0,
             "photo_preferences_moved": 0,
-            "species_highlights_moved": 0,
         }
 
     selected_folder_ids = set(folder_ids)
@@ -333,11 +332,9 @@ def move_folders_to_workspace(
                 seen_folder_ids.add(subtree_id)
                 moved_folder_ids.append(subtree_id)
 
-    (
-        pending_changes_moved,
-        photo_preferences_moved,
-        species_highlights_moved,
-    ) = _move_folders_unit(db, source_ws_id, target_ws_id, folder_ids, moved_folder_ids)
+    pending_changes_moved, photo_preferences_moved = _move_folders_unit(
+        db, source_ws_id, target_ws_id, folder_ids, moved_folder_ids,
+    )
     # (``db.workspace_folders.move_folders`` in one unit of work; folders
     # changed membership for BOTH workspaces, so each workspace's
     # new-images backlog is dropped once the move durably commits.)
@@ -346,7 +343,6 @@ def move_folders_to_workspace(
         "folders_moved": len(folder_ids),
         "pending_changes_moved": pending_changes_moved,
         "photo_preferences_moved": photo_preferences_moved,
-        "species_highlights_moved": species_highlights_moved,
     }
 
 
@@ -399,7 +395,7 @@ def check_folder_health(db: Database, *, checkpoint: Callable[[], object] | None
 
 def _move_folders_unit(
         db: Database, source_ws_id: int, target_ws_id: int, folder_ids: Iterable[int],
-        moved_folder_ids: list[int]) -> tuple[int, int, int]:
+        moved_folder_ids: list[int]) -> tuple[int, int]:
     """Move the folders and their workspace-scoped rows in one unit of work.
 
     Also schedules the new-images cache invalidation for both workspaces

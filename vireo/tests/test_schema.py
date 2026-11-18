@@ -616,7 +616,7 @@ def test_subject_comparison_cache_migrates_without_changing_photographer_choices
             "detection_id", "source_key", "features", "mask_png"]
 
 
-@pytest.mark.parametrize("version", [38, 39, 40, 41, 42, 43, 44])
+@pytest.mark.parametrize("version", [38, 39, 40, 41, 42, 43, 44, 45])
 def test_catalog_unmeasures_the_detail_read_another_way(tmp_path, version):
     """Historical nonempty measurements lack rendering provenance at every
     subject size; masks, empty-mask zeros and pending values are kept."""
@@ -668,7 +668,7 @@ def test_catalog_unmeasures_the_detail_read_another_way(tmp_path, version):
         assert conn.execute("SELECT COUNT(*) FROM photo_masks WHERE path IS NOT NULL").fetchone()[0] == 24
 
 
-@pytest.mark.parametrize("version", [38, 39, 40, 41, 42, 43, 44])
+@pytest.mark.parametrize("version", [38, 39, 40, 41, 42, 43, 44, 45])
 def test_middle_band_detail_is_invalidated_without_reading_the_raw(tmp_path, version):
     """A 1000 px subject could have used a 6000x3376 cropped JPEG on a
     6000x4000 sensor. Preview dimensions were not stored with the score."""
@@ -735,7 +735,7 @@ def test_catalog_without_error_details_preserves_historical_job_on_upgrade(tmp_p
 
 def test_alternate_version_39_catalog_gains_job_history_errors(tmp_path):
     """A catalog stamped v39 by this branch before merging main lacks the
-    ``errors`` column that main's v39 adds. Migration 42 must repair it so
+    ``errors`` column that main's v39 adds. Migration 43 must repair it so
     ``persist_job`` can still write history after the upgrade."""
     path = str(tmp_path / "vireo.db")
     schema.ensure_schema(path)
@@ -790,3 +790,18 @@ def test_alternate_branch_catalog_gains_main_migrations_without_startup_ddl(tmp_
             "detection_id", "af", "sharp", "continuity",
         }
         assert conn.execute("SELECT name FROM sqlite_master WHERE name='idx_photos_burst_capture'").fetchone()
+
+
+def test_branch_version_45_preserves_ranked_species_highlights(tmp_path):
+    path = str(tmp_path / "catalog.db")
+    schema.ensure_schema(path)
+    with sqlite3.connect(path) as conn:
+        conn.execute("INSERT INTO folders (id, path) VALUES (1, '/synthetic')")
+        conn.execute("INSERT INTO photos (id, folder_id, filename) VALUES (1, 1, 'a.jpg')")
+        conn.execute("CREATE TABLE species_highlights (workspace_id, species, photo_id, rank, created_at)")
+        conn.execute("INSERT INTO species_highlights VALUES (1, 'Mallard', 1, 1, 0)")
+        conn.execute("PRAGMA user_version=45")
+    schema.ensure_schema(path)
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT species, photo_id FROM species_representatives").fetchall() == [("Mallard", 1)]
+        assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name='species_highlights'").fetchone()

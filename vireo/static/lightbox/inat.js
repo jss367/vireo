@@ -24,6 +24,7 @@ function _inatOptionTaxon(option) {
   return option.scientific_name || option.species || '';
 }
 
+/** @returns {InatQueueItem} */
 function _inatQueueItem(/** @type {number} */ photoId, /** @type {InatPreparedPhoto} */ data) {
   var options = (data.species_options || []).filter(function(option) { return !!_inatOptionTaxon(option); });
   // The single-valued fields stay the default; a photo with only a
@@ -208,19 +209,25 @@ function copyInatQuickUploadUrl(/** @type {number} */ idx) {
   return copyExternalUrl(_inatQuickUploadUrl(idx));
 }
 
-export async function submitToInat(/** @type {number} */ photoId) {
+/** @param {number} photoId @param {InatQueueItem['comparison']} [comparison] */
+export async function submitToInat(photoId, comparison) {
   if (_lbGuardReadOnly()) return false;
   try {
     var data = await /** @type {Promise<InatPreparedPhoto>} */ (safeFetch('/api/inat/prepare/' + photoId, {}, { toast: false }));
     if (data.error) { alert(data.error); return; }
 
+    const item = _inatQueueItem(photoId, data);
+    if (comparison) {
+      item.comparison = comparison;
+      item.taxon_name = comparison.name;
+    }
     if (data.mode === 'quick') {
-      await openInatQuickModal([_inatQueueItem(photoId, data)], []);
+      await openInatQuickModal([item], []);
       return;
     }
 
     // Direct mode: open modal
-    inatQueue = [_inatQueueItem(photoId, data)];
+    inatQueue = [item];
     openInatModal([]);
   } catch(e) { const failure = /** @type {Error & {body?: {partial?: boolean, observation_url?: string}}} */ (e instanceof Error ? e : new Error(String(e)));
     alert('Error: ' + failure.message);
@@ -654,6 +661,26 @@ export function closeInatModal() {
   }
 }
 
+/** @param {InatQueueItem} item @param {number} i */
+function readInatSubmission(item, i) {
+  const field = (/** @type {string} */ prefix) =>
+    /** @type {HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement} */ (document.getElementById(prefix + i)).value;
+  const taxon = field('inatTaxon').trim();
+  const lat = field('inatLat').trim();
+  const lng = field('inatLng').trim();
+  return {
+    photo_id: item.photo_id,
+    taxon_name: taxon,
+    taxon_id: item.comparison?.name === taxon ? item.comparison.id : undefined,
+    expected_login: item.comparison?.login,
+    observed_on: field('inatDate'),
+    latitude: lat === '' ? null : parseFloat(lat),
+    longitude: lng === '' ? null : parseFloat(lng),
+    description: field('inatDesc').trim(),
+    geoprivacy: field('inatGeo'),
+  };
+}
+
 export async function inatDoSubmit() {
   if (_lbGuardReadOnly()) return false;
   var btn = /** @type {HTMLButtonElement} */ (document.getElementById('inatSubmitBtn'));
@@ -678,20 +705,7 @@ export async function inatDoSubmit() {
     if (_inatCancelled || generation !== _inatModalGeneration) break;
     var item = queue[i]; if (!item) continue;
     var statusEl = /** @type {HTMLElement} */ (document.getElementById('inatStatus' + i));
-    var latValue = /** @type {HTMLInputElement} */ (document.getElementById('inatLat' + i)).value.trim();
-    var lngValue = /** @type {HTMLInputElement} */ (document.getElementById('inatLng' + i)).value.trim();
-
-    // Read possibly-edited fields from the form
-    var submission = {
-      photo_id: item.photo_id,
-      taxon_name: /** @type {HTMLInputElement} */ (document.getElementById('inatTaxon' + i)).value.trim(),
-      observed_on: /** @type {HTMLInputElement} */ (document.getElementById('inatDate' + i)).value,
-      latitude: latValue === '' ? null : parseFloat(latValue),
-      longitude: lngValue === '' ? null : parseFloat(lngValue),
-      description: /** @type {HTMLTextAreaElement} */ (document.getElementById('inatDesc' + i)).value.trim(),
-      geoprivacy: /** @type {HTMLSelectElement} */ (document.getElementById('inatGeo' + i)).value,
-    };
-
+    const submission = readInatSubmission(item, i);
     statusEl.className = 'inat-card-status';
     statusEl.textContent = 'Submitting...';
 
@@ -702,6 +716,11 @@ export async function inatDoSubmit() {
         body: JSON.stringify(submission),
       }, { toast: false }));
 
+      if (!result.error && submission.taxon_id) {
+        document.dispatchEvent(new CustomEvent('inat:species-submitted', {
+          detail: {login: submission.expected_login, id: submission.taxon_id, url: result.observation_url},
+        }));
+      }
       if (generation !== _inatModalGeneration) {
         if (!result.error) succeeded++;
         done++;
