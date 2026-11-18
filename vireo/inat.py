@@ -176,16 +176,22 @@ def account_species(login):
                   "per_page": 500, "page": 1}
         seen = set()
         covered = set()
+        expected_total = None
         while True:
             data = _public_page("observations/species_counts", params)
+            total = data["total_results"]
+            if expected_total is None:
+                expected_total = total
+            elif total != expected_total:
+                raise InatApiError("The observation list changed during refresh. Try again.")
             for row in data["results"]:
                 taxon = row["taxon"]
                 seen.add(taxon["id"])
                 covered.add(taxon["id"])
                 covered.update(taxon["ancestor_ids"])
-            if len(seen) >= data["total_results"]:
+            if len(seen) == total:
                 break
-            if not data["results"] or params["page"] * data["per_page"] >= data["total_results"]:
+            if not data["results"] or params["page"] * data["per_page"] >= total:
                 raise InatApiError("The observation list changed during refresh. Try again.")
             params["page"] += 1
     except (KeyError, TypeError, AttributeError) as exc:

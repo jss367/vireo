@@ -1507,3 +1507,23 @@ def test_queue_upload_checks_token_owner_before_creating_observation(app_and_db)
         })
     assert response.status_code == 403
     submit.assert_not_called()
+
+
+@pytest.mark.parametrize("new_total", [1, 3])
+def test_account_species_rejects_changed_total(new_total):
+    import inat
+    with patch("inat._public_page", side_effect=[
+        {"results": [{"login": "birder", "id": 52}]},
+        {"per_page": 1, "total_results": 2, "results": [{"taxon": {"id": 8, "ancestor_ids": []}}]},
+        {"per_page": 1, "total_results": new_total, "results": []},
+    ]), pytest.raises(inat.InatApiError, match="changed"):
+        inat.account_species("birder")
+
+
+def test_account_species_accepts_empty_account():
+    import inat
+    with patch("inat._public_page", side_effect=[
+        {"results": [{"login": "birder", "id": 52}]},
+        {"per_page": 500, "total_results": 0, "results": []},
+    ]):
+        assert inat.account_species("birder")["taxon_ids"] == []
