@@ -629,7 +629,11 @@ def _null_timestamp_pair_facts(photo_a, photo_b, ts_a, ts_b):
 
 
 def _undetected_visual_neighbor(a, b, dt, cfg):
-    if dt > cfg["undetected_max_gap"] or not (a.get("subject_absent") or b.get("subject_absent")):
+    return bool(a.get("subject_absent") or b.get("subject_absent")) and _visual_neighbor(a, b, dt, cfg)
+
+
+def _visual_neighbor(a, b, dt, cfg):
+    if dt > cfg["undetected_max_gap"]:
         return False
     ga, gb = a.get("dino_global_embedding"), b.get("dino_global_embedding")
     if ga is not None and gb is not None and ga.shape == gb.shape:
@@ -891,7 +895,7 @@ def _visual_boundary_support(left, right, cfg):
         if len(tail) != 2 or len(head) != 2:
             continue
         pairs = list(zip(tail, head, strict=True))
-        if all(_undetected_visual_neighbor(
+        if all(_visual_neighbor(
             a, b, _time_delta_seconds(_parse_timestamp(a.get("timestamp")), _parse_timestamp(b.get("timestamp"))), cfg
         ) and _confident_species_conflict(a, b, config=cfg) is None for a, b in pairs):
             return [p for p in (*tail, *head, left[-1], right[0]) if p.get("subject_absent")]

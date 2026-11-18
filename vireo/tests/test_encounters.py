@@ -1514,3 +1514,23 @@ def test_visual_merge_requires_two_matches_across_the_boundary():
     assert merge_microsegments([left, right]) == [left + right]
     right[2]['phash_crop'] = other
     assert merge_microsegments([left, right]) == [left, right]
+
+
+def test_single_missed_frame_uses_detected_support_pairs():
+    from encounters import DEFAULTS, _visual_boundary_support, merge_microsegments
+
+    pattern = 'abcd12345678abcd'
+    other = '5432edcba9875432'
+    frames = [dict(id=i, timestamp=f'2026-11-14T08:40:00.{i}',
+                   subject_absent=i == 3, subject_present=i != 3,
+                   phash_crop=other if i == 3 else pattern) for i in range(1, 6)]
+    left, right = frames[:3], frames[3:]
+    assert _visual_boundary_support(left, right, DEFAULTS) == [frames[2]]
+    assert merge_microsegments([left, right]) == [frames]
+    # One corroborating match is insufficient.
+    frames[0]['phash_crop'] = other
+    assert _visual_boundary_support(left, right, DEFAULTS) == []
+    # Matching detected pairs alone never enable this missing-frame fallback.
+    frames[0]['phash_crop'] = pattern
+    frames[2]['subject_absent'] = False
+    assert _visual_boundary_support(left, right, DEFAULTS) == []
