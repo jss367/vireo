@@ -218,4 +218,5 @@ function bindReviewQueue() {
     button.addEventListener('click', function() { rqSetFlag(/** @type {HTMLElement} */ (button).dataset.rqFlag || 'none'); });
   });
   window.addEventListener('pagehide', rqSave);
+  /** @type {HTMLInputElement} */ (rqElement('rqEnabled')).disabled = false;
 }
