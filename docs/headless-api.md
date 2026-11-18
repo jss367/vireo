@@ -309,8 +309,9 @@ in `meta.unconfirmed_species_omitted`). Rejected photos are never listed.
 
 Within a species the order is: the species' chosen photos (the photos marked
 as its representative), then the workspace's ranked highlights, then flagged
-picks by Vireo's score, then everything else by score. Each species carries a
-`decision` saying which of those put its first photo there:
+picks by Vireo's score, then everything else by score, then the photos the
+species is not the subject of. Each species carries a `decision` saying which
+of those put its first photo there:
 
 | `kind` | Meaning |
 | --- | --- |
@@ -320,10 +321,22 @@ picks by Vireo's score, then everything else by score. Each species carries a
 | `pick` | Nobody chose; a flagged pick leads, by Vireo's score among the picks. |
 | `score` | Nobody chose or flagged; Vireo's score ordered the photos. |
 | `unanalyzed` | Nobody chose and the first photo has no score yet, so the order is capture order. Run Process before trusting it. |
+| `in_frame` | Nobody chose, and no photo in the scope has the species as its subject: another bird is. The photo where the species fills most of the frame leads. |
+| `outside_crop` | Nobody chose, and every photo in the scope crops the species out. Capture order. |
+
+A flag, a rating and the score belong to the photo, so they describe the bird
+the photo is a picture of. Each photo carries `species_presence` for the
+species it is listed under: `subject`, `in_frame` (another bird is the subject
+and this species is elsewhere in the frame) or `outside_crop` (every region
+matched to this species lies outside the photo's crop). `subject_species` names
+the species the photo is a picture of. The subject is the photo's primary
+subject, or the first region inside the crop when the photo is cropped; a
+species whose region is at least half that bird's box area is a subject too.
+A flagged pick counts as a pick only where the species is the subject.
 
 `contender_ids` lists every chosen photo of the species in the scope, best
-first. `meta` counts `chosen`, `needs_comparison` (ties) and `guessed` (score or
-unanalyzed) so a reviewer can see what is left to settle.
+first. `meta` counts `chosen`, `needs_comparison` (ties) and `guessed` (score,
+unanalyzed, in_frame or outside_crop) so a reviewer can see what is left to settle.
 
 Chosen photos are ranked by comparisons, not by when they were chosen. A choice
 made for a trip says that photo beats the other chosen photos of that trip and
