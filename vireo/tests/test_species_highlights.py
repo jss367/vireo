@@ -6,6 +6,7 @@ record a comparison, scoped to what the page showed, so a trip's order never
 claims anything about another trip.
 """
 
+import json
 import sqlite3
 
 import pytest
@@ -221,6 +222,57 @@ def test_a_neighbor_that_is_not_a_highlight_is_refused(trips):
     )
 
     assert response.status_code == 400
+
+
+@pytest.fixture(params=["folder", "collection", "rules"])
+def scoped_highlights(trips, request):
+    app, db, folders, photos = trips
+    client = app.test_client()
+    for key in ("a1", "a2", "b1"):
+        folder = folders["second" if key == "b1" else "first"]
+        assert _add(client, photos[key], folder_id=folder).status_code == 200
+    rules = [{"field": "photo_ids", "value": [photos["a1"], photos["a2"]]}]
+    if request.param == "folder":
+        scope = {"folder_id": folders["first"]}
+    elif request.param == "collection":
+        collection = db.collections.add("Synthetic trip", json.dumps(rules))
+        db.commit()
+        scope = {"collection_id": collection}
+    else:
+        scope = {"rules": rules}
+    return client, db, folders, photos, scope
+
+
+@pytest.mark.parametrize("direction", ["up", "down"])
+def test_neighbor_outside_requested_scope_is_refused_without_changes(scoped_highlights, direction):
+    client, db, folders, photos, scope = scoped_highlights
+    before = db.species_choices.comparisons()
+    before_orders = [_highlights(_row(db, folder)) for folder in folders.values()]
+
+    response = _move(
+        client, photos["a1"], direction, neighbor_id=photos["b1"], **scope,
+    )
+
+    assert response.status_code == 400
+    assert db.species_choices.comparisons() == before
+    assert [_highlights(_row(db, folder)) for folder in folders.values()] == before_orders
+
+
+@pytest.mark.parametrize("direction", ["up", "down"])
+def test_neighbor_inside_requested_scope_can_change_order(scoped_highlights, direction):
+    client, db, folders, photos, scope = scoped_highlights
+    moving, neighbor = (photos["a2"], photos["a1"])
+    if direction == "down":
+        moving, neighbor = neighbor, moving
+
+    response = _move(client, moving, direction, neighbor_id=neighbor, **scope)
+
+    assert response.status_code == 200
+    assert response.get_json()["moved"] is True
+    assert _highlights(_row(db, folders["first"])) == [
+        (photos["a2"], 1), (photos["a1"], 2),
+    ]
+    assert _highlights(_row(db, folders["second"])) == [(photos["b1"], 1)]
 
 
 def test_removing_the_middle_highlight_keeps_the_others_in_order(trips):

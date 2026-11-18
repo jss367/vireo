@@ -272,8 +272,8 @@ def move_highlight(
     preferences = Preferences(db.species_choices.comparisons())
     through = _traversal_set(db, canonical)
     if neighbor_id is not None:
-        if neighbor_id == photo_id or neighbor_id not in _eligible_highlights(db, canonical):
-            raise ValueError("neighbor_id is not another highlight of that species")
+        if neighbor_id == photo_id or neighbor_id not in ranked:
+            raise ValueError("neighbor_id is not another highlight of that species in the scope")
         others = [neighbor_id]
     elif direction == "up" and place == 0:
         others = [
