@@ -203,7 +203,7 @@ _CAMERA_SERIAL_TAGS = ("SerialNumber", "BodySerialNumber", "CameraSerialNumber")
 _PILLOW_CAMERA_SERIAL_TAGS = (0xFDE9, 0xA431, 0xC62F)
 _EXIFREAD_CAMERA_SERIAL_TAGS = tuple(
     f"{group} {tag}" for group in ("EXIF", "MakerNote", "Image") for tag in _CAMERA_SERIAL_TAGS
-)
+) + ("Image Tag 0xC62F",)
 
 
 def _camera_serial(groups, tags=_CAMERA_SERIAL_TAGS):

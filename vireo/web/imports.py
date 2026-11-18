@@ -472,7 +472,7 @@ class _DuplicateCheckStream:
         """
         from camera_clock import ClockFrame, dcf_frame_number, find_clock_problems, parse_offset
 
-        frames = []
+        folders: dict[Path, list[ClockFrame]] = {}
         for path in self.paths:
             source_file = Path(path)
             captured = self._capture_time(source_file)
@@ -483,12 +483,12 @@ class _DuplicateCheckStream:
                 offset, camera = self.recovery_offsets.get(path), self.recovery_cameras.get(path)
             else:
                 offset, camera = self.checker.capture_offset(source_file), self.checker.capture_camera(source_file)
-            frames.append(ClockFrame(
+            folders.setdefault(source_file.parent, []).append(ClockFrame(
                 ref=path, filename=source_file.name, captured=captured,
                 offset_minutes=parse_offset(offset),
                 camera=camera or f"Files named {dcf[0]}…",
             ))
-        problems = find_clock_problems(frames, use_gps=False)
+        problems = [p for frames in folders.values() for p in find_clock_problems(frames, use_gps=False)]
         if problems:
             payload = [problem.to_json(include_refs=False) for problem in problems]
             yield f"data: {json.dumps({'clock_problems': payload})}\n\n"

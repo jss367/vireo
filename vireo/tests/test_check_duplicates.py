@@ -1670,6 +1670,15 @@ def test_duplicate_check_reports_a_camera_clock_change_on_the_card(
         (card / name).write_bytes(name.encode())
         times[card / name] = (captured, offset)
 
+    # An older shoot has overlapping file numbers from the same camera.
+    # It must not add a reset or contribute frames to this shoot's fix.
+    older = card / "older"
+    older.mkdir()
+    for name, captured, offset in shots[-3:]:
+        path = older / name
+        path.write_bytes(name.encode())
+        times[path] = (captured.replace(year=2024), offset)
+
     def capture_times(paths):
         result = import_dedup.CaptureTimes()
         for path in paths:
@@ -1679,7 +1688,7 @@ def test_duplicate_check_reports_a_camera_clock_change_on_the_card(
 
     monkeypatch.setattr(import_dedup, "source_capture_timestamps", capture_times)
     response = app.test_client().post("/api/import/check-duplicates", json={
-        "paths": [str(card / name) for name, _, _ in shots],
+        "paths": [str(path) for path in times],
         "verify_by_hash": verify_by_hash,
         "include_capture_dates": True,
     })

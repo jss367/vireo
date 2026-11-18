@@ -36,6 +36,7 @@ from __future__ import annotations
 import math
 import os
 import re
+from bisect import bisect_left
 from collections import Counter, defaultdict
 from collections.abc import Callable, Hashable, Iterable, Sequence
 from dataclasses import dataclass, field
@@ -257,7 +258,7 @@ def _dcf_sequences(frames: list[tuple[int, ClockFrame]]) -> list[list[ClockFrame
 
     A gap spanning most of the counter leaves two runs whose relative order
     is ambiguous. Join them only when both consecutive rollover numbers are
-    present and their timestamps support that direction.
+    present. The clock itself may have been reset at the boundary.
     """
     frames.sort(key=lambda item: (item[0], item[1].filename))
     ordered = [frame for _, frame in frames]
@@ -266,12 +267,7 @@ def _dcf_sequences(frames: list[tuple[int, ClockFrame]]) -> list[list[ClockFrame
             continue
         low, high = ordered[:i], ordered[i:]
         if frames[0][0] == 1 and frames[-1][0] == DCF_NUMBER_SPAN:
-            before, after = high[-1], low[0]
-            first, second = before.instant(), after.instant()
-            if first is None or second is None:
-                first, second = before.captured, after.captured
-            if second >= first:
-                return [high + low]
+            return [high + low]
         return [low, high]
     return [ordered]
 
@@ -371,17 +367,18 @@ def estimate_clock_error(frames: Iterable[ClockFrame]) -> tuple[int, int] | None
         if frame.gps_utc not in per_fix or error < per_fix[frame.gps_utc]:
             per_fix[frame.gps_utc] = error
     errors = sorted(per_fix.values())
-    best: list[float] = []
-    for low in errors:
-        window = [e for e in errors if low <= e <= low + GPS_AGREEMENT_MINUTES]
-        if len(window) > len(best):
-            best = window
-    if len(best) < GPS_MIN_FIXES:
+    best_start = best_count = end = 0
+    for start, low in enumerate(errors):
+        while end < len(errors) and errors[end] <= low + GPS_AGREEMENT_MINUTES:
+            end += 1
+        if end - start > best_count:
+            best_start, best_count = start, end - start
+    if best_count < GPS_MIN_FIXES:
         return None
-    value = best[len(best) // 4]
+    value = errors[best_start + best_count // 4]
     snapped = int(round(value / 15) * 15)
     estimate = snapped if abs(value - snapped) <= GPS_SNAP_MINUTES else int(round(value))
-    return estimate, len(best)
+    return estimate, best_count
 
 
 def _most_common(values: Iterable[Any]) -> Any:
@@ -453,15 +450,16 @@ class _CameraClock:
             epochs.append(rest)
         return epochs
 
-    def part(self, frames: list[ClockFrame], use_gps: bool) -> _CameraClock:
+    def part(self, frames: list[ClockFrame], use_gps: bool, zone_lookup: ZoneLookup | None) -> _CameraClock:
         """The same camera over one stretch between resets, with its own clock error."""
         refs = {f.ref for f in frames}
-        part = _CameraClock(frames=frames, zones={r: z for r, z in self.zones.items() if r in refs})
+        part = _CameraClock(frames=frames)
         part._position = self._position
         part.switches = [s for s in self.switches if s.before.ref in refs and s.after.ref in refs]
         part.link_switches()
         if use_gps:
-            _measure(part)
+            _measure_and_locate(part, zone_lookup)
+            self.zones.update(part.zones)
         return part
 
     def offset_groups(self) -> list[tuple[int, list[ClockFrame]]]:
@@ -513,11 +511,18 @@ class _CameraClock:
         if not positioned:
             found = self.group_zone(offset)
             return [(group, *found)] if found is not None else [(group, None, None)]
+        by_time = {}
+        for index, (frame, zone) in enumerate(positioned):
+            by_time.setdefault(frame.captured, (index, zone))
+        times = sorted(by_time)
         by_zone: dict[tuple[str, int], list[ClockFrame]] = defaultdict(list)
         for frame in group:
             zone = self.zones.get(frame.ref)
             if zone is None:
-                zone = min(positioned, key=lambda p: abs((p[0].captured - frame.captured).total_seconds()))[1]
+                i = bisect_left(times, frame.captured)
+                nearest = min(times[max(0, i - 1):i + 1],
+                              key=lambda t: (abs(t - frame.captured), by_time[t][0]))
+                zone = by_time[nearest][1]
             by_zone[zone].append(frame)
         return [(frames, zone, None) for zone, frames in sorted(by_zone.items())]
 
@@ -669,7 +674,7 @@ def _reset_fix(jump: ClockJump, frames: list[ClockFrame], other_shift: int, *, m
 
 
 def _fixes_across_resets(clock: _CameraClock, nearby_error: tuple[int, str] | None,
-                         use_gps: bool) -> list[ClockFix]:
+                         use_gps: bool, zone_lookup: ZoneLookup | None) -> list[ClockFix]:
     """Fixes when the clock itself was set back somewhere in these frames.
 
     A reset changes the clock error, so GPS is measured separately on each
@@ -682,14 +687,19 @@ def _fixes_across_resets(clock: _CameraClock, nearby_error: tuple[int, str] | No
     shifts: dict[Hashable, int] = {}
     settled: set[Hashable] = set()
     stretch_of: dict[Hashable, list[ClockFrame]] = {}
-    for epoch in clock.epochs():
-        part = clock.part(epoch, use_gps)
+    unresolved: set[Hashable] = set()
+    for index, epoch in enumerate(clock.epochs()):
+        part = clock.part(epoch, use_gps, zone_lookup)
         clock.epoch_errors.append((epoch[0], epoch[-1], part.clock_error, part.error_fixes))
         part_fixes = _fixes(part, nearby_error)
         fixes.extend(part_fixes)
+        group_sizes = Counter(fix.group for fix in part_fixes)
         for fix in part_fixes:
-            if fix.recommended:
+            if group_sizes[fix.group] > 1:
+                unresolved.update(f.ref for f in fix.frames)
+            else:
                 shifts.update({f.ref: fix.shift_minutes for f in fix.frames})
+            fix.group = f"epoch {index}: {fix.group}"
         if part.clock_error is not None or part_fixes:
             settled.update(f.ref for f in epoch)
         stretch_of.update({f.ref: epoch for f in epoch})
@@ -698,12 +708,18 @@ def _fixes_across_resets(clock: _CameraClock, nearby_error: tuple[int, str] | No
     # the remaining unanchored prefix, work backward from its final epoch.
     for jump in resets:
         after = [f for f in stretch_of[jump.after.ref] if f.ref not in settled]
-        if after and jump.before.ref in settled:
+        if jump.before.ref in unresolved and after:
+            unresolved.update(f.ref for f in after)
+            settled.update(f.ref for f in after)
+        elif after and jump.before.ref in settled:
             _add_reset_fix(fixes, shifts, settled,
                            _reset_fix(jump, after, shifts.get(jump.before.ref, 0), move_before=False))
     for jump in reversed(resets):
         before = [f for f in stretch_of[jump.before.ref] if f.ref not in settled]
-        if before:
+        if jump.after.ref in unresolved:
+            unresolved.update(f.ref for f in before)
+            settled.update(f.ref for f in before)
+        elif before:
             _add_reset_fix(fixes, shifts, settled,
                            _reset_fix(jump, before, shifts.get(jump.after.ref, 0), move_before=True))
     return fixes
@@ -812,6 +828,19 @@ def _measure(clock: _CameraClock) -> None:
         clock.error_fixes = measured[1]
 
 
+def _measure_and_locate(clock: _CameraClock, zone_lookup: ZoneLookup | None) -> None:
+    _measure(clock)
+    if zone_lookup is None:
+        return
+    for frame in clock.frames:
+        if frame.latitude is None or frame.longitude is None:
+            continue
+        utc = frame.captured - timedelta(minutes=(frame.offset_minutes or 0) + (clock.clock_error or 0))
+        zone = zone_lookup(frame.latitude, frame.longitude, utc)
+        if zone is not None:
+            clock.zones[frame.ref] = zone
+
+
 def _summary(clock: _CameraClock, fixes: list[ClockFix]) -> str:
     error = clock.clock_error or 0
     zone_wrong = any(f.target_offset is not None and f.target_offset != f.recorded_offset for f in fixes)
@@ -842,20 +871,13 @@ def analyze_camera(frames: Sequence[ClockFrame], *, zone_lookup: ZoneLookup | No
     for sequence in shot_sequences(clock.frames):
         clock.add_sequence(sequence)
     clock.link_switches()
-    if use_gps:
-        _measure(clock)
-        if zone_lookup is not None:
-            for frame in clock.frames:
-                if frame.latitude is None or frame.longitude is None:
-                    continue
-                approx_utc = frame.captured - timedelta(
-                    minutes=(frame.offset_minutes or 0) + (clock.clock_error or 0))
-                zone = zone_lookup(frame.latitude, frame.longitude, approx_utc)
-                if zone is not None:
-                    clock.zones[frame.ref] = zone
-
     resets = any(j.kind == "reset" for j in clock.jumps)
-    fixes = _fixes_across_resets(clock, nearby_error, use_gps) if resets else _fixes(clock, nearby_error)
+    if resets:
+        fixes = _fixes_across_resets(clock, nearby_error, use_gps, zone_lookup)
+    else:
+        if use_gps:
+            _measure_and_locate(clock, zone_lookup)
+        fixes = _fixes(clock, nearby_error)
     if not fixes and not resets:
         # Every offset is right for where the photos were taken (or nothing
         # says otherwise), so a backward step in clock time was real travel.

@@ -298,3 +298,45 @@ def test_sparse_dcf_runs_preserve_local_reset_evidence():
     [problem] = find_clock_problems(frames, use_gps=False)
     [fix] = problem.fixes
     assert [frame.ref for frame in fix.frames] == [9000]
+
+
+def test_rollover_with_backward_clock_preserves_reset_evidence():
+    frames = [ClockFrame(ref=n, filename=f"DSC_{n:04d}.JPG", captured=datetime(2026, 4, 1, hour))
+              for n, hour in [(9999, 14), (1, 13)]]
+    [problem] = find_clock_problems(frames, use_gps=False)
+    [fix] = problem.fixes
+    assert [f.ref for f in fix.frames] == [9999]
+    assert fix.shift_minutes == -61
+
+
+def test_measured_reset_epochs_need_separate_fix_groups():
+    problem = analyze_camera(_reset_frames(gps_error_before=30, gps_error_after=-45))
+    assert problem is not None
+    assert {f.shift_minutes for f in problem.fixes} == {-30, 45}
+    assert len({f.group for f in problem.fixes}) == 2
+
+
+def test_reset_fix_waits_for_unmeasured_zone_choice():
+    from dataclasses import replace
+
+    frames = [replace(f, latitude=34., longitude=-118.) if f.ref <= 6 else f for f in _reset_frames()]
+    problem = analyze_camera(frames, zone_lookup=la_winter)
+    assert problem is not None
+    assert {f.shift_minutes for f in problem.fixes} == {-60, 0}
+    assert all(f.ref <= 6 for fix in problem.fixes for f in fix.frames)
+
+
+def test_reset_epoch_uses_its_own_clock_error_at_dst_boundary():
+    from zoneinfo import ZoneInfo
+
+    def local_zone(_lat, _lon, utc):
+        from datetime import UTC
+        local = utc.replace(tzinfo=UTC).astimezone(ZoneInfo("America/Los_Angeles"))
+        return "America/Los_Angeles", int(local.utcoffset().total_seconds() // 60)
+
+    before = frames_at(datetime(2026, 11, 1, 1, 50), 8, offset=-420, first_count=1, gps_error=0)
+    after = frames_at(datetime(2026, 11, 1, 0, 50), 4, offset=-420, first_count=9, gps_error=-120)
+    problem = analyze_camera(before + after, zone_lookup=local_zone)
+    assert problem is not None
+    [fix] = problem.fixes
+    assert (fix.target_offset, fix.shift_minutes) == (-480, 60)

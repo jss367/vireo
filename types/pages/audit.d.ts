@@ -10,7 +10,7 @@ interface AuditFileEntry {path: string; folder: string}
 interface AuditFlaggedHash {photo_id: number; filename: string; folder_path: string; hash_status: string; hash_checked_at: string}
 interface AuditIntegrity {stats: {checked: number; total: number; unchecked: number}; flagged: AuditFlaggedHash[]}
 interface AuditClockFix {
-  group: string; count: number; first: string; last: string; refs: number[];
+  expected_state: string; group: string; count: number; first: string; last: string; refs: number[];
   recorded_offset: string | null; target_offset: string | null; shift_minutes: number;
   label: string; explanation: string; recommended: boolean;
 }

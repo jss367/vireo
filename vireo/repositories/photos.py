@@ -248,6 +248,22 @@ class PhotoRepository:
             )
         return found
 
+    def capture_time_states(self, photo_ids):
+        states = []
+        for chunk in self._chunks(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self.conn.execute(
+                "SELECT p.id, p.timestamp, p.file_mtime, p.file_hash, "
+                "CASE WHEN json_valid(p.exif_data) THEN json_extract(p.exif_data, "
+                "'$.EXIF.DateTimeOriginal', '$.EXIF.SubSecTimeOriginal', "
+                "'$.EXIF.OffsetTimeOriginal', '$.EXIF.OffsetTime') END FROM photos p "
+                f"JOIN photo_workspace_visibility wf ON wf.photo_id=p.id "
+                f"WHERE wf.workspace_id=? AND p.id IN ({placeholders})",
+                [self.workspace_id, *chunk],
+            )
+            states.extend(tuple(row) for row in rows)
+        return states
+
     def get_by_ids(self, photo_ids, *, include_exif=False):
         """Return photos for a list of IDs.
 

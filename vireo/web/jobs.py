@@ -416,6 +416,12 @@ def create_jobs_blueprint(
         shift_minutes = body.get("shift_minutes")
         keep_backups = bool(body.get("keep_backups", True))
 
+        from capture_time import current_capture_time_token, guard_capture_time
+
+        expected = current_capture_time_token(get_db(), photo_ids)
+        if body.get("expected_state", expected) != expected:
+            return json_error("The capture-time evidence changed. Review the photos again.", 409)
+
         def work(job: JobDict) -> JsonDict:
             from capture_time import adjust_capture_time
 
@@ -439,16 +445,17 @@ def create_jobs_blueprint(
                     },
                 )
 
-            return adjust_capture_time(
-                thread_db,
-                photo_ids,
-                mode=mode,
-                target_offset=target_offset,
-                shift_minutes=shift_minutes,
-                keep_backups=keep_backups,
-                progress_callback=progress_cb,
-                cancel_check=lambda: ctx.runner.is_cancelled(job["id"]),
-            )
+            with guard_capture_time(thread_db, photo_ids, expected):
+                return adjust_capture_time(
+                    thread_db,
+                    photo_ids,
+                    mode=mode,
+                    target_offset=target_offset,
+                    shift_minutes=shift_minutes,
+                    keep_backups=keep_backups,
+                    progress_callback=progress_cb,
+                    cancel_check=lambda: ctx.runner.is_cancelled(job["id"]),
+                )
 
         return ctx.start(
             "capture-time",

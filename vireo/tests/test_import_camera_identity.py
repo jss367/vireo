@@ -147,3 +147,16 @@ def test_lens_serial_does_not_identify_a_camera_body(tmp_path, monkeypatch):
         "EXIF LensSerialNumber": "lens-A", "MakerNote LensSerialNumber": "lens-A",
     })
     assert grouping.read_exif_clock(path).camera == "Synthetic Camera"
+
+
+def test_exifread_numeric_dng_serial(tmp_path, monkeypatch):
+    path = tmp_path / "DSC_0001.jpg"
+    jpeg(path, "CameraSerialNumber", "body-A", in_sub_ifd=False)
+
+    def no_pillow_header(*_args):
+        raise OSError("Exercise the ExifRead fallback")
+
+    monkeypatch.setattr(Image, "open", no_pillow_header)
+    clock = grouping.read_exif_clock(path)
+    assert clock.captured == datetime(2026, 5, 30, 12)
+    assert clock.camera == "Synthetic Camera #body-A"

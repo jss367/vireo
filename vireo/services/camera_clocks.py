@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 import camera_clock
 import time_zones
 from camera_clock import CLOCK_ERROR_MIN_MINUTES, ClockFrame
+from capture_time import capture_time_token
 
 if TYPE_CHECKING:
     import sqlite3
@@ -117,7 +118,9 @@ def check_camera_clocks(db: Database) -> JsonDict:
     """
     groups: dict[tuple[int, str | None], list[ClockFrame]] = defaultdict(list)
     folder_paths: dict[int, str] = {}
+    states = {}
     for row in db.audit.camera_clock_rows():
+        states[row["id"]] = (row["id"], row["timestamp"], row["file_mtime"], row["file_hash"], row["clock_state"])
         frame = frame_from_row(row)
         if frame is None:
             continue
@@ -144,10 +147,13 @@ def check_camera_clocks(db: Database) -> JsonDict:
         problem = camera_clock.analyze_camera(frames, zone_lookup=zone_lookup, nearby_error=nearby)
         if problem is None:
             continue
+        payload = problem.to_json(include_refs=True)
+        for fix in payload["fixes"]:
+            fix["expected_state"] = capture_time_token(states[pid] for pid in fix["refs"])
         findings.append({
             "folder_id": folder_id,
             "folder_path": folder_paths[folder_id],
-            **problem.to_json(include_refs=True),
+            **payload,
         })
     findings.sort(key=lambda f: (str(f["folder_path"]), str(f["camera"] or "")))
     return {"findings": findings, "location_available": location}
