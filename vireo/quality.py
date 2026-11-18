@@ -484,6 +484,16 @@ def measure_subject_detail(mask, *, source_path, frame_size=None):
         image.close()
 
 
+def saved_mask_matches_frame(mask_size, mask_frame, image):
+    """Can the saved proxy mask be mapped to this rendering by resizing alone?"""
+    w, h = mask_size
+    iw, ih = image.size
+    # Each thumbnail may round its short dimension by a pixel.
+    if abs(w * ih - h * iw) > max(w, h) + max(iw, ih):
+        return False
+    return mask_frame == "camera_rendered" or max(w, h) > image.info.get("vireo_rejected_preview_edge", 0)
+
+
 def measure_cached_subject_detail(mask_path, source_path, frame_size=None):
     """Subject detail for a saved mask PNG whose row predates the measurement.
 
@@ -495,6 +505,7 @@ def measure_cached_subject_detail(mask_path, source_path, frame_size=None):
     """
     try:
         with Image.open(mask_path) as mask_image:
+            mask_frame = mask_image.info.get("vireo_mask_frame")
             mask = np.asarray(mask_image.convert("L")) > 127
     except (OSError, SyntaxError, ValueError, Image.DecompressionBombError):
         # OSError covers the file missing or unreadable; the others cover
@@ -508,7 +519,16 @@ def measure_cached_subject_detail(mask_path, source_path, frame_size=None):
         # the measurement below still propagate.
         log.warning("Could not read mask %s for the subject detail measurement", mask_path, exc_info=True)
         return MASK_CACHE_INVALID
-    return measure_subject_detail(mask, source_path=source_path, frame_size=frame_size) or None
+    needed = detail_decode_edge(mask)
+    if needed is None:
+        return {"subject_detail": 0.0, "subject_detail_px": None}
+    image = load_detail_source(source_path, needed, frame_size)
+    if image is None:
+        return None
+    with image:
+        if not saved_mask_matches_frame(mask.shape[::-1], mask_frame, image):
+            return MASK_CACHE_INVALID
+        return compute_subject_detail(image, mask, frame_size=frame_size)
 
 
 def compute_all_quality_features(image, mask):

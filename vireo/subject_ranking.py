@@ -128,7 +128,8 @@ def source_path(db, photo):
 # 2: subject detail is read from the camera's rendering at every subject size.
 # 3: reduced/cropped RAW previews demosaic at every subject size.
 # 4: always use a full-resolution demosaic before resizing.
-ANALYSIS_RECIPE_VERSION = 4
+# 5: segment and measure the same camera-rendered frame.
+ANALYSIS_RECIPE_VERSION = 5
 
 
 def analysis_key(path, detection, effective_cfg):

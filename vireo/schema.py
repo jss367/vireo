@@ -484,6 +484,7 @@ MIGRATIONS = (
     Migration(41, "primary_projection_policy", _add_primary_projection_policy),
     Migration(42, "repair_alternate_branch_schemas", _repair_alternate_branch_schemas),
     Migration(43, "subject_detail_full_resolution", _clear_subject_detail_from_other_read_paths),
+    Migration(44, "subject_detail_mask_alignment", _clear_subject_detail_from_other_read_paths),
 )
 
 

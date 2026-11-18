@@ -70,15 +70,15 @@ Nine of those bursts had frames on both sides of the 512 px line, so frames
 of one burst were being ranked on two renderings. A RAW without a full-size
 preview is demosaiced at full resolution before resizing, falling back to its embedded
 JPEG only if libraw cannot decode it.
-None of this catalog's cameras (D7200, D850, Z 8) is one. Migration 43
+None of this catalog's cameras (D7200, D850, Z 8) is one. Migration 44
 returns every nonempty historical detail measurement to "not measured".
 Preview dimensions were not recorded with the score: even a middle-band
 subject could have used a cropped or reduced JPEG that now demosaics, so
-subject size alone cannot certify its rendering. Mask files, unrelated
-features, and empty-mask zeros are preserved; the mask stage measures the
-cached masks again without rerunning SAM. The comparison
+subject size alone cannot certify its rendering. The mask stage remeasures aligned cached masks and regenerates masks
+whose preview framing cannot be verified. Fresh segmentation and detail
+measurement both use the camera-rendered frame. The comparison
 analyses (`subject_ranking_analysis`) store the detail too; their key carries
-`subject_ranking.ANALYSIS_RECIPE_VERSION` (3), raised with this change, so an
+`subject_ranking.ANALYSIS_RECIPE_VERSION` (5), raised with this change, so an
 analysis made before it no longer matches and the subject is analysed again.
 
 `photos.subject_detail_px` is the subject box's longer side in native pixels,

@@ -248,7 +248,7 @@ def retry_features(db: Database, pid: int, effective: JsonDict, cache_dir: str,
             raise ValueError("Primary subject changed during analysis; retry the chosen subject")
         _publish_features(db, pid, detection, analysis, effective, cache_dir, checkpoint,
                           lambda: _unchanged(db, pid, path, identity),
-                          existing_mask_path=existing_path)
+                          existing_mask_path=analysis["existing_mask_path"])
     if on_published:
         on_published()
     if expected_primary_detection_id is not None:

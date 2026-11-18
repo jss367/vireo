@@ -1130,3 +1130,22 @@ def test_quality_only_work_rechecks_mask_owner(retry_library, tmp_path):
     after = db.masks_features.get_mask(pid, "sam2-small")
     assert calls["segmentation"] == ["sam2-small"]
     assert after["path"] != before["path"] and after["detector_model"] == before["detector_model"]
+
+
+def test_quality_retry_replaces_a_mask_with_different_framing(retry_library, tmp_path):
+    from services.analysis_retry import retry_features
+
+    _, db, ids, calls = retry_library
+    pid = ids[0]
+    execute(db, [pid], tmp_path)
+    previous = db.masks_features.get_mask(pid, "sam2-small")["path"]
+    Image.new("L", (100, 56), 255).save(previous)
+    calls["segmentation"].clear()
+
+    retry_features(db, pid, db.get_effective_config({}), str(tmp_path), lambda: None, quality_only=True)
+    current = db.masks_features.get_mask(pid, "sam2-small")["path"]
+    assert current != previous
+    assert calls["segmentation"] == ["sam2-small"]
+    with Image.open(current) as mask:
+        assert mask.size == (100, 80)
+        assert mask.info["vireo_mask_frame"] == "camera_rendered"

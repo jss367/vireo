@@ -670,7 +670,7 @@ class _MaskExtractionRun:
                           else ("mask PNGs", "were"))
             job_errors.append(
                 f"{self.mask_cache_invalidated} cached {noun} {verb} "
-                f"unreadable and will be rebuilt on the next Extract run."
+                f"unreadable or could not be aligned to the source and will be rebuilt on the next Extract run."
             )
         return {"masked": self.masked, "skipped": self.skipped,
                 "failed": failed, "unreadable": unreadable, "total": total,

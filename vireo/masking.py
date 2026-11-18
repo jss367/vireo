@@ -426,10 +426,17 @@ def save_mask(mask, masks_dir, photo_id, variant):
     """
     os.makedirs(masks_dir, exist_ok=True)
     path = os.path.join(masks_dir, f"{photo_id}.{variant}.png")
-    # Convert bool mask to uint8 (0 or 255)
-    mask_img = Image.fromarray((mask.astype(np.uint8) * 255), mode="L")
-    mask_img.save(path, format="PNG")
+    write_mask_png(mask, path)
     return path
+
+
+def write_mask_png(mask, destination):
+    """Encode the segmented frame provenance with the mask pixels."""
+    from PIL.PngImagePlugin import PngInfo
+
+    metadata = PngInfo()
+    metadata.add_text("vireo_mask_frame", "camera_rendered")
+    Image.fromarray(mask.astype(np.uint8) * 255).save(destination, format="PNG", pnginfo=metadata)
 
 
 def load_mask(masks_dir, photo_id, variant):
@@ -558,6 +565,6 @@ def render_proxy(image_path, longest_edge=1536):
     Returns:
         PIL Image or None on failure
     """
-    from image_loader import load_image
+    from image_loader import RAW_DECODE_CAMERA_RENDERED, load_image
 
-    return load_image(image_path, max_size=longest_edge)
+    return load_image(image_path, max_size=longest_edge, raw_decode=RAW_DECODE_CAMERA_RENDERED)

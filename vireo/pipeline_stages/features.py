@@ -187,9 +187,9 @@ def _unmeasured_detail(count: int) -> str:
 
 
 def _invalidated_cache(count: int) -> str:
-    """'N cached mask PNG(s) could not be decoded', singular aware."""
+    """Describe masks that cannot be reused for source detail."""
     noun, verb = ("mask PNG", "was") if count == 1 else ("mask PNGs", "were")
-    return f"{count} cached {noun} {verb} unreadable"
+    return f"{count} cached {noun} {verb} unreadable or could not be aligned to the source"
 
 
 class _MaskFileStage(Protocol):

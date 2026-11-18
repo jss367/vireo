@@ -1207,11 +1207,15 @@ def _load_raw(path, max_size, raw_decode=RAW_DECODE_JPEG_FIRST):
         try:
             if raw_decode == RAW_DECODE_LINEAR:
                 return _postprocess_raw_linear(raw)
-            return _postprocess_raw(
+            image = _postprocess_raw(
                 raw,
                 None if raw_decode == RAW_DECODE_CAMERA_RENDERED else max_size,
                 preserve_highlights=raw_decode == RAW_DECODE_PRESERVE_HIGHLIGHTS,
             )
+            if raw_decode == RAW_DECODE_CAMERA_RENDERED and embedded is not None:
+                # Legacy JPEG-first masks at or below this size used the rejected preview.
+                image.info["vireo_rejected_preview_edge"] = max(embedded.size)
+            return image
         except Exception as e:  # broad: libraw raises undocumented errors; the embedded JPEG is the fallback, else re-raise
             if raw_decode == RAW_DECODE_LINEAR:
                 # A failed unpack leaves this LibRaw handle refusing further

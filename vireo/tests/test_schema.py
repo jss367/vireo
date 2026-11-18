@@ -616,7 +616,7 @@ def test_subject_comparison_cache_migrates_without_changing_photographer_choices
             "detection_id", "source_key", "features", "mask_png"]
 
 
-@pytest.mark.parametrize("version", [38, 39, 40, 41, 42])
+@pytest.mark.parametrize("version", [38, 39, 40, 41, 42, 43])
 def test_catalog_unmeasures_the_detail_read_another_way(tmp_path, version):
     """Historical nonempty measurements lack rendering provenance at every
     subject size; masks, empty-mask zeros and pending values are kept."""
@@ -668,7 +668,7 @@ def test_catalog_unmeasures_the_detail_read_another_way(tmp_path, version):
         assert conn.execute("SELECT COUNT(*) FROM photo_masks WHERE path IS NOT NULL").fetchone()[0] == 24
 
 
-@pytest.mark.parametrize("version", [38, 39, 40, 41, 42])
+@pytest.mark.parametrize("version", [38, 39, 40, 41, 42, 43])
 def test_middle_band_detail_is_invalidated_without_reading_the_raw(tmp_path, version):
     """A 1000 px subject could have used a 6000x3376 cropped JPEG on a
     6000x4000 sensor. Preview dimensions were not stored with the score."""

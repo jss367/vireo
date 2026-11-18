@@ -240,6 +240,32 @@ def test_detail_source_preview_eligibility_is_independent_of_request_size(
         assert max(image.size) == min(needed, source_edge)
 
 
+@pytest.mark.parametrize("preview_size", [(1200, 676), (900, 600)])
+def test_mask_proxy_and_detail_share_frame_after_preview_rejection(tmp_path, monkeypatch, preview_size):
+    import numpy as np
+    from image_loader import load_image
+    from masking import render_proxy, save_mask
+    from PIL import Image
+    from quality import MASK_CACHE_INVALID, measure_cached_subject_detail
+
+    source = tmp_path / "frame.nef"
+    source.write_bytes(b"synthetic RAW")
+    _install_fake_raw(monkeypatch, _FakeRaw(
+        embedded_jpeg=_jpeg_bytes(preview_size), sensor_size=(1200, 800), postprocess_size=(1200, 800),
+    ))
+    with load_image(source, max_size=600) as legacy:
+        stale = tmp_path / "legacy-mask.png"
+        Image.new("L", legacy.size, 255).save(stale)
+    assert measure_cached_subject_detail(stale, source) is MASK_CACHE_INVALID
+
+    with render_proxy(source, longest_edge=600) as aligned:
+        assert aligned.size == (600, 400)
+        assert aligned.getpixel((0, 0)) == (0, 0, 0)
+        mask = np.ones((aligned.height, aligned.width), dtype=bool)
+    saved = save_mask(mask, str(tmp_path), 1, "sam2-small")
+    assert measure_cached_subject_detail(saved, source, (1200, 800))["subject_detail_px"] == 1200
+
+
 def test_raw_camera_rendered_mode_rejects_cropped_embedded_jpeg(
     tmp_path, monkeypatch,
 ):
