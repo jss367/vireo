@@ -432,9 +432,9 @@ class JobHistory:
                         result, error_count, config, workspace_id, tree, summary,
                         resource_wait_seconds, resource_wait_count,
                         origin, parent_job_id, reason, repeat_count, repeat_since,
-                        task_scope)
+                        task_scope, progress, errors)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                               ?, ?, ?, ?, ?, ?)""",
+                               ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         job["id"], job["type"], job["status"],
                         job["started_at"], job["finished_at"],
@@ -446,6 +446,8 @@ class JobHistory:
                         job.get("origin") or "user", job.get("parent_job_id"),
                         job.get("reason"), repeat_count, repeat_since,
                         job.get("task_scope"),
+                        json.dumps(job.get("progress"), default=str),
+                        json.dumps(job.get("errors") or [], default=str),
                     ),
                 )
                 self.prune_operations(conn, job.get("workspace_id"))
@@ -562,7 +564,7 @@ class JobHistory:
     # Reads
     # ------------------------------------------------------------------
 
-    def get_history(self, db, limit=10, origin=None):
+    def get_history(self, db, limit=10, origin=None, *, job_id=None):
         """Get recent job history from the database.
 
         Only TERMINAL rows (completed/failed/cancelled) are returned —
@@ -582,12 +584,13 @@ class JobHistory:
         """
         try:
             ws_id = db.active_workspace_id
-            terminal = ("completed", "failed", "cancelled")
-            rows = db.job_history.terminal(ws_id, terminal, limit, origin)
+            rows = db.job_history.terminal(ws_id, TERMINAL_STATUSES, limit, origin, job_id=job_id)
             result = []
             for r in rows:
                 d = dict(r)
-                for field in ("tree", "result", "config", "progress"):
+                if job_id is None:
+                    d.pop("errors", None)  # Only detail requests need the error sample.
+                for field in ("tree", "result", "config", "progress", "errors"):
                     if d.get(field) and isinstance(d[field], str):
                         try:
                             d[field] = json.loads(d[field])

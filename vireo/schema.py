@@ -433,6 +433,11 @@ def _validate_flag_attribution_keeper(conn):
         raise RuntimeError("current_flag_attribution is missing its keeper columns")
 
 
+def _add_job_history_errors(conn):
+    if "errors" not in job_history_columns(conn):
+        conn.execute("ALTER TABLE job_history ADD COLUMN errors TEXT")
+
+
 MIGRATIONS = (
     Migration(
         13, "companion_identities_file_mtime",
@@ -487,7 +492,8 @@ MIGRATIONS = (
     Migration(36, "species_choices", create_species_choices),
     Migration(37, "subject_candidates", create_subject_candidates),
     Migration(38, "assignment_reviews", create_assignment_reviews),
-    Migration(39, "subject_detail_one_read_path", _clear_subject_detail_from_other_read_paths),
+    Migration(39, "job_history_errors", _add_job_history_errors),
+    Migration(40, "subject_detail_one_read_path", _clear_subject_detail_from_other_read_paths),
 )
 
 

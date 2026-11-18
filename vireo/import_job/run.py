@@ -17,6 +17,7 @@ from import_job.resume import (
     _recover_parent_landings,
 )
 from import_job.state import _ImportRunState
+from import_job.timing import FIND, timed
 from import_job.transports import _make_transport
 
 if TYPE_CHECKING:
@@ -61,6 +62,7 @@ def run_import_job(job: JobDict, runner: JobRunner, db_path: str, workspace_id: 
     runner.update_step(job["id"], "import", status="running")
 
     state = _ImportRunState(log_label=transport.log_label)
+    state.paused_seconds = lambda: runner.pause_elapsed_seconds(job["id"])
     eta = _ImportEtaEstimator(
         expected_new=(params.checked_count if params.skip_duplicates else None),
     )
@@ -86,7 +88,8 @@ def run_import_job(job: JobDict, runner: JobRunner, db_path: str, workspace_id: 
             deselected=0, vanished_paths=set(), appeared=0,
             remote_unverified=False,
         )
-    plan = _plan_import(db, params, _emit, state)
+    with timed(state, FIND):
+        plan = _plan_import(db, params, _emit, state)
     # The source snapshots gate a resume's drift check (a different card
     # at the same path), so they must be on the row before any copy.
     if not _publish_resume_scope(

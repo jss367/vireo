@@ -206,6 +206,9 @@ class Image:
         self.events.append(("point", self.kind, fn(0), fn(128), fn(255)))
         return self
 
+    def close(self):
+        self.events.append(("close", self.kind))
+
     def save(self, buf, **kw):
         self.events.append(("save", self.size, kw))
         buf.write(b"fake-jpeg")
@@ -292,12 +295,17 @@ def focus(photo=None, args=None, size=(3000, 2000), enabled=True, mask_path=None
         folders=types.SimpleNamespace(get=lambda fid: {"path": "/invented"}),
         get_effective_config=lambda cfg: cfg,
         masks_features=types.SimpleNamespace(
-            photo_mask_path=lambda pid: mask_path, active_prompt_detection=lambda pid: active_prompt or (boxes[0] if mask_path else None)
+            photo_mask_path=lambda pid: mask_path,
+            active_prompt_detection=lambda pid, include_mask_path=False: (
+                {**(active_prompt or boxes[0]), **({"active_mask_path": mask_path} if include_mask_path else {})}
+                if mask_path or active_prompt else None
+            ),
         ),
     )
     ns["get_db"] = lambda: db
     nested("web/media_common.py", ns, {"_focus_source_image"})
-    nested("web/media_crops.py", ns, {"serve_focus_crop", "_focus_mask_bytes", "_validated_focus_source", "_focus_geometry_error"})
+    nested("web/media_crops.py", ns, {"serve_focus_crop", "_focus_mask_bytes", "_validated_focus_source", "_focus_geometry_error",
+                                          "_needs_primary_focus_subject", "_requested_focus_mask"})
     route = types.SimpleNamespace(_get_db=ns["get_db"], _config=ns["config"], _db_path=ns["db_path"], _json_error=ns["json_error"])
     return ns["serve_focus_crop"](route, 1), events
 
@@ -330,7 +338,9 @@ def focus_checks():
     assert ("point", "mask", 0, 255, 255) in events
     assert ("point", "image", 0, 44, 89) in events
     res, events = focus(args={"mask": "1"}, mask_path="/elsewhere/mask.png")
-    assert res.headers["X-Vireo-Focus-Mask"] == "0" and not any(e[0] == "mask-read" for e in events)
+    assert res[1] == 404 and "mask is unavailable" in res[0]
+    assert not any(e[0] == "mask-read" for e in events)
+    assert ("close", "image") in events
     for args in [{"size": "12"}, {"basis": "nose"}]:
         res, events = focus(args=args)
         assert res[1] == 400 and not any(e[0] == "loader" for e in events)
@@ -618,6 +628,7 @@ def test_active_prompt_requires_current_variant_path_model_and_geometry():
         repo = ns["MasksFeaturesRepository"]()
         repo.conn = c
         assert repo.active_prompt_detection(1)["id"] == 7
+        assert repo.active_prompt_detection(1, include_mask_path=True)["active_mask_path"] == '/invented/mask'
         assert repo.active_prompt_detection(999) is None
         for sql in [
             "UPDATE photos SET active_mask_variant='old'",
@@ -629,6 +640,7 @@ def test_active_prompt_requires_current_variant_path_model_and_geometry():
         ]:
             c.execute(sql)
             assert repo.active_prompt_detection(1) is None
+            assert repo.active_prompt_detection(1, include_mask_path=True) is None
             c.rollback()
     finally:
         c.close()

@@ -616,7 +616,8 @@ def test_subject_comparison_cache_migrates_without_changing_photographer_choices
             "detection_id", "source_key", "features", "mask_png"]
 
 
-def test_version_38_catalog_unmeasures_the_detail_read_another_way(tmp_path):
+@pytest.mark.parametrize("version", [38, 39])
+def test_catalog_unmeasures_the_detail_read_another_way(tmp_path, version):
     """Subjects under 512 px came from a rendering the larger ones never use,
     and subjects that fit an analysis proxy were measured on it when fresh;
     both return to "not measured" and the subjects in between are kept."""
@@ -649,7 +650,7 @@ def test_version_38_catalog_unmeasures_the_detail_read_another_way(tmp_path):
                     "prompt_w, prompt_h, subject_detail, subject_detail_px) VALUES (?, ?, ?, 0, 'md', 0, 0, 1, 1, ?, ?)",
                     (photo_id, variant, f"/masks/{photo_id}.{variant}.png", detail, px),
                 )
-        conn.execute("PRAGMA user_version=38")
+        conn.execute(f"PRAGMA user_version={version}")
     schema.ensure_schema(path)
     schema.ensure_schema(path)
     kept = {photo_id: rows[photo_id][:2] for photo_id in (3, 4, 5, 7)}
@@ -691,3 +692,21 @@ def test_version_34_catalog_gains_subject_detail_columns(tmp_path):
             assert {"subject_detail", "subject_detail_px"} <= columns
         # Existing rows are unmeasured, never zero.
         assert conn.execute("SELECT COUNT(*) FROM photos WHERE subject_detail IS NOT NULL").fetchone()[0] == 0
+
+
+def test_version_38_catalog_preserves_historical_job_on_upgrade(tmp_path):
+    path = str(tmp_path / "vireo.db")
+    schema.ensure_schema(path)
+    with sqlite3.connect(path) as conn:
+        conn.execute("ALTER TABLE job_history DROP COLUMN errors")
+        conn.execute("PRAGMA user_version=38")
+        conn.execute(
+            "INSERT INTO job_history (id, type, status, result, error_count) "
+            """VALUES ('old-job', 'scan', 'failed', '{"error":"old failure"}', 1)"""
+        )
+    schema.ensure_schema(path)
+    with sqlite3.connect(path) as conn:
+        row = conn.execute(
+            "SELECT status, result, error_count, errors FROM job_history WHERE id='old-job'"
+        ).fetchone()
+        assert row == ("failed", '{"error":"old failure"}', 1, None)

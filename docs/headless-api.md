@@ -237,10 +237,10 @@ different subject. A pinned retry always rebuilds that subject under the photo
 lock, including when prior measurements are complete; if the subject is gone,
 it fails without running replacement detection. Unpinned retries keep normal
 readiness-based stage selection. The lightbox's **Retry subject mask and quality** button
-uses this path. The older `subjects/analyze` endpoint measures detection boxes
-for crop/exposure suggestions; it does not rebuild the selected animal's mask,
-quality or available eye evidence used for ranking. Missing eye identification
-remains explicit; selecting a region does not manufacture a species prediction.
+uses this path. `POST /api/photos/<id>/subjects/analyze` measures retained
+boxes for crop and exposure suggestions. With a `detection_id`, it also
+computes or reuses comparison evidence for that detection. The job returns
+the detection and verified generation in `result.photos` on success.
 
 ### Burst adjudication
 
@@ -311,8 +311,9 @@ in `meta.unconfirmed_species_omitted`). Rejected photos are never listed.
 
 Within a species the order is: the species' chosen photos (the photos marked
 as its representative), then the workspace's ranked highlights, then flagged
-picks by Vireo's score, then everything else by score. Each species carries a
-`decision` saying which of those put its first photo there:
+picks by Vireo's score, then everything else by score, then the photos the
+species is not the subject of. Each species carries a `decision` saying which
+of those put its first photo there:
 
 | `kind` | Meaning |
 | --- | --- |
@@ -322,10 +323,22 @@ picks by Vireo's score, then everything else by score. Each species carries a
 | `pick` | Nobody chose; a flagged pick leads, by Vireo's score among the picks. |
 | `score` | Nobody chose or flagged; Vireo's score ordered the photos. |
 | `unanalyzed` | Nobody chose and the first photo has no score yet, so the order is capture order. Run Process before trusting it. |
+| `in_frame` | Nobody chose, and no photo in the scope has the species as its subject: another bird is. The photo where the species fills most of the frame leads. |
+| `outside_crop` | Nobody chose, and every photo in the scope crops the species out. Capture order. |
+
+A flag, a rating and the score belong to the photo, so they describe the bird
+the photo is a picture of. Each photo carries `species_presence` for the
+species it is listed under: `subject`, `in_frame` (another bird is the subject
+and this species is elsewhere in the frame) or `outside_crop` (every region
+matched to this species lies outside the photo's crop). `subject_species` names
+the species the photo is a picture of. The subject is the photo's primary
+subject, or the first region inside the crop when the photo is cropped; a
+species whose region is at least half that bird's box area is a subject too.
+A flagged pick counts as a pick only where the species is the subject.
 
 `contender_ids` lists every chosen photo of the species in the scope, best
-first. `meta` counts `chosen`, `needs_comparison` (ties) and `guessed` (score or
-unanalyzed) so a reviewer can see what is left to settle.
+first. `meta` counts `chosen`, `needs_comparison` (ties) and `guessed` (score,
+unanalyzed, in_frame or outside_crop) so a reviewer can see what is left to settle.
 
 Chosen photos are ranked by comparisons, not by when they were chosen. A choice
 made for a trip says that photo beats the other chosen photos of that trip and
@@ -439,8 +452,12 @@ comparison has no suggested best frame.
 
 To compute missing evidence, POST the same comparison to
 `/api/v1/photos/burst-evidence` with `"analyze": true`. It returns `job_id`;
-poll `/api/jobs/<job_id>`, then fetch the comparison again. Job results report
-`analyzed`, `cached`, unresolved identities, and per-photo errors separately.
+poll `/api/jobs/<job_id>`, then fetch the comparison again. A selection with
+one photo and its `subject_overrides` entry supports both analysis and readback.
+Its card contains the evidence and has no relative rank. Each entry in
+`result.photos` reports `analyzed`, `cached`, `skipped` with a reason, or
+`failed` with an error. For an analyzed or cached entry, match its
+`detection_id` and `analysis_key` to the returned card's `subject` fields.
 Analysis uses original-derived images capped at 1024 pixels on the longest
 edge, SAM masks, and the existing mask-gated eye policy when enabled and its
 model is available. Each card reports the actual analysis dimensions and eye
@@ -464,6 +481,21 @@ Focus responses include `X-Vireo-Detection-Id` and `X-Vireo-Analysis-Key`.
 Full-frame previews and subject crops support visual review of pose, eye
 visibility, and obstructions; this feature does not introduce aesthetic weights.
 
+
+## Looking up a finished job
+
+Save the ID returned when you start a job. `GET /api/jobs/<job_id>` first checks
+the live runner. After the runner releases a job or Vireo restarts, the same
+URL returns its retained terminal record with `historical: true`. Read
+`status`, `result`, `steps`, `progress`, `errors`, and `error_count` to
+reconcile the outcome. For a chained import, follow `result.process_job_id`
+to the processing job. Its `parent_job_id` identifies the import.
+
+Historical jobs are read-only. Older records can have null progress and only
+the error messages retained in the result. A 404 means there is no live job
+or retained terminal record visible for that ID. A 503 with code
+`job_history_unavailable` means the catalog read failed. Retry the lookup
+with the same ID.
 
 ## Exporting photos with metadata
 
