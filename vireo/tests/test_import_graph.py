@@ -81,6 +81,7 @@ FOUNDATION = frozenset({
     "duplicates",
     "edit_batch",
     "edit_recipe",
+    "focus_point",
     "keyword_normalization",
     "process_strategies",
     "settings_source",
