@@ -24,6 +24,7 @@ from pipeline_job import (
     run_pipeline_job,
 )
 from repositories.masks_features import PipelineFeatures
+from reviewer_helpers import confirmed_reviewer_box
 from services import detection_store, photo_ingest, subject_masks, workspace_folders
 
 
@@ -4422,8 +4423,8 @@ def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch, 
 
     chosen = None
     if reviewer_box:
-        from subjects import analyze_photo, select_reviewer_box
-        chosen = select_reviewer_box(db, photo_id, dict(x=.2, y=.2, w=.2, h=.2))
+        from subjects import analyze_photo
+        chosen = confirmed_reviewer_box(db, photo_id, dict(x=.2, y=.2, w=.2, h=.2))
         analyze_photo(db, photo_id, os.path.join(folder_path, "test.jpg"), detection_id=chosen)
         db.predictions.add(chosen, 'Ruby-crowned Kinglet', .9, 'reviewed-classifier', status='accepted')
         db.predictions.add(chosen, 'Robin', .4, 'BioCLIP', labels_fingerprint='legacy', status=reviewer_box)
@@ -4463,10 +4464,9 @@ def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch, 
     def redraw_box():
         if replacement:
             return
-        from subjects import select_reviewer_box
         writer = Database(db_path)
         writer.set_active_workspace(ws_id)
-        replacement.append(select_reviewer_box(
+        replacement.append(confirmed_reviewer_box(
             writer, photo_id, dict(x=redraw[1], y=.2, w=.2, h=.2)))
         writer.close()
 

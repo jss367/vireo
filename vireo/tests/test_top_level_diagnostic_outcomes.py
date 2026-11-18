@@ -167,12 +167,13 @@ def test_existing_image_failure_diagnostics_include_original_traceback():
         logger = SimpleNamespace(warning=Mock())
         fn = _selected(
             "image_loader.py", name, RAW_DECODE_JPEG_FIRST="invented",
-            RAW_DECODE_LINEAR="linear", RAW_EXTENSIONS=set(), SUPPORTED_EXTENSIONS={".jpg"},
+            RAW_DECODE_LINEAR="linear", RAW_DECODE_ALIGNED="aligned", RAW_EXTENSIONS=set(), SUPPORTED_EXTENSIONS={".jpg"},
             _RAW_DECODE_MODES={"invented"}, Path=PurePosixPath, Image=SimpleNamespace(open=Mock(side_effect=original)),
             log=logger,
         )
         assert fn("/invented/photo.jpg", 100) is None
         logger.warning.assert_called_once()
+        assert logger.warning.call_args.args[-1] is original
         assert logger.warning.call_args.kwargs == {"exc_info": True}
 
 
@@ -192,6 +193,7 @@ def test_existing_raw_fallback_diagnostic_keeps_embedded_preview():
     logger = SimpleNamespace(info=Mock())
     fn = _selected(
         "image_loader.py", "_load_raw", RAW_DECODE_JPEG_FIRST="jpeg", RAW_DECODE_LINEAR="linear",
+        RAW_DECODE_ALIGNED="aligned", RAW_DECODE_CAMERA_RENDERED="camera",
         RAW_DECODE_PRESERVE_HIGHLIGHTS="highlights", _extract_embedded_jpeg=lambda raw: embedded,
         _embedded_preview_suffices=lambda *args: False, _postprocess_raw=Mock(side_effect=original),
         _full_camera_output_qualifier=lambda *args: "", log=logger,
@@ -199,6 +201,7 @@ def test_existing_raw_fallback_diagnostic_keeps_embedded_preview():
     )
     assert fn("/invented/raw", 100) is embedded
     logger.info.assert_called_once()
+    assert original in logger.info.call_args.args
     assert logger.info.call_args.kwargs == {"exc_info": True}
 
 
@@ -229,4 +232,5 @@ def test_existing_revision_fallback_diagnostic_keeps_default_branch():
     assert len(downloads) == 2
     assert all(call["revision"] is None for call in downloads)
     logger.info.assert_called_once()
+    assert original in logger.info.call_args.args
     assert logger.info.call_args.kwargs == {"exc_info": True}
