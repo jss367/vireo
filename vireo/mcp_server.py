@@ -84,17 +84,19 @@ identifications; model confidence is not a probability of correct identification
 
 Best photos: best_of_each_species lists one photo per species for a folder, a
 collection, a date range or the whole workspace. Each species has a decision
-saying why its first photo leads: chosen (someone chose it and no other chosen
-photo there beats it), tie (several chosen photos nobody has compared, listed in
-tied_photo_ids; the newest choice is shown meanwhile), highlight or pick (the
-user's ranked highlight or flagged pick), score or unanalyzed (nobody chose;
-Vireo ordered it). To settle a tie or replace a guess, list more of that
-species (species=..., per_species=N), compare the candidates with
-view_photo(view="subject") and view_photo(view="preview"), then call
-choose_best_photo with the photos it beat in over and a reason. A choice
-claims only what it names: the photos in over, or the other chosen photos in
-the scope you pass. Leave a decision whose source is the user's alone unless
-asked to revisit it.
+saying why its first photo leads: highlight (it is a highlight of the species
+and no other highlight there beats it), tie (several highlights nobody has
+compared, listed in tied_photo_ids; the newest is shown meanwhile), pick (a
+flagged pick, by Vireo's score), score or unanalyzed (nothing is highlighted
+there; Vireo ordered it). A species has one list of highlights, shown as
+Highlight 1, 2, ... on the Highlights page; the number is a photo's place
+among the highlights in the set being shown. To settle a tie or replace a
+guess, list more of that species (species=..., per_species=N), compare the
+candidates with view_photo(view="subject") and view_photo(view="preview"),
+then call choose_best_photo with the photos it beat in over and a reason. That
+makes the photo a highlight ahead of them. A choice claims only what it names:
+the photos in over, or the other highlights in the scope you pass. Leave a
+decision whose source is the user's alone unless asked to revisit it.
 """
 
 _QUALITY_METRIC_KEYS = ("quality_score", "sharpness", "subject_sharpness", "subject_size")
@@ -803,11 +805,12 @@ def _register_best_tools(server, client):
         year) or, with no scope, the whole workspace; scopes combine.
 
         Each species lists ``per_species`` photos, best first, and a
-        ``decision`` for the first one: ``kind`` (``chosen``, ``tie``,
-        ``highlight``, ``pick``, ``score``, ``unanalyzed``), who chose it and
-        why, ``tied_photo_ids`` for a tie and ``contender_ids`` (every chosen
-        photo of the species here, best first). ``meta`` counts the species
-        that need a comparison and the ones Vireo guessed. Species held only
+        ``decision`` for the first one: ``kind`` (``highlight``, ``tie``,
+        ``pick``, ``score``, ``unanalyzed``), who chose it and why,
+        ``tied_photo_ids`` for a tie and ``contender_ids`` (every highlight
+        of the species here, best first). ``meta`` counts the species led by
+        a settled highlight (``highlighted``), the ones that need a
+        comparison and the ones Vireo guessed. Species held only
         by an unconfirmed prediction are left out and counted in
         ``meta.unconfirmed_species_omitted`` unless ``include_unconfirmed``.
         """
@@ -836,8 +839,9 @@ def _register_best_tools(server, client):
         """Record that ``photo_id`` is the best photo of ``species`` among
         photos you compared, after viewing them at full detail.
 
-        ``over`` lists the photo ids it beat. Without ``over``, it is chosen
-        over every other chosen photo of the species in the scope given
+        The photo becomes a highlight of the species, ahead of the photos
+        named. ``over`` lists the photo ids it beat. Without ``over``, it
+        goes ahead of every other highlight of the species in the scope given
         (folder, collection, dates; none means the whole workspace). Send
         ``over`` or a scope, not both. The photo must already carry the
         species as a confirmed identification. ``reason`` (required, up to

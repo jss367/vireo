@@ -307,38 +307,43 @@ lists that many photos of each, best first, and `include_unconfirmed=1` adds
 species held only by an unconfirmed prediction (left out otherwise and counted
 in `meta.unconfirmed_species_omitted`). Rejected photos are never listed.
 
-Within a species the order is: the species' chosen photos (the photos marked
-as its representative), then the workspace's ranked highlights, then flagged
-picks by Vireo's score, then everything else by score. Each species carries a
+A species has one list of highlights: the photos chosen to show for it,
+catalog-wide. Within a species the order is its highlights, then flagged picks
+by Vireo's score, then everything else by score. Each species carries a
 `decision` saying which of those put its first photo there:
 
 | `kind` | Meaning |
 | --- | --- |
-| `chosen` | Someone chose this photo, and no other chosen photo in the scope beats it. `source`, `reason` and `chosen_at` say who, why and when (all null for a photo chosen before choices were recorded). |
-| `tie` | Several chosen photos in the scope have never been compared (`tied_photo_ids`). The newest choice is shown until someone compares them. |
-| `highlight` | Nobody chose a photo here; the workspace's top ranked highlight leads. |
-| `pick` | Nobody chose; a flagged pick leads, by Vireo's score among the picks. |
-| `score` | Nobody chose or flagged; Vireo's score ordered the photos. |
-| `unanalyzed` | Nobody chose and the first photo has no score yet, so the order is capture order. Run Process before trusting it. |
+| `highlight` | This photo is a highlight, and no other highlight in the scope beats it. `source`, `reason` and `chosen_at` say who chose it, why and when (all null when none was recorded). |
+| `tie` | Several highlights in the scope have never been compared (`tied_photo_ids`). The newest is shown until someone compares them. |
+| `pick` | Nothing is highlighted here; a flagged pick leads, by Vireo's score among the picks. |
+| `score` | Nothing is highlighted or flagged; Vireo's score ordered the photos. |
+| `unanalyzed` | Nothing is highlighted and the first photo has no score yet, so the order is capture order. Run Process before trusting it. |
 
-`contender_ids` lists every chosen photo of the species in the scope, best
-first. `meta` counts `chosen`, `needs_comparison` (ties) and `guessed` (score or
-unanalyzed) so a reviewer can see what is left to settle.
+`contender_ids` lists every highlight of the species in the scope, best first,
+and each photo carries `is_highlighted` and `highlight_rank` (its place among
+them, 1 first). `meta` counts `highlighted`, `needs_comparison` (ties) and
+`guessed` (score or unanalyzed) so a reviewer can see what is left to settle.
 
-Chosen photos are ranked by comparisons, not by when they were chosen. A choice
-made for a trip says that photo beats the other chosen photos of that trip and
-nothing more, so the best eagle of 2024 and the best eagle of 2025 stay tied in
-a lifetime list until they are compared. `POST /api/v1/species-best/choose`
-records a choice: with `over`, the photo beats exactly those photos (they need
-not be chosen yet; the comparison counts once both are); without `over`, it
-beats every other chosen photo of the species within the scope sent (all of
-them when no scope is sent). `over` and a scope together answer 400. The photo
-must be a confirmed, unrejected photo of the species. The response lists `over`
-and `superseded`, the older comparisons this choice reversed: the newest
-decision wins a contradiction and the older comparison is removed. A comparison
-counts through other photos (A over B and B over C puts A over C). "Set as
-representative" in the app records the same choice, over every other chosen
-photo of the species.
+Highlights are ordered by comparisons, not by stored numbers or by when they
+were added. A choice made for a trip says that photo beats the other
+highlights of that trip and nothing more, so the best eagle of 2024 and the
+best eagle of 2025 stay tied in a lifetime list until they are compared.
+`POST /api/v1/species-best/choose` records a choice and makes the photo a
+highlight: with `over`, it beats exactly those photos (they need not be
+highlights yet; the comparison counts once both are); without `over`, it beats
+every other highlight of the species within the scope sent (all of them when
+no scope is sent). `over` and a scope together answer 400. The photo must be a
+confirmed, unrejected photo of the species. The response lists `over` and
+`superseded`, the older comparisons this choice reversed: the newest decision
+wins a contradiction and the older comparison is removed. A comparison counts
+through other highlights (A over B and B over C puts A over C).
+
+The Highlights page writes the same comparisons through the browser routes:
+adding a highlight records it behind the highlights the page showed, Up and
+Down swap it with its neighbor, "Make Top Highlight" puts it ahead of the
+others, and removing one keeps the rest in order. Each sends the folder the
+page showed, so it orders that folder's highlights only.
 
 A reviewer working through a scope reads the list, takes the species whose
 `kind` is `tie`, `score` or `unanalyzed`, lists more of each

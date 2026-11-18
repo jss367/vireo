@@ -1,14 +1,14 @@
-"""Persistence for species curation: Highlights, representatives, the Life List.
+"""Persistence for species curation: a species' highlights and the Life List.
 
 This module owns the SQL behind the curated-species features:
 
-- ``species_highlights``: the ordered per-workspace Highlights buckets (add,
-  promote, move, remove, rename, and the eligibility-filtered read);
-- ``species_representatives``: the global representative photos per species
-  (a species' chosen photos), with the undo restore and the rename. Which of
-  them leads is decided by the comparisons in ``repositories.species_choices``
-  through ``species_preference.Preferences``; the newest selection leads
-  among photos nobody has compared;
+- ``species_representatives``: a species' highlights, catalog-wide (the
+  photos chosen to show for it), with the eligibility-filtered reads
+  (``get_highlights`` for the Highlights buckets, ``get_representative_lists``
+  for confirmed species), the single-photo removal, the undo restore and the
+  rename. Their order is decided by the comparisons in
+  ``repositories.species_choices`` through ``species_preference.Preferences``;
+  the newest selection leads among photos nobody has compared;
 - ``photo_preferences``: the per-workspace preference rows kept for older
   callers, their clear and rename;
 - the Life List and taxonomy-explorer reads (candidates, found taxa,
@@ -16,7 +16,7 @@ This module owns the SQL behind the curated-species features:
   the per-photo eligible identifications);
 - the two one-shot legacy backfills from ``photo_preferences``;
 - the reads ``web/highlights.py`` runs: the Highlights relabel's curation
-  snapshot (``highlight_rows_for_photos`` through
+  snapshot (``preference_rows_for_photos`` and
   ``representative_rows_for_photos``) and the life-list preference
   eligibility check (``photo_is_life_list_preference_eligible``). Their SQL
   came from that module unchanged, except that chunking goes through
