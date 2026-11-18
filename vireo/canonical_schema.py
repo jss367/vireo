@@ -20,7 +20,7 @@ This module must not import ``db``: ``schema.py`` imports ``db``, and
 # database it creates from nothing. It is the newest registry migration in
 # ``schema.MIGRATIONS``: ``create_tables`` builds every migration's end state,
 # so a fresh database has nothing to migrate.
-SCHEMA_VERSION = 40
+SCHEMA_VERSION = 42
 
 # Promoted EXIF summary columns in the ``photos`` table — the canonical
 # list the scanner uses to clear absent fields on rescan (a metadata write
@@ -304,6 +304,16 @@ def create_species_choices(conn):
     )
 
 
+def create_subject_focus(conn):
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_photos_burst_capture ON photos(folder_id, burst_id, timestamp)")
+    conn.execute("""CREATE TABLE IF NOT EXISTS subject_focus (
+        detection_id INTEGER PRIMARY KEY REFERENCES detections(id) ON DELETE CASCADE,
+        af INTEGER NOT NULL,
+        sharp INTEGER NOT NULL,
+        continuity INTEGER NOT NULL
+    )""")
+
+
 def create_subject_candidates(conn):
     """Person/vehicle detector regions the classifier was asked about.
 
@@ -341,6 +351,7 @@ def create_auxiliary_schema_objects(conn):
     create_photo_versions(conn)
     create_species_choices(conn)
     create_subject_candidates(conn)
+    create_subject_focus(conn)
 
 
 class CanonicalSchema:
@@ -766,7 +777,10 @@ class CanonicalSchema:
             );
             CREATE TABLE IF NOT EXISTS photo_subject_state (
                 photo_id INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
-                detection_id INTEGER NOT NULL
+                detection_id INTEGER NOT NULL,
+                min_conf REAL,
+                detector_model TEXT,
+                refresh_pending INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS predictions (

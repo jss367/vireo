@@ -171,7 +171,8 @@ def _photo_lock(pid: int, checkpoint: Callable[[], None]) -> Iterator[None]:
 
 def retry_detection(db: Database, pid: int, checkpoint: Callable[[], None],
                     *, on_published: Callable[[], None] | None = None) -> None:
-    from computation_cache import megadetector_runtime_fingerprint, source_input
+    from cache_identity import detector_input
+    from computation_cache import megadetector_runtime_fingerprint
     from detector import detect_animals, ensure_megadetector_weights
     from services.detection_store import write_detection_batch
 
@@ -185,27 +186,33 @@ def retry_detection(db: Database, pid: int, checkpoint: Callable[[], None],
     if runtime is None:
         raise ValueError("Detector runtime identity is unavailable after model preparation")
     checkpoint()
-    detections = detect_animals(path)  # intentionally bypass completed/incomplete detector caches
+    focus = db.subjects.focus_point(pid)
+    detections = detect_animals(path, focus=focus) if focus else detect_animals(path)
     if detections is None:
         raise ValueError("Subject detection could not decode or analyze this photo")
     checkpoint()
     source = db.model_runs.detector_source_identity(pid)
     input_fp = None
     if source and source["file_hash"] and not source["companion_path"]:
-        input_fp = source_input(source["file_hash"], "vireo-detector-source-v1")[1]
+        input_fp = detector_input(source["file_hash"], focus)[1]
     with _photo_lock(pid, checkpoint):
         _unchanged(db, pid, path, identity)
         if megadetector_runtime_fingerprint() != runtime:
             raise ValueError("Detector runtime changed during analysis; retry with the current model")
-        write_detection_batch(db, pid, "megadetector-v6", detections, runtime, input_fp)
+        from subjects import sync_primary
+        with db.transaction():
+            db.hold_writer_lock()
+            if db.subjects.focus_point(pid) != focus:
+                raise ValueError("Camera autofocus metadata changed during detection; retry this photo")
+            write_detection_batch(db, pid, "megadetector-v6", detections, runtime, input_fp)
+            # The writer can preserve a reviewed result from a different input.
+            stored = db.model_runs.detector_run_identity(pid, "megadetector-v6")
+            if (stored is None or stored["runtime_fingerprint"] != runtime
+                    or stored["input_fingerprint"] != input_fp):
+                raise ValueError("A reviewed detector result was retained for different inputs; review its subject choice before retrying")
+            sync_primary(db, pid)
         if on_published:
             on_published()
-        # The normal writer protects reviewed detector outputs. Never force away
-        # those decisions merely to make recovery appear successful.
-        stored = db.model_runs.detector_run_identity(pid, "megadetector-v6")
-        if (stored is None or stored["runtime_fingerprint"] != runtime
-                or stored["input_fingerprint"] != input_fp):
-            raise ValueError("A reviewed detector result was retained for different inputs; review its subject choice before retrying")
 
 
 def retry_features(db: Database, pid: int, effective: JsonDict, cache_dir: str,

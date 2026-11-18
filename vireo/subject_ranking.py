@@ -126,7 +126,8 @@ def source_path(db, photo):
 # Raise it when a stored feature starts being measured another way, so the
 # generations made before stop matching and the subject is analysed again.
 # 2: subject detail is read from the camera's rendering at every subject size.
-ANALYSIS_RECIPE_VERSION = 2
+# 3: reduced/cropped RAW previews demosaic at every subject size.
+ANALYSIS_RECIPE_VERSION = 3
 
 
 def analysis_key(path, detection, effective_cfg):

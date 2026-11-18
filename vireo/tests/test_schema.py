@@ -616,25 +616,26 @@ def test_subject_comparison_cache_migrates_without_changing_photographer_choices
             "detection_id", "source_key", "features", "mask_png"]
 
 
-@pytest.mark.parametrize("version", [38, 39])
+@pytest.mark.parametrize("version", [38, 39, 40, 41])
 def test_catalog_unmeasures_the_detail_read_another_way(tmp_path, version):
-    """Subjects under 512 px came from a rendering the larger ones never use,
-    and subjects that fit an analysis proxy were measured on it when fresh;
-    both return to "not measured" and the subjects in between are kept."""
+    """Historical nonempty measurements lack rendering provenance at every
+    subject size; masks, empty-mask zeros and pending values are kept."""
     path = str(tmp_path / "vireo.db")
     schema.ensure_schema(path)
     # photo id: (detail, subject px, frame width, frame height)
     rows = {
         1: (19413.16, 259.2, 5408, 3608),    # under the scale
         2: (708.37, 517.9, 5408, 3608),      # under a full-size preview's coverage
-        3: (9026.48, 518.0, 5408, 3608),     # read from the source at the needed edge: kept
-        4: (24410.87, 1015.7, 5408, 3608),   # kept
+        3: (9026.48, 518.0, 5408, 3608),     # middle band can still have used a reduced JPEG
+        4: (24410.87, 1015.7, 5408, 3608),
         5: (0.0, None, 5408, 3608),          # empty mask, nothing was read: kept
         6: (5462.9, 2137.0, 5408, 3608),     # fit the default 1536 px proxy
-        7: (4000.0, 1351.0, 5408, 3608),     # just under a quarter, too small for any proxy: kept
+        7: (4000.0, 1351.0, 5408, 3608),     # just under a quarter, still lacks preview provenance
         8: (4000.0, 1400.0, 3608, 5408),     # portrait frame, the long edge decides
         10: (4000.0, 1352.0, 5408, 3608),    # a quarter of the frame: fit a 2048 px proxy
         9: (4000.0, 900.0, None, None),      # frame size unrecorded
+        11: (4000.0, None, 5408, 3608),     # nonempty score without a recorded subject size
+        12: (None, None, 5408, 3608),       # already pending
     }
     with sqlite3.connect(path) as conn:
         conn.execute("INSERT INTO folders (id, path) VALUES (1, '/photos')")
@@ -653,8 +654,8 @@ def test_catalog_unmeasures_the_detail_read_another_way(tmp_path, version):
         conn.execute(f"PRAGMA user_version={version}")
     schema.ensure_schema(path)
     schema.ensure_schema(path)
-    kept = {photo_id: rows[photo_id][:2] for photo_id in (3, 4, 5, 7)}
-    cleared = dict.fromkeys((1, 2, 6, 8, 9, 10), (None, None))
+    kept = {photo_id: rows[photo_id][:2] for photo_id in (5, 12)}
+    cleared = dict.fromkeys(set(rows) - kept.keys(), (None, None))
     with sqlite3.connect(path) as conn:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         got = {row[0]: (row[1], row[2]) for row in conn.execute("SELECT id, subject_detail, subject_detail_px FROM photos")}
@@ -664,15 +665,34 @@ def test_catalog_unmeasures_the_detail_read_another_way(tmp_path, version):
                 "SELECT photo_id, subject_detail, subject_detail_px FROM photo_masks WHERE variant=?", (variant,))}
             assert got == {**cleared, **kept}, variant
         # The masks themselves stay: only the measurement is pending again.
-        assert conn.execute("SELECT COUNT(*) FROM photo_masks WHERE path IS NOT NULL").fetchone()[0] == 20
+        assert conn.execute("SELECT COUNT(*) FROM photo_masks WHERE path IS NOT NULL").fetchone()[0] == 24
 
 
-def test_the_cleared_proxy_band_covers_the_largest_proxy_a_workspace_can_set():
-    """A larger permitted proxy would hold smaller subjects at the detail
-    scale, and their fresh measurements would be ones the migration keeps."""
-    import config_schema
-
-    assert config_schema.SCHEMA["pipeline.proxy_longest_edge"]["max"] == schema.SUBJECT_DETAIL_LARGEST_PROXY
+@pytest.mark.parametrize("version", [38, 39, 40, 41])
+def test_middle_band_detail_is_invalidated_without_reading_the_raw(tmp_path, version):
+    """A 1000 px subject could have used a 6000x3376 cropped JPEG on a
+    6000x4000 sensor. Preview dimensions were not stored with the score."""
+    path = str(tmp_path / "synthetic.db")
+    schema.ensure_schema(path)
+    with sqlite3.connect(path) as conn:
+        conn.execute("INSERT INTO folders (id, path) VALUES (1, '/synthetic')")
+        conn.execute(
+            "INSERT INTO photos (id, folder_id, filename, width, height, subject_detail, subject_detail_px) "
+            "VALUES (1, 1, 'fake.nef', 6000, 4000, 1234, 1000)"
+        )
+        for variant in ("sam2-large", "sam2-small"):
+            conn.execute(
+                "INSERT INTO photo_masks (photo_id, variant, path, created_at, detector_model, "
+                "prompt_x, prompt_y, prompt_w, prompt_h, subject_detail, subject_detail_px) "
+                "VALUES (1, ?, ?, 0, 'md', 0, 0, 1, 1, 1234, 1000)",
+                (variant, f"/synthetic/{variant}.png"),
+            )
+        conn.execute(f"PRAGMA user_version={version}")
+    schema.ensure_schema(path)
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT subject_detail, subject_detail_px FROM photos").fetchone() == (None, None)
+        assert conn.execute("SELECT subject_detail, subject_detail_px FROM photo_masks").fetchall() == [(None, None)] * 2
+        assert conn.execute("SELECT COUNT(*) FROM photo_masks WHERE path IS NOT NULL").fetchone()[0] == 2
 
 
 def test_version_34_catalog_gains_subject_detail_columns(tmp_path):
@@ -694,12 +714,13 @@ def test_version_34_catalog_gains_subject_detail_columns(tmp_path):
         assert conn.execute("SELECT COUNT(*) FROM photos WHERE subject_detail IS NOT NULL").fetchone()[0] == 0
 
 
-def test_version_38_catalog_preserves_historical_job_on_upgrade(tmp_path):
+@pytest.mark.parametrize("version", [38, 39, 40])
+def test_catalog_without_error_details_preserves_historical_job_on_upgrade(tmp_path, version):
     path = str(tmp_path / "vireo.db")
     schema.ensure_schema(path)
     with sqlite3.connect(path) as conn:
         conn.execute("ALTER TABLE job_history DROP COLUMN errors")
-        conn.execute("PRAGMA user_version=38")
+        conn.execute(f"PRAGMA user_version={version}")
         conn.execute(
             "INSERT INTO job_history (id, type, status, result, error_count) "
             """VALUES ('old-job', 'scan', 'failed', '{"error":"old failure"}', 1)"""
@@ -714,7 +735,7 @@ def test_version_38_catalog_preserves_historical_job_on_upgrade(tmp_path):
 
 def test_alternate_version_39_catalog_gains_job_history_errors(tmp_path):
     """A catalog stamped v39 by this branch before merging main lacks the
-    ``errors`` column that main's v39 adds. Migration 40 must repair it so
+    ``errors`` column that main's v39 adds. Migration 42 must repair it so
     ``persist_job`` can still write history after the upgrade."""
     path = str(tmp_path / "vireo.db")
     schema.ensure_schema(path)
@@ -735,3 +756,37 @@ def test_alternate_version_39_catalog_gains_job_history_errors(tmp_path):
             "SELECT status, errors FROM job_history WHERE id='new-job'"
         ).fetchone()
         assert row == ("completed", "[]")
+
+
+def test_primary_policy_migration_preserves_projected_subject(tmp_path):
+    path = str(tmp_path / "vireo.db")
+    schema.ensure_schema(path)
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP TABLE photo_subject_state")
+        conn.execute("CREATE TABLE photo_subject_state (photo_id INTEGER PRIMARY KEY, detection_id INTEGER NOT NULL)")
+        conn.execute("INSERT INTO photo_subject_state VALUES (10, 20)")
+        conn.execute("PRAGMA user_version=38")
+    schema.ensure_schema(path)
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT detection_id, min_conf, detector_model, refresh_pending "
+                            "FROM photo_subject_state WHERE photo_id=10").fetchone() == (20, None, None, 0)
+
+
+@pytest.mark.parametrize("version", [39, 40])
+def test_alternate_branch_catalog_gains_main_migrations_without_startup_ddl(tmp_path, version):
+    path = str(tmp_path / "synthetic.db")
+    schema.ensure_schema(path)
+    with sqlite3.connect(path) as conn:
+        conn.execute("ALTER TABLE job_history DROP COLUMN errors")
+        conn.execute("DROP TABLE subject_focus")
+        conn.execute("DROP INDEX idx_photos_burst_capture")
+        conn.execute(f"PRAGMA user_version={version}")
+        conn.commit()
+        schema._apply_pending(conn)
+        schema._apply_pending(conn)
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert "errors" in {row[1] for row in conn.execute("PRAGMA table_info(job_history)")}
+        assert {row[1] for row in conn.execute("PRAGMA table_info(subject_focus)")} == {
+            "detection_id", "af", "sharp", "continuity",
+        }
+        assert conn.execute("SELECT name FROM sqlite_master WHERE name='idx_photos_burst_capture'").fetchone()

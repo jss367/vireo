@@ -34,6 +34,7 @@ from canonical_schema import (
     create_same_shot_reviews,
     create_species_choices,
     create_subject_candidates,
+    create_subject_focus,
     create_subject_ranking_analysis,
     job_history_columns,
 )
@@ -311,64 +312,28 @@ def _validate_subject_detail(conn):
             raise RuntimeError(f"{table} is missing {', '.join(missing)}")
 
 
-# ``subject_detail_px`` below which a stored subject detail may have been read
-# from a libraw demosaic rather than the camera's embedded JPEG. A subject
-# under the 512 px detail scale asked the loader for more than the frame
-# holds, and a full-size preview (down to 99% of the sensor on each axis)
-# does not cover such a request, so 512 / 0.99 rounded up bounds the rows.
-SUBJECT_DETAIL_MIXED_RENDERING_PX = 518
-
-# The largest analysis proxy a workspace can be set to
-# (``pipeline.proxy_longest_edge`` in ``config_schema``). A subject spanning
-# at least 512 px of it reached the detail scale inside the proxy, so a mask
-# measured as it was made was resampled down from that proxy instead of read
-# from the source at the needed edge. No smaller subject fit any proxy.
-SUBJECT_DETAIL_LARGEST_PROXY = 2048
-SUBJECT_DETAIL_PROXY_SHARE = 512 / SUBJECT_DETAIL_LARGEST_PROXY
-
-
 def _clear_subject_detail_from_other_read_paths(conn):
-    """Unmeasure the subject detail that did not come from the one read path.
+    """Unmeasure detail whose source rendering was not recorded.
 
-    Two groups of rows were read differently from the rest. Subjects under
-    the detail scale came from whichever rendering the loader fell through
-    to (a demosaic where libraw could decode the file, the embedded JPEG
-    where it could not). Subjects large enough for the analysis proxy were
-    measured on that proxy when their mask was fresh, in whatever rendering
-    it held, and from the source when the mask was cached. A row whose frame
-    size is unrecorded cannot be placed, so it goes with them. NULL means
-    "not measured": the mask stage counts the cached masks as pending and
-    the next Process run measures them without rerunning SAM. The subjects
-    in between keep their values, always read from the source at the needed
-    edge.
+    Subject size cannot identify the rendering: even middle-band subjects
+    could have used reduced or cropped embedded JPEGs that the current
+    camera-rendered path demosaics. Preview dimensions were not persisted,
+    so no nonempty historical measurement can be certified. Preserve mask
+    files and other features; NULL makes Process remeasure cached masks
+    without rerunning SAM. Empty masks (zero detail, no subject size) and
+    measurements already pending remain unchanged.
 
-    A dev catalog stamped ``user_version=39`` by this branch before the
-    merge with main has the subject-detail rewrite applied but lacks the
-    ``job_history.errors`` column that migration 39 (``job_history_errors``)
-    adds on main, and would skip that migration here because
-    ``_apply_pending`` runs only migrations newer than ``user_version``.
-    Idempotently add the column so either alternate v39 layout converges on
-    the canonical v40 schema; otherwise every completed job's
-    ``persist_job`` insert would fail against the missing column.
+    Earlier versions of this branch stamped catalogs 39 or 40 before those
+    numbers belonged to main's job-history and subject-focus migrations.
+    Repair both idempotently so those catalogs converge on the same schema.
     """
     _add_job_history_errors(conn)
-    stale = (
-        "{px} < ? OR p.width IS NULL OR p.height IS NULL "
-        "OR {px} >= MAX(p.width, p.height) * ?"
-    )
-    params = (SUBJECT_DETAIL_MIXED_RENDERING_PX, SUBJECT_DETAIL_PROXY_SHARE)
-    conn.execute(
-        "UPDATE photo_masks SET subject_detail=NULL, subject_detail_px=NULL "
-        "WHERE subject_detail_px IS NOT NULL AND EXISTS ("
-        "  SELECT 1 FROM photos p WHERE p.id = photo_masks.photo_id AND ("
-        + stale.format(px="photo_masks.subject_detail_px") + "))",
-        params,
-    )
-    conn.execute(
-        "UPDATE photos AS p SET subject_detail=NULL, subject_detail_px=NULL "
-        "WHERE p.subject_detail_px IS NOT NULL AND (" + stale.format(px="p.subject_detail_px") + ")",
-        params,
-    )
+    create_subject_focus(conn)
+    for table in ("photo_masks", "photos"):
+        conn.execute(
+            f"UPDATE {table} SET subject_detail=NULL, subject_detail_px=NULL "
+            "WHERE subject_detail_px IS NOT NULL OR subject_detail != 0"
+        )
 
 
 # Job types only Vireo itself started before ``origin`` was recorded: the
@@ -448,6 +413,18 @@ def _add_job_history_errors(conn):
         conn.execute("ALTER TABLE job_history ADD COLUMN errors TEXT")
 
 
+def _add_primary_projection_policy(conn):
+    # Catalogs that already have subject focus can carry version 39 or 40
+    # without the job-history column. Ensure both schemas converge at 41.
+    _add_job_history_errors(conn)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(photo_subject_state)")}
+    for name, definition in (
+        ("min_conf", "REAL"), ("detector_model", "TEXT"), ("refresh_pending", "INTEGER NOT NULL DEFAULT 0"),
+    ):
+        if name not in columns:
+            conn.execute(f"ALTER TABLE photo_subject_state ADD COLUMN {name} {definition}")
+
+
 MIGRATIONS = (
     Migration(
         13, "companion_identities_file_mtime",
@@ -503,7 +480,9 @@ MIGRATIONS = (
     Migration(37, "subject_candidates", create_subject_candidates),
     Migration(38, "assignment_reviews", create_assignment_reviews),
     Migration(39, "job_history_errors", _add_job_history_errors),
-    Migration(40, "subject_detail_one_read_path", _clear_subject_detail_from_other_read_paths),
+    Migration(40, "subject_focus", create_subject_focus),
+    Migration(41, "primary_projection_policy", _add_primary_projection_policy),
+    Migration(42, "subject_detail_one_read_path", _clear_subject_detail_from_other_read_paths),
 )
 
 

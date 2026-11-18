@@ -288,7 +288,7 @@ class MasksFeaturesRepository:
         ``active_mask_path`` to capture the mask and its owner in one read.
         """
         mask_column = ", p.mask_path AS active_mask_path" if include_mask_path else ""
-        return self.conn.execute(
+        matches = self.conn.execute(
             f"""SELECT d.*{mask_column} FROM photos p
                JOIN photo_masks pm ON pm.photo_id = p.id
                 AND pm.variant = p.active_mask_variant AND pm.path = p.mask_path
@@ -298,9 +298,10 @@ class MasksFeaturesRepository:
                 AND d.box_w = pm.prompt_w AND d.box_h = pm.prompt_h
                WHERE p.id = ? AND d.category = 'animal'
                  AND d.detector_model != 'full-image'
-               LIMIT 1""",
+               LIMIT 2""",
             (photo_id,),
-        ).fetchone()
+        ).fetchall()
+        return matches[0] if len(matches) == 1 else None
 
     def photo_mask_state(self, photo_id: int) -> sqlite3.Row | None:
         """Row (``active_mask_variant``, ``dino_embedding_variant``,
