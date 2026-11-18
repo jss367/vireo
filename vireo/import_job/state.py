@@ -161,6 +161,12 @@ class _ImportRunState:
     # stopped the whole pass, if one did.
     wc_failed_paths: list[str] = field(default_factory=list)
     wc_pass_error: str | None = None
+    # Wall-clock seconds per phase and the bytes of every file the
+    # transport landed, for the result's timing (``import_job.timing``).
+    # A landing later reclassified as failed keeps its bytes here: they
+    # were copied, which is what the copy phase's rate measures.
+    phase_seconds: dict[str, float] = field(default_factory=dict)
+    transferred_bytes: int = 0
     # One line per sidecar whose keywords a batch scan could not import
     # (``ScanHooks.sidecar_error``). The photo was imported but is missing
     # those keywords: a failed item for the job's verdict, not for the card

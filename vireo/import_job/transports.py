@@ -48,8 +48,8 @@ _ENQ_QUEUED = "queued"
 _ENQ_CANCELLED = "cancelled"
 
 
-def _book_copied(state: _ImportRunState, rel: str, attests_bytes: bool) -> None:
-    """Book one landed copy into the run counters.
+def _book_copied(state: _ImportRunState, rel: str, attests_bytes: bool, size: int | None) -> None:
+    """Book one landed copy of ``size`` bytes into the run counters.
 
     The two pre-merge sites incremented in different statement orders
     (local: copied → verified → folder count; rsync: copied → folder
@@ -63,6 +63,7 @@ def _book_copied(state: _ImportRunState, rel: str, attests_bytes: bool) -> None:
     _counts(state, rel)["copied"] += 1
     if attests_bytes:
         state.verified += 1
+    state.transferred_bytes += size or 0
 
 
 def _landed_copied(source_file: Path, *, dest_path: str, verified_hash: str, src_size: int,
@@ -203,7 +204,7 @@ class _LocalTransport:
                 "match the source)",
             )
             return _ENQ_HANDLED
-        _book_copied(state, rel, self.attests_bytes)
+        _book_copied(state, rel, self.attests_bytes, src_size)
         batch_st.landed.append(_landed_copied(
             source_file, dest_path=dest_file,
             # ``copy_and_hash_verify`` returns the destination-read hash
@@ -722,7 +723,7 @@ class _RsyncTransport:
                     )
                     _fail(state, rel, sf, reason)
                     continue
-            _book_copied(state, rel, attests_bytes)
+            _book_copied(state, rel, attests_bytes, sz)
             batch_st.landed.append(_landed_copied(
                 sf, dest_path=dest_path,
                 # checker.content_hash returns None for size-0;
