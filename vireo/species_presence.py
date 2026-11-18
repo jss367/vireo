@@ -35,7 +35,10 @@ the main bird matches another species they tagged: an unconfirmed prediction
 for the main bird is the model's guess, and it does not outrank a tag. It
 also stays the subject while a co-subject-sized region in view matches none
 of the photo's species: the classifier often names a lookalike, so that
-region may be the tagged species.
+region may be the tagged species. A recipe that also corrects lens
+distortion (the manual amount or the lens profile) resamples the frame
+before the crop with a warp this module does not reproduce, so its crop
+demotes nothing.
 
 Pure: no database, config or I/O.
 """
@@ -80,12 +83,22 @@ class Presence:
 
 def crop_geometry(recipe):
     """The parts of a normalized edit recipe that decide what its crop
-    shows, None for a photo with no crop."""
+    shows, None for a photo with no crop.
+
+    ``warped`` is set when the recipe corrects lens distortion: the renderer
+    resamples the frame radially before the rotation and crop
+    (``optics.distort_image``), so a region's source position no longer
+    says where it sits in the cropped picture.
+    """
     crop = (recipe or {}).get("crop")
     if not crop:
         return None
+    adjustments = recipe.get("adjustments") or {}
     return {
         "crop": crop,
+        "warped": bool(
+            adjustments.get("distortion") or adjustments.get("lens_profile")
+        ),
         "rotation": recipe.get("rotation", 0),
         "flip": recipe.get("flip") or {},
         "straighten": recipe.get("straighten", 0),
@@ -181,7 +194,7 @@ def species_presence(row, memberships, canonicalize_species=None):
     ]
     geometry = row.get("crop_geometry")
     if geometry:
-        if not all(_has_box(s) for s in subjects):
+        if geometry.get("warped") or not all(_has_box(s) for s in subjects):
             return presence
         size = _frame_size(row)
         in_view = [s for s in subjects if _center_in_crop(s, geometry, size)]

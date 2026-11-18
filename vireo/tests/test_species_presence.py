@@ -78,6 +78,31 @@ def test_crop_on_one_bird_leaves_the_other_species_outside_it():
     assert presence["Dunlin"].frame_share == pytest.approx(0.016 * 0.036)
 
 
+@pytest.mark.parametrize("adjustments", [
+    {"distortion": 12.0}, {"lens_profile": True},
+])
+def test_a_crop_on_a_lens_corrected_frame_demotes_nothing(adjustments):
+    """The renderer warps the frame before it crops, so the regions' source
+    positions do not say what the crop shows."""
+    presence = _presence(
+        ["Black-bellied plover", "Dunlin"], [PLOVER, DUNLIN, SMALL_PLOVER],
+        crop={"x": 0.54, "y": 0.55, "w": 0.16, "h": 0.12},
+        adjustments=adjustments,
+    )
+    assert _kinds(presence) == {
+        "Black-bellied plover": SUBJECT, "Dunlin": SUBJECT,
+    }
+
+
+def test_other_adjustments_leave_the_crop_readable():
+    presence = _presence(
+        ["Black-bellied plover", "Dunlin"], [PLOVER, DUNLIN, SMALL_PLOVER],
+        crop={"x": 0.54, "y": 0.55, "w": 0.16, "h": 0.12},
+        adjustments={"exposure": 0.25, "sharpen": 18.0, "distortion": 0.0},
+    )
+    assert _kinds(presence)["Black-bellied plover"] == OUTSIDE_CROP
+
+
 def test_uncropped_similar_sized_birds_are_both_subjects():
     plover = _subject("Black-bellied Plover", (0.2, 0.3, 0.3, 0.3), rank=1)
     dunlin = _subject("Dunlin", (0.6, 0.3, 0.25, 0.25), rank=2)
