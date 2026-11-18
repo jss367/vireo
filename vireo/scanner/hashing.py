@@ -120,11 +120,9 @@ def _compute_file_features(path_str: str, verified: tuple[str, int, int] | None 
     # Unreadable file: the caller logs the ``None`` hash and leaves the stored
     # mtime stale so the next scan retries the file.
     with contextlib.suppress(OSError):
-        if verified is not None:
-            digest, size, mtime_ns = verified
-            current = os.stat(path_str)
-            if (current.st_size, current.st_mtime_ns) == (size, mtime_ns):
-                return phash, digest
+        # The copy-time digest is a comparison target, not proof of the
+        # current destination bytes: replacements can preserve size/mtime.
+        # Keep this read independent of the import's earlier verification.
         file_hash = compute_file_hash(path_str)
     return phash, file_hash
 

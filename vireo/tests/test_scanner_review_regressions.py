@@ -31,6 +31,34 @@ def _selected(module, names, namespace, owner=None):
     return result
 
 
+@pytest.mark.parametrize("count", [1, 3, 5])
+def test_import_cpu_leases_only_request_remaining_rows(tmp_path, count):
+    import os
+    import tempfile
+
+    requested = []
+    finished = []
+
+    @contextlib.contextmanager
+    def claim(rows, *args, **kwargs):
+        requested.append(len(rows))
+        yield min(2, len(rows))
+
+    ns = _selected("working_copy_batch.py", {"_run_import_rows"}, {
+        "os": os, "tempfile": tempfile, "_claim_worker_count": claim,
+        "ResourceWaitCancelled": RuntimeError,
+    }, "_WorkingCopyBatch")
+    subject = SimpleNamespace(
+        vireo_dir=str(tmp_path), rows=[{"id": i} for i in range(count)],
+        total=count, cancel_check=None,
+        _prepare_working_copies=lambda rows, scratch: {},
+        _finish_row=lambda index, row, prepared: finished.append(row["id"]) or True,
+    )
+    ns["_run_import_rows"](subject)
+    assert requested == list(range(count, 0, -2))
+    assert finished == list(range(count))
+
+
 @pytest.mark.parametrize("boundary", ["window", "first", "pending", "normal", "cancel"])
 def test_pool_pause_requeues_and_joins_before_return(boundary):
     class Pause(Exception):
