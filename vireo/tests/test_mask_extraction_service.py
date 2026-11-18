@@ -314,9 +314,9 @@ def test_cache_invalidation_drops_the_row_when_the_unlink_is_refused(
     assert_released(extraction, first)
 
 
-@pytest.mark.parametrize("legacy_catalog", [False, True])
+@pytest.mark.parametrize("legacy_version", [None, 46, 47, 48, 49])
 def test_companion_box_cannot_prompt_raw_even_without_a_rejected_preview(
-    db, tmp_path, extraction, legacy_catalog,
+    db, tmp_path, extraction, legacy_version,
 ):
     import schema
     from detection_id import COMPANION_FRAME_RUNTIME
@@ -335,7 +335,7 @@ def test_companion_box_cannot_prompt_raw_even_without_a_rejected_preview(
     db.predictions.add(did, "Mallard", .9, "bioclip")
     db.commit()
     _pair_raw_jpeg_companions(db)
-    if legacy_catalog:
+    if legacy_version is not None:
         db.conn.execute("UPDATE detections SET runtime_fingerprint='legacy' WHERE photo_id=?", (raw,))
         legacy_id = db.detections.get(raw, 0)[0]["id"]
         db.subjects.set_primary_state(raw, legacy_id)
@@ -343,7 +343,7 @@ def test_companion_box_cannot_prompt_raw_even_without_a_rejected_preview(
         db.conn.execute("INSERT INTO photo_masks (photo_id, variant, path, created_at, detector_model, "
                         "prompt_x, prompt_y, prompt_w, prompt_h, subject_detail) VALUES "
                         "(?, 'sam2-base', 'old.png', 0, 'megadetector-v6', .1, .6, .2, .15, 123)", (raw,))
-        db.conn.execute("PRAGMA user_version=46")
+        db.conn.execute(f"PRAGMA user_version={legacy_version}")
         db.commit()
         schema._apply_pending(db.conn)
         assert db.conn.execute("SELECT subject_detail FROM photos WHERE id=?", (raw,)).fetchone()[0] is None

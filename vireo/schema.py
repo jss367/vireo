@@ -669,6 +669,8 @@ MIGRATIONS = (
     Migration(47, "companion_box_frames", _invalidate_ambiguous_companion_boxes),
     Migration(48, "repair_alternate_branch_schemas", _repair_alternate_branch_schemas),
     Migration(49, "verified_reviewer_frame", _unmeasure_unverified_reviewer_detail),
+    # Alternate v47 catalogs used that slot for reviewer frames and can already be at v49.
+    Migration(50, "reconcile_companion_box_frames", _invalidate_ambiguous_companion_boxes),
 )
 
 
