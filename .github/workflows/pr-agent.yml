@@ -743,7 +743,7 @@ jobs:
     permissions:
       actions: write
       contents: write
-      issues: read
+      issues: write
       pull-requests: write
     steps:
       - uses: actions/checkout@v5
@@ -845,7 +845,7 @@ jobs:
     permissions:
       actions: write
       contents: write
-      issues: read
+      issues: write
       pull-requests: write
     steps:
       - uses: actions/checkout@v5
@@ -956,7 +956,7 @@ jobs:
     permissions:
       actions: write
       contents: write
-      issues: read
+      issues: write
       pull-requests: write
     steps:
       - uses: actions/checkout@v5
@@ -1028,7 +1028,7 @@ jobs:
     permissions:
       actions: write
       contents: write
-      issues: read
+      issues: write
       pull-requests: write
     steps:
       - name: Recover head-bound human authorization
