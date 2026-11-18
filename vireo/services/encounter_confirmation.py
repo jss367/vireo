@@ -135,9 +135,7 @@ def _refresh_group(
     )
     if membership_changed:
         enc.pop("focus_cohorts", None)
-        if "visual_neighbor_photo_ids" in enc:
-            members = set(ids)
-            enc["visual_neighbor_photo_ids"] = [pid for pid in enc["visual_neighbor_photo_ids"] if pid in members]
+        enc.pop("visual_neighbor_photo_ids", None)
     enc.pop("trace", None)
     for burst, previous_order in zip(bursts, previous_orders, strict=True):
         burst["species_override"] = override(burst["photo_ids"], previous_order)

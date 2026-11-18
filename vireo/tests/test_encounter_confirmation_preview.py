@@ -57,6 +57,9 @@ def test_explicit_transition_exact_subset_and_single_undo(app_and_db, first, sec
     db.photo_review.set_flag(ids[1], 'flagged')
     db.commit()
     before = json.load(open(path))
+    before['encounters'][0]['visual_neighbor_photo_ids'] = ids[:2]
+    with open(path, 'w') as handle:
+        json.dump(before, handle)
     body = {'species': second, 'previous_species': first, 'photo_ids': ids[1:],
             'source_photo_ids': ids, 'split': True}
     preview = request_preview(client, body)
@@ -71,6 +74,7 @@ def test_explicit_transition_exact_subset_and_single_undo(app_and_db, first, sec
     assert response.status_code == 200, response.get_json()
     after = response.get_json()['encounters']
     assert [enc['photo_ids'] for enc in after] == [ids[:1], ids[1:]]
+    assert all('visual_neighbor_photo_ids' not in enc for enc in after)
     assert [enc['confirmed_species'] for enc in after] == [first, second]
     actual = db.photo_species.get_species_for_photos(ids)
     assert actual[ids[0]] == [first]

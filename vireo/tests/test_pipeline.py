@@ -791,6 +791,22 @@ def test_prune_results_removes_deleted_ids(tmp_path):
     assert loaded["encounters"][1]["bursts"][0]["photo_ids"] == [4]
 
 
+@pytest.mark.parametrize("deleted_id", [1, 2])
+def test_prune_invalidates_visual_evidence_only_for_changed_encounter(tmp_path, deleted_id):
+    from pipeline import load_results_raw, prune_results
+
+    cache = _sample_cache()
+    cache["encounters"][0]["trace"] = [{"photo_a_id": 1, "photo_b_id": 2, "decision": "kept_visual_neighbor"}]
+    cache["encounters"][0]["visual_neighbor_photo_ids"] = [2]
+    cache["encounters"][1]["visual_neighbor_photo_ids"] = [5]
+    _write_cache(str(tmp_path), 1, cache)
+    assert prune_results(str(tmp_path), 1, [deleted_id])
+    changed, unaffected = load_results_raw(str(tmp_path), 1)["encounters"]
+    assert "trace" not in changed
+    assert "visual_neighbor_photo_ids" not in changed
+    assert unaffected["visual_neighbor_photo_ids"] == [5]
+
+
 def test_prune_results_drops_empty_encounters_and_bursts(tmp_path):
     """An encounter (or burst) whose every photo was deleted is dropped."""
     from pipeline import load_results, prune_results

@@ -1859,7 +1859,11 @@ def prune_results(cache_dir, workspace_id, deleted_ids):
 
     pruned_encounters = []
     for enc in data.get("encounters", []):
-        enc["photo_ids"] = [pid for pid in enc.get("photo_ids", []) if pid not in deleted]
+        original_ids = enc.get("photo_ids", [])
+        enc["photo_ids"] = [pid for pid in original_ids if pid not in deleted]
+        if len(enc["photo_ids"]) != len(original_ids):
+            enc.pop("trace", None)
+            enc.pop("visual_neighbor_photo_ids", None)
         if "bursts" in enc:
             kept_bursts = []
             for burst in enc["bursts"]:
