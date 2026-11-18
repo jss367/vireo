@@ -14,6 +14,7 @@ const storageKey = 'vireo.inaturalist.observer';
 /** @type {Observer | undefined} */ let snapshot;
 /** @type {QueueEntry[] | undefined} */ let entries;
 let generation = 0;
+let pendingLogin = '';
 
 function readSnapshot() {
   try {
@@ -117,6 +118,7 @@ function render() {
 async function load(refresh) {
   const current = ++generation;
   const login = input.value.trim();
+  pendingLogin = login.toLowerCase();
   status.textContent = refresh ? 'Checking observations…' : 'Loading Life List…';
   try {
     const [life, account] = await Promise.all([
@@ -133,16 +135,21 @@ async function load(refresh) {
     render();
   } catch (error) {
     if (current === generation) status.textContent = error instanceof Error ? error.message : String(error);
+  } finally {
+    if (current === generation) pendingLogin = '';
   }
 }
 
 document.addEventListener('inat:species-submitted', event => {
   const {detail} = /** @type {CustomEvent<{login: string, id: number, url: string}>} */ (event);
   if (!snapshot || detail.login !== snapshot.login) return;
-  generation++;
+  if (pendingLogin === detail.login.toLowerCase()) {
+    generation++;
+    pendingLogin = '';
+    status.textContent = '';
+  }
   snapshot.taxon_ids.push(detail.id);
   saveSnapshot();
-  status.textContent = '';
   const link = document.createElement('a');
   link.href = detail.url;
   link.target = '_blank';
