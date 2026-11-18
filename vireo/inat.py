@@ -165,6 +165,31 @@ def _public_page(path, params=None):
         raise InatApiError(f"Could not read observations from iNaturalist: {exc}") from exc
 
 
+def _read_species_counts(user_id):
+    params = {"user_id": user_id, "quality_grade": "casual,needs_id,research",
+              "per_page": 500, "page": 1}
+    seen = set()
+    covered = set()
+    expected_total = None
+    while True:
+        data = _public_page("observations/species_counts", params)
+        total = data["total_results"]
+        if expected_total is None:
+            expected_total = total
+        elif total != expected_total:
+            raise InatApiError("The observation list changed during refresh. Try again.")
+        for row in data["results"]:
+            taxon = row["taxon"]
+            seen.add(taxon["id"])
+            covered.add(taxon["id"])
+            covered.update(taxon["ancestor_ids"])
+        if len(seen) == total:
+            return seen, covered, params["page"] > 1
+        if not data["results"] or params["page"] * data["per_page"] >= total:
+            raise InatApiError("The observation list changed during refresh. Try again.")
+        params["page"] += 1
+
+
 def account_species(login):
     """Fetch a complete observer snapshot, including ancestors of finer identifications."""
     try:
@@ -172,28 +197,11 @@ def account_species(login):
         account = next((u for u in accounts if u["login"].casefold() == login.casefold()), None)
         if account is None:
             raise InatApiError("iNaturalist could not find that account.")
-        params = {"user_id": account["id"], "quality_grade": "casual,needs_id,research",
-                  "per_page": 500, "page": 1}
-        seen = set()
-        covered = set()
-        expected_total = None
-        while True:
-            data = _public_page("observations/species_counts", params)
-            total = data["total_results"]
-            if expected_total is None:
-                expected_total = total
-            elif total != expected_total:
+        observed, covered, paginated = _read_species_counts(account["id"])
+        if paginated:
+            confirmed, confirmed_coverage, _ = _read_species_counts(account["id"])
+            if observed != confirmed or covered != confirmed_coverage:
                 raise InatApiError("The observation list changed during refresh. Try again.")
-            for row in data["results"]:
-                taxon = row["taxon"]
-                seen.add(taxon["id"])
-                covered.add(taxon["id"])
-                covered.update(taxon["ancestor_ids"])
-            if len(seen) == total:
-                break
-            if not data["results"] or params["page"] * data["per_page"] >= total:
-                raise InatApiError("The observation list changed during refresh. Try again.")
-            params["page"] += 1
     except (KeyError, TypeError, AttributeError) as exc:
         raise InatApiError("iNaturalist returned incomplete observation data.") from exc
     return {"login": account["login"], "taxon_ids": sorted(covered),

@@ -1483,7 +1483,7 @@ def test_account_species_includes_subspecies_ancestors_and_all_grades():
         result = inat.account_species("birder")
     assert result["login"] == "Birder"
     assert result["taxon_ids"] == [7, 781, 782, 901]
-    assert [call["page"] for call in calls] == [1, 2]
+    assert [call["page"] for call in calls] == [1, 2, 1, 2]
     assert all(call["user_id"] == 52 and call["quality_grade"] == "casual,needs_id,research"
                for call in calls)
 
@@ -1527,3 +1527,18 @@ def test_account_species_accepts_empty_account():
         {"per_page": 500, "total_results": 0, "results": []},
     ]):
         assert inat.account_species("birder")["taxon_ids"] == []
+
+
+def test_account_species_rejects_replacement_with_unchanged_total():
+    import inat
+
+    def page(taxon_id):
+        return {"per_page": 1, "total_results": 2,
+                "results": [{"taxon": {"id": taxon_id, "ancestor_ids": [7]}}]}
+
+    with patch("inat._public_page", side_effect=[
+        {"results": [{"login": "birder", "id": 52}]},
+        page(101), page(103),  # First pass straddles the replacement of 101.
+        page(102), page(103),
+    ]), pytest.raises(inat.InatApiError, match="changed"):
+        inat.account_species("birder")
