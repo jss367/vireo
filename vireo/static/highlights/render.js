@@ -212,6 +212,7 @@ export function highlightsMetaText(bucketCount) {
   var highlightSelection = /** @type {HTMLSelectElement} */ (document.getElementById('highlightSelectionFilter')).value;
   var representative = /** @type {HTMLSelectElement} */ (document.getElementById('representativeFilter')).value;
   var filterLabel = (search || speciesSearch) ? ' matching species' : ' species';
+  if (confirmation === 'all') filterLabel += ' from tags or AI predictions';
   if (confirmation === 'confirmed') filterLabel += ' with confirmed keywords';
   if (confirmation === 'unconfirmed') filterLabel += ' without confirmed keywords';
   if (highlightSelection === 'yes') filterLabel += ' with highlights chosen';
