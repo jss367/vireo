@@ -61,6 +61,30 @@ function results() {
   ]};
 }
 
+for (const eligibility of [false, null, undefined, true]) {
+  test(`scope reset retains refreshed keeper eligibility: ${eligibility}`, () => {
+    const {ctx} = page();
+    const source = results();
+    source.photos = source.photos.slice(0, 2);
+    source.photos.forEach(p => Object.assign(p, {label: 'KEEP', automatic_keep_eligible: true}));
+    ctx.setPipelineResults(source);
+    ctx.cullSelectedSpecies.add('Black Phoebe');
+    const refreshed = results();
+    refreshed.photos = [photo(1, {label: 'KEEP'})];
+    if (eligibility !== undefined) refreshed.photos[0].automatic_keep_eligible = eligibility;
+    ctx.syncCullSourceFlags(refreshed);
+    ctx.setPipelineResults(refreshed, '', true);
+    // Reset restores the retained source before its next analysis request.
+    ctx.runCulling = () => {};
+    ctx.clearCullFilters();
+    assert.equal(ctx.pipelineResults, source);
+    assert.equal(ctx.resolveCullDecision(source.photos[0]).suggested, eligibility === true ? 'keep' : 'review');
+    assert.equal(source.photos[1].automatic_keep_eligible, true);
+    assert.equal(ctx.cullData.suggested_keepers, eligibility === true ? 2 : 1);
+    assert.deepEqual(plain(ctx.collectCullingApplyPayload(ctx.cullData).keepers), eligibility === true ? [1, 2] : [2]);
+  });
+}
+
 test('a reject loses to the best kept photo of its encounter, with the measurement both share', () => {
   const {ctx, posted} = page();
   ctx.setPipelineResults(results());

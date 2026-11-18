@@ -419,6 +419,7 @@ function syncCullSourceFlags(results) {
     if (saved) {
       p.flag = saved.flag;
       p.flag_confirmation_status = saved.flag_confirmation_status || 'unverified';
+      p.automatic_keep_eligible = saved.automatic_keep_eligible;
       if (saved.reject_keeper) p.reject_keeper = saved.reject_keeper;
       else delete p.reject_keeper;
     }
