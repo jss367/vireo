@@ -695,10 +695,16 @@ def _fixes_across_resets(clock: _CameraClock, nearby_error: tuple[int, str] | No
     settled: set[Hashable] = set()
     stretch_of: dict[Hashable, list[ClockFrame]] = {}
     choices: dict[Hashable, list[tuple[ClockFix, int]]] = defaultdict(list)
+    resets = [j for j in clock.jumps if j.kind == "reset"]
+    reset_at = {jump.after.ref: jump for jump in resets}
     for index, epoch in enumerate(clock.epochs()):
         part = clock.part(epoch, use_gps, zone_lookup)
         clock.epoch_errors.append((epoch[0], epoch[-1], part.clock_error, part.error_fixes))
-        part_fixes = _fixes(part, nearby_error)
+        jump = reset_at.get(epoch[0].ref)
+        post_reset_bound = None
+        if jump is not None and jump.before.ref in settled and jump.before.ref not in choices:
+            post_reset_bound = (jump, shifts.get(jump.before.ref, 0))
+        part_fixes = _fixes(part, nearby_error, post_reset_bound)
         fixes.extend(part_fixes)
         group_sizes = Counter(fix.group for fix in part_fixes)
         for fix in part_fixes:
@@ -711,7 +717,6 @@ def _fixes_across_resets(clock: _CameraClock, nearby_error: tuple[int, str] | No
         if part.clock_error is not None or part_fixes:
             settled.update(f.ref for f in epoch)
         stretch_of.update({f.ref: epoch for f in epoch})
-    resets = [j for j in clock.jumps if j.kind == "reset"]
     # Propagate known shifts forward from an anchored stretch first. For
     # the remaining unanchored prefix, work backward from its final epoch.
     for jump in resets:
@@ -758,7 +763,29 @@ def _add_reset_fix(fixes: list[ClockFix], shifts: dict[Hashable, int], settled: 
         fixes.append(fix)
 
 
-def _fixes(clock: _CameraClock, nearby_error: tuple[int, str] | None) -> list[ClockFix]:
+def _order_post_reset_options(options: list[ClockFix], jump: ClockJump, anchor_shift: int) -> list[ClockFix]:
+    """Compose the zone and reset shifts into a single write for each distinct result."""
+    minimum = math.floor(jump.minutes_back) + 1 + anchor_shift
+    anchor_note = (f" Apply the {format_minutes(anchor_shift)} correction for {jump.before.filename} as well."
+                   if anchor_shift else "")
+    distinct: dict[int, ClockFix] = {}
+    for option in options:
+        if option.shift_minutes < minimum:
+            option.shift_minutes = minimum
+            option.recommended = False
+            option.explanation = (
+                f"The local time zone at the GPS position is {format_offset(option.target_offset)}. "
+                f"This is the smallest whole-minute shift that puts {jump.after.filename} after "
+                f"{jump.before.filename} in corrected clock time. The actual gap is unknown.{anchor_note}"
+            )
+        # An unchanged reading may have independent evidence from a nearby day.
+        if option.shift_minutes not in distinct or option.recommended:
+            distinct[option.shift_minutes] = option
+    return list(distinct.values())
+
+
+def _fixes(clock: _CameraClock, nearby_error: tuple[int, str] | None,
+           post_reset_bound: tuple[ClockJump, int] | None = None) -> list[ClockFix]:
     fixes: list[ClockFix] = []
     for recorded, offset_group in clock.offset_groups():
         parts = clock.zone_groups(recorded, offset_group)
@@ -770,6 +797,8 @@ def _fixes(clock: _CameraClock, nearby_error: tuple[int, str] | None) -> list[Cl
             elif zone is not None:
                 if zone[1] != recorded:
                     found = _unmeasured_fixes(clock, recorded, group, zone, borrowed, nearby_error)
+                    if post_reset_bound and found[0].frames[0].ref == post_reset_bound[0].after.ref:
+                        found = _order_post_reset_options(found, *post_reset_bound)
             elif clock.same_place(recorded):
                 fix = _restate_fix(clock, recorded, group)
                 found = [fix] if fix is not None else []

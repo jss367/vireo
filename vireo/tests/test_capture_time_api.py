@@ -200,11 +200,11 @@ def test_capture_time_job_skips_already_correct_offset(client_with_photo, monkey
     )
     db.conn.commit()
 
-    def fail_run(*_args, **_kwargs):
+    def unexpected_write(*_args):
         raise AssertionError("ExifTool should not run for a no-op capture-time adjustment")
 
     monkeypatch.setattr(capture_time.shutil, "which", lambda name: "/usr/bin/exiftool")
-    monkeypatch.setattr(capture_time.subprocess, "run", fail_run)
+    monkeypatch.setattr(capture_time, "_write_capture_time", unexpected_write)
 
     client = app.test_client()
     resp = client.post(

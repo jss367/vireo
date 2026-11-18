@@ -357,3 +357,32 @@ def test_rollover_with_no_gap_larger_than_half_the_counter():
     [problem] = find_clock_problems(frames, use_gps=False)
     assert problem.jump_count == 1
     assert any("DSC_9999.JPG" in line and "DSC_0001.JPG" in line for line in problem.evidence)
+
+
+def test_post_reset_zone_choices_include_the_shift_needed_for_shot_order():
+    from dataclasses import replace
+
+    frames = [replace(f, latitude=34., longitude=-118.) if f.ref > 6 else f
+              for f in _reset_frames(gps_error_before=0)]
+    problem = analyze_camera(frames, zone_lookup=la_winter)
+    assert problem is not None
+    # Both readings lead to the same write: 0 + 60 and -60 + 120.
+    [fix] = problem.fixes
+    assert (fix.shift_minutes, fix.target_offset) == (60, -480)
+    assert [f.ref for f in fix.frames] == list(range(7, 13))
+    assert not fix.dependent_fixes
+    corrected = [f.captured + timedelta(minutes=60 if f in fix.frames else 0) for f in frames]
+    assert all(a < b for a, b in pairwise(corrected))
+
+
+def test_post_reset_zone_choices_respect_corrected_anchor_and_keep_valid_options():
+    from dataclasses import replace
+
+    frames = [replace(f, latitude=34., longitude=-118.) if f.ref > 6 else f
+              for f in _reset_frames(gps_error_before=30)]
+    problem = analyze_camera(frames, zone_lookup=lambda *_: ("America/New_York", -300))
+    assert problem is not None
+    assert [(f.shift_minutes, f.target_offset) for f in problem.fixes if f.frames[0].ref == 1] == [(-30, None)]
+    assert {(f.shift_minutes, f.target_offset) for f in problem.fixes if f.frames[0].ref == 7} == {
+        (30, -300), (120, -300),
+    }
