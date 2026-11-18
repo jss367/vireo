@@ -65,7 +65,7 @@ def test_pool_pause_requeues_and_joins_before_return(boundary):
         "_compute_file_features": object(),
     }, "_FeatureHasher")
     queue = deque([(PurePosixPath("/invented/a"), "/invented/a")])
-    subject = SimpleNamespace(_check_cancelled_no_park=check, _pause_pending=lambda: False,
+    subject = SimpleNamespace(verified_destinations={}, _check_cancelled_no_park=check, _pause_pending=lambda: False,
                               _feature_result=lambda _: ("fake phash", "fake hash"))
     generator = ns["_pool_features"](subject, Workers(2), queue)
     if boundary == "cancel":
@@ -109,7 +109,7 @@ def test_restricted_generator_survives_discovery_for_empty_leaf_status(leaves):
     control = SimpleNamespace(cancel_check=None, pause_check=None, cancel_only_check=None)
     ns["__init__"](subject, "/invented/root", resolved, object(), {},
                    catalog_folder_path=object(), catalog_folder_aliases=object(),
-                   options=SimpleNamespace(recursive=True), hooks=hooks, control=control)
+                   options=SimpleNamespace(recursive=True, verified_destinations=None), hooks=hooks, control=control)
     assert observed == leaves
     assert tuple(subject.restrict_dirs) == tuple(leaves)
     registered, stamps, stats = [], [], []
