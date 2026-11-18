@@ -146,8 +146,10 @@ export function render() {
   var filtersActive = Boolean(search)
     || taxonomicGroup !== 'all'
     || identificationRank !== 'all';
-  meta.textContent = state.currentData.meta.species_count + ' species on your life list · '
-    + state.currentData.meta.photo_count + ' tagged photos'
+  var entryCount = state.currentData.meta.species_count;
+  var photoCount = state.currentData.meta.photo_count;
+  meta.textContent = entryCount + ' distinct confirmed identification' + (entryCount === 1 ? '' : 's')
+    + ' on your life list · ' + photoCount + ' tagged photo' + (photoCount === 1 ? '' : 's')
     + (filtersActive ? ' · ' + list.length + ' shown' : '');
 
   var renumberView = /** @type {HTMLInputElement} */ (document.getElementById('renumberView')).checked;

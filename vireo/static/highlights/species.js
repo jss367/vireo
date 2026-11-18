@@ -6,11 +6,11 @@ import { safeFetch, showToast } from './shared.js';
 import { updateHighlightsLightboxControls } from './lightbox.js';
 import { loadHighlights } from './loading.js';
 import { loadMoreBucket } from './render.js';
-import { highlightsScopeParams, representativeToast, selectedFolderId } from './scope.js';
+import { highlightsScopeParams, representativeToast, selectedScope } from './scope.js';
 import { state } from './state.js';
 
 var INCOMPLETE_ROW_MESSAGE = 'Nothing was changed: this row\'s photos could not all be loaded '
-  + 'for the current folder and filters. Try again.';
+  + 'for the current selection and filters. Try again.';
 
 /** Tell the user a bulk action stopped before changing anything. @returns {null} */
 function cancelBulkAction() {
@@ -191,14 +191,9 @@ export async function setSpeciesRepresentative(species, photoId, button) {
   if (!species || !photoId) return;
   if (button) button.disabled = true;
   try {
-    // The choice claims what the page shows: with one folder selected, the
-    // photo is chosen over the other representatives in that folder only, so
-    // it does not outrank another trip's representative the user never saw
-    // beside it. With every folder shown it is chosen over all of them.
-    /** @type {{purpose: string, species: string, photo_id: number, folder_id?: number}} */
-    var body = { purpose: 'species_representative', species: species, photo_id: photoId };
-    var folderId = selectedFolderId();
-    if (folderId != null) body.folder_id = folderId;
+    if (state.loadedHighlightsScope !== highlightsScopeParams().toString()) return;
+    var scope = selectedScope();
+    var body = { purpose: 'species_representative', species: species, photo_id: photoId, ...scope };
     /** @type {{over?: number[]}} */
     var result = await safeFetch('/api/photo-preferences', {
       method: 'POST',
@@ -208,7 +203,8 @@ export async function setSpeciesRepresentative(species, photoId, button) {
     await loadHighlights();
     updateHighlightsLightboxControls(state.activeLightboxPhotoId);
     if (typeof showToast === 'function') {
-      showToast(representativeToast(result && result.over ? result.over.length : 0, folderId != null), 'success');
+      var scopeName = scope.collection_id ? 'collection' : scope.folder_id ? 'folder' : '';
+      showToast(representativeToast(result?.over?.length || 0, scopeName), 'success');
     }
   } finally {
     if (button) button.disabled = false;

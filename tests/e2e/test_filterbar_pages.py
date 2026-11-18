@@ -15,7 +15,7 @@ def _wait_bar(page):
     page.wait_for_selector("#vireoFilterBar", timeout=15000)
     page.wait_for_function(
         "document.querySelector('.vf-total strong') && "
-        "document.querySelector('.vf-total strong').textContent !== '–'",
+        "document.querySelector('.vf-total strong').textContent !== ''",
         timeout=15000,
     )
 

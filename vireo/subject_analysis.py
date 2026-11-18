@@ -114,7 +114,12 @@ def _usable_analysis(analysis):
     if not ready["eligible"]:
         return False
     try:
+        basis = analysis["features"].get("analysis")
+        if not isinstance(basis, dict) or basis.get("source") != "original" or basis.get("measurement_basis") != "subject_mask":
+            return False
         with Image.open(io.BytesIO(analysis["mask_png"])) as image:
+            if image.size != (basis.get("width"), basis.get("height")):
+                return False
             pixels = np.asarray(image)
             return pixels.ndim == 2 and bool(np.any(pixels))
     except (OSError, ValueError, TypeError):
@@ -140,11 +145,33 @@ def publish_analysis(db, photo, detection, analysis, effective_cfg):
     db.subjects.save_ranking_analysis(detection["id"], key, analysis["features"], analysis["mask_png"])
 
 
+def analyze_selected_subject(db, photo, comparison, effective_cfg, checkpoint):
+    """Measure one selection and read its current immutable generation back."""
+    detection, selection = resolve_subject(db, photo["id"], comparison)
+    if detection is None:
+        return {"status": "skipped", "reason": selection["selection"]}
+    key = analysis_key(source_path(db, photo), detection, effective_cfg)
+    changed = analyze_detection(db, photo, detection, effective_cfg, checkpoint)
+    verify_selected_analysis(db, photo["id"], comparison, effective_cfg, detection["id"], key)
+    return {"status": "analyzed" if changed else "cached", "detection_id": detection["id"], "analysis_key": key}
+
+
+def verify_selected_analysis(db, photo_id, comparison, effective_cfg, detection_id, key):
+    with db.transaction():
+        db.hold_read_snapshot()
+        current_photo = db.photos.get(photo_id, verify_workspace=True)
+        current, _ = resolve_subject(db, photo_id, comparison)
+        if (current_photo is None or current is None or current["id"] != detection_id
+                or analysis_key(source_path(db, current_photo), current, effective_cfg) != key
+                or not _usable_analysis(_existing_analysis(db, detection_id, key))):
+            raise ValueError("Selected subject evidence changed during analysis; retry this frame")
+
+
 def analyze_comparison(ctx, job, photo_ids, comparison, effective_cfg):
     """Each failure stays visible; unresolved identity never runs arbitrary inference."""
     import logging
     db = ctx.thread_db()
-    result = {"analyzed": 0, "cached": 0, "unresolved": [], "errors": []}
+    result = {"analyzed": 0, "cached": 0, "unresolved": [], "errors": [], "photos": []}
     job["progress"]["total"] = len(photo_ids)
     try:
         for index, photo_id in enumerate(photo_ids):
@@ -152,15 +179,17 @@ def analyze_comparison(ctx, job, photo_ids, comparison, effective_cfg):
             photo = db.photos.get(photo_id, verify_workspace=True)
             job["progress"]["current_file"] = photo["filename"] if photo else str(photo_id)
             try:
-                detection, selection = resolve_subject(db, photo_id, comparison) if photo else (None, {})
-                if not detection:
-                    result["unresolved"].append({"photo_id": photo_id, "reason": selection.get("selection", "photo_unavailable")})
+                outcome = (analyze_selected_subject(db, photo, comparison, effective_cfg, lambda: ctx.checkpoint(job))
+                           if photo else {"status": "skipped", "reason": "photo_unavailable"})
+                if outcome["status"] == "skipped":
+                    result["unresolved"].append({"photo_id": photo_id, "reason": outcome["reason"]})
                 else:
-                    changed = analyze_detection(db, photo, detection, effective_cfg, lambda: ctx.checkpoint(job))
-                    result["analyzed" if changed else "cached"] += 1
+                    result[outcome["status"]] += 1
             except (OSError, ValueError, RuntimeError) as exc:
                 logging.getLogger(__name__).exception("Subject analysis failed for photo %s", photo_id)
                 result["errors"].append({"photo_id": photo_id, "error": str(exc)})
+                outcome = {"status": "failed", "error": str(exc)}
+            result["photos"].append({"photo_id": photo_id, **outcome})
             job["progress"]["current"] = index + 1
         return result
     finally:

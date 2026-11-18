@@ -516,6 +516,19 @@ def _attach_photo_file_fields(db: Database, photo: Row, result: JsonDict) -> Non
         result["xmp_path"] = ""
 
 
+def _attach_species_reviews(db: Database, photo_id: int, result: JsonDict) -> None:
+    reviews = db.species_provenance.reviews(photo_id)
+    result["assignment_reviews"] = list(reviews.values())
+    result["review_workspace_id"] = db.require_workspace_id()
+    result["species_assignments"] = db.species_provenance.assignments(photo_id, reviews=reviews)
+    names_by_keyword = {a["keyword_id"]: a for a in result["species_assignments"]}
+    for keyword in result["keywords"]:
+        names = names_by_keyword.get(keyword["id"], {})
+        keyword.update({key: names[key] for key in (
+            "display_name", "synonyms", "taxon_id", "source_taxon_id", "scientific_name",
+        ) if key in names})
+
+
 def create_photos_blueprint(
     get_db: GetDb,
     json_error: JsonError,
@@ -1002,13 +1015,7 @@ def create_photos_blueprint(
 
         keywords = db.photo_keywords.get_for_photo(photo_id)
         result["keywords"] = [dict(k) for k in keywords]
-        result["species_assignments"] = db.species_provenance.assignments(photo_id)
-        names_by_keyword = {a["keyword_id"]: a for a in result["species_assignments"]}
-        for keyword in result["keywords"]:
-            names = names_by_keyword.get(keyword["id"], {})
-            keyword.update({key: names[key] for key in (
-                "display_name", "synonyms", "taxon_id", "source_taxon_id", "scientific_name",
-            ) if key in names})
+        _attach_species_reviews(db, photo_id, result)
         # Export naming uses the species-rank keyword list, which is narrower
         # than the detail payload's life-list identifications (that list can
         # also contain genus/family rows). Expose the exact export metadata so
@@ -1175,14 +1182,15 @@ def create_photos_blueprint(
         return jsonify(result)
 
     def _selected_best_batch_rows(
-        db: Database, body: object,
+        db: Database, body: object, *, single_subject: bool = False,
     ) -> tuple[list[int], list[Row], ErrorResponse | None]:
         """``(photo_ids, rows, None)`` for a selected-photos batch body, or
         ``([], [], error_response)``.
 
         Shared by the Best Batch and burst-evidence POST routes so both
         accept exactly the same selection: at most 500 integer ids, at least
-        two of which the workspace can see in an online folder.
+        two of which the workspace can see in an online folder. A subject
+        evidence request may also select one available photo.
         """
         if not isinstance(body, dict):
             return [], [], json_error("request body must be a JSON object")
@@ -1201,13 +1209,15 @@ def create_photos_blueprint(
                 continue
             seen.add(raw)
             photo_ids.append(raw)
-        if len(photo_ids) < 2:
+        if len(photo_ids) < 2 and not single_subject:
             return [], [], json_error("at least two selected photos are required", 400)
 
         rows = db.photos.best_batch_rows_by_ids(photo_ids)
         by_id = {row["id"]: row for row in rows}
         rows = [by_id[pid] for pid in photo_ids if pid in by_id]
-        if len(rows) < 2:
+        if not rows and single_subject:
+            return [], [], json_error("No selected photo is available", 404)
+        if len(rows) < 2 and not (single_subject and len(photo_ids) == 1):
             return [], [], json_error("at least two selected photos are required", 400)
         return photo_ids, rows, None
 
@@ -1286,7 +1296,7 @@ def create_photos_blueprint(
     def api_selected_photos_burst_evidence(ctx: JobLaunch) -> ResponseReturnValue:
         """The evidence pack for an explicit selection (``{"photo_ids": [...]}``).
 
-        Same selection contract as ``POST /api/photos/best-batch``; same pack
+        Selected-subject evidence also accepts one photo. Returns the same pack
         as ``GET /api/photos/<id>/burst-evidence`` with ``scope_method``
         ``selected_photos``.
         """
@@ -1295,12 +1305,14 @@ def create_photos_blueprint(
         if err is not None:
             return err
         body = request.get_json(silent=True) or {}
-        photo_ids, rows, err = _selected_best_batch_rows(db, body)
+        photo_ids, rows, err = _selected_best_batch_rows(db, body, single_subject=True)
         if err is not None:
             return err
         comparison, err = _comparison_args(db, body, rows)
         if err is not None:
             return err
+        if len(rows) == 1 and comparison is None:
+            return json_error("at least two selected photos are required", 400)
         if "analyze" in body and not isinstance(body["analyze"], bool):
             return json_error("analyze must be a boolean")
         if body.get("analyze"):
@@ -1571,20 +1583,36 @@ def create_photos_blueprint(
             return json_error("Choose a retained subject from this photo")
         vireo_dir = media_root(config["THUMB_CACHE_DIR"])
 
-        def work(job: JobDict) -> None:
+        def work(job: JobDict) -> JsonDict:
             from image_loader import get_canonical_image_path
+            from subject_analysis import analyze_selected_subject
+            from subject_ranking import SubjectComparison
             from subjects import analyze_photo
             thread_db = ctx.thread_db()
             try:
+                job["progress"].update(total=1, current=0)
                 ctx.checkpoint(job)
                 photo = thread_db.photos.get(photo_id, verify_workspace=True)
                 if photo is None:
                     raise ValueError("Photo is no longer in this workspace")
                 folders = {f["id"]: f["path"] for f in thread_db.folders.tree()}
                 path = get_canonical_image_path(photo, vireo_dir, folders)
+                job["progress"]["current_file"] = photo["filename"]
                 count = analyze_photo(thread_db, photo_id, path, detection_id=detection_id,
                                       force=detection_id is not None, checkpoint=lambda: ctx.checkpoint(job))
-                job["result"] = {"photo_id": photo_id, "detection_id": detection_id, "subjects_analyzed": count}
+                if detection_id is not None:
+                    comparison = SubjectComparison(subject_overrides={photo_id: detection_id})
+                    outcome = analyze_selected_subject(thread_db, photo, comparison,
+                                                       thread_db.get_effective_config(cfg.load()), lambda: ctx.checkpoint(job))
+                elif count:
+                    outcome = {"status": "analyzed", "reason": "retained_subject_boxes_measured"}
+                elif retained(thread_db, photo_id):
+                    outcome = {"status": "skipped", "reason": "no_new_box_measurements"}
+                else:
+                    outcome = {"status": "skipped", "reason": "no_retained_subjects"}
+                job["progress"]["current"] = 1
+                return {"photo_id": photo_id, "detection_id": detection_id, "subjects_analyzed": count,
+                        "photos": [{"photo_id": photo_id, **outcome}]}
             finally:
                 thread_db.close()
 

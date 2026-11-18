@@ -4,6 +4,7 @@ The optional JSON belongs to the association. Absence deliberately means
 manual/unspecified or imported/unknown, according to its existing source.
 """
 
+import hashlib
 import json
 import sqlite3
 from collections.abc import Callable
@@ -83,9 +84,35 @@ class SpeciesProvenanceRepository:
 
     def set(self, photo_id: int, keyword_id: int, provenance: dict[str, Any]) -> None:
         self.conn.execute(
-            'UPDATE photo_keywords SET species_provenance=? WHERE photo_id=? AND keyword_id=?',
-            (json.dumps(provenance, sort_keys=True), photo_id, keyword_id),
+            """UPDATE photo_keywords SET species_provenance=CASE
+                WHEN json_extract(species_provenance, '$.review_id') IS NULL THEN :value
+                ELSE json_set(:value, '$.review_id', json_extract(species_provenance, '$.review_id')) END
+                WHERE photo_id=:pid AND keyword_id=:kid""",
+            {'value': json.dumps(provenance, sort_keys=True), 'pid': photo_id, 'kid': keyword_id},
         )
+
+    def reviews(self, photo_id: int) -> dict[str, dict[str, Any]]:
+        return {r['id']: json.loads(r['record']) for r in self.conn.execute(
+            'SELECT id, record FROM assignment_reviews WHERE photo_id=?', (photo_id,))}
+
+    def save_review(self, photo_id: int, review_id: str, record: dict[str, Any] | None) -> None:
+        if record is None:
+            self.conn.execute('DELETE FROM assignment_reviews WHERE photo_id=? AND id=?', (photo_id, review_id))
+        else:
+            self.conn.execute(
+                'INSERT INTO assignment_reviews (photo_id, id, record) VALUES (?, ?, ?) '
+                'ON CONFLICT(id) DO UPDATE SET record=excluded.record',
+                (photo_id, review_id, json.dumps(record, sort_keys=True)))
+
+    def outstanding_reviews(self, workspace_id: int) -> list[dict[str, Any]]:
+        rows = self.conn.execute("""SELECT r.photo_id, k.id AS keyword_id, k.name AS species
+            FROM assignment_reviews r JOIN photo_workspace_visibility v
+                ON v.photo_id=r.photo_id AND v.workspace_id=?
+            JOIN photo_keywords pk ON pk.photo_id=r.photo_id
+                AND json_extract(pk.species_provenance, '$.review_id')=r.id
+            JOIN keywords k ON k.id=pk.keyword_id
+            WHERE json_extract(r.record, '$.resolution') IS NULL ORDER BY r.photo_id, k.id""", (workspace_id,))
+        return [dict(row) for row in rows]
 
     def carry(self, losing_id: int, survivor_id: int, *, keyword_id: int | None = None) -> None:
         """Carry evidence only for links the normal merge chose to keep.
@@ -111,7 +138,7 @@ class SpeciesProvenanceRepository:
         row = self.conn.execute('SELECT photo_id FROM detections WHERE id=?', (detection_id,)).fetchone()
         return row[0] if row else None
 
-    def assignments(self, photo_id: int) -> list[dict[str, Any]]:
+    def assignments(self, photo_id: int, *, reviews: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
         aliases = self._taxon_aliases(photo_id)
         rows = self.conn.execute(
             f'''SELECT k.id AS keyword_id, k.name AS species, pk.source, pk.species_provenance,
@@ -123,13 +150,19 @@ class SpeciesProvenanceRepository:
                  AND (t.rank='species' OR t.rank IS NULL) ORDER BY k.id''',
             (photo_id,),
         )
+        if reviews is None:
+            reviews = self.reviews(photo_id)
         result = []
         for row in rows:
             provenance = json.loads(row['species_provenance']) if row['species_provenance'] else {
                 'method': 'manual_unspecified' if row['source'] in ('manual', 'accept') else 'imported_unknown',
                 'confidence': None, 'confidence_meaning': 'Not recorded',
             }
-            result.append({'photo_id': photo_id, 'keyword_id': row['keyword_id'],
+            review = reviews.get(provenance.pop('review_id', None))
+            version = hashlib.sha256(json.dumps([photo_id, row['keyword_id'], row['species'], row['taxon_id'],
+                                                row['source_taxon_id'], row['source'], row['species_provenance'], review],
+                                                sort_keys=True).encode()).hexdigest()
+            result.append({'review_version': version, 'review': review, 'photo_id': photo_id, 'keyword_id': row['keyword_id'],
                            'species': row['species'], **provenance,
                            **self._display_names(row, aliases)})
         return result

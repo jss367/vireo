@@ -100,6 +100,10 @@ All notable changes to Vireo are documented in this file.
   paths on hover.
 
 ### Fixed
+- **Recentered focus crops retain the subject mask.** Requesting a mask with a
+  manual focus center now shades the new window using the validated subject
+  mask. Missing or stale masks report an error instead of silently returning a
+  plain crop; manual inspection without a mask remains available.
 - **Expanded stacks stop flickering while their details load.** Opening a
   burst or duplicate stack painted its photos and then rebuilt the whole tray
   twice more as iNaturalist and color-label details arrived a moment later.
