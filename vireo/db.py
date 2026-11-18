@@ -12,6 +12,7 @@ from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, S
 from typing import TYPE_CHECKING, Any, Literal, Self
 
 import settings_source
+from focus_point import focus_area_json
 from keyword_normalization import (
     normalize_keyword_display,
 )
@@ -491,6 +492,7 @@ class Database:
         self._unit = UnitOfWork()
         self.conn.units = self._unit
         self.conn.row_factory = sqlite3.Row
+        self.conn.create_function("vireo_focus_area", 1, focus_area_json, deterministic=True)
         self.conn.create_function(
             "vireo_keyword_text_match",
             4,

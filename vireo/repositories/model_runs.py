@@ -208,6 +208,29 @@ class ModelRunsRepository:
         ).fetchone()
         return row is not None
 
+    def stale_detector_input_ids(self, photo_ids: Sequence[int] | None = None) -> set[int]:
+        """Find portable MegaDetector runs whose source or focus changed, except reviewed runs.
+
+        Callers can limit the lookup to one chunk of a larger classification request.
+        Legacy runs do not carry a portable input to compare.
+        """
+        from cache_identity import catalog_detector_input, is_sha256
+
+        scope = "" if photo_ids is None else f"AND dr.photo_id IN ({','.join('?' for _ in photo_ids)})"
+        rows = self.conn.execute(f"""SELECT dr.photo_id, dr.input_fingerprint, p.file_hash,
+                vireo_focus_area(p.exif_data) AS focus_area
+            FROM detector_runs dr JOIN photos p ON p.id=dr.photo_id
+            WHERE dr.detector_model='megadetector-v6' AND length(dr.input_fingerprint)=64
+              AND length(p.file_hash)=64 {scope}""", tuple(photo_ids or ()))
+        stale = set()
+        for row in rows:
+            if not (is_sha256(row["file_hash"]) and is_sha256(row["input_fingerprint"])):
+                continue
+            _, expected = catalog_detector_input(row["file_hash"], "megadetector-v6", row["focus_area"])
+            if expected != row["input_fingerprint"] and not self.detector_run_is_pinned(row["photo_id"], "megadetector-v6"):
+                stale.add(row["photo_id"])
+        return stale
+
     def get_detector_run_photo_ids(
         self, detector_model: str, runtime_fingerprint: str | None = None,
     ) -> set[int]:
@@ -255,8 +278,11 @@ class ModelRunsRepository:
                                  WHERE d.photo_id = dr.photo_id
                                    AND d.detector_model = dr.detector_model))""",
             params,
-        ).fetchall()
-        return {r["photo_id"] for r in rows}
+        )
+        ids = {r["photo_id"] for r in rows}
+        if ids and detector_model == "megadetector-v6":
+            ids.difference_update(self.stale_detector_input_ids())
+        return ids
 
     def record_classifier_run(
         self,

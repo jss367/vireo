@@ -70,3 +70,9 @@ def focus_point(metadata):
     except (AttributeError, TypeError, KeyError, ValueError, OverflowError):
         pass
     return None
+
+
+def focus_area_json(metadata):
+    """SQLite scalar for projecting only the small detector input from an EXIF record."""
+    area = focus_point(metadata) if metadata else None
+    return json.dumps(area) if area is not None else None

@@ -22,6 +22,22 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
 from app_paths import default_path
+from cache_identity import (
+    CacheFormatError,
+    canonical_bytes,
+    catalog_detector_input,
+    detector_input,
+    fingerprint,
+)
+from cache_identity import (
+    is_sha256 as _is_sha256,
+)
+from cache_identity import (
+    normalize_json as _normalize_json,
+)
+from cache_identity import (
+    source_input as source_input,
+)
 from file_replace import replace_file
 from services import detection_store
 from services.retained_cache import guarded_reader, reader_guard
@@ -39,56 +55,11 @@ MAX_COMPRESSION_RATIO = 200
 
 _SQLITE_INT64_MAX = (1 << 63) - 1
 
-_HEX64 = frozenset("0123456789abcdef")
 _ARTIFACT_TYPES = frozenset({"detection", "classification"})
 _FILE_DIGEST_CACHE = {}
 # Serializes the read-merge-replace of trust.json: two bundle imports that
 # merge concurrently would otherwise each write back only their own runtimes.
 _TRUST_WRITE_LOCK = threading.Lock()
-
-
-class CacheFormatError(ValueError):
-    """Raised when an artifact or bundle is invalid or unsupported."""
-
-
-def _is_sha256(value):
-    return (
-        isinstance(value, str)
-        and len(value) == 64
-        and all(char in _HEX64 for char in value)
-    )
-
-
-def _normalize_json(value):
-    if value is None or isinstance(value, (str, bool, int)):
-        return value
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            raise CacheFormatError("NaN and infinity are not valid cache data")
-        return 0.0 if value == 0 else value
-    if isinstance(value, list):
-        return [_normalize_json(item) for item in value]
-    if isinstance(value, dict):
-        if not all(isinstance(key, str) for key in value):
-            raise CacheFormatError("cache object keys must be strings")
-        return {key: _normalize_json(item) for key, item in value.items()}
-    raise CacheFormatError(f"unsupported cache value: {type(value).__name__}")
-
-
-def canonical_bytes(value):
-    """Return the exact canonical JSON bytes used for all cache digests."""
-    normalized = _normalize_json(value)
-    return json.dumps(
-        normalized,
-        ensure_ascii=False,
-        allow_nan=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("utf-8")
-
-
-def fingerprint(value):
-    return hashlib.sha256(canonical_bytes(value)).hexdigest()
 
 
 def artifact_digest(artifact):
@@ -150,9 +121,9 @@ def megadetector_runtime_fingerprint(weights_path=None):
         "type": "detection",
         "model": "megadetector-v6",
         "weights_sha256": sha256_file(weights_path),
-        "input_recipe": "vireo-detector-source-v1",
+        "input_recipes": ["vireo-detector-source-v1", "vireo-detector-focus-v2"],
         "preprocess": {
-            "version": 8,
+            "version": 9,
             "input_size": INPUT_SIZE,
             "resize": "Pillow.BILINEAR-letterbox",
             "padding": 114,
@@ -482,13 +453,12 @@ def publish_detection_artifact(
     runtime,
     detections,
     store=None,
+    *, focus=None,
 ):
     """Publish one newly committed detector result when identity is complete."""
     if not _is_sha256(photo_sha256) or not _is_sha256(runtime):
         return None
-    input_block, input_fp = source_input(
-        photo_sha256, "vireo-detector-source-v1",
-    )
+    input_block, input_fp = detector_input(photo_sha256, focus)
     subjects = [{
         "key": f"d{index}",
         "kind": "box",
@@ -684,21 +654,6 @@ def promote_and_publish_classifier_run(
     )
     digest, _created = (store or ArtifactStore()).put(artifact)
     return digest
-
-
-def source_input(photo_sha256, recipe):
-    """Build the versioned source identity used by the experimental v1 cache.
-
-    The model runtime identity owns decode/preprocess behavior.  The input
-    identity owns the exact source bytes and named source-selection recipe.
-    """
-    if not _is_sha256(photo_sha256):
-        raise CacheFormatError("photo_sha256 must be a lowercase SHA-256")
-    block = {
-        "recipe": recipe,
-        "sources": [{"role": "original", "sha256": photo_sha256}],
-    }
-    return block, fingerprint(block)
 
 
 def classification_input(
@@ -1107,9 +1062,15 @@ def _validate_detection_metadata(artifact):
         for source in sources
     ):
         raise CacheFormatError("detection input source does not match photo")
-    expected_input, _expected_fp = source_input(
-        artifact["photo_sha256"], "vireo-detector-source-v1",
-    )
+    focus = artifact["input"].get("focus_area")
+    if focus is not None:
+        if artifact["detector_model"] != "megadetector-v6" or not isinstance(focus, list) or len(focus) != 4:
+            raise CacheFormatError("invalid detector focus area")
+        for coordinate in focus:
+            if type(coordinate) not in (int, float):
+                raise CacheFormatError("invalid detector focus coordinate")
+            _finite_unit_interval(coordinate, "focus coordinate")
+    expected_input, _expected_fp = detector_input(artifact["photo_sha256"], focus)
     if artifact["input"] != expected_input:
         raise CacheFormatError("unsupported detection input recipe")
 
@@ -1565,8 +1526,8 @@ def _export_detection_artifacts(db, detection_rows, artifacts, summary):
         if not _is_sha256(row["runtime_fingerprint"]):
             summary["skipped_legacy"] += 1
             continue
-        input_block, expected_input = source_input(
-            row["file_hash"], "vireo-detector-source-v1",
+        input_block, expected_input = catalog_detector_input(
+            row["file_hash"], row["detector_model"], row["focus_area"],
         )
         if row["input_fingerprint"] != expected_input:
             summary["skipped_incompatible_input"] += 1
@@ -2094,10 +2055,10 @@ class _ArtifactMaterialization:
         """
         detection_by_key = {}
         for artifact in detection_items:
-            key = (artifact["photo_sha256"], artifact["detector_model"])
+            key = (artifact["photo_sha256"], artifact["detector_model"], artifact["input_fingerprint"])
             detection_by_key.setdefault(key, []).append(artifact)
         chosen_detections = []
-        for (photo_sha256, detector_model), candidates in detection_by_key.items():
+        for (photo_sha256, detector_model, _input), candidates in detection_by_key.items():
             if len(candidates) == 1:
                 chosen_detections.append(candidates[0])
                 continue
@@ -2209,9 +2170,12 @@ class _ArtifactMaterialization:
         companion or working-copy identity, skip catalog rows backed by
         either alternate rendition.
         """
-        return self.db.computation_cache.original_backed_photos(
-            artifact["photo_sha256"],
-        )
+        photos = self.db.computation_cache.original_backed_photos(artifact["photo_sha256"])
+        if artifact["type"] != "detection" or artifact["detector_model"] != "megadetector-v6":
+            return photos
+        return [p for p in photos if catalog_detector_input(
+            artifact["photo_sha256"], artifact["detector_model"], p["focus_area"],
+        )[1] == artifact["input_fingerprint"]]
 
     def apply_detection(self, artifact, photos):
         db = self.db

@@ -100,6 +100,8 @@ def _all_photos_cache_satisfied(
                 chunk, run_filter, detector_confidence,
             )
         )
+        if chunk_covered and db.model_runs.stale_detector_input_ids(chunk):
+            return False
         total += chunk_total
         covered += chunk_covered
         covered_photos += chunk_photos

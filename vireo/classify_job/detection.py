@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from classify_job.common import compute_sharpness, detect_animals, get_primary_detection, log
 from config import config_value
+from focus_point import FocusArea
 from resource_ledger import ResourceWaitCancelled
 from services import detection_store
 
@@ -222,7 +223,7 @@ class _DetectBatchRun:
         # early-continue above and must not poison the skip set.
         detector_runtime = self.job.get("_detector_runtime_fingerprint") or "legacy"
         portable_input, portable_photo_hash = self._portable_identity(
-            photo, detector_runtime,
+            photo, detector_runtime, focus,
         )
         det_ids = detection_store.write_detection_batch(
             self.db, photo["id"], "megadetector-v6", detections,
@@ -233,7 +234,7 @@ class _DetectBatchRun:
 
         if portable_input is not None:
             self._publish_portable_result(
-                photo, detector_runtime, portable_photo_hash,
+                photo, detector_runtime, portable_photo_hash, portable_input, focus,
             )
 
         if detections:
@@ -291,7 +292,9 @@ class _DetectBatchRun:
             effective_cfg = self.db.get_effective_config(cfg.load())
             self.det_conf_threshold = config_value(effective_cfg, "detector_confidence")
 
-    def _portable_identity(self, photo: sqlite3.Row, detector_runtime: str) -> tuple[str | None, str | None]:
+    def _portable_identity(
+        self, photo: sqlite3.Row, detector_runtime: str, focus: FocusArea | None,
+    ) -> tuple[str | None, str | None]:
         """Return ``(input_fingerprint, photo_hash)`` for a portable run.
 
         Both are ``None`` for the legacy runtime, companion-backed photos,
@@ -308,11 +311,11 @@ class _DetectBatchRun:
                 and not identity_row["companion_path"]
             ):
                 try:
-                    from computation_cache import source_input
+                    from cache_identity import detector_input
 
                     portable_photo_hash = identity_row["file_hash"]
-                    _input_block, portable_input = source_input(
-                        portable_photo_hash, "vireo-detector-source-v1",
+                    _input_block, portable_input = detector_input(
+                        portable_photo_hash, focus,
                     )
                 except (TypeError, ValueError):
                     portable_input = None
@@ -321,31 +324,19 @@ class _DetectBatchRun:
 
     def _publish_portable_result(
         self, photo: sqlite3.Row, detector_runtime: str, portable_photo_hash: str | None,
+        input_fp: str, focus: FocusArea | None,
     ) -> None:
-        """Publish the committed detector result as a portable artifact.
-
-        Publication follows the database commit.  A store failure must
-        never turn successful inference into a failed detector run.
-
-        ``write_detection_batch`` returns early (leaving the stored
-        detector_runs.runtime_fingerprint at its OLD value) when a
-        runtime change is proposed against a review-pinned run and
-        ``force_runtime_replace`` is False.  Publishing with the new
-        ``detector_runtime`` in that case would attach a foreign
-        runtime identity to boxes that were actually produced by an
-        older runtime — the artifact is content-addressed and
-        exportable, so downstream catalogs would trust that lie.
-        Read back the persisted runtime and only publish when it
-        equals the runtime we intended to write.
-        """
+        """Publish committed boxes only if the writer accepted this runtime and input."""
         db = self.db
         try:
             from computation_cache import publish_detection_artifact
 
-            persisted_runtime = db.model_runs.detector_runtime_fingerprint(
-                photo["id"], "megadetector-v6",
-            )
-            if persisted_runtime == detector_runtime:
+            with db.transaction():
+                db.hold_read_snapshot()
+                stored = db.model_runs.detector_run_identity(photo["id"], "megadetector-v6")
+                if (stored is None or stored["runtime_fingerprint"] != detector_runtime
+                        or stored["input_fingerprint"] != input_fp):
+                    return
                 normalized_detections = [{
                     "box": {
                         "x": row["box_x"], "y": row["box_y"],
@@ -357,23 +348,23 @@ class _DetectBatchRun:
                     db, photo["id"], min_conf=0,
                     detector_model="megadetector-v6",
                 ), key=lambda row: (-row["detector_confidence"], row["id"]))]
-                # Reconstruct the configured ArtifactStore from
-                # the path stashed by ``run_classify_job`` /
-                # ``run_pipeline_job`` so newly published detector
-                # artifacts honor ``COMPUTATION_CACHE_DIR``
-                # instead of landing in the default location.
-                from computation_cache import ArtifactStore
-                _cache_dir = self.job.get("_computation_cache_dir")
-                _publish_store = (
-                    ArtifactStore(_cache_dir) if _cache_dir else None
-                )
-                publish_detection_artifact(
-                    portable_photo_hash,
-                    "megadetector-v6",
-                    detector_runtime,
-                    normalized_detections,
-                    store=_publish_store,
-                )
+            # Reconstruct the configured ArtifactStore from
+            # the path stashed by ``run_classify_job`` /
+            # ``run_pipeline_job`` so newly published detector
+            # artifacts honor ``COMPUTATION_CACHE_DIR``
+            # instead of landing in the default location.
+            from computation_cache import ArtifactStore
+            _cache_dir = self.job.get("_computation_cache_dir")
+            _publish_store = (
+                ArtifactStore(_cache_dir) if _cache_dir else None
+            )
+            publish_detection_artifact(
+                portable_photo_hash,
+                "megadetector-v6",
+                detector_runtime,
+                normalized_detections,
+                store=_publish_store, focus=focus,
+            )
         except Exception:  # broad: publishing the portable cache is best-effort; the local result already committed
             log.warning(
                 "Could not publish portable detector result for photo %s",

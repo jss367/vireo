@@ -582,13 +582,13 @@ class _FeatureLoad:
         has_run = model in rows
         detection = {"status": "complete" if has_run or primary else "not_run"}
         if has_run and evidence.get("input_fingerprint"):
-            from computation_cache import source_input
+            from cache_identity import catalog_detector_input
             source_hash = evidence.get("file_hash")
             if (isinstance(source_hash, str) and len(source_hash) == 64
                     and all(c in "0123456789abcdef" for c in source_hash)
                     and not evidence.get("companion_path")):
-                detection["current"] = evidence["input_fingerprint"] == source_input(
-                    source_hash, "vireo-detector-source-v1",
+                detection["current"] = evidence["input_fingerprint"] == catalog_detector_input(
+                    source_hash, model, evidence.get("focus_area"),
                 )[1]
             else:
                 # A stamped run whose current input cannot be verified is
