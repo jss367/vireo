@@ -123,7 +123,8 @@ export function renderBatch(data) {
 
   /** @type {HTMLButtonElement} */ (byId('reviewBtn')).disabled = !!data.comparison || !data.photo_ids || data.photo_ids.length < 2;
   byId('reviewBtn').title = data.comparison ? 'Review the selected subjects with the comparison controls below.' : '';
-  /** @type {HTMLButtonElement} */ (byId('analyzeSubjectsBtn')).disabled = !data.comparison;
+  /** @type {HTMLButtonElement} */ (byId('analyzeSubjectsBtn')).disabled = !data.comparison ||
+    !(data.cards || []).some(card => card.subject?.detection_id && card.evidence_status === 'subject_analysis_missing');
   /** @type {HTMLButtonElement} */ (byId('flagBtn')).disabled = false;
   /** @type {HTMLButtonElement} */ (byId('rejectBtn')).disabled = !data.best_photo_id;
   var inspected = cards.find(function(c) { return c.id === state.inspectedId; });

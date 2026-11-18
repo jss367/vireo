@@ -15,10 +15,12 @@ import time
 from collections.abc import Callable
 from contextlib import closing
 from dataclasses import dataclass
+from functools import partial
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 from detection_id import detection_prompt_runtime, require_original_box
+from primary_comparison import measurement_inputs
 from repositories.masks_features import MaskQuality, PipelineFeatures
 from services import detection_store, subject_masks
 
@@ -154,6 +156,7 @@ class _MaskPhoto:
     photo_id: int
     image_path: str
     existing: JsonDict | None = None
+    comparison_inputs: str | None = None
     mask_file_stage: _StagedMaskFile | None = None
 
 
@@ -362,6 +365,7 @@ class _MaskExtractionRun:
         # Generate mask via SAM2
         deps.require_aligned_detector_prompt(proxy, photo.get("detector_runtime"), detector_model=photo.get("detector_model"))
         mask = deps.generate_mask(proxy, det_box, variant=self.sam2_variant)
+        item.comparison_inputs = measurement_inputs(proxy, photo["detection_id"], photo["detector_runtime"], getattr(proxy, "info", {}).get("vireo_sam_generation"))
         if mask is None:
             self.skipped += 1
             return False
@@ -387,7 +391,7 @@ class _MaskExtractionRun:
 
         subj_emb_blob, global_emb_blob = self._embed(proxy, mask)
         self._store_mask(
-            item, mask, completeness, features, subj_emb_blob, global_emb_blob,
+            item, mask, completeness, features, subj_emb_blob, global_emb_blob, frame_id,
         )
         self.masked += 1
         return True
@@ -449,7 +453,12 @@ class _MaskExtractionRun:
         )
         if existing is None:
             return False
-        self.deps.require_original_reviewer_frame(item.image_path, photo.get("detector_runtime"), detector_model=photo.get("detector_model"))
+        from masking import cached_mask_frame_matches
+
+        frame_id = self.deps.require_original_reviewer_frame(
+            item.image_path, photo.get("detector_runtime"),
+            detector_model=photo.get("detector_model"), verify_mask_frame=True,
+        )
         cached_prompt = (
             existing["prompt_x"], existing["prompt_y"],
             existing["prompt_w"], existing["prompt_h"],
@@ -458,7 +467,8 @@ class _MaskExtractionRun:
                 == photo["detector_model"]
                 and cached_prompt == photo["prompt"]
                 and existing["path"]
-                and os.path.isfile(existing["path"])):
+                and os.path.isfile(existing["path"])
+                and cached_mask_frame_matches(existing["path"], frame_id)):
             return False
         state = thread_db.masks_features.photo_mask_state(item.photo_id)
         if (state is not None
@@ -561,7 +571,7 @@ class _MaskExtractionRun:
 
     def _store_mask(
         self, item: _MaskPhoto, mask: np.ndarray, completeness: float, features: JsonDict, subj_emb_blob: bytes | None,
-        global_emb_blob: bytes,
+        global_emb_blob: bytes, frame_id: str | None,
     ) -> None:
         """Stage the mask file, write its rows in one commit, then publish it."""
         deps = self.deps
@@ -574,7 +584,7 @@ class _MaskExtractionRun:
             self.masks_dir,
             photo_id,
             self.sam2_variant,
-            deps.save_mask,
+            partial(deps.save_mask, frame_id=frame_id) if frame_id else deps.save_mask,
             previous_path=(
                 existing["path"] if existing else None
             ),
@@ -607,6 +617,7 @@ class _MaskExtractionRun:
             detector_model=photo["detector_model"],
             prompt=photo["prompt"],
             quality=MaskQuality(
+                comparison_inputs=item.comparison_inputs,
                 subject_size=mask_subject_size,
                 subject_tenengrad=mask_subject_tenengrad,
                 bg_tenengrad=mask_bg_tenengrad,

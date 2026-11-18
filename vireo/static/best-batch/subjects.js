@@ -50,7 +50,7 @@ export function renderSubject(card) {
   var eyes = {disabled: 'Eye analysis is off.', model_unavailable: 'Eye model is unavailable.',
     identity_unavailable: 'Eye analysis needs a supported species identification.',
     not_located: 'No reliable eye located.', measured: 'Eye focus measured on the selected subject.'};
-  byId('subjectEvidenceStatus').textContent = (messages[card.evidence_status || ''] || '') +
+  byId('subjectEvidenceStatus').textContent = (card.evidence_reason || messages[card.evidence_status || ''] || '') +
     (card.subject.selection === 'selected' ? ' Subject chosen for this comparison.' : '') +
     (analysis ? ' Mask measurements use a ' + analysis.width + ' × ' + analysis.height + ' analysis image from the original.' : '') +
     ' ' + (eyes[card.eye_status || ''] || '') +
@@ -121,6 +121,10 @@ function renderMaskReview(card) {
 export async function analyzeSubjects(photoId) {
   var data = state.bestBatchData;
   if (!data?.comparison || state.analyzing) return;
+  var pending = (data.cards || []).filter(card => card.subject?.detection_id && (photoId ? card.id === photoId : card.evidence_status === 'subject_analysis_missing'));
+  if (!pending.length) return;
+  var selection = photoId ? {[photoId]: state.subjectOverrides[String(photoId)]}
+    : Object.fromEntries(pending.map(card => [String(card.id), card.subject?.detection_id]));
   var sequence = ++state.requestSequence;
   state.analyzing = true;
   ['analyzeSubjectsBtn', 'compareSubjectsBtn', 'flagBtn', 'rejectBtn', 'subjectChoices', 'requestedSpecies'].forEach(function(id) {
@@ -128,13 +132,12 @@ export async function analyzeSubjects(photoId) {
   });
   try {
     var job = await fetchJson('/api/photos/burst-evidence', {method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({...data.comparison, photo_ids: photoId ? [photoId] : data.photo_ids,
-        subject_overrides: photoId ? {[photoId]: state.subjectOverrides[String(photoId)]} : data.comparison.subject_overrides,
-        compare_subjects: true, analyze: true})});
+      body: JSON.stringify({...data.comparison, photo_ids: pending.map(card => card.id),
+        subject_overrides: selection, compare_subjects: true, analyze: true})});
     while (sequence === state.requestSequence) {
       var progress = await fetchJson('/api/jobs/' + job.job_id);
       byId('comparisonStatus').textContent = 'Analyzing selected subjects: ' + (progress.progress?.current || 0) +
-        ' of ' + (progress.progress?.total || data.count) + ' frames processed.';
+        ' of ' + (progress.progress?.total || pending.length) + ' frames processed.';
       if (progress.status === 'completed') {
         var result = progress.result || {};
         byId('comparisonStatus').textContent = (result.analyzed || 0) + ' analyzed, ' + (result.cached || 0) +

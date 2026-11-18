@@ -25,6 +25,7 @@
     "../vireo/static/review/photo-actions.js",
     "../vireo/static/review/state.js",
     "../vireo/static/review/queue-state.js",
+    "../vireo/static/review/queue-coverage.js",
     "../vireo/static/review/queue-focus.js",
     "../vireo/static/review/queue.js",
     "../vireo/static/review/tool-reorder.js"

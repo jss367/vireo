@@ -20,7 +20,8 @@ function harness() {
   vm.runInContext(moduleAsScript(readFileSync('vireo/static/best-batch/subjects.js', 'utf8')), context);
   context.renderMaskReview({id: 1, subject: {detection_id: 2, analysis_key: 'key'},
     mask_review: {verdict: 'unreviewed', revision: 7, mask_digest: 'pixels', history: []}});
-  return {byId, writes, reloads, state, render: card => context.renderMaskReview(card)};
+  return {byId, writes, reloads, state, render: card => context.renderMaskReview(card),
+    analyze: photoId => context.analyzeSubjects(photoId), setFetch: callback => { context.fetchJson = callback; }};
 }
 
 test('mask review sends its displayed revision and blocks opposing/repeated clicks until refreshed', async () => {
@@ -64,3 +65,30 @@ test('a late failure cannot replace the status of a freshly rendered review of t
   assert.equal(byId('maskVerdict').textContent, refreshed);
   assert.equal(byId('invalidMask').disabled, false);
 });
+
+for (const refined of [false, true]) {
+  test(`analysis preserves missing-only bulk work and a newly refined single subject (${refined})`, async () => {
+    const {state, analyze, setFetch, reloads} = harness();
+    state.requestSequence = 0;
+    state.subjectOverrides = {'1': 99};
+    state.bestBatchData = {photo_ids: [1, 2, 3], comparison: {photo_ids: [1, 2, 3],
+      subject_overrides: {'1': 10, '2': 20, '3': 30}}, cards: [
+      {id: 1, subject: {detection_id: 10}, evidence_status: 'ready'},
+      {id: 2, subject: {detection_id: 20}, evidence_status: 'subject_analysis_missing'},
+      {id: 3, subject: {detection_id: 30}, evidence_status: 'ready'},
+    ]};
+    const requests = [];
+    setFetch(async (url, options) => {
+      if (options) {
+        requests.push(JSON.parse(options.body));
+        return {job_id: 'synthetic'};
+      }
+      return {status: 'completed', result: {analyzed: 1}};
+    });
+    await analyze(refined ? 1 : undefined);
+    assert.equal(requests.length, 1);
+    assert.deepEqual(requests[0].photo_ids, refined ? [1] : [2]);
+    assert.deepEqual(requests[0].subject_overrides, refined ? {'1': 99} : {'2': 20});
+    assert.equal(reloads.length, 1);
+  });
+}

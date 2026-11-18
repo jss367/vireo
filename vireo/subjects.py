@@ -202,7 +202,7 @@ def _refresh_focus(db, photo_id):
 def selection_evidence(db, photo_id, detections):
     point = db.subjects.focus_point(photo_id)
     missed = bool(point and not any(point.match(_box(d)) == FocusMatch.CENTER for d in detections))
-    previous = db.subjects.previous_burst_subject(photo_id)
+    previous = db.subjects.previous_burst_subject(photo_id, workspace_id=db.require_workspace_id())
     switched = bool(previous and detections and _burst_overlap(previous, detections[0]) < BURST_SUBJECT_MIN_IOU)
     reason = ""
     if detections:
@@ -356,7 +356,63 @@ def select_primary(db, photo_id, detection_id):
     db.commit_with_retry()
 
 
+def _region_inventory(photo, regions, retained_ids):
+    """Bind browser-local observations to the source and exact region inventory."""
+    extra = []
+    evidence = []
+    for region in regions:
+        if region["detector_model"] == "full-image":
+            continue
+        region = dict(region)
+        reason = None
+        if region["subject_verdict"]:
+            reason = "Catalog verdict: background"
+        elif region["category"] != "animal":
+            reason = f"Detector category: {region['category']}"
+        elif region["id"] not in retained_ids:
+            reason = "Below detector confidence threshold"
+        if reason:
+            extra.append(dict(region, inspection_reason=reason))
+        evidence.append((region["id"], region["frame_id"], region["runtime_fingerprint"],
+                         region["created_at"], _box(region), region["detector_confidence"], reason))
+    source = [photo[key] for key in ("file_hash", "file_size", "file_mtime", "width", "height")]
+    generation = hashlib.sha256(json.dumps([source, sorted(evidence)]).encode()).hexdigest()
+    return generation, extra
+
+
+def inspection_candidates(db, photo, regions, retained_ids):
+    generation, extra = _region_inventory(photo, regions, retained_ids)
+    previous_source = db.subjects.visible_burst_source(photo["id"], db.require_workspace_id())
+    previous_id = previous_source["id"] if previous_source is not None else None
+    previous_generation = None
+    previous = []
+    primary_id = None
+    if previous_id:
+        previous = detection_store.get_detections(db, previous_id, min_conf=0, include_rejected=True)
+        previous_retained = retained(db, previous_id)
+        primary_id = previous_retained[0]["id"] if previous_retained else None
+        previous_generation, _ = _region_inventory(previous_source, previous, {d["id"] for d in previous_retained})
+    return {"generation": generation, "additional": extra, "previous_photo_id": previous_id,
+            "previous_generation": previous_generation, "previous_primary": primary_id, "min_overlap": BURST_SUBJECT_MIN_IOU,
+            "previous_regions": [{"id": r["id"], **_box(r)} for r in previous if r["detector_model"] != "full-image"]}
+
+
+def visible_payload(db, photo_id, *, coverage=False):
+    with db.transaction(join=True):
+        db.hold_read_snapshot()
+        source = db.subjects.visible_inspection_source(db.require_workspace_id(), photo_id)
+        if source is None:
+            return None
+        return _subject_payload(db, photo_id, source if coverage else None)
+
+
 def payload(db, photo_id):
+    with db.transaction(join=True):
+        db.hold_read_snapshot()
+        return _subject_payload(db, photo_id, None)
+
+
+def _subject_payload(db, photo_id, inspection_photo):
     detections = retained(db, photo_id)
     choice = db.subjects.choice(photo_id)
     analyses = db.subjects.analyses_for_photo(photo_id)
@@ -385,12 +441,15 @@ def payload(db, photo_id):
         region = dict(row)
         region["predictions"] = grouped.get(region["id"], [])
         rejected.append(region)
-    full_image_ids = {d["id"] for d in detection_store.get_detections(db, photo_id, min_conf=0)
-                      if d["detector_model"] == "full-image"}
+    regions = detection_store.get_detections(db, photo_id, min_conf=0, include_rejected=inspection_photo is not None)
+    full_image_ids = {d["id"] for d in regions
+                      if d["detector_model"] == "full-image" and not d["subject_verdict"]}
     return {"photo_id": photo_id, "workspace_id": db.require_workspace_id(), "subjects": detections,
             "full_image_predictions": [p for did in full_image_ids for p in grouped.get(did, [])],
             "primary_detection_id": primary_id,
             **selection_evidence(db, photo_id, detections),
+            **({"inspection": inspection_candidates(db, inspection_photo, regions, {d["id"] for d in detections})}
+               if inspection_photo is not None else {}),
             "selection": "manual" if choice else "automatic",
             "choice_unavailable": bool(choice and choice["detection_id"] != primary_id),
             # Regions the user rejected as background: not retained, shown

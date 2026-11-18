@@ -635,6 +635,7 @@ def _validate_merged_species_highlights(conn):
 
 
 def _add_mask_review_revision(conn):
+    create_subject_mask_reviews(conn)
     if "revision" not in {row[1] for row in conn.execute("PRAGMA table_info(subject_mask_reviews)")}:
         conn.execute("ALTER TABLE subject_mask_reviews ADD COLUMN revision INTEGER NOT NULL DEFAULT 1")
 
@@ -670,6 +671,19 @@ def _add_reviewed_gps(conn):
     # catalogs stamped 44 already ran this; branch catalogs at 44–51 did not.
     _add_classifier_input_source(conn)
     create_reviewed_gps(conn)
+
+
+def _add_primary_comparison_inputs(conn):
+    if "comparison_inputs" not in {row[1] for row in conn.execute("PRAGMA table_info(photo_masks)")}:
+        conn.execute("ALTER TABLE photo_masks ADD COLUMN comparison_inputs TEXT")
+
+
+def _reconcile_mask_review_primary_schema(conn):
+    # Version 55 represented either primary provenance on main or mask reviews
+    # on the feature branch; branch version 56 already added review revisions.
+    # Reconcile both histories without replacing any existing reviewed bytes.
+    _add_primary_comparison_inputs(conn)
+    _add_mask_review_revision(conn)
 
 
 MIGRATIONS = (
@@ -747,8 +761,9 @@ MIGRATIONS = (
     Migration(52, "reviewed_gps", _add_reviewed_gps),
     Migration(53, "orphaned_companion_masks", _clear_orphaned_companion_mask_projections),
     Migration(54, "detector_decoded_frames", _retire_unbound_detector_caches),
-    Migration(55, "subject_mask_reviews", create_subject_mask_reviews),
+    Migration(55, "primary_comparison_inputs", _add_primary_comparison_inputs),
     Migration(56, "mask_review_revision", _add_mask_review_revision),
+    Migration(57, "reconcile_mask_review_primary_schema", _reconcile_mask_review_primary_schema),
 )
 
 

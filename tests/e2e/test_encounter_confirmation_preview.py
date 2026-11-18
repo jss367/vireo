@@ -96,3 +96,33 @@ def test_preview_cancel_and_stale_revalidation_do_not_apply(live_server, page):
     assert response.value.status == 409
     expect(page.locator('#toastContainer [role=alert]').filter(has_text='Preview again')).to_be_visible()
     assert all(new not in names for names in db.photo_species.get_species_for_photos(ids).values())
+
+
+def test_review_shows_pre_grouping_saves_and_their_conflict(live_server, page, tmp_path):
+    from pipeline import load_photo_features, run_full_pipeline, save_results
+
+    url = live_server['url']
+    page.goto(url + '/review')
+    expect(page.get_by_text('You can save species before grouping.', exact=False)).to_be_visible()
+    page.goto(url + '/pipeline/review')
+    expect(page.locator('#emptyStateBody')).to_contain_text('attached to encounters when grouping finishes')
+    ids = live_server['data']['photos'][:2]
+    for pid, species in zip(ids, ['Robin', 'Mallard'], strict=True):
+        body = {'species': species, 'photo_ids': [pid], 'add': True}
+        endpoint = url + '/api/encounters/species'
+        preview = page.request.post(endpoint, data={**body, 'preview': True})
+        assert preview.ok, preview.text()
+        assert page.request.post(endpoint, data={**body, 'preview_token': preview.json()['preview_token']}).ok
+
+    db = live_server['db']
+    photos = load_photo_features(db, photo_ids=ids)
+    for photo in photos:
+        photo['timestamp'] = '2026-11-14T18:00:00'
+    results = run_full_pipeline(photos)
+    assert len(results['encounters']) == 1
+    save_results(results, tmp_path, db.require_workspace_id())
+    page.reload()
+    header = page.locator('.encounter-header').first
+    expect(header).to_contain_text('Review conflicting saved species')
+    expect(header).to_contain_text('Robin')
+    expect(header).to_contain_text('Mallard')

@@ -6,6 +6,8 @@ from PIL import Image
 from playwright.sync_api import expect
 from services import detection_store, photo_ingest, workspace_folders
 
+from vireo.tests.reviewer_helpers import original_frame_detections
+
 
 def test_choose_subject_preview_and_apply_suggestion(live_server, page, tmp_path):
     from subjects import analyze_photo, payload
@@ -23,10 +25,10 @@ def test_choose_subject_preview_and_apply_suggestion(live_server, page, tmp_path
     photo_id = photo_ingest.add_photo(db, folder_id, path.name, extension='.jpg',
                            file_size=path.stat().st_size, file_mtime=path.stat().st_mtime,
                            width=640, height=400)
-    ids = detection_store.write_detection_batch(db, photo_id, 'megadetector-v6', [
+    ids = detection_store.write_detection_batch(db, photo_id, 'megadetector-v6', original_frame_detections(path, [
         {'box': {'x': .06, 'y': .2, 'w': .33, 'h': .55}, 'confidence': .95, 'category': 'animal'},
         {'box': {'x': .59, 'y': .2, 'w': .33, 'h': .55}, 'confidence': .8, 'category': 'animal'},
-    ])
+    ]))
     # The Blue Jay crop is both sharper and a better species match.
     db.model_runs.record_classifier_match_score(ids[0], 'bioclip', 'fp', .40, score_kind='cosine')
     db.model_runs.record_classifier_match_score(ids[1], 'bioclip', 'fp', .55, score_kind='cosine')
@@ -78,9 +80,9 @@ def test_existing_photo_can_analyze_without_rerunning_models(live_server, page, 
     folder_id = workspace_folders.add_folder(db, str(tmp_path))
     photo_id = photo_ingest.add_photo(db, folder_id, path.name, extension='.jpg',
                            file_size=path.stat().st_size, file_mtime=1, width=320, height=240)
-    detection_store.write_detection_batch(db, photo_id, 'megadetector-v6', [
+    detection_store.write_detection_batch(db, photo_id, 'megadetector-v6', original_frame_detections(path, [
         {'box': {'x': .1, 'y': .1, 'w': .5, 'h': .5}, 'confidence': .9, 'category': 'animal'},
-    ])
+    ]))
     page.goto(live_server['url'] + '/browse')
     page.evaluate("id => openLightbox(id, 'existing.jpg')", photo_id)
     expect(page.locator('#lightboxSubjects')).to_be_visible()
@@ -110,10 +112,10 @@ def test_rejecting_a_region_as_not_an_animal_promotes_the_other_subject_and_is_r
     photo_id = photo_ingest.add_photo(db, folder_id, path.name, extension='.jpg',
                            file_size=path.stat().st_size, file_mtime=path.stat().st_mtime,
                            width=640, height=400)
-    stump, bird = detection_store.write_detection_batch(db, photo_id, 'megadetector-v6', [
+    stump, bird = detection_store.write_detection_batch(db, photo_id, 'megadetector-v6', original_frame_detections(path, [
         {'box': {'x': .06, 'y': .2, 'w': .33, 'h': .55}, 'confidence': .95, 'category': 'animal'},
         {'box': {'x': .59, 'y': .2, 'w': .33, 'h': .55}, 'confidence': .8, 'category': 'animal'},
-    ])
+    ]))
     analyze_photo(db, photo_id, path)
     db.predictions.add(stump, 'Mule Deer', .93, 'bioclip')
     db.predictions.add(bird, 'Hairy Woodpecker', .61, 'bioclip')

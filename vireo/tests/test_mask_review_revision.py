@@ -2,6 +2,7 @@
 import sqlite3
 
 import pytest
+from canonical_schema import SCHEMA_VERSION
 from test_subject_ranking import TARGET, _analyze, _pack
 from test_subject_ranking import comparison_library as _comparison_library
 
@@ -43,6 +44,7 @@ def test_existing_mask_reviews_keep_verdict_and_bytes_during_revision_upgrade():
 
     conn = sqlite3.connect(":memory:")
     try:
+        conn.execute("CREATE TABLE photo_masks (id INTEGER PRIMARY KEY)")
         conn.execute("CREATE TABLE subject_mask_reviews (id INTEGER PRIMARY KEY, verdict TEXT, mask_png BLOB)")
         conn.execute("INSERT INTO subject_mask_reviews VALUES (1, 'invalid', ?)", (b"fictional PNG",))
         conn.execute("PRAGMA user_version=55")
@@ -51,7 +53,39 @@ def test_existing_mask_reviews_keep_verdict_and_bytes_during_revision_upgrade():
         schema._apply_pending(conn)
         assert conn.execute("SELECT verdict, mask_png, revision FROM subject_mask_reviews").fetchone() == (
             "invalid", b"fictional PNG", 1)
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 56
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("history", ["main55", "reviews55", "reviews56"])
+def test_divergent_version_55_and_56_schemas_converge_without_losing_evidence(history):
+    import schema
+
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.execute("CREATE TABLE photo_masks (id INTEGER PRIMARY KEY)")
+        if history == "main55":
+            conn.execute("ALTER TABLE photo_masks ADD COLUMN comparison_inputs TEXT")
+            conn.execute("INSERT INTO photo_masks VALUES (1, 'retained primary proof')")
+        else:
+            conn.execute("CREATE TABLE subject_mask_reviews (id INTEGER PRIMARY KEY, verdict TEXT, mask_png BLOB)")
+            conn.execute("INSERT INTO subject_mask_reviews VALUES (1, 'invalid', ?)", (b"synthetic reviewed bytes",))
+            if history == "reviews56":
+                conn.execute("ALTER TABLE subject_mask_reviews ADD COLUMN revision INTEGER NOT NULL DEFAULT 1")
+                conn.execute("UPDATE subject_mask_reviews SET revision=7")
+        conn.execute(f"PRAGMA user_version={56 if history == 'reviews56' else 55}")
+        conn.commit()
+        schema._apply_pending(conn)
+        schema._apply_pending(conn)
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert "comparison_inputs" in {r[1] for r in conn.execute("PRAGMA table_info(photo_masks)")}
+        assert "revision" in {r[1] for r in conn.execute("PRAGMA table_info(subject_mask_reviews)")}
+        if history == "main55":
+            assert conn.execute("SELECT comparison_inputs FROM photo_masks").fetchone() == ("retained primary proof",)
+        else:
+            assert conn.execute("SELECT verdict, mask_png, revision FROM subject_mask_reviews").fetchone() == (
+                "invalid", b"synthetic reviewed bytes", 7 if history == "reviews56" else 1)
     finally:
         conn.close()
 
