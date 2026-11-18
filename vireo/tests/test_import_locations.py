@@ -1461,3 +1461,14 @@ def test_stream_uses_camera_times_and_breaks_a_drive_into_short_gps_steps(db, mo
     preview = json.loads(frames[-1].removeprefix("data: "))
     offers = [g for g in preview["groups"] if g["suggestion"]["source"] == "outing"]
     assert offers and all(paths[-1] not in g["outing_paths"] for g in offers)
+
+
+def test_repeated_fast_legs_cannot_renew_the_walks_jitter(db, monkeypatch):
+    park = {"place_id": "park", "name": "Preserve", "source": "park", "lat": 32, "lng": 0}
+    city = {**park, "place_id": "city", "name": "City", "source": "area", "types": ["locality"]}
+    monkeypatch.setattr(places, "reverse_geocode", lambda lat, *a, **kw: park if lat == 32 else city)
+    points = _files([(32 + i * .0023, 0) for i in range(4)])
+    times = dict(zip(points, ["2026-11-14T08:" + t for t in ("00:00", "00:50", "01:40", "02:30")], strict=True))
+    preview = suggest_import_locations(db, points, api_key="KEY", language="en", capture_times=times)
+    [offer] = [g for g in preview["groups"] if g["suggestion"]["source"] == "outing"]
+    assert offer["outing_paths"] == list(points)[:2]

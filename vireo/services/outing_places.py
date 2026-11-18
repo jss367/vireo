@@ -62,9 +62,13 @@ def outing_offers(frames) -> list[Outing]:
     offers = []
     run: list[dict] = []
     reference = None
+    jitter = GPS_JITTER_M
     for _, time, frame in dated:
         role = _role(frame["place"]) if has_usable_coordinates(frame) else None
-        if run and (role is None or not _continues_walk(run[-1], reference, frame, time)):
+        remaining = None
+        if role and run:
+            remaining = _remaining_jitter(run[-1], reference, frame, time, jitter)
+        if run and remaining is None:
             if offer := _offer(run):
                 offers.append(offer)
             run = []
@@ -72,11 +76,14 @@ def outing_offers(frames) -> list[Outing]:
         if role:
             current = {**frame, "time": time, "role": role}
             run.append(current)
-            # Check accumulated displacement as well as each step, so a car
-            # photographed in bursts cannot take a fresh jitter allowance
-            # every few seconds.
-            if reference is None or distance_meters(reference, current) >= 2 * GPS_JITTER_M:
+            if reference is None:
                 reference = current
+                jitter = GPS_JITTER_M
+            elif remaining is not None and distance_meters(reference, current) >= 2 * GPS_JITTER_M:
+                # Carry the unused allowance to the next leg. Time spent
+                # below walking speed can replenish it up to the original cap.
+                reference = current
+                jitter = remaining
     if offer := _offer(run):
         offers.append(offer)
     return offers
@@ -88,12 +95,13 @@ def _point_key(frame):
     return 0.0, 0.0
 
 
-def _continues_walk(previous, reference, frame, time):
+def _remaining_jitter(previous, reference, frame, time, jitter):
     if (previous["time"].tzinfo is None) != (time.tzinfo is None):
-        return False
+        return None
     seconds = (time - previous["time"]).total_seconds()
     allowed_step = min(MAX_STEP_M, GPS_JITTER_M + seconds * MAX_SPEED_M_S)
     if seconds > MAX_GAP_SECONDS or distance_meters(previous, frame) > allowed_step:
-        return False
+        return None
     elapsed = (time - reference["time"]).total_seconds()
-    return distance_meters(reference, frame) <= GPS_JITTER_M + elapsed * MAX_SPEED_M_S
+    remaining = jitter + elapsed * MAX_SPEED_M_S - distance_meters(reference, frame)
+    return min(GPS_JITTER_M, remaining) if remaining >= 0 else None
