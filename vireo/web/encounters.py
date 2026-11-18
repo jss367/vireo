@@ -603,6 +603,9 @@ class _SpeciesConfirmation:
             if "preview_token" in body and error[1] == 400:
                 return self.json_error("Photo membership changed. Reload the review and preview again.", 409)
             return error
+        # A photo-only decision is valid while all source photos are ungrouped.
+        if not found and self.burst_index is None and not body.get("split") and "group_changes" not in body:
+            return None
         if found != wanted:
             return self.json_error("Photo membership changed. Reload the review and preview again.", 409)
         if len(self.review_encounters) > 1:
@@ -1280,6 +1283,13 @@ class _SpeciesConfirmation:
         """
         cached = self.cached
         if not cached or (self.target_enc is None and not self.review_encounters):
+            if self.preview_scope and self.photo_edit_id is not None:
+                from services.grouping_history import convert_to_grouping_edit
+                edit = self.db.edit_history.action_and_new_value(self.photo_edit_id)
+                assert edit is not None
+                convert_to_grouping_edit(self.db, self.photo_edit_id, {
+                    "photo_only": True, "saved_before_grouping": True, "photo_edit": dict(edit),
+                })
             return
         flag_items = []
         group_attribution: dict = {}

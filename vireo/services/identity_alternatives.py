@@ -313,10 +313,11 @@ def refresh_species_caches(db: Database, cache_dir: str, photo_ids: Sequence[int
     for workspace_id in sorted(workspace_ids):
         try:
             with acquire_workspace_regroup(workspace_id):
-                species = db.photo_species.get_species_for_photos(photo_ids)
-                for pid in photo_ids:
-                    species.setdefault(pid, [])
-                refresh_cache_species_for_photos(cache_dir, workspace_id, species)
+                with db.transaction(join=True):
+                    db.hold_read_snapshot()
+                    identities = db.photo_species.get_species_for_photos(photo_ids, include_identities=True)
+                species = {pid: [entry['name'] for entry in identities.get(pid, [])] for pid in photo_ids}
+                refresh_cache_species_for_photos(cache_dir, workspace_id, species, identities_by_photo=identities)
         except (OSError, ValueError, TypeError, KeyError, sqlite3.Error):
             log.exception('Failed to refresh species in Process Review for workspace %s', workspace_id)
             failed.append(workspace_id)

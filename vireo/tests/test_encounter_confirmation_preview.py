@@ -1332,3 +1332,65 @@ def test_split_reports_selected_encounter_at_apply_time(app_and_db, response_mod
     assert group['encounter_index'] == applied_index
     assert group['photo_ids'] == group['changed_photo_ids'] == selected
     assert json.load(open(path))['encounters'][applied_index]['photo_ids'] == selected
+
+
+def test_pre_grouping_confirmation_survives_grouping_and_one_undo(app_and_db, tmp_path):
+    from pipeline import load_photo_features, load_results_raw, run_full_pipeline, save_results
+
+    app, db = app_and_db
+    client = app.test_client()
+    body = {
+        'species': 'Robin', 'photo_ids': [1, 3], 'add': True, 'response_mode': 'compact',
+        'provenance': {'method': 'adjacent_frames', 'reviewer': 'Alex',
+                       'reason': 'Visible in adjacent frame', 'supporting_photo_ids': [2]},
+    }
+    response = apply(client, body, request_preview(client, body))
+    assert response.status_code == 200, response.get_json()
+    edit_id = response.get_json()['undo']['edit_id']
+    ws = db.require_workspace_id()
+    assert load_results_raw(str(tmp_path), ws) is None
+    for pid in body['photo_ids']:
+        assignment = next(a for a in db.species_provenance.assignments(pid) if a['species'] == 'Robin')
+        for key, value in body['provenance'].items():
+            assert assignment[key] == value
+    assert client.post('/api/undo').get_json()['entry_id'] == edit_id
+    assert client.post('/api/redo').get_json()['entry_id'] == edit_id
+    results = run_full_pipeline(load_photo_features(db))
+    save_results(results, str(tmp_path), ws)
+
+    def confirmed():
+        return {pid for enc in load_results_raw(str(tmp_path), ws)['encounters']
+                if enc['species_confirmed'] and 'Robin' in enc['confirmed_species_list']
+                for pid in enc['photo_ids']}
+
+    assert confirmed() == {1, 3}
+
+    def assert_cached_identities():
+        cache = load_results_raw(str(tmp_path), ws)
+        actual = db.photo_species.get_species_for_photos([1, 3], include_identities=True)
+        for photo in cache['photos']:
+            if photo['id'] in (1, 3):
+                assert photo['confirmed_species_identities'] == actual.get(photo['id'], [])
+                assert photo['confirmed_species_list'] == [entry['name'] for entry in actual.get(photo['id'], [])]
+
+    assert_cached_identities()
+    assert client.post('/api/undo').get_json()['entry_id'] == edit_id
+    assert confirmed() == set()
+    assert_cached_identities()
+    assert client.post('/api/redo').get_json()['entry_id'] == edit_id
+    assert confirmed() == {1, 3}
+    assert_cached_identities()
+
+
+def test_pre_grouping_preview_checks_all_source_memberships(app_and_db):
+    from test_app import _seed_encounter_cache
+    app, db = app_and_db
+    client = app.test_client()
+    body = {'species': 'Robin', 'photo_ids': [1], 'source_photo_ids': [1, 2]}
+    preview = request_preview(client, body)
+    _seed_encounter_cache(app, db, [1, 2])
+    assert apply(client, body, preview).status_code == 409
+    _seed_encounter_cache(app, db, [2])
+    assert client.post('/api/encounters/species', json={**body, 'preview': True}).status_code == 409
+    _seed_encounter_cache(app, db, [3])
+    assert apply(client, body, preview).status_code == 200

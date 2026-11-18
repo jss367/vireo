@@ -332,3 +332,39 @@ def test_mask_owner_changed_after_source_validation_stays_bound(app_and_db, monk
         # The captured original path still belongs to the subject in the headers.
         crop = Image.open(io.BytesIO(response.data))
         assert crop.getpixel((128, 128))[0] > 180
+
+
+@pytest.mark.parametrize("eye,bill,crown", [
+    ((.61, .44), (.67, .42), (.59, .39)),   # upright
+    ((.53, .41), (.49, .48), (.54, .39)),   # bowed
+    ((.40, .57), (.34, .52), (.41, .54)),   # banking left
+    ((.045, .30), (.002, .31), (.05, .28)),  # bill at the source edge
+])
+def test_head_window_contains_visible_landmarks_at_native_scale(eye, bill, crown):
+    from focus_crop import focus_headers, focus_window, head_focus_point
+
+    raster = (5408, 3608)
+    features = dict(eye_status="measured", eye_x=eye[0], eye_y=eye[1],
+                    head_landmarks={"bill": bill, "crown": crown})
+    box = _box(0, .2, .8, .6)
+    center, basis = head_focus_point(features, box, raster, 512)
+    assert basis == "head"
+    window, _ = focus_window(raster, center, 512)
+    l, t, r, b = window
+    assert r - l == b - t == 512
+    for x, y in (bill, crown, eye):
+        assert l <= x * raster[0] < r and t <= y * raster[1] < b
+    headers = focus_headers(basis, center, window, raster, "original", False, subject=box)
+    assert headers["X-Vireo-Focus-Subject-Clipped"] == "1"
+    assert headers["X-Vireo-Focus-Source-Edges"] == ("left" if bill[0] < .01 else "none")
+
+
+def test_hidden_head_requires_corroborating_evidence_without_an_eye():
+    from focus_crop import head_focus_point
+
+    features = dict(eye_status="not_located", eye_x=.2, eye_y=.3,
+                    head_landmarks={"bill": [.2, .3], "crown": [.25, .28], "nape": [.99, .7]})
+    box = _box(.1, .2, .4, .4)
+    assert head_focus_point(features, box, (900, 600), 512) == (None, "subject")
+    features["head_landmarks"]["nape"] = [.27, .32]
+    assert head_focus_point(features, box, (900, 600), 512)[1] == "head"

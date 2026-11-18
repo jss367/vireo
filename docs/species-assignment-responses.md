@@ -6,6 +6,13 @@ existing encounter-tree response. Send `response_mode: "compact"` to receive onl
 changed encounter records. Invalid modes fail before any writes. Preview requests
 retain their existing preview contract; the mode selects the final apply response.
 
+Before grouping, clients can preview and apply a species assignment when every
+source photo is still ungrouped. The assignment saves the reviewed species and
+its provenance on the selected photos as one undoable edit. Grouping reads those
+assignments when it builds encounters. If a source photo joins an encounter
+between preview and apply, request a new preview. Burst edits, splits, and
+combined Group Review changes require an existing group.
+
 A compact confirmation uses the same replace/add/remove, preview-token, burst,
 exact-photo-subset and grouping rules as a full confirmation. For example:
 

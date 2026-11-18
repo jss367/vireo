@@ -55,7 +55,7 @@ def preview(db: Database, confirmation: object, body: JsonDict) -> JsonDict:
     order = {pid: i for i, pid in enumerate(source_ids)}
     rows.sort(key=lambda row: order[row["id"]])
     encounters = [enc for _, enc in edit.review_encounters]
-    refresh_ids = [pid for enc in encounters for pid in enc["photo_ids"]]
+    refresh_ids = [pid for enc in encounters for pid in enc["photo_ids"]] if encounters else source_ids
     state = {
         "workspace": db.require_workspace_id(), "encounters": encounters,
         "burst_index": edit.burst_index, "rows": rows, "species": edit.species,

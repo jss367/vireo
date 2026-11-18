@@ -182,6 +182,25 @@ function speciesCandidateKeyForReviewUnit(enc, burst, expected) {
   return (/** @type {ReviewSpeciesRow | null} */ (winner))?.species_key || null;
 }
 
+/** @param {number[]} photoIds @param {Record<number,ReviewPhoto>} photoMap */
+function savedSpeciesConflict(photoIds, photoMap) {
+  /** @type {Set<string> | undefined} */ var common;
+  /** @type {Map<string,string>} */ var names = new Map();
+  for (var pid of photoIds) {
+    var identities = photoMap[pid]?.confirmed_species_identities || [];
+    if (!identities.length) continue;
+    var keys = new Set(identities.map(entry => entry.key));
+    for (var entry of identities) names.set(entry.key, entry.name);
+    if (!common) common = keys;
+    else {
+      for (var key of common) {
+        if (!keys.has(key)) common.delete(key);
+      }
+    }
+  }
+  return common && !common.size ? 'Review conflicting saved species: ' + Array.from(names.values()).join(', ') : '';
+}
+
 /** @param {Record<number,ReviewPhoto>} [photoMap] */
 function buildSpeciesConflictEvidence(photoMap) {
   /** @type {ReviewConflictEvidence} */ var evidence = {};
