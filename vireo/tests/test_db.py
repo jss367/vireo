@@ -22048,7 +22048,7 @@ def test_all_nav_ids_covers_every_page():
     expected = {
         "import", "card_cleanup",
         "pipeline", "jobs", "pipeline_review", "pipeline_rapid_review", "review", "cull",
-        "misses", "highlights", "life_list", "browse", "edit", "map", "location_review",
+        "misses", "highlights", "life_list", "inaturalist", "browse", "edit", "map", "location_review",
         "dashboard", "storage", "audit", "move", "id_conflicts",
         "settings", "workspace", "lightroom", "shortcuts",
         "keywords", "duplicates", "logs",

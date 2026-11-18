@@ -710,11 +710,15 @@ def test_life_order_numbering_and_dates(life_app):
 
 
 def test_taxon_names_attached(life_app):
-    app, _, _ = life_app
+    app, db, _ = life_app
+    db.conn.execute("UPDATE taxa SET inat_id=13858 WHERE name='Passer domesticus'")
+    db.commit()
     data = _get_life_list(app)
     sparrow = _entry(data, "House Sparrow")
     assert sparrow["scientific_name"] == "Passer domesticus"
     assert sparrow["common_name"] == "House Sparrow"
+    assert sparrow["inat_id"] == 13858
+    assert sparrow["taxon_id"] != sparrow["inat_id"]
     cardinal = _entry(data, "Northern Cardinal")
     assert cardinal["scientific_name"] is None
 

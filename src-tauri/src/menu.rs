@@ -17,6 +17,7 @@ pub mod ids {
     pub const NAV_CULL: &str = "nav_cull";
     pub const NAV_MISSES: &str = "nav_misses";
     pub const NAV_HIGHLIGHTS: &str = "nav_highlights";
+    pub const NAV_INATURALIST: &str = "nav_inaturalist";
     pub const NAV_LIFE_LIST: &str = "nav_life_list";
     pub const NAV_KEYWORDS: &str = "nav_keywords";
     pub const NAV_MAP: &str = "nav_map";
@@ -102,6 +103,7 @@ pub fn route_for_id(id: &str) -> Option<&'static str> {
         ids::NAV_CULL => Some("/cull"),
         ids::NAV_MISSES => Some("/misses"),
         ids::NAV_HIGHLIGHTS => Some("/highlights"),
+        ids::NAV_INATURALIST => Some("/inaturalist"),
         ids::NAV_LIFE_LIST => Some("/life-list"),
         ids::NAV_KEYWORDS => Some("/keywords"),
         ids::NAV_MAP => Some("/map"),
@@ -363,6 +365,7 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
                 .accelerator("CmdOrCtrl+9")
                 .build(app)?,
         )
+        .item(&MenuItemBuilder::with_id(ids::NAV_INATURALIST, "iNaturalist").build(app)?)
         .item(&MenuItemBuilder::with_id(ids::NAV_LIFE_LIST, "Life List").build(app)?)
         .item(&MenuItemBuilder::with_id(ids::NAV_KEYWORDS, "Keywords").build(app)?)
         .separator()
