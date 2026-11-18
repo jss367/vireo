@@ -84,7 +84,7 @@ test('head inspection keeps the selected subject and generation when using a ver
   await ctx.loadFocus('/photos/1/focus-crop?size=512&source=original&detection_id=42&analysis_key=generation');
   byId('headFocusBtn').handlers.click();
   const url = new URL(requests[1], 'http://vireo.local');
-  assert.equal(url.searchParams.get('basis'), 'eye');
+  assert.equal(url.searchParams.get('basis'), 'head');
   assert.equal(url.searchParams.get('detection_id'), '42');
   assert.equal(url.searchParams.get('analysis_key'), 'generation');
   assert.equal(url.searchParams.get('source'), 'original');
@@ -146,7 +146,6 @@ test('legacy eye scoring never labels a body crop as eye-centered or draws a fal
     previewUrl: () => '', hasEyeKeypoint: () => true});
   vm.runInContext(moduleAsScript(readFileSync('vireo/static/best-batch/render.js', 'utf8')), ctx);
   const html = ctx.focusCardHtml({id: 1, focus_basis: 'eye', eye_x: .8, eye_y: .2, focus_crop_url: '/crop'});
-  assert.match(html, /head may be outside crop/);
-  assert.match(html, /No verified eye evidence/);
+  assert.match(html, /inspect head placement below/);
   assert.doesNotMatch(html, /Eye-centered|crosshair/);
 });

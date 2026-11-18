@@ -73,8 +73,7 @@ def test_review_queue_resumes_scope_position_subject_manual_center_and_unresolve
     expect(page.locator('#rqFlag')).to_contain_text('Current catalog flag: rejected')
     page.locator('#rqSubject').select_option(str(subjects[1][1]))
     expect(page.locator('#rqAnalysis')).to_contain_text('No cached box analysis')
-    expect(page.locator('#rqAnalysis')).to_contain_text('head or eye may be outside the crop')
-    expect(page.locator('#rqAnalysis')).to_contain_text('No current subject-bound eye evidence')
+    expect(page.locator('#rqCropStatus')).to_contain_text('No verified head location for this source')
     expect(page.locator('#rqSubjectBox')).to_be_visible()
     assert page.locator('#rqSubjectBox').evaluate('el => el.style.left') == '65%'
     page.locator('#rqUnresolved').check()

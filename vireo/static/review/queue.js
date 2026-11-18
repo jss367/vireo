@@ -207,10 +207,14 @@ function bindReviewQueue() {
   });
   rqElement('rqResetCenter').addEventListener('click', function() {
     if (!reviewQueue.current) return;
+    reviewQueue.manual = false;
+    rqElement('rqManual').setAttribute('aria-pressed', 'false');
+    rqElement('rqFullStatus').textContent = 'Full frame for head inspection.';
     var item = rqItem(reviewQueue.current.id);
     item.center = null;
     var note = item.entry === undefined ? null : rqActiveCoverage()?.notes[item.entry];
-    if (note) note.center = null; rqSave(); rqRenderSubjects(); rqLoadCrop();
+    if (note) note.center = null;
+    rqSave(); rqRenderSubjects(); rqLoadCrop();
   });
   rqElement('rqFull').addEventListener('click', rqPlaceCenter);
   rqElement('rqFull').addEventListener('error', function() { rqElement('rqFullStatus').textContent = 'Full frame unavailable. Manual placement requires this upright source preview.'; });
