@@ -170,6 +170,7 @@ def compatible_primary(row, owner, detection, path, effective_cfg, masks_dir):
         eye_status="disabled",
         analysis={
             "source": "original",
+            "frame_id": inputs["frame_id"],
             "width": width,
             "height": height,
             "longest_edge_limit": 1024,

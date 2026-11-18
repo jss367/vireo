@@ -7,7 +7,7 @@ import { renderSubject } from './subjects.js';
 import { byId, state } from './state.js';
 import { escapeAttr, escapeHtml } from './shared.js';
 import {
-  hasEyeKeypoint, previewUrl, rankLabel, scoreText, thumbnailUrl,
+  previewUrl, rankLabel, scoreText, thumbnailUrl,
 } from './helpers.js';
 
 /** @param {string} message */
@@ -67,15 +67,13 @@ export function inspectPhoto(photoId) {
 
 /** @param {BestBatchCard} card */
 function focusCardHtml(card) {
-  var hasEye = Boolean(card.subject && card.focus_crop_url && card.eye_status === 'measured' && hasEyeKeypoint(card));
   return '<div class="focus-card ' + escapeAttr(card.role || '') + '" data-photo-id="' + card.id + '">' +
     '<div class="focus-crop native">' +
       '<img src="' + escapeAttr(card.focus_crop_url || card.crop_url || previewUrl(card.id, 1920)) + '" alt="' + escapeAttr(card.filename || '') + '" loading="lazy">' +
     '</div>' +
     '<div class="focus-meta">' +
-      '<div class="score">' + (card.focus_crop_url ? (hasEye ? 'Eye-centered window' :
-        'Subject/frame center · head may be outside crop') : 'Context preview · inspect focus below') + '</div>' +
-      (!hasEye ? '<div class="score">No verified eye evidence in this crop</div>' : '') +
+      '<div class="score">' + (card.focus_crop_url ? 'Native crop · inspect head placement below' :
+        'Context preview · inspect focus below') + '</div>' +
       '<div class="role ' + escapeAttr(card.role || '') + '">' + escapeHtml(rankLabel(card)) + '</div>' +
       '<div class="filename" title="' + escapeAttr(card.filename || '') + '">' + escapeHtml(card.filename || '') + '</div>' +
       '<div class="score">' + escapeHtml(scoreText(card)) + '</div>' +
