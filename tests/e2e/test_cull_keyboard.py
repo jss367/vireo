@@ -4,9 +4,9 @@ from playwright.sync_api import expect
 def _pipeline_results_for_cull_keyboard():
     return {
         "photos": [
-            {"id": 1, "filename": "enc1-a.jpg", "label": "KEEP", "quality_composite": 0.91},
+            {"id": 1, "filename": "enc1-a.jpg", "label": "KEEP", "automatic_keep_eligible": True, "quality_composite": 0.91},
             {"id": 2, "filename": "enc1-b.jpg", "label": "REVIEW", "quality_composite": 0.67},
-            {"id": 3, "filename": "enc2-a.jpg", "label": "KEEP", "quality_composite": 0.88},
+            {"id": 3, "filename": "enc2-a.jpg", "label": "KEEP", "automatic_keep_eligible": True, "quality_composite": 0.88},
             {"id": 4, "filename": "enc3-a.jpg", "label": "REJECT", "quality_composite": 0.32},
         ],
         "encounters": [

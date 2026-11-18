@@ -21,7 +21,7 @@ test('bare flags and ranking labels never become photographer decisions', () => 
       const decision = ctx.resolveCullDecision({id: 1, flag, label: 'KEEP', flag_confirmation_status: status});
       assert.equal(decision.action, 'review');
       assert.equal(decision.source, 'auto');
-      assert.equal(decision.suggested, 'keep');
+      assert.equal(decision.suggested, 'review');
     }
   }
 });

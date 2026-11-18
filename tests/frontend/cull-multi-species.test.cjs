@@ -119,13 +119,45 @@ test('a two-species photo counts under each species but once in the page totals'
 test('a favorite suggested under one species shows as one under the other', () => {
   const {ctx} = page();
   const data = ctx.pipelineToCullData(results([
-    photo(1, {label: 'KEEP', quality_composite: 0.9, confirmed_species_list: ['Mallard', 'Wood Duck']}),
+    photo(1, {label: 'KEEP', automatic_keep_eligible: true, quality_composite: 0.9, confirmed_species_list: ['Mallard', 'Wood Duck']}),
   ]));
   const cards = data.species_groups.map(sg => plain(sg.scene_groups[0].photos[0]));
   assert.deepEqual(plain(cards.map(p => [p.favorite, p.action, p.suggested_for])),
     [[true, 'keep', 'Mallard'], [true, 'keep', 'Mallard']]);
   assert.deepEqual(plain(data.species_groups.map(sg => sg.keepers)), [1, 1]);
   assert.equal(data.suggested_keepers, 1);
+});
+
+test('reported wildlife winners remain undecided alone and together in Cull', () => {
+  const {ctx} = page();
+  const fixture = require('../../vireo/tests/fixtures/keep_safety_review_examples.json');
+  const failures = [213640, 214325, 216521].map(id => fixture.photos.find(p => p.id === id));
+  for (const group of [...failures.map(p => [p]), failures]) {
+    const data = ctx.pipelineToCullData(results(group));
+    assert.equal(data.suggested_reviews, group.length);
+    assert.equal(data.suggested_keepers, 0);
+    assert.deepEqual(plain(ctx.collectCullingApplyPayload(data).keepers), []);
+  }
+});
+
+test('a stale KEEP stays out of favorites and Apply after confirmation is lost', () => {
+  const {ctx} = page();
+  for (const eligibility of [undefined, false]) {
+    const source = results([photo(1, {
+      label: 'KEEP', flag: 'flagged', flag_confirmation_status: 'confirmed',
+      automatic_keep_eligible: eligibility, confirmed_species_list: ['Mallard', 'Wood Duck'],
+    })]);
+    ctx.cullSourceResults = source;
+    assert.equal(ctx.pipelineToCullData(source).suggested_keepers, 1);
+    ctx.syncCullSourceFlags(results([photo(1, {flag: 'flagged', flag_confirmation_status: 'unverified'})]));
+    const data = ctx.pipelineToCullData(source);
+    assert.equal(data.suggested_reviews, 1);
+    assert.equal(data.suggested_keepers, 0);
+    for (const species of data.species_groups) {
+      assert.equal(species.scene_groups[0].photos[0].favorite, false);
+    }
+    assert.deepEqual(plain(ctx.collectCullingApplyPayload(data).keepers), []);
+  }
 });
 
 test('the species filter keeps a two-species photo under the chosen species only', () => {

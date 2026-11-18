@@ -21,7 +21,7 @@ def _results():
                 'id': photo_id, 'filename': f'{species}-{photo_id}.jpg',
                 'timestamp': f'{date}T08:00:{number:02}',
                 'confirmed_species': species, 'species_top5': [[species, 0.99]],
-                'label': 'KEEP', 'quality_composite': 0.99 - number / 100,
+                'label': 'KEEP', 'automatic_keep_eligible': True, 'quality_composite': 0.99 - number / 100,
                 # Four confirmed picks must survive both the AI rejection
                 # label and the three-suggestion limit.
                 'flag': 'flagged' if photo_id in [1, 2, 3, 4] else 'none',
