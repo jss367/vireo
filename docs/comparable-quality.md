@@ -82,7 +82,11 @@ recipe. Historical boxes may instead belong to a cropped preview or a
 larger tiled sensor read; no crop transform was stored. On a RAW with a
 rejected preview, subject analysis therefore requires the current detector
 runtime. Older or reviewed boxes stay intact and require an explicit
-detector rerun rather than an assumed coordinate mapping. Mask PNGs also
+detector rerun or a redraw on the original. A JPEG companion can have a
+different crop even when the RAW has a full-size embedded preview. Pairing
+preserves the JPEG box and its species predictions but marks its coordinates
+as unverified for the RAW. Migration 47 applies the same rule to legacy
+boxes of unknown origin on paired photos. Mask PNGs also
 record prompt provenance so an earlier camera-rendered mask made from an
 unverified box cannot be reused. Coordinate-bearing analysis uses the strict
 `aligned_camera_rendered` mode: if a full-sensor demosaic fails, a rejected

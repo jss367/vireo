@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Protocol, TypedDict
 
 import numpy as np
 from config import config_value
+from detection_id import require_original_box
 from pipeline_locks import (
     acquire_photo_mask,
 )
@@ -1012,6 +1013,7 @@ class _MaskPass:
         item.det_box = {k: selected["box_" + k] for k in "xywh"}
         item.entry["detector_model"] = selected["detector_model"]
         item.entry["prompt"] = tuple(selected["box_" + k] for k in "xywh")
+        require_original_box(item.detector_runtime)
         if self._reuse_cached_mask(item):
             invalidated = False
             if item.existing is not None and item.existing["subject_detail"] is None:

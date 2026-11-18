@@ -312,3 +312,54 @@ def test_cache_invalidation_drops_the_row_when_the_unlink_is_refused(
     assert db.masks_features.get_mask(first, "sam2-base") is None
     assert mask_path.is_file()
     assert_released(extraction, first)
+
+
+@pytest.mark.parametrize("legacy_catalog", [False, True])
+def test_companion_box_cannot_prompt_raw_even_without_a_rejected_preview(
+    db, tmp_path, extraction, legacy_catalog,
+):
+    import schema
+    from detection_id import COMPANION_FRAME_RUNTIME
+    from PIL import Image
+    from scanner.companions import _pair_raw_jpeg_companions
+
+    folder = workspace_folders.add_folder(db, str(tmp_path))
+    jpeg = photo_ingest.add_photo(db, folder, "frame.jpg", ".jpg", 100, 1)
+    raw = photo_ingest.add_photo(db, folder, "frame.nef", ".nef", 200, 1)
+    preview = Image.new("RGB", (120, 68))
+    preview.save(tmp_path / "frame.jpg")
+    source = Image.new("RGB", (120, 80))
+    extraction.deps.render_proxy = lambda *args, **kwargs: source
+    box = {"x": .1, "y": .6, "w": .2, "h": .15}
+    did, = db.detections.upsert_rows(jpeg, "megadetector-v6", [{"box": box, "confidence": .95}], "current")
+    db.predictions.add(did, "Mallard", .9, "bioclip")
+    db.commit()
+    _pair_raw_jpeg_companions(db)
+    if legacy_catalog:
+        db.conn.execute("UPDATE detections SET runtime_fingerprint='legacy' WHERE photo_id=?", (raw,))
+        legacy_id = db.detections.get(raw, 0)[0]["id"]
+        db.subjects.set_primary_state(raw, legacy_id)
+        db.conn.execute("UPDATE photos SET subject_detail=123 WHERE id=?", (raw,))
+        db.conn.execute("INSERT INTO photo_masks (photo_id, variant, path, created_at, detector_model, "
+                        "prompt_x, prompt_y, prompt_w, prompt_h, subject_detail) VALUES "
+                        "(?, 'sam2-base', 'old.png', 0, 'megadetector-v6', .1, .6, .2, .15, 123)", (raw,))
+        db.conn.execute("PRAGMA user_version=46")
+        db.commit()
+        schema._apply_pending(db.conn)
+        assert db.conn.execute("SELECT subject_detail FROM photos WHERE id=?", (raw,)).fetchone()[0] is None
+        assert db.masks_features.get_mask(raw, "sam2-base") is None
+    row, = db.detections.get(raw, 0)
+    assert row["runtime_fingerprint"] == COMPANION_FRAME_RUNTIME
+    assert db.conn.execute("SELECT species FROM predictions WHERE detection_id=?", (row["id"],)).fetchone()[0] == "Mallard"
+    db.commit()
+    result = run(extraction)
+    assert result["failed"] == 1
+    assert "JPEG companion" in str(extraction.job["errors"])
+    assert not extraction.generated
+    # A detector pass on the original can verify the same region without
+    # discarding the content-addressed row or the prediction it carries.
+    verified, = db.detections.upsert_rows(raw, "megadetector-v6", [{"box": box, "confidence": .95}], "current")
+    assert verified == row["id"]
+    db.commit()
+    assert run(extraction)["masked"] == 1
+    assert len(extraction.generated) == 1

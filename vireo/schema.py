@@ -492,6 +492,34 @@ def _merge_species_highlights(conn):
     conn.execute("DROP TABLE species_highlights")
 
 
+def _invalidate_ambiguous_companion_boxes(conn):
+    """Paired legacy boxes have no record of which photo supplied their coordinates."""
+    from detection_id import COMPANION_FRAME_RUNTIME
+    from repositories.subjects import SubjectsRepository
+
+    conn.execute(
+        "UPDATE detections SET runtime_fingerprint=? WHERE runtime_fingerprint='legacy' "
+        "AND detector_model!='full-image' AND photo_id IN "
+        "(SELECT id FROM photos WHERE companion_path IS NOT NULL UNION SELECT photo_id FROM companion_identities)",
+        (COMPANION_FRAME_RUNTIME,),
+    )
+    ambiguous = "SELECT id FROM detections WHERE runtime_fingerprint=?"
+    for table in ("detection_subjects", "subject_ranking_analysis", "subject_raw_analysis"):
+        conn.execute(f"DELETE FROM {table} WHERE detection_id IN ({ambiguous})", (COMPANION_FRAME_RUNTIME,))
+    projected = conn.execute(
+        f"SELECT photo_id FROM photo_subject_state WHERE detection_id IN ({ambiguous})", (COMPANION_FRAME_RUNTIME,)
+    ).fetchall()
+    subjects = SubjectsRepository(conn)
+    for photo_id, in projected:
+        subjects.clear_primary_features(photo_id)
+    conn.execute(
+        "DELETE FROM photo_masks AS m WHERE EXISTS (SELECT 1 FROM detections d WHERE d.photo_id=m.photo_id "
+        "AND d.runtime_fingerprint=? AND d.detector_model=m.detector_model AND "
+        "(d.box_x,d.box_y,d.box_w,d.box_h)=(m.prompt_x,m.prompt_y,m.prompt_w,m.prompt_h))",
+        (COMPANION_FRAME_RUNTIME,),
+    )
+
+
 def _reconcile_highlights_and_detail(conn):
     # Branch catalogs stamped 42 through 45 can still hold per-workspace highlights.
     _merge_species_highlights(conn)
@@ -612,6 +640,7 @@ MIGRATIONS = (
     Migration(44, "subject_detail_full_resolution", _clear_subject_detail_from_other_read_paths),
     Migration(45, "subject_detail_mask_alignment", _clear_subject_detail_from_other_read_paths),
     Migration(46, "reconcile_highlights_and_detail", _reconcile_highlights_and_detail, _validate_merged_species_highlights),
+    Migration(47, "companion_box_frames", _invalidate_ambiguous_companion_boxes),
 )
 
 

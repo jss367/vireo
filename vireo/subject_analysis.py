@@ -5,6 +5,7 @@ import os
 
 import numpy as np
 from config import config_value
+from detection_id import require_original_box
 from PIL import Image
 from subject_ranking import analysis_key, resolve_subject, source_path
 
@@ -48,6 +49,7 @@ def analyze_detection(db, photo, detection, effective_cfg, checkpoint, *, force=
     from quality import compute_all_quality_features, saved_mask_matches_frame
 
     path = source_path(db, photo)
+    require_original_box(dict(detection).get("runtime_fingerprint"))
     key = analysis_key(path, detection, effective_cfg)
     if not force and _usable_analysis(_existing_analysis(db, detection["id"], key)):
         return False
