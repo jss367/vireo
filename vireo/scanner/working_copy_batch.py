@@ -362,12 +362,18 @@ class _WorkingCopyBatch:
             if self.cancel_check and self.cancel_check():
                 return
             with tempfile.TemporaryDirectory(prefix=".import-", dir=working) as scratch:
+                # Size the CPU lease from the unprocessed tail, not the full
+                # row list: on an odd-sized import the final iteration would
+                # otherwise request two permits while only one row remains to
+                # decode, pinning a permit that a concurrent pipeline could
+                # use while the last RAW extracts.
+                remaining = self.rows[index:]
                 try:
                     with _claim_worker_count(
-                        self.rows, self.cancel_check, limit=2,
+                        remaining, self.cancel_check, limit=2,
                         label="import working copies", min_parallel_files=2,
                     ) as workers:
-                        rows = self.rows[index:index + workers]
+                        rows = remaining[:workers]
                         prepared = self._prepare_working_copies(rows, scratch)
                 except ResourceWaitCancelled:
                     return
