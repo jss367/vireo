@@ -114,6 +114,7 @@ function fixFor(row) {
 function captureTimeBody(fix) {
   return {
     photo_ids: fix.refs,
+    expected_state: fix.expected_state,
     mode: fix.target_offset ? 'set_offset' : 'manual',
     target_offset: fix.target_offset,
     shift_minutes: fix.shift_minutes,
@@ -151,6 +152,7 @@ function confirmFix(row) {
   var fix = fixFor(row);
   var actions = /** @type {HTMLElement} */ (row.querySelector('.clock-fix-actions'));
   var keep = /** @type {HTMLInputElement} */ (byId('clockKeepBackups')).checked;
+  row.dataset.keepBackups = String(keep);
   actions.innerHTML = '<span class="clock-confirm-text">Rewrite the capture time in ' + fix.count +
     ' original file(s)' + (keep ? ', keeping an ExifTool backup of each' : ' without backups') + '?</span>' +
     '<button type="button" class="btn btn-primary" data-action="confirm">Rewrite</button>' +
@@ -180,7 +182,7 @@ async function waitForCaptureTimeJob(jobId, status) {
 /** @param {HTMLElement} row */
 async function applyFix(row) {
   var body = Object.assign(captureTimeBody(fixFor(row)), {
-    keep_backups: /** @type {HTMLInputElement} */ (byId('clockKeepBackups')).checked,
+    keep_backups: row.dataset.keepBackups === 'true',
   });
   var actions = /** @type {HTMLElement} */ (row.querySelector('.clock-fix-actions'));
   actions.innerHTML = '<span class="clock-fix-status">Starting…</span>';

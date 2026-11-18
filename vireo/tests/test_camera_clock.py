@@ -1,6 +1,7 @@
 """Camera-clock detection: shot order, time-zone switches, GPS error, location."""
 
 from datetime import datetime, timedelta
+from itertools import pairwise
 
 import camera_clock
 from camera_clock import ClockFrame, analyze_camera, estimate_clock_error, find_clock_problems
@@ -142,7 +143,8 @@ def test_clock_set_back_without_offsets_suggests_a_shift():
     assert "clock was set back" in problem.summary
     [fix] = problem.fixes
     assert fix.target_offset is None
-    assert fix.shift_minutes == -59  # 14:05 back to 13:06
+    # 14:05 back to 13:06 is exactly 59 min; one more puts 14:05 at 13:05, before 13:06.
+    assert fix.shift_minutes == -60
     assert [f.ref for f in fix.frames] == [1, 2, 3, 4, 5]
 
 
@@ -185,3 +187,156 @@ def test_unmeasured_clock_offers_both_readings_and_ranks_by_nearby_day():
     assert by_shift[0].recommended and not by_shift[-60].recommended
     assert "2026-01-02" in by_shift[0].explanation
     assert len({f.group for f in problem.fixes}) == 1
+
+
+def _reset_frames(gps_error_before=None, gps_error_after=None):
+    """14:00-14:05 at -07:00, then the clock set back so 13:06 follows 14:05."""
+    def run(start, first, count, gps_error):
+        out = []
+        for i in range(count):
+            captured = start + timedelta(minutes=i)
+            gps = None
+            if gps_error is not None:
+                gps = captured + timedelta(minutes=420) - timedelta(minutes=gps_error)
+            out.append(ClockFrame(ref=first + i, filename=f"DSC_{first + i:04d}.NEF", captured=captured,
+                                  offset_minutes=-420, gps_utc=gps))
+        return out
+    return (run(datetime(2026, 4, 1, 14, 0), 1, 6, gps_error_before)
+            + run(datetime(2026, 4, 1, 13, 6), 7, 6, gps_error_after))
+
+
+def test_reset_with_gps_after_it_composes_the_fix_before_it():
+    """GPS measures only the stretch after the reset (45 min behind): that
+    stretch moves forward 45 min, and the stretch before moves back 60 + 45."""
+    problem = analyze_camera(_reset_frames(gps_error_after=-45))
+    assert problem is not None and "set back" in problem.summary
+    by_first = {fix.frames[0].ref: fix for fix in problem.fixes}
+    assert by_first[7].shift_minutes == 45 and [f.ref for f in by_first[7].frames] == list(range(7, 13))
+    assert by_first[1].shift_minutes == -15 and [f.ref for f in by_first[1].frames] == list(range(1, 7))
+    assert "Apply both" in by_first[1].explanation
+    assert any("too few GPS fixes" in line for line in problem.evidence)
+    assert any("45 min behind" in line for line in problem.evidence)
+
+
+def test_reset_with_a_right_clock_before_it_moves_the_frames_after_it():
+    problem = analyze_camera(_reset_frames(gps_error_before=0))
+    assert problem is not None
+    [fix] = problem.fixes
+    assert [f.ref for f in fix.frames] == list(range(7, 13))
+    assert fix.shift_minutes == 60
+    assert "right before the reset" in fix.explanation
+
+
+def test_reset_needs_no_fix_before_it_when_gps_fixes_the_rest_exactly():
+    problem = analyze_camera(_reset_frames(gps_error_after=-60))
+    assert problem is not None
+    [fix] = problem.fixes
+    assert [f.ref for f in fix.frames] == list(range(7, 13))
+    assert fix.shift_minutes == 60
+
+
+def test_repeated_resets_accumulate_so_every_stretch_ends_in_order():
+    """12:00 -> 10:00 -> 08:00 by shot order: the first stretch moves past both resets."""
+    starts = [datetime(2026, 4, 1, 12, 0), datetime(2026, 4, 1, 10, 0), datetime(2026, 4, 1, 8, 0)]
+    frames = [
+        ClockFrame(ref=n, filename=f"DSC_{n:04d}.JPG", captured=start + timedelta(minutes=k))
+        for s, start in enumerate(starts) for k in range(2) for n in [s * 2 + k + 1]
+    ]
+    [problem] = find_clock_problems(frames, use_gps=False)
+    corrected = {f.ref: f.captured for f in frames}
+    for fix in problem.fixes:
+        for f in fix.frames:
+            corrected[f.ref] = f.captured + timedelta(minutes=fix.shift_minutes)
+    in_shot_order = [corrected[n] for n in range(1, 7)]
+    assert in_shot_order == sorted(in_shot_order)
+    assert len(set(in_shot_order)) == 6
+
+
+def test_one_offset_across_two_real_zones_gets_a_fix_per_zone():
+    """-05:00 recorded all day: correct in New York, wrong in Los Angeles."""
+    def zone(_lat, lon, _utc):
+        return ("America/New_York", -300) if lon > -100 else ("America/Los_Angeles", -480)
+
+    morning = frames_at(datetime(2026, 1, 10, 8, 0), 10, offset=-300, first_count=1, gps_error=0)
+    evening = frames_at(datetime(2026, 1, 10, 20, 0), 20, offset=-300, first_count=11, gps_error=0)
+    morning = [ClockFrame(**{**f.__dict__, "longitude": -74.0}) for f in morning]
+    problem = analyze_camera(morning + evening, zone_lookup=zone)
+
+    [fix] = problem.fixes
+    assert {f.ref for f in fix.frames} == {f.ref for f in evening}
+    assert fix.target_offset == -480
+
+
+def test_repeated_resets_after_a_gps_verified_clock_move_forward():
+    first = frames_at(datetime(2026, 4, 1, 12), 6, first_count=1, offset=0, gps_error=0)
+    middle = frames_at(datetime(2026, 4, 1, 10), 3, first_count=7, offset=0)
+    last = frames_at(datetime(2026, 4, 1, 8), 3, first_count=10, offset=0)
+    frames = first + middle + last
+    problem = analyze_camera(frames)
+    assert problem is not None
+    shifts = {f.ref: fix.shift_minutes for fix in problem.fixes for f in fix.frames}
+    assert set(shifts) == {f.ref for f in middle + last}
+    corrected = [f.captured + timedelta(minutes=shifts.get(f.ref, 0)) for f in frames]
+    assert all(a < b for a, b in pairwise(corrected))
+
+
+def test_sparse_dcf_numbers_do_not_create_a_reset():
+    start = datetime(2026, 1, 25, 10)
+    frames = [
+        ClockFrame(ref=n, filename=f"DSC_{n:04d}.JPG", captured=start + timedelta(hours=i))
+        for i, n in enumerate([100, 9000])
+    ]
+    assert find_clock_problems(frames, use_gps=False) == []
+
+
+def test_sparse_dcf_runs_preserve_local_reset_evidence():
+    start = datetime(2026, 1, 25, 10)
+    frames = [
+        ClockFrame(ref=n, filename=f"DSC_{n:04d}.JPG", captured=start + timedelta(hours=h))
+        for n, h in [(100, 0), (101, 1), (9000, 4), (9001, 3)]
+    ]
+    [problem] = find_clock_problems(frames, use_gps=False)
+    [fix] = problem.fixes
+    assert [frame.ref for frame in fix.frames] == [9000]
+
+
+def test_rollover_with_backward_clock_preserves_reset_evidence():
+    frames = [ClockFrame(ref=n, filename=f"DSC_{n:04d}.JPG", captured=datetime(2026, 4, 1, hour))
+              for n, hour in [(9999, 14), (1, 13)]]
+    [problem] = find_clock_problems(frames, use_gps=False)
+    [fix] = problem.fixes
+    assert [f.ref for f in fix.frames] == [9999]
+    assert fix.shift_minutes == -61
+
+
+def test_measured_reset_epochs_need_separate_fix_groups():
+    problem = analyze_camera(_reset_frames(gps_error_before=30, gps_error_after=-45))
+    assert problem is not None
+    assert {f.shift_minutes for f in problem.fixes} == {-30, 45}
+    assert len({f.group for f in problem.fixes}) == 2
+
+
+def test_reset_fix_waits_for_unmeasured_zone_choice():
+    from dataclasses import replace
+
+    frames = [replace(f, latitude=34., longitude=-118.) if f.ref <= 6 else f for f in _reset_frames()]
+    problem = analyze_camera(frames, zone_lookup=la_winter)
+    assert problem is not None
+    assert {f.shift_minutes for f in problem.fixes} == {-60, 0}
+    assert all(f.ref <= 6 for fix in problem.fixes for f in fix.frames)
+
+
+def test_reset_epoch_uses_its_own_clock_error_at_dst_boundary():
+    from zoneinfo import ZoneInfo
+
+    def local_zone(_lat, _lon, utc):
+        from datetime import UTC
+        local = utc.replace(tzinfo=UTC).astimezone(ZoneInfo("America/Los_Angeles"))
+        return "America/Los_Angeles", int(local.utcoffset().total_seconds() // 60)
+
+    before = frames_at(datetime(2026, 11, 1, 1, 50), 8, offset=-420, first_count=1, gps_error=0)
+    after = frames_at(datetime(2026, 11, 1, 0, 50), 4, offset=-420, first_count=9, gps_error=-120)
+    problem = analyze_camera(before + after, zone_lookup=local_zone)
+    assert problem is not None
+    [fix] = problem.fixes
+    assert (fix.target_offset, fix.shift_minutes) == (-480, 60)

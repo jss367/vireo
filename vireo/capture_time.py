@@ -1,12 +1,16 @@
 """Capture-time and timezone repair helpers."""
 
+import hashlib
 import json
 import logging
 import os
 import re
 import shutil
 import subprocess
+from contextlib import contextmanager
 from datetime import datetime, timedelta
+
+from threading import Lock
 
 from metadata import extract_metadata
 try:
@@ -17,6 +21,36 @@ except ImportError:
 log = logging.getLogger(__name__)
 
 OFFSET_RE = re.compile(r"^([+-])(\d{2}):(\d{2})$")
+
+
+_active_corrections = set()
+_correction_lock = Lock()
+
+
+def capture_time_token(states):
+    """Fingerprint the selected catalog rows as they were when reviewed."""
+    encoded = json.dumps(sorted(states), separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def current_capture_time_token(db, ids):
+    return capture_time_token(db.photos.capture_time_states(ids))
+
+
+@contextmanager
+def guard_capture_time(db, ids, expected):
+    keys = set(ids)
+    with _correction_lock:
+        if keys & _active_corrections:
+            raise ValueError("A capture-time correction is already running for these photos.")
+        _active_corrections.update(keys)
+    try:
+        if current_capture_time_token(db, ids) != expected:
+            raise ValueError("The capture-time evidence changed. Review the photos again.")
+        yield
+    finally:
+        with _correction_lock:
+            _active_corrections.difference_update(keys)
 
 
 def parse_offset_minutes(value):

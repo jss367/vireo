@@ -832,3 +832,29 @@ def test_capture_time_primary_only_preserves_companion_identity(client_with_phot
     assert identity is not None
     assert identity["file_hash"] == companion_hash
     assert DuplicateChecker(CatalogIndex.from_db(db), verify_by_hash=True).match(source)
+
+
+def test_capture_time_rejects_a_stale_preview(app_and_db):
+    app, db = app_and_db
+    pid = db.photos.list_page()[0]["id"]
+    client = app.test_client()
+    body = {"photo_ids": [pid], "mode": "manual", "shift_minutes": 15}
+    token = client.post("/api/capture-time/preview", json=body).get_json()["expected_state"]
+    db.conn.execute("UPDATE photos SET timestamp='2026-03-18T01:23:45' WHERE id=?", (pid,))
+    db.commit()
+    result = client.post("/api/jobs/capture-time", json={**body, "expected_state": token})
+    assert result.status_code == 409
+
+
+def test_capture_time_overlap_is_rejected_before_writing(app_and_db):
+    import pytest
+    from capture_time import current_capture_time_token, guard_capture_time
+
+    _, db = app_and_db
+    pid = db.photos.list_page()[0]["id"]
+    token = current_capture_time_token(db, [pid])
+    with guard_capture_time(db, [pid], token), pytest.raises(ValueError, match="already running"):
+        with guard_capture_time(db, [pid], token):
+            pytest.fail("overlapping correction acquired the same photo")
+    with guard_capture_time(db, [pid], token):
+        pass

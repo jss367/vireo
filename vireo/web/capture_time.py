@@ -27,7 +27,7 @@ def create_capture_time_blueprint(get_db: GetDb, json_error: JsonError) -> Bluep
     @blueprint.route("/api/capture-time/preview", methods=["POST"])
     def api_capture_time_preview() -> ResponseReturnValue:
         """Preview a capture-time correction for selected photos."""
-        from capture_time import build_capture_time_preview
+        from capture_time import build_capture_time_preview, current_capture_time_token
 
         db = get_db()
         body = request.get_json(silent=True)
@@ -53,6 +53,7 @@ def create_capture_time_blueprint(get_db: GetDb, json_error: JsonError) -> Bluep
             seen.add(raw)
             photo_ids.append(raw)
 
+        expected = current_capture_time_token(db, photo_ids)
         photos = []
         for pid in photo_ids[:20]:
             photo = db.photos.get(pid, verify_workspace=True)
@@ -71,6 +72,7 @@ def create_capture_time_blueprint(get_db: GetDb, json_error: JsonError) -> Bluep
             )
         except ValueError as exc:
             return json_error(str(exc), 400)
+        preview["expected_state"] = expected
         preview["count"] = len(photo_ids)
         return jsonify(preview)
 
