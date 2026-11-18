@@ -201,7 +201,8 @@ class _DetectBatchRun:
 
         self._resolve_threshold()
 
-        detections = detect_animals(image_path)
+        focus = self.db.subjects.focus_point(photo["id"])
+        detections = detect_animals(image_path, focus=focus) if focus else detect_animals(image_path)
 
         if detections is None:
             # Detector run itself failed (image decode error, ONNX
@@ -248,7 +249,7 @@ class _DetectBatchRun:
             # place and allowing future non-reclassify runs to reuse them.
             self.processed_ids.add(photo["id"])
 
-            self._score_subject_quality(photo, image_path, detections)
+            self._score_subject_quality(photo, image_path)
 
         self.processed_ids.add(photo["id"])
 
@@ -418,23 +419,17 @@ class _DetectBatchRun:
                 })
         return det_list
 
-    def _score_subject_quality(self, photo: sqlite3.Row, image_path: str, detections: list[dict[str, Any]]) -> None:
-        """Score subject quality from the primary detection."""
+    def _score_subject_quality(self, photo: sqlite3.Row, image_path: str) -> None:
+        """Measure the retained primary, including any saved manual override."""
+        from subjects import retained
+
         db = self.db
-        # Use highest-confidence detection as primary for quality scoring
-        primary = get_primary_detection(detections)
-        if primary and primary["confidence"] < self.det_conf_threshold:
-            # Top detection is below the workspace's detector_confidence
-            # threshold — it's noise, not a real subject. Skip scoring
-            # and clear any stale quality fields from a prior run so
-            # noise photos don't float to the top of highlights with a
-            # giant ``subject_size`` from a whole-frame noise box.
+        regions = retained(db, photo["id"], self.det_conf_threshold)
+        if not regions:
             with db.transaction():
                 db.photos.update_quality(photo["id"])
-            primary = None
-        if not primary:
             return
-        det_box = primary["box"]
+        det_box = {k: regions[0]["box_" + k] for k in "xywh"}
         subject_size = det_box["w"] * det_box["h"]
 
         if compute_sharpness is None:
@@ -608,7 +603,12 @@ def _analyze_subjects(
     if vireo_dir:
         from image_loader import get_canonical_image_path
 
-    for photo in photos:
+    # Project the preceding frame before its burst neighbor reads that box.
+    def capture_order(photo: sqlite3.Row) -> tuple[str, int]:
+        timestamp = photo["timestamp"] if "timestamp" in photo.keys() else None  # noqa: SIM118 -- sqlite3.Row
+        return timestamp or "", photo["id"]
+
+    for photo in sorted(photos, key=capture_order):
         if photo["id"] in cached_detections:
             continue
         # ``processed_ids`` only tracks photos whose detection loop reached

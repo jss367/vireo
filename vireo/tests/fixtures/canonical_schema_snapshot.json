@@ -1159,6 +1159,18 @@
    null
   ],
   [
+   "index",
+   "idx_photos_burst_capture",
+   "photos",
+   "CREATE INDEX idx_photos_burst_capture ON photos(folder_id, burst_id, timestamp)"
+  ],
+  [
+   "table",
+   "subject_focus",
+   "subject_focus",
+   "CREATE TABLE subject_focus (\n        detection_id INTEGER PRIMARY KEY REFERENCES detections(id) ON DELETE CASCADE,\n        af INTEGER NOT NULL,\n        sharp INTEGER NOT NULL,\n        continuity INTEGER NOT NULL\n    )"
+  ],
+  [
    "table",
    "photo_exif_search_text",
    "photo_exif_search_text",

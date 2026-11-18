@@ -33,6 +33,7 @@ from canonical_schema import (
     create_same_shot_reviews,
     create_species_choices,
     create_subject_candidates,
+    create_subject_focus,
     create_subject_ranking_analysis,
     job_history_columns,
 )
@@ -435,6 +436,7 @@ MIGRATIONS = (
     Migration(35, "subject_detail", _add_subject_detail, _validate_subject_detail),
     Migration(36, "species_choices", create_species_choices),
     Migration(37, "subject_candidates", create_subject_candidates),
+    Migration(38, "subject_focus", create_subject_focus),
 )
 
 

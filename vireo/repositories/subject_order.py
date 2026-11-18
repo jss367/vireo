@@ -1,32 +1,7 @@
-"""The SQL ordering that picks one detection per photo as its primary subject.
-
-Every reader that chooses one detection per photo orders by this, so the
-lightbox, the subject panel, the mask, eye-keypoint and quality stages, the
-pipeline stage counts and Highlights (through ``subject_rank``) agree on
-which region is the photo's subject:
-
-1. a real animal box before the whole-frame row and non-animal boxes;
-2. the region the user chose as the subject;
-3. boxes that do not span the frame before ones that do
-   (``species_memberships.FRAME_SPANNING_EXTENT``): the detector boxes tree
-   trunks and blurred foreground as full-height strips beside the animal,
-   often more confidently than the animal itself;
-4. regions the classifier scored as an animal before background-like ones
-   (``background_match``, the same margin and confident-box override);
-5. the region whose best species label matched best in its newest
-   classifier run (cosine runs before other score kinds, which are on a
-   different scale); a crop of the animal fits a species label better than
-   the scenery beside it;
-6. the detector's confidence, then the region's most confident prediction,
-   then the lower id.
-
-Subject quality is deliberately not an input: it is measured on the chosen
-region, and on tiny or textured boxes (a speck, a bush top) it reads higher
-than on the animal. Checked by eye on 57 multi-box photos, this order picked
-the animal in 53, the quality-first order in 42 and detector-first in 19.
-"""
+"""Shared primary-subject ordering and its deciding evidence."""
 
 from background_match import BACKGROUND_MARGIN, CONFIDENT_DETECTION
+from focus_point import FocusMatch
 from species_memberships import FRAME_SPANNING_EXTENT
 
 #: Added to a run's best label score so cosine runs sort above runs scored on
@@ -48,7 +23,7 @@ def chosen_subject_sql(alias="detections"):
                               WHERE photo_id = {alias}.photo_id), 0)"""
 
 
-def primary_order_sql(alias="detections"):
+def primary_terms(alias="detections"):
     """Shared ordering for readers that choose one detection per photo."""
     background_like = _newest_match_run(
         alias,
@@ -60,16 +35,30 @@ def primary_order_sql(alias="detections"):
         f"CASE WHEN cms.score_kind = 'cosine' THEN {_COSINE_RANK} "
         f"ELSE {_OTHER_SCORE_RANK} END + cms.max_match_score",
     )
-    return f"""CASE WHEN {alias}.category = 'animal'
-                     AND {alias}.detector_model != 'full-image' THEN 1 ELSE 0 END DESC,
-        {chosen_subject_sql(alias)} DESC,
-        MAX({alias}.box_w, {alias}.box_h) >= {FRAME_SPANNING_EXTENT},
-        COALESCE({alias}.detector_confidence < {CONFIDENT_DETECTION}
-                 AND {background_like}, 0),
-        {match_rank} DESC,
-        {alias}.detector_confidence DESC,
-        (SELECT MAX(confidence) FROM predictions WHERE detection_id = {alias}.id) DESC,
-        {alias}.id ASC"""
+
+    def focus_term(column):
+        return f"COALESCE((SELECT {column} FROM subject_focus WHERE detection_id={alias}.id), 0)"
+
+    return [
+        ("Animal region", f"({alias}.category = 'animal' AND {alias}.detector_model != 'full-image')", "DESC"),
+        ("Your choice", chosen_subject_sql(alias), "DESC"),
+        ("Contains the camera AF point", f"({focus_term('af')} = {FocusMatch.CENTER})", "DESC"),
+        ("Overlaps the camera AF area", f"({focus_term('af')} = {FocusMatch.AREA})", "DESC"),
+        ("Region fits within the frame", f"MAX({alias}.box_w, {alias}.box_h) >= {FRAME_SPANNING_EXTENT}", "ASC"),
+        ("Animal rather than background", f"COALESCE({alias}.detector_confidence < {CONFIDENT_DETECTION} "
+         f"AND {background_like}, 0)", "ASC"),
+        ("Near the camera AF area", focus_term("af"), "DESC"),
+        ("Clearly sharper region", focus_term("sharp"), "DESC"),
+        ("Overlaps the previous burst subject", focus_term("continuity"), "DESC"),
+        ("Species-label match", match_rank, "DESC"),
+        ("Detector confidence", f"{alias}.detector_confidence", "DESC"),
+        ("Classifier confidence", f"(SELECT MAX(confidence) FROM predictions WHERE detection_id={alias}.id)", "DESC"),
+        ("Stable region order", f"{alias}.id", "ASC"),
+    ]
+
+
+def primary_order_sql(alias="detections"):
+    return ", ".join(f"{expr} {direction}" for _, expr, direction in primary_terms(alias))
 
 
 def subject_rank_sql(alias="detections"):

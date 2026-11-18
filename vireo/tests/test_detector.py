@@ -1123,3 +1123,37 @@ def test_detect_animals_propagates_resource_wait_cancellation(monkeypatch, tmp_p
 
     with pytest.raises(ResourceWaitCancelled):
         detector.detect_animals(str(img_path))
+
+
+def test_focus_crop_maps_proposals_back_to_the_full_frame(monkeypatch):
+    import detector
+    from focus_point import FocusArea
+    focus = FocusArea(.75, .25, .1, .1)
+    proposals = [{"box": {"x": .4, "y": .4, "w": .2, "h": .2},
+                  "category": "person", "confidence": .8}]
+    monkeypatch.setattr(detector, "_infer_array", lambda *args: proposals)
+    found = detector._focus_crop(None, None, np.zeros((400, 800, 3)), focus, .5)
+    assert len(found) == 1
+    assert found[0]["category"] == "person"
+    assert found[0]["box"] == pytest.approx({"x": .725, "y": .2, "w": .05, "h": .1})
+
+
+def test_confident_bystander_still_triggers_focus_crop(monkeypatch, tmp_path):
+    from unittest.mock import MagicMock
+
+    import detector
+    from focus_point import FocusArea, FocusMatch
+    from PIL import Image
+
+    path = tmp_path / "birds.jpg"
+    Image.new("RGB", (640, 640)).save(path)
+    bystander = {"box": {"x": .1, "y": .1, "w": .15, "h": .15}, "confidence": .95, "category": "animal"}
+    bird = {"box": {"x": .3, "y": .3, "w": .4, "h": .4}, "confidence": .75, "category": "animal"}
+    infer = MagicMock(side_effect=[[bystander], [bystander], [bird], []])
+    monkeypatch.setattr(detector, "_infer_array", infer)
+    monkeypatch.setattr(detector, "_get_session", MagicMock())
+    focus = FocusArea(.65, .7, .04, .04)
+    detections = detector.detect_animals(path, focus=focus)
+    assert infer.call_count == 4
+    assert detections[0] == bystander
+    assert focus.match(detections[1]["box"]) == FocusMatch.CENTER

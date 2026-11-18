@@ -185,7 +185,8 @@ def retry_detection(db: Database, pid: int, checkpoint: Callable[[], None],
     if runtime is None:
         raise ValueError("Detector runtime identity is unavailable after model preparation")
     checkpoint()
-    detections = detect_animals(path)  # intentionally bypass completed/incomplete detector caches
+    focus = db.subjects.focus_point(pid)
+    detections = detect_animals(path, focus=focus) if focus else detect_animals(path)
     if detections is None:
         raise ValueError("Subject detection could not decode or analyze this photo")
     checkpoint()
@@ -197,15 +198,17 @@ def retry_detection(db: Database, pid: int, checkpoint: Callable[[], None],
         _unchanged(db, pid, path, identity)
         if megadetector_runtime_fingerprint() != runtime:
             raise ValueError("Detector runtime changed during analysis; retry with the current model")
-        write_detection_batch(db, pid, "megadetector-v6", detections, runtime, input_fp)
+        from subjects import sync_primary
+        with db.transaction():
+            write_detection_batch(db, pid, "megadetector-v6", detections, runtime, input_fp)
+            # The writer can preserve a reviewed result from a different input.
+            stored = db.model_runs.detector_run_identity(pid, "megadetector-v6")
+            if (stored is None or stored["runtime_fingerprint"] != runtime
+                    or stored["input_fingerprint"] != input_fp):
+                raise ValueError("A reviewed detector result was retained for different inputs; review its subject choice before retrying")
+            sync_primary(db, pid)
         if on_published:
             on_published()
-        # The normal writer protects reviewed detector outputs. Never force away
-        # those decisions merely to make recovery appear successful.
-        stored = db.model_runs.detector_run_identity(pid, "megadetector-v6")
-        if (stored is None or stored["runtime_fingerprint"] != runtime
-                or stored["input_fingerprint"] != input_fp):
-            raise ValueError("A reviewed detector result was retained for different inputs; review its subject choice before retrying")
 
 
 def retry_features(db: Database, pid: int, effective: JsonDict, cache_dir: str,

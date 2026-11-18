@@ -125,20 +125,18 @@ panel, the mask, eye and quality stages, the pipeline stage counts and the
 Highlights bucket rule all read that one order, so they never disagree about
 which region a photo is "of":
 
-1. the region the user chose (or drew) as the subject;
-2. a region that does not span the frame before one that does: a box at
-   least `species_memberships.FRAME_SPANNING_EXTENT` of the frame's height or
-   width beside another region is a trunk strip or blurred foreground;
-3. a region the classifier scored as an animal before a background-like one;
-4. the region whose crop best matched a species label in its newest
-   classifier run;
-5. the detector's confidence.
+1. A manual choice takes priority.
+2. Prefer an animal containing the camera's AF center, then one intersecting the recorded AF area.
+3. Prefer regions that fit within the frame and pass the background check.
+4. With AF metadata, prefer a nearby region when the point misses. Without it, prefer the sharpest measured region when its mean squared gradient exceeds twice the runner-up's.
+5. Prefer a region overlapping the previous burst subject, then use species-label match and detector confidence.
 
-Subject quality is not an input: on a speck or a bush top it reads higher
-than on the animal. Because the order reads classifier scores, both classify
-paths re-project the subject after storing a classification
-(`subjects.resync_after_classification`); a mask drawn from the previous
-subject is then stale and the next Process run redoes it.
+The Subjects panel and Pipeline inspector show the rule that separated the first two candidates.
+They also flag an uncovered AF center and a possible switch when the primary has little spatial
+overlap with the previous frame. Nikon files with AF coordinates get a targeted crop retry if
+the full-frame pass lacks a confident animal at the point. Reprocessing an older detector run
+can recover additional boxes. Analysis on cached detections can update selection without re-running
+the detector. A change of primary invalidates measurements tied to its previous box.
 
 Highlights opens the primary's species unless it is background-like. Another
 region suggests a second species only at or above

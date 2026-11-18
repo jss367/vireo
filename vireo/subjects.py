@@ -9,6 +9,7 @@ import math
 import os
 
 import numpy as np
+from focus_point import FocusMatch
 from services import detection_store
 
 ANALYSIS_VERSION = 1
@@ -94,7 +95,7 @@ def analyze_photo(db, photo_id, image_path, *, min_conf=None, force=False, check
         # leaving stale mask/quality/DINO/eye state attached to a photo with
         # no detections. Check either signal.
         stale = db.subjects.has_stale_primary_state(photo_id)
-        if stale:
+        if stale or db.subjects.focus_point(photo_id):
             with acquire_photo_mask(photo_id):
                 if checkpoint:
                     checkpoint()
@@ -145,12 +146,69 @@ def _current_analysis_results(db, photo_id, pending, results, detection_id, min_
     return [r for r in results if r["detection_id"] in valid]
 
 
+def _box(detection):
+    return {k: detection["box_" + k] for k in "xywh"}
+
+
+def _burst_overlap(previous, detection):
+    from encounter_continuity import _overlap
+    return _overlap(_box(previous), _box(detection))
+
+
+BURST_SUBJECT_MIN_IOU = 0.35
+
+
+def _refresh_focus(db, photo_id):
+    """Refresh image evidence independently of the caller's model or confidence floor."""
+    candidates = db.subjects.focus_candidates(photo_id)
+    point = db.subjects.focus_point(photo_id)
+    previous = db.subjects.previous_burst_subject(photo_id)
+    sharp_id = None
+    if point is None:
+        measured = sorted((d["sharpness"], d["id"]) for d in candidates
+                          if d["category"] == "animal" and d["sharpness"] is not None)
+        if len(measured) >= 2 and measured[-1][0] > max(1, measured[-2][0] * 2):
+            sharp_id = measured[-1][1]
+    rows = []
+    for d in candidates:
+        af = point.match(_box(d)) if point else 0
+        continuity = bool(previous and _burst_overlap(previous, d) >= BURST_SUBJECT_MIN_IOU)
+        if af or sharp_id == d["id"] or continuity:
+            rows.append((d["id"], af, sharp_id == d["id"], continuity))
+    db.subjects.save_focus_evidence(photo_id, rows)
+
+
+def selection_evidence(db, photo_id, detections):
+    point = db.subjects.focus_point(photo_id)
+    missed = bool(point and not any(point.match(_box(d)) == FocusMatch.CENTER for d in detections))
+    previous = db.subjects.previous_burst_subject(photo_id)
+    switched = bool(previous and detections and _burst_overlap(previous, detections[0]) < BURST_SUBJECT_MIN_IOU)
+    reason = ""
+    if detections:
+        first = detections[0]["id"]
+        choice = db.subjects.choice(photo_id)
+        if choice and first == choice["detection_id"]:
+            reason = "Your choice"
+        elif len(detections) == 1:
+            reason = "Only retained animal"
+        else:
+            reason = db.subjects.primary_reason(first, detections[1]["id"])
+    explanation = ("Primary subject: " + reason + ".") if reason else ""
+    if missed:
+        explanation += " Possible missed subject: no retained animal contains the camera AF point."
+    if switched:
+        explanation += " Possible subject switch since the previous burst frame."
+    return {"primary_reason": reason, "possible_missed_subject": missed, "possible_subject_switch": switched,
+            "selection_explanation": explanation.strip()}
+
+
 def sync_primary(db, photo_id, *, min_conf=None, detector_model=None):
     """Project primary quality; clear stale subject-dependent outputs on a switch.
 
     Mask snapshots referenced by manual edits are immutable and untouched.
     Existing photo_masks remain cached, and prompt matching decides reuse.
     """
+    _refresh_focus(db, photo_id)
     detections = retained(db, photo_id, min_conf, detector_model=detector_model)
     if not detections:
         db.subjects.clear_primary_features(photo_id)
@@ -185,7 +243,8 @@ def resync_after_classification(db, photo_ids, min_conf):
     """
     from pipeline_locks import acquire_photo_mask
     by_photo = detection_store.get_detections_for_photos(db, photo_ids, min_conf=min_conf)
-    for photo_id, regions in by_photo.items():
+    for photo_id in db.subjects.capture_order(by_photo):
+        regions = by_photo[photo_id]
         if len([d for d in regions if d.get("detector_model") != "full-image"]) < 2:
             continue
         with acquire_photo_mask(photo_id):
@@ -244,6 +303,7 @@ def payload(db, photo_id):
     return {"photo_id": photo_id, "workspace_id": db.require_workspace_id(), "subjects": detections,
             "full_image_predictions": [p for did in full_image_ids for p in grouped.get(did, [])],
             "primary_detection_id": primary_id,
+            **selection_evidence(db, photo_id, detections),
             "selection": "manual" if choice else "automatic",
             "choice_unavailable": bool(choice and choice["detection_id"] != primary_id),
             # Regions the user rejected as background: not retained, shown

@@ -130,6 +130,8 @@ def megadetector_runtime_fingerprint(weights_path=None):
     """Resolve the exact installed MegaDetector runtime without loading ONNX."""
     from detector import (
         CLASS_NAMES,
+        FOCUS_CROP_FRACTIONS,
+        FOCUS_SHADOW_CROP_FRACTION,
         INPUT_SIZE,
         MEGADETECTOR_ONNX_PATH,
         RAW_CONF_FLOOR,
@@ -150,10 +152,12 @@ def megadetector_runtime_fingerprint(weights_path=None):
         "weights_sha256": sha256_file(weights_path),
         "input_recipe": "vireo-detector-source-v1",
         "preprocess": {
-            "version": 6,
+            "version": 7,
             "input_size": INPUT_SIZE,
             "resize": "Pillow.BILINEAR-letterbox",
             "padding": 114,
+            "focus_crop_fractions": list(FOCUS_CROP_FRACTIONS),
+            "focus_shadow_crop_fraction": FOCUS_SHADOW_CROP_FRACTION,
             "tiled_fallback": {
                 "trigger_confidence": TILED_FALLBACK_TRIGGER_CONFIDENCE,
                 "crop_fraction": TILED_CROP_FRACTION,

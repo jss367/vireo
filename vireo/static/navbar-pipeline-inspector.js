@@ -281,10 +281,7 @@ function renderRegionTable(regions, floorPct) {
       '<td>' + label + '</td><td>' + subject + '</td>' +
       '<td style="color:var(--text-dim);">' + escapeHtml(highlightsRoleText(r, floorPct)) + '</td></tr>';
   });
-  html += '</table><p style="color:var(--text-dim);font-size:12px;margin-top:6px;">' +
-    'The subject is the region you chose; otherwise the region whose crop best matches a species label, ' +
-    'passing over regions that span the frame or look like background scenery. The lightbox, quality scoring ' +
-    'and Highlights all use it.</p>';
+  html += '</table>';
   return html;
 }
 
@@ -317,6 +314,7 @@ function renderDetectionStep(data, photoId) {
   var regions = data.regions || [];
   var html = '<div class="pipeline-step">' +
     '<div class="pipeline-step-header"><span class="pipeline-step-num">2</span><span class="pipeline-step-title">Subject Detection (MegaDetector)</span></div>';
+  if (data.selection_explanation) html += '<p>' + escapeHtml(data.selection_explanation) + '</p>';
   if (data.detection_box && data.detection_box.x != null) {
     var db = /** @type {NavBox} */ (data.detection_box);
     var cropBox = data.crop_box;
@@ -325,15 +323,15 @@ function renderDetectionStep(data, photoId) {
         '<div class="pipeline-stat">Subject confidence: <b>' + Math.round(Number(data.detection_conf) * 100) + '%</b></div>' +
         '<div class="pipeline-stat">Subject size: <b>' + Math.round((db.w * db.h) * 10000) / 100 + '%</b> of frame</div>' +
       '</div>';
-    if (regions.length) {
-      html += renderRegionTable(regions, Math.round((data.secondary_subject_floor ?? 0.5) * 100));
-    }
   } else if ((diag.hidden_detection_count || 0) > 0) {
     html += '<p style="color:var(--text-dim);font-size:13px;">No subject above the current detector threshold. ' +
       diag.hidden_detection_count + ' lower-confidence detection' + (diag.hidden_detection_count === 1 ? ' is' : 's are') +
       ' stored' + (maxDetectorPct != null ? ' (best ' + maxDetectorPct + '%, threshold ' + detectorThresholdPct + '%)' : '') + '.</p>';
   } else {
     html += '<p style="color:var(--text-dim);font-size:13px;">No subject detected</p>';
+  }
+  if (regions.length) {
+    html += renderRegionTable(regions, Math.round((data.secondary_subject_floor ?? 0.5) * 100));
   }
   return html + '</div>';
 }

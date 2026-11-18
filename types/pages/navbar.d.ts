@@ -160,6 +160,7 @@ interface NavSubject {
   analysis?: {source_key?: string; crop: NavBox; quality_score: number; exposure_ev: number;} | null;
 }
 interface NavSubjectData {
+  selection_explanation: string;
   workspace_id: number;
   warning?: string;
   full_image_predictions?: {species: string; confidence: number}[];
@@ -329,6 +330,7 @@ interface NavMatchSummary {
   assessments?: {explanation?: string; model?: string}[];
 }
 interface NavPipelinePhotoData {
+  selection_explanation: string;
   match_summary?: NavMatchSummary;
   filename?: string;
   width?: number;

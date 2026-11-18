@@ -29,6 +29,57 @@ class SubjectsRepository:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
 
+    def focus_point(self, photo_id):
+        from focus_point import focus_point
+        row = self.conn.execute("SELECT exif_data FROM photos WHERE id=?", (photo_id,)).fetchone()
+        return focus_point(row[0]) if row else None
+
+    def capture_order(self, photo_ids):
+        from sql_chunks import chunked
+        captures = []
+        for chunk in chunked(list(photo_ids)):
+            placeholders = ",".join("?" * len(chunk))
+            captures.extend((r[0] or "", r[1]) for r in self.conn.execute(
+                f"SELECT timestamp, id FROM photos WHERE id IN ({placeholders})", chunk))
+        return [photo_id for _, photo_id in sorted(captures)]
+
+    def previous_burst_subject(self, photo_id):
+        # Sequence metadata is optional. A subsecond adjacent capture in the
+        # same folder is a conservative fallback for cameras without burst IDs.
+        return self.conn.execute("""SELECT d.* FROM photos p JOIN photos prev ON prev.id=(
+            SELECT q.id FROM photos q WHERE q.folder_id=p.folder_id AND q.burst_id IS p.burst_id
+            AND (q.timestamp, q.id) < (p.timestamp, p.id)
+            ORDER BY q.timestamp DESC, q.id DESC LIMIT 1)
+            JOIN photo_subject_state st ON st.photo_id=prev.id JOIN detections d ON d.id=st.detection_id
+            WHERE p.id=? AND (p.burst_id IS NOT NULL OR
+                (julianday(p.timestamp)-julianday(prev.timestamp))*86400 BETWEEN 0 AND 0.5)""",
+            (photo_id,)).fetchone()
+
+    def focus_candidates(self, photo_id):
+        return self.conn.execute("""SELECT d.id, d.box_x, d.box_y, d.box_w, d.box_h, d.category,
+                json_extract(s.features, '$.subject_sharpness') AS sharpness
+            FROM detections d LEFT JOIN detection_subjects s ON s.detection_id=d.id
+            WHERE d.photo_id=? AND d.detector_model != 'full-image' AND d.subject_verdict IS NULL""",
+            (photo_id,)).fetchall()
+
+    def primary_reason(self, first, second):
+        from repositories.subject_order import primary_terms
+        terms = primary_terms()
+        columns = ", ".join(expr for _, expr, _ in terms)
+        rows = self.conn.execute(f"SELECT {columns} FROM detections WHERE id IN (?,?)",
+                                 (first, second)).fetchall()
+        if len(rows) != 2:
+            return "Only retained animal"
+        for index, (reason, _, _) in enumerate(terms):
+            if rows[0][index] != rows[1][index]:
+                return reason
+        return "Only retained animal"
+
+    def save_focus_evidence(self, photo_id, rows):
+        self.conn.execute("DELETE FROM subject_focus WHERE detection_id IN "
+                          "(SELECT id FROM detections WHERE photo_id=?)", (photo_id,))
+        self.conn.executemany("INSERT INTO subject_focus(detection_id,af,sharp,continuity) VALUES (?,?,?,?)", rows)
+
     # -- analysis cache ---------------------------------------------------------
 
     def has_stale_primary_state(self, photo_id: int) -> bool:

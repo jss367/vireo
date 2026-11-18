@@ -198,3 +198,78 @@ def test_unclassified_or_rejected_primary_does_not_promote_secondary(
     photo = next(row for row in candidates if row["id"] == pid)
     assert all(subject["subject_rank"] > 1 for subject in photo["subject_predictions"])
     assert _buckets(app.test_client(), fid) == {}
+
+
+def _af_metadata(x, y):
+    return json.dumps({"MakerNotes": {"AFCoordinatesAvailable": 1, "AFImageWidth": 1000,
+                      "AFImageHeight": 1000, "AFAreaXPosition": x, "AFAreaYPosition": y,
+                      "AFAreaWidth": 60, "AFAreaHeight": 60}})
+
+
+def test_af_choice_and_miss_are_explained_in_both_views(app_and_db):
+    from subjects import select_primary
+    app, db = app_and_db
+    pid, hawk, strip, _ = _hawk_frame(db, _folder(db))
+    db.conn.execute("UPDATE photos SET exif_data=? WHERE id=?", (_af_metadata(800, 500), pid))
+    sync_primary(db, pid, min_conf=.2)
+    db.commit()
+    client = app.test_client()
+    for endpoint in ("pipeline", "subjects"):
+        result = client.get(f"/api/photos/{pid}/{endpoint}").get_json()
+        assert result["primary_reason"] == "Contains the camera AF point"
+        assert not result["possible_missed_subject"]
+    assert payload(db, pid)["primary_detection_id"] == strip
+    select_primary(db, pid, hawk)
+    assert payload(db, pid)["primary_reason"] == "Your choice"
+    db.conn.execute("UPDATE photos SET exif_data=? WHERE id=?", (_af_metadata(500, 50), pid))
+    sync_primary(db, pid)
+    assert payload(db, pid)["possible_missed_subject"]
+
+
+def test_sharpness_requires_a_clear_lead_over_the_other_box(db):
+    fid = _folder(db)
+    pid = db.conn.execute("INSERT INTO photos(folder_id,filename) VALUES (?, 'a.jpg')", (fid,)).lastrowid
+    first, second = _regions(db, pid, ((.1,.1,.2,.2), .8), ((.6,.1,.2,.2), .7))
+    _classify(db, first, "Coot", .9, .55)
+    _classify(db, second, "Grebe", .8, .45)
+    for did in (first, second):
+        _analysis(db, did, .5)
+    for sharp, expected, reason in [(1.8, first, "Species-label match"), (3., second, "Clearly sharper region")]:
+        db.conn.execute("UPDATE detection_subjects SET features=json_set(features,'$.subject_sharpness',?) "
+                        "WHERE detection_id=?", (sharp, second))
+        sync_primary(db, pid)
+        result = payload(db, pid)
+        assert (result["primary_detection_id"], result["primary_reason"]) == (expected, reason)
+
+
+def test_burst_overlap_breaks_weak_switch_and_af_explains_real_switch(db):
+    fid = _folder(db)
+    def frame(name, ts):
+        return db.conn.execute("INSERT INTO photos(folder_id,filename,timestamp) VALUES (?,?,?)",
+                               (fid,name,"2026-11-14T09:00:17." + ts)).lastrowid
+    first = frame("DSC_1.NEF", "100")
+    _regions(db, first, ((.1,.1,.2,.2), .7))
+    sync_primary(db, first)
+    second = frame("DSC_2.NEF", "200")
+    same, other = _regions(db, second, ((.11,.1,.2,.2), .7), ((.6,.6,.2,.2), .8))
+    _classify(db, other, "Coot", .9, .55)
+    sync_primary(db, second)
+    assert payload(db, second)["primary_detection_id"] == same
+    assert payload(db, second)["primary_reason"] == "Overlaps the previous burst subject"
+    db.conn.execute("UPDATE photos SET exif_data=? WHERE id=?", (_af_metadata(700,700), second))
+    sync_primary(db, second)
+    result = payload(db, second)
+    assert result["primary_detection_id"] == other
+    assert result["possible_subject_switch"]
+
+
+def test_nikon_focus_area_maps_sensor_crop_and_orientation():
+    from focus_point import focus_point
+    meta = json.loads(_af_metadata(550, 400))
+    meta["MakerNotes"]["CropHiSpeed"] = "2 1000 1000 500 500 250 250"
+    meta["EXIF"] = {"Orientation": 6}
+    focus = focus_point(meta)
+    assert tuple(focus) == pytest.approx((.7,.6,.12,.12))
+    meta["MakerNotes"]["AFCoordinatesAvailable"] = 0
+    assert focus_point(meta) is None
+    assert focus_point("broken json") is None
