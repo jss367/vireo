@@ -239,7 +239,7 @@ def _comparison_media_subject(
 ) -> tuple[JsonDict, JsonDict]:
     """Validate selected-subject media without falling back to primary evidence."""
     from focus_crop import valid_subject_box
-    from subject_ranking import SubjectComparison, cached_analysis, resolve_subject
+    from subject_ranking import SubjectComparison, comparison_analysis, resolve_subject
     try:
         detection_id = int(args.get("detection_id", ""))
     except (TypeError, ValueError):
@@ -250,7 +250,7 @@ def _comparison_media_subject(
 
     if not valid_subject_box(detection):
         raise ValueError("Selected subject coordinates are invalid")
-    key, analysis = cached_analysis(db, photo, detection, effective)
+    key, analysis, _ = comparison_analysis(db, photo, detection, effective)
     requested_key = args.get("analysis_key")
     if not requested_key or analysis is None or key != requested_key:
         raise ValueError("Selected subject analysis is unavailable or stale; refresh the comparison")

@@ -741,6 +741,8 @@ def load_image(file_path, max_size: int | None = 1024, raw_decode=RAW_DECODE_JPE
             return None
 
         if aligned_state is not None:
+            img.info["vireo_source_generation"] = source_generation(aligned_state)
+            img.info["vireo_native_size"] = img.size
             img.info["vireo_subject_frame_id"] = aligned_frame_identity(path, img, aligned_state)
         if max_size and max_size > 0 and max(img.size) > max_size:
             img.thumbnail((max_size, max_size), Image.LANCZOS)
@@ -755,6 +757,11 @@ def aligned_source_state(path):
     """Bind a frame to the original file generation, without exposing its path."""
     stat = os.stat(path)
     return (os.path.realpath(path), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+
+
+def source_generation(state):
+    """Portable representation of the local original-file generation for API responses."""
+    return hashlib.sha256(json.dumps(state).encode()).hexdigest()
 
 
 def aligned_frame_identity(path, image, before):

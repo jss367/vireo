@@ -346,7 +346,9 @@ def _publish_features(db: Database, pid: int, detection: JsonDict, analysis: Jso
                     raise ValueError("Subject mask changed before quality publication; retry the current mask")
             db.masks_features.upsert_mask(pid, variant, mask_path, detection["detector_model"],
                 tuple(detection["box_" + key] for key in "xywh"),
-                MaskQuality(**{field: features.get(field) for field in MaskQuality.__dataclass_fields__}))
+                MaskQuality(comparison_inputs=analysis.get("comparison_inputs"),
+                            **{field: features.get(field) for field in MaskQuality.__dataclass_fields__
+                               if field != "comparison_inputs"}))
             current = _current_photo(db, pid, effective)
             min_conf = config_value(effective, "detector_confidence")
             weak_floor = (rescue_floor(current, config_value(effective.get("pipeline", {}), "weak_detection_confidence", section="pipeline"))

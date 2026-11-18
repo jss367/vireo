@@ -19,6 +19,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 from detection_id import detection_prompt_runtime, require_original_box
+from primary_comparison import measurement_inputs
 from repositories.masks_features import MaskQuality, PipelineFeatures
 from services import detection_store, subject_masks
 
@@ -154,6 +155,7 @@ class _MaskPhoto:
     photo_id: int
     image_path: str
     existing: JsonDict | None = None
+    comparison_inputs: str | None = None
     mask_file_stage: _StagedMaskFile | None = None
 
 
@@ -361,6 +363,7 @@ class _MaskExtractionRun:
 
         # Generate mask via SAM2
         deps.require_aligned_detector_prompt(proxy, photo.get("detector_runtime"), detector_model=photo.get("detector_model"))
+        item.comparison_inputs = measurement_inputs(proxy, photo["detection_id"], photo["detector_runtime"], self.sam2_variant)
         mask = deps.generate_mask(proxy, det_box, variant=self.sam2_variant)
         if mask is None:
             self.skipped += 1
@@ -607,6 +610,7 @@ class _MaskExtractionRun:
             detector_model=photo["detector_model"],
             prompt=photo["prompt"],
             quality=MaskQuality(
+                comparison_inputs=item.comparison_inputs,
                 subject_size=mask_subject_size,
                 subject_tenengrad=mask_subject_tenengrad,
                 bg_tenengrad=mask_bg_tenengrad,

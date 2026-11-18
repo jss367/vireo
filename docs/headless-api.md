@@ -457,6 +457,17 @@ subjects do not enter score percentiles or rejection suggestions. At least two
 analyzed subjects are required for a relative comparison, and an all-rejected
 comparison has no suggested best frame.
 
+The `evidence_owner` on a scored card identifies the detection, normalized
+region, model, raster, and measurement generation used for its subject scores.
+Photo-level eye evidence is unbound. Selected cards also include
+`comparison_evidence.status` and a readable `evidence_reason`. For example,
+`compatible_primary` means the selected animal can use the recorded primary
+measurements without creating a second cache entry. `other_animal`,
+`scale_mismatch`, and `primary_unverified` explain why fresh analysis is
+needed. Older primary masks can lack raster and model-generation records.
+`comparison_evidence.selected_cache` is `stale` when an earlier selected
+generation exists and neither route supplies current measurements.
+
 To compute missing evidence, POST the same comparison to
 `/api/v1/photos/burst-evidence` with `"analyze": true`. It returns `job_id`;
 poll `/api/jobs/<job_id>`, then fetch the comparison again. A selection with

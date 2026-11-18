@@ -20,6 +20,7 @@ from pipeline_locks import (
 )
 from pipeline_stages.context import PipelineRun
 from pipeline_stages.outcomes import StageOutcomes
+from primary_comparison import measurement_inputs
 from repositories.masks_features import MaskQuality, PipelineFeatures
 from resource_ledger import (
     ResourceWaitCancelled,
@@ -262,6 +263,7 @@ class _MaskPhoto:
     image_path: str
     # The photo's stored ``photo_masks`` row for this SAM variant, if any.
     existing: dict[str, Any] | None = None
+    comparison_inputs: str | None = None
     mask_file_stage: _MaskFileStage | None = None
     detector_runtime: str | None = None
     frame_id: str | None = None
@@ -1214,6 +1216,7 @@ class _MaskPass:
         with self._timed("segment"):
             item.frame_id = getattr(proxy, "info", {}).get("vireo_subject_frame_id")
             self.require_aligned_detector_prompt(proxy, item.detector_runtime, detector_model=item.entry.get("detector_model"))
+            item.comparison_inputs = measurement_inputs(proxy, item.entry["detection_id"], item.detector_runtime, self.sam2_variant)
             return self.generate_mask(proxy, item.det_box, variant=self.sam2_variant)
 
     def _analyze_and_embed(
@@ -1394,6 +1397,7 @@ class _MaskPass:
             detector_model=entry["detector_model"],
             prompt=entry["prompt"],
             quality=MaskQuality(
+                comparison_inputs=item.comparison_inputs,
                 subject_size=mask_subject_size,
                 subject_tenengrad=mask_subject_tenengrad,
                 bg_tenengrad=mask_bg_tenengrad,
