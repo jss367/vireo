@@ -538,6 +538,7 @@ def cut_microsegments(photos, config=None, emit_trace=False, *, visual_join_ids=
     recent_scores = []  # sliding window for soft cut detection
     trace = [] if emit_trace else None
 
+    last_non_absent = None
     for i in range(len(sorted_photos) - 1):
         if emit_trace:
             score, components = compute_s_enc(
@@ -551,9 +552,13 @@ def cut_microsegments(photos, config=None, emit_trace=False, *, visual_join_ids=
         ts_b = _parse_timestamp(sorted_photos[i + 1].get("timestamp"))
         dt = _time_delta_seconds(ts_a, ts_b)
 
-        species_conflict = _confident_species_conflict(
-            sorted_photos[i], sorted_photos[i + 1], config=cfg
-        )
+        # Compare the frames bracketing a run of missed detections at its
+        # trailing edge. A close visual match cannot override a species cut.
+        if not sorted_photos[i].get("subject_absent"):
+            last_non_absent = sorted_photos[i]
+        species_conflict = None
+        if last_non_absent is not None and not sorted_photos[i + 1].get("subject_absent"):
+            species_conflict = _confident_species_conflict(last_non_absent, sorted_photos[i + 1], config=cfg)
         decision, cut, recent_scores = _classify_pair(
             sorted_photos[i], sorted_photos[i + 1], ts_a, ts_b, dt, score,
             species_conflict, recent_scores, cfg,
@@ -562,6 +567,7 @@ def cut_microsegments(photos, config=None, emit_trace=False, *, visual_join_ids=
             visual_join_ids.update(p["id"] for p in sorted_photos[i:i + 2] if p.get("subject_absent") and "id" in p)
         if cut:
             cuts.add(i)
+            last_non_absent = None
 
         if emit_trace:
             trace.append(_cut_trace_entry(
@@ -962,9 +968,12 @@ def _merge_microsegments_with_map(segments, config=None, *, visual_join_ids=None
         # Never stitch back across the same trustworthy classifier conflict
         # that forced a pass-1 boundary. Without this guard, identical scene
         # embeddings and a short time gap can immediately undo cut_species.
-        species_conflict = _confident_species_conflict(
-            merged[-1][-1], seg[0], config=cfg
-        )
+        species_conflict = None
+        first_non_absent = next((p for p in seg if not p.get("subject_absent")), None)
+        if first_non_absent is not None:
+            last_non_absent = next((p for p in reversed(merged[-1]) if not p.get("subject_absent")), None)
+            if last_non_absent is not None:
+                species_conflict = _confident_species_conflict(last_non_absent, first_non_absent, config=cfg)
         if species_conflict is None and gap <= cfg["merge_max_gap"]:
             s_seg = compute_s_seg(merged[-1], seg, config=cfg)
             visual_support = []

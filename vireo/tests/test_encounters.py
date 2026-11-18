@@ -1586,3 +1586,19 @@ def test_isolated_missed_frame_between_two_detected_segments():
         if frame['subject_present']:
             frame['species_top5'] = [('Robin' if frame['id'] < 3 else 'Mallard', .99)]
     assert [enc['photo_count'] for enc in segment_encounters(frames)] == [2, 1, 2]
+
+
+def test_visual_join_preserves_species_boundaries_across_missed_runs():
+    from encounters import segment_encounters
+
+    for missed in (1, 3):
+        for following in ('Robin', 'Mallard'):
+            species = ['Robin'] * 2 + [None] * missed + [following] * 2
+            frames = [dict(id=i, timestamp=f'2026-11-14T08:40:00.{i}', subject_absent=name is None,
+                           subject_present=name is not None, species_top5=[(name, .99)] if name else [],
+                           phash_crop='abcd12345678abcd') for i, name in enumerate(species)]
+            # Even a permissive second-pass merge must honor a confident change.
+            groups = segment_encounters(frames, config={'merge_score': 0}, emit_trace=True)
+            expected = [frames] if following == 'Robin' else [frames[:-2], frames[-2:]]
+            assert [g['photos'] for g in groups] == expected
+            assert groups[0]['visual_neighbor_photo_ids'] == list(range(2, 2 + missed))
