@@ -428,3 +428,45 @@ def test_subject_audit_checks_only_active_mask_and_visible_workspace(app_and_db)
     assert db.audit.subject_findings(.2)[0]['stale_mask'] == 1
     db.conn.execute("DELETE FROM workspace_folders WHERE folder_id=?", (fid,))
     assert db.audit.subject_findings(.2) == []
+
+
+def test_subject_audit_treats_legacy_score_without_state_as_stale(db):
+    """A migrated catalog with a quality_score but no photo_subject_state
+    row cannot prove which detection produced the score, so the audit must
+    report it stale (matching ``SubjectsRepository.has_stale_primary_state``)."""
+    fid = _folder(db)
+    pid, _hawk, _strip, _ = _hawk_frame(db, fid)
+    db.conn.execute("DELETE FROM photo_subject_state WHERE photo_id=?", (pid,))
+    db.commit()
+    assert db.audit.subject_findings(.2)[0]['stale_score'] == 1
+
+
+def test_subject_audit_excludes_rejected_and_superseded_predictions(db):
+    """Audit's 'unnamed' check reflects the same evidence Highlights uses:
+    rejected or stale-fingerprint predictions no longer count as a
+    classification, and a stale full-image prediction no longer manufactures
+    a whole-frame fallback."""
+    fid = _folder(db)
+    pid, hawk, _strip, _ = _hawk_frame(db, fid)
+    anchor = db.detections.save(pid, [{"box": dict(x=0, y=0, w=1, h=1),
+                                      "confidence": 1, "category": "animal"}],
+                                detector_model="full-image")[0]
+    db.predictions.add(anchor, "Whole frame guess", 0.9, "BioCLIP-2.5")
+    db.conn.execute(
+        "INSERT INTO prediction_review(prediction_id, workspace_id, status, reviewed_at) "
+        "SELECT id, ?, 'rejected', '2026-11-18' FROM predictions WHERE detection_id=?",
+        (db._ws_id(), hawk),
+    )
+    db.commit()
+    assert db.audit.subject_findings(.2)[0]['unnamed'] == 1
+    db.conn.execute(
+        "UPDATE predictions SET labels_fingerprint='stale' WHERE detection_id=?", (anchor,),
+    )
+    db.predictions.add(anchor, "Current guess", 0.9, "BioCLIP-2.5",
+                       labels_fingerprint="current")
+    db.commit()
+    assert db.audit.subject_findings(.2)[0]['unnamed'] == 1
+    db.predictions.add(hawk, "Red-shouldered Hawk", 1.0, "BioCLIP-2.5",
+                       labels_fingerprint="current")
+    db.commit()
+    assert db.audit.subject_findings(.2)[0]['unnamed'] == 0

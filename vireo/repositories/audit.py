@@ -72,7 +72,16 @@ class AuditRepository:
         }
 
     def subject_findings(self, floor: float) -> list[dict[str, Any]]:
-        """Inspect active outputs against the same retained animal the reviewer sees."""
+        """Inspect active outputs against the same retained animal the reviewer sees.
+
+        Treats a classification as evidence only when it is not rejected in
+        this workspace and carries the current labels fingerprint for its
+        (detection, classifier_model), matching the reads Highlights and
+        product surfaces use. A legacy ``photos.quality_score`` without a
+        ``photo_subject_state`` row is reported as stale too, so a migrated
+        catalog with no provenance for its scores cannot look clean.
+        """
+        ws = self.workspace_id_fn()
         rows = self.conn.execute(f"""
             WITH evidence AS MATERIALIZED (
                 SELECT p.id, p.filename, p.quality_score, p.active_mask_variant,
@@ -86,22 +95,47 @@ class AuditRepository:
             )
             SELECT e.id, e.filename, e.detection_id,
                    d.id IS NOT NULL AND NOT EXISTS (
-                       SELECT 1 FROM predictions WHERE detection_id=d.id
+                       SELECT 1 FROM predictions pr
+                       LEFT JOIN prediction_review pr_rev
+                              ON pr_rev.prediction_id = pr.id
+                             AND pr_rev.workspace_id = ?
+                       WHERE pr.detection_id = d.id
+                         AND pr.species IS NOT NULL
+                         AND COALESCE(pr_rev.status, 'pending') != 'rejected'
+                         AND pr.labels_fingerprint = (
+                             SELECT pr2.labels_fingerprint FROM predictions pr2
+                             WHERE pr2.detection_id = pr.detection_id
+                               AND pr2.classifier_model = pr.classifier_model
+                             ORDER BY pr2.created_at DESC, pr2.id DESC LIMIT 1
+                         )
                    ) AND EXISTS (
-                       SELECT 1 FROM detections old JOIN predictions pr ON pr.detection_id=old.id
-                       WHERE old.photo_id=e.id AND old.detector_model='full-image'
+                       SELECT 1 FROM detections old
+                       JOIN predictions pr ON pr.detection_id = old.id
+                       LEFT JOIN prediction_review pr_rev
+                              ON pr_rev.prediction_id = pr.id
+                             AND pr_rev.workspace_id = ?
+                       WHERE old.photo_id = e.id
+                         AND old.detector_model = 'full-image'
+                         AND pr.species IS NOT NULL
+                         AND COALESCE(pr_rev.status, 'pending') != 'rejected'
+                         AND pr.labels_fingerprint = (
+                             SELECT pr2.labels_fingerprint FROM predictions pr2
+                             WHERE pr2.detection_id = pr.detection_id
+                               AND pr2.classifier_model = pr.classifier_model
+                             ORDER BY pr2.created_at DESC, pr2.id DESC LIMIT 1
+                         )
                    ) AS unnamed,
                    pm.photo_id IS NOT NULL AND (d.id IS NULL OR NOT (
                        pm.detector_model IS d.detector_model AND pm.prompt_x IS d.box_x
                        AND pm.prompt_y IS d.box_y AND pm.prompt_w IS d.box_w
                        AND pm.prompt_h IS d.box_h)) AS stale_mask,
-                   e.quality_score IS NOT NULL AND st.photo_id IS NOT NULL AND
-                       st.detection_id IS NOT d.id AS stale_score
+                   e.quality_score IS NOT NULL AND
+                       (st.photo_id IS NULL OR st.detection_id IS NOT d.id) AS stale_score
             FROM evidence e LEFT JOIN detections d ON d.id=e.detection_id
             LEFT JOIN photo_subject_state st ON st.photo_id=e.id
             LEFT JOIN photo_masks pm ON pm.photo_id=e.id AND pm.variant=e.active_mask_variant
             WHERE unnamed OR stale_mask OR stale_score ORDER BY e.id
-        """, (floor, self.workspace_id_fn()))
+        """, (floor, ws, ws, ws))
         return [dict(row) for row in rows]
 
     # -- hash integrity ------------------------------------------------------
