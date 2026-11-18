@@ -883,6 +883,32 @@ def merge_microsegments(segments, config=None):
     return merged
 
 
+def _matching_support_pairs(tail, head, cfg):
+    if len(tail) != 2 or len(head) != 2:
+        return False
+    for a, b in zip(tail, head, strict=True):
+        dt = _time_delta_seconds(_parse_timestamp(a.get("timestamp")), _parse_timestamp(b.get("timestamp")))
+        if not _visual_neighbor(a, b, dt, cfg) or _confident_species_conflict(a, b, config=cfg) is not None:
+            return False
+    return True
+
+
+def _supports_singleton_bridge(left, middle, right, cfg):
+    if len(middle) != 1 or not middle[0].get("subject_absent"):
+        return False
+    tail, head = left[-2:], right[:2]
+    if not all(p.get("subject_present") for p in (*tail, *head)):
+        return False
+    gap_limit = min(cfg["hard_cut_time"], cfg["merge_max_gap"], cfg["undetected_max_gap"])
+    for a, b in ((tail[-1], middle[0]), (middle[0], head[0]), (tail[-1], head[0])):
+        if _confident_species_conflict(a, b, config=cfg) is not None:
+            return False
+        gap = _time_delta_seconds(_parse_timestamp(a.get("timestamp")), _parse_timestamp(b.get("timestamp")))
+        if gap > gap_limit:
+            return False
+    return _matching_support_pairs(tail, head, cfg)
+
+
 def _visual_boundary_support(left, right, cfg):
     """Corroborate a missing-region boundary across one visually atypical frame.
 
@@ -897,12 +923,7 @@ def _visual_boundary_support(left, right, cfg):
     if right[0].get("subject_absent"):
         candidates.append((left[-2:], right[1:3]))
     for tail, head in candidates:
-        if len(tail) != 2 or len(head) != 2:
-            continue
-        pairs = list(zip(tail, head, strict=True))
-        if all(_visual_neighbor(
-            a, b, _time_delta_seconds(_parse_timestamp(a.get("timestamp")), _parse_timestamp(b.get("timestamp"))), cfg
-        ) and _confident_species_conflict(a, b, config=cfg) is None for a, b in pairs):
+        if _matching_support_pairs(tail, head, cfg):
             return [p for p in (*tail, *head, left[-1], right[0]) if p.get("subject_absent")]
     return []
 
@@ -923,6 +944,16 @@ def _merge_microsegments_with_map(segments, config=None, *, visual_join_ids=None
     merged = [segments[0]]
     counts = [1]
     for seg in segments[1:]:
+        # Pass 1 can cut on both sides of one missed detection. Only join
+        # those three segments together when both flanks corroborate it.
+        if len(merged) >= 2 and _supports_singleton_bridge(merged[-2], merged[-1], seg, cfg):
+            singleton = merged.pop()
+            if visual_join_ids is not None and "id" in singleton[0]:
+                visual_join_ids.add(singleton[0]["id"])
+            merged[-1] = merged[-1] + singleton + seg
+            bridged_count = counts.pop() + 1
+            counts[-1] += bridged_count
+            continue
         last_a = _segment_timestamp(merged[-1], "last")
         first_b = _segment_timestamp(seg, "first")
         gap = _time_delta_seconds(last_a, first_b)

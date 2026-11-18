@@ -1562,3 +1562,27 @@ def test_visual_support_can_skip_either_absent_boundary():
         missing = left[-1] if absent_left else right[0]
         missing.update(subject_absent=True, subject_present=False, phash_crop='5432edcba9875432')
         assert _visual_boundary_support(left, right, DEFAULTS) == [missing]
+
+
+def test_isolated_missed_frame_between_two_detected_segments():
+    from encounters import cut_microsegments, segment_encounters
+
+    pattern, other = 'abcd12345678abcd', '5432edcba9875432'
+    frames = [dict(id=i, timestamp=f'2026-11-14T08:40:00.{i}', subject_absent=i == 3,
+                   subject_present=i != 3, phash_crop=other if i == 3 else pattern)
+              for i in range(1, 6)]
+    assert [len(s) for s in cut_microsegments(frames)] == [2, 1, 2]
+    encounter, = segment_encounters(frames, emit_trace=True)
+    assert encounter['photos'] == frames
+    assert encounter['visual_neighbor_photo_ids'] == [3]
+    assert [t['decision'] for t in encounter['trace']].count('merged_back') == 2
+
+    frames[0]['phash_crop'] = other
+    assert [enc['photo_count'] for enc in segment_encounters(frames)] == [2, 1, 2]
+
+    frames[0]['phash_crop'] = pattern
+    assert len(segment_encounters(frames, config={'merge_max_gap': .05})) == 3
+    for frame in frames:
+        if frame['subject_present']:
+            frame['species_top5'] = [('Robin' if frame['id'] < 3 else 'Mallard', .99)]
+    assert [enc['photo_count'] for enc in segment_encounters(frames)] == [2, 1, 2]
