@@ -1394,3 +1394,34 @@ def test_pre_grouping_preview_checks_all_source_memberships(app_and_db):
     assert client.post('/api/encounters/species', json={**body, 'preview': True}).status_code == 409
     _seed_encounter_cache(app, db, [3])
     assert apply(client, body, preview).status_code == 200
+
+
+def test_source_only_encounters_revalidate_without_appearing_in_results(app_and_db):
+    from pathlib import Path
+
+    app, db = app_and_db
+    client = app.test_client()
+    ids, filename = seed(app, db)
+    path = Path(filename)
+    cache = json.loads(path.read_text())
+    template = cache['encounters'][0]
+    cache['encounters'] = [
+        {**template, 'photo_ids': members, 'bursts': [members], 'photo_count': len(members)}
+        for members in (ids[:2], ids[2:])
+    ]
+    path.write_text(json.dumps(cache))
+    selected = ids[2:]
+    body = {'species': 'Wood Duck', 'photo_ids': selected, 'source_photo_ids': ids,
+            'add': True, 'response_mode': 'compact'}
+    preview = request_preview(client, body)
+    expected = {'encounter_index': 1, 'photo_ids': selected}
+    assert preview['encounter_results'] == [expected]
+
+    cache['encounters'][0]['bursts'] = [[pid] for pid in ids[:2]]
+    path.write_text(json.dumps(cache))
+    stale = apply(client, body, preview)
+    assert stale.status_code == 409
+    assert stale.json['encounter_results'] == [{**expected, 'changed_photo_ids': [], 'unchanged_photo_ids': selected}]
+    result = apply(client, body, request_preview(client, body))
+    assert result.status_code == 200
+    assert result.json['encounter_results'] == [{**expected, 'changed_photo_ids': selected, 'unchanged_photo_ids': []}]

@@ -628,7 +628,7 @@ class _SpeciesConfirmation:
         groups = enumerate(self.cached["encounters"]) if self.split and self.cached else self.review_encounters
         for index, enc in groups:
             ids = [pid for pid in enc["photo_ids"] if pid in selected]
-            if self.split and not ids:
+            if not ids:
                 continue
             results.append({"encounter_index": index, "photo_ids": ids,
                             "changed_photo_ids": [pid for pid in ids if pid in changed],
