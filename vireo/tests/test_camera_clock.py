@@ -386,3 +386,63 @@ def test_post_reset_zone_choices_respect_corrected_anchor_and_keep_valid_options
     assert {(f.shift_minutes, f.target_offset) for f in problem.fixes if f.frames[0].ref == 7} == {
         (30, -300), (120, -300),
     }
+
+
+def test_ambiguous_zones_on_both_sides_offer_only_joint_ordered_writes():
+    from dataclasses import replace
+
+    frames = [replace(f, latitude=34., longitude=-118.) for f in _reset_frames()]
+    problem = analyze_camera(frames, zone_lookup=la_winter)
+    assert problem is not None
+    assert len({f.group for f in problem.fixes}) == 1
+    pairs = set()
+    for option in problem.fixes:
+        [later] = option.dependent_fixes
+        assert option.target_offset == later.target_offset == -480
+        assert option.frames == frames[:6] and later.frames == frames[6:]
+        pairs.add((option.shift_minutes, later.shift_minutes))
+        assert (frames[5].captured + timedelta(minutes=option.shift_minutes)
+                < frames[6].captured + timedelta(minutes=later.shift_minutes))
+    assert pairs == {(0, 60), (-60, 0)}
+
+
+def test_unmeasured_epoch_leaves_correct_zone_frames_available_for_reset():
+    from dataclasses import replace
+
+    frames = _reset_frames(gps_error_before=0)
+    frames = [replace(f, latitude=34., longitude=-118. if f.ref <= 9 else -100.)
+              if f.ref > 6 else f for f in frames]
+
+    def zone(_lat, lon, _utc):
+        return ("Zone A", -420) if lon < -110 else ("Zone B", -300)
+
+    problem = analyze_camera(frames, zone_lookup=zone)
+    assert problem is not None
+    boundary = [fix for fix in problem.fixes if frames[6] in fix.frames]
+    assert len(boundary) == 1
+    assert boundary[0].frames == frames[6:9]
+    assert boundary[0].shift_minutes == 60
+    assert all(fix.frames == frames[9:] for fix in problem.fixes if fix not in boundary)
+
+
+def test_distinct_paired_choices_propagate_to_the_next_reset():
+    from dataclasses import replace
+
+    frames = [replace(f, latitude=34., longitude=-118. if f.ref <= 6 else -75.) for f in _reset_frames()]
+    frames += [replace(f, ref=f.ref + 6, filename=f"DSC_{f.ref + 6:04d}.NEF",
+                       captured=f.captured - timedelta(minutes=54), latitude=None, longitude=None)
+               for f in frames[6:]]
+    problem = analyze_camera(frames, zone_lookup=lambda _lat, lon, _utc: (
+        ("America/Los_Angeles", -480) if lon < -100 else ("America/New_York", -300)
+    ))
+    assert problem is not None
+    triples = set()
+    for plan in problem.fixes:
+        second, third = plan.dependent_fixes
+        triples.add((plan.shift_minutes, second.shift_minutes, third.shift_minutes))
+        assert third.target_offset is None
+        times = [f.captured + timedelta(minutes=step.shift_minutes)
+                 for step in (plan, second, third) for f in step.frames]
+        assert len(times) == len(frames)
+        assert all(a < b for a, b in pairwise(times))
+    assert triples == {(0, 60, 120), (0, 120, 180), (-60, 0, 60), (-60, 120, 180)}

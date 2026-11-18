@@ -58,7 +58,11 @@ def capture_time_plan(db, photo_ids, body):
         if not isinstance(step.get("expected_state"), str):
             raise ValueError("Dependent shifts require reviewed capture-time evidence")
         selected.update(ids)
-        shifts.update(dict.fromkeys(ids, step["shift_minutes"]))
+        mode = step.get("mode", "manual")
+        if mode not in ("manual", "set_offset"):
+            raise ValueError("Dependent shifts must use manual or set_offset mode")
+        _, minutes, offset = _normalize_inputs(mode, step.get("target_offset"), step["shift_minutes"])
+        shifts.update(dict.fromkeys(ids, minutes if offset is None else (minutes, offset)))
         groups.append((ids, step["expected_state"]))
     states = {row[0]: row for row in db.photos.capture_time_states(list(selected))}
     for ids, expected in groups:
@@ -228,12 +232,8 @@ def _offset_tags_already_target(photo, target_offset):
     return all(value and str(value).strip() == target_offset for value in values)
 
 
-def _is_noop_adjustment(mode, target_offset, photo_shift, photo):
-    if photo_shift != 0:
-        return False
-    if mode == "manual":
-        return True
-    return _offset_tags_already_target(photo, target_offset)
+def _is_noop_adjustment(target_offset, photo_shift, photo):
+    return photo_shift == 0 and _offset_tags_already_target(photo, target_offset)
 
 
 def format_preview_timestamp(dt):
@@ -509,9 +509,10 @@ def adjust_capture_time(
             if dependent_shift is None:
                 output_offset = target_offset_str
                 photo_shift = _photo_shift_minutes(mode, target_minutes, manual_shift, photo)
+            elif isinstance(dependent_shift, int):
+                photo_shift, output_offset = dependent_shift, None
             else:
-                output_offset = None
-                photo_shift = dependent_shift
+                photo_shift, output_offset = dependent_shift
         except ValueError as exc:
             failed += 1
             failures.append(
@@ -524,7 +525,7 @@ def adjust_capture_time(
         has_companion = _has_key(photo, "companion_path") and bool(photo["companion_path"])
         if (
             not has_companion
-            and _is_noop_adjustment(mode, output_offset, photo_shift, photo)
+            and _is_noop_adjustment(output_offset, photo_shift, photo)
         ):
             skipped += 1
             shifts_used.append(photo_shift)
