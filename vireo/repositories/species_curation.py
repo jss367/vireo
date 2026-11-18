@@ -1165,10 +1165,11 @@ class SpeciesCurationRepository:
     def get_globally_eligible_representatives(self, species=None):
         """``{species: [photo_id, ...]}`` of catalog-wide eligible representatives.
 
-        Same eligibility as :meth:`get_representative_lists` with
-        ``eligible_only=True`` (photo not rejected, folder ok/partial, still
-        carries the species keyword), but without scoping to the active
-        workspace's visible folders. Callers use it as the traversal set when
+        Confirmed highlights use :meth:`get_representative_lists` eligibility
+        without the active workspace's visibility restriction. Prediction-held
+        highlights count when eligible under :meth:`get_highlights` in any
+        workspace that can see them, using that workspace's reviews and floor.
+        Callers use the union as the traversal set when
         ranking, so comparisons chained through an intermediate representative
         visible only in another workspace still settle a scoped pair — the
         chain's photo is still chosen for the species, just not in sight.
@@ -1195,6 +1196,17 @@ class SpeciesCurationRepository:
             ids = result.setdefault(row["species"], [])
             if row["photo_id"] not in ids:
                 ids.append(row["photo_id"])
+        workspace_ids = [row[0] for row in self.conn.execute(
+            "SELECT DISTINCT v.workspace_id FROM photo_workspace_visibility v "
+            "JOIN species_representatives sr ON sr.photo_id = v.photo_id"
+        )]
+        for workspace_id in workspace_ids:
+            # Resolve each workspace locally; reading traversal cannot switch
+            # the caller's active workspace or apply its floor to another one.
+            repository = SpeciesCurationRepository(self.conn, lambda ws=workspace_id: ws)
+            for name, photo_ids in repository.get_highlights(species, eligible_only=True).items():
+                ids = result.setdefault(name, [])
+                ids.extend(pid for pid in photo_ids if pid not in ids)
         return result
 
     def get_representative_lists(self, eligible_only=False, species=None, ranked=True):

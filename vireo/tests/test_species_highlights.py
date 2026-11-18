@@ -418,6 +418,61 @@ def test_photo_detail_rank_keeps_chains_outside_the_workspace(trips):
     assert entry["highlight_rank"] == 2
 
 
+@pytest.mark.parametrize("ineligible", [None, "prediction_review", "detector_floor", "photo_flag", "folder"])
+def test_prediction_only_highlight_elsewhere_can_carry_order(trips, ineligible):
+    from repositories.species_curation import SpeciesCurationRepository
+    from services.species_choices import ranked_in_scope
+    from test_highlights_multi_species import _pred, _subjects
+
+    app, db, folders, photos = trips
+    workspace = db.require_workspace_id()
+    elsewhere = db.create_workspace("Synthetic prediction workspace", config_overrides={"detector_confidence": .4})
+    db.set_active_workspace(workspace)
+    db.conn.execute("UPDATE workspaces SET config_overrides = ? WHERE id = ?",
+                    (json.dumps({"detector_confidence": .95}), workspace))
+    first, middle, last = [photos[key] for key in ("a1", "b1", "a3")]
+    keyword_tagging.untag_photo(db, middle, db.keywords.add("Bald Eagle", is_species=True))
+    detection = _subjects(db, middle, count=1)[0]
+    db.conn.execute("UPDATE detections SET detector_confidence = .6 WHERE id = ?", (detection,))
+    prediction = _pred(db, detection, "Bald Eagle", .9)
+    for pid in (first, middle, last):
+        db.set_species_representative("Bald Eagle", pid)
+    db.species_choices.record("Bald Eagle", first, [middle])
+    db.species_choices.record("Bald Eagle", middle, [last])
+    db.photo_visibility.grant(elsewhere, [middle])
+    db.conn.execute("DELETE FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+                    (workspace, folders["second"]))
+    if ineligible == "prediction_review":
+        db.predictions.set_review_status(prediction, elsewhere, "rejected")
+    elif ineligible == "detector_floor":
+        db.conn.execute("UPDATE workspaces SET config_overrides = ? WHERE id = ?",
+                        (json.dumps({"detector_confidence": .8}), elsewhere))
+    elif ineligible == "photo_flag":
+        db.conn.execute("UPDATE photos SET flag = 'rejected' WHERE id = ?", (middle,))
+    elif ineligible == "folder":
+        db.conn.execute("UPDATE folders SET status = 'offline' WHERE id = ?", (folders["second"],))
+    db.commit()
+    eligible = ineligible is None
+    other_repo = SpeciesCurationRepository(db.conn, lambda: elsewhere)
+    assert (middle in other_repo.get_highlights("Bald Eagle", eligible_only=True).get("Bald Eagle", [])) == eligible
+
+    globally_chosen = db.species_curation.get_globally_eligible_representatives("Bald Eagle")
+
+    assert (middle in globally_chosen.get("Bald Eagle", [])) == eligible
+    assert db.require_workspace_id() == workspace
+    expected = [first, last] if eligible else [last, first]
+    assert ranked_in_scope(db, "Bald Eagle") == expected
+    bucket = _row(db)
+    assert [pid for pid, _rank in _highlights(bucket)] == expected
+    assert bucket["best_decision"]["kind"] == ("highlight" if eligible else "tie")
+    response = app.test_client().get(f"/api/photos/{last}")
+    entry = next(e for e in response.get_json()["highlight_list"] if e["species"] == "Bald Eagle")
+    assert entry["highlight_rank"] == (2 if eligible else 1)
+    db.set_active_workspace(None)
+    assert db.species_curation.get_globally_eligible_representatives("Bald Eagle") == globally_chosen
+    assert db.active_workspace_id is None
+
+
 def test_removing_the_middle_highlight_keeps_the_others_in_order(trips):
     app, db, folders, photos = trips
     client = app.test_client()
