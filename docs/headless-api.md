@@ -237,10 +237,10 @@ different subject. A pinned retry always rebuilds that subject under the photo
 lock, including when prior measurements are complete; if the subject is gone,
 it fails without running replacement detection. Unpinned retries keep normal
 readiness-based stage selection. The lightbox's **Retry subject mask and quality** button
-uses this path. The older `subjects/analyze` endpoint measures detection boxes
-for crop/exposure suggestions; it does not rebuild the selected animal's mask,
-quality or available eye evidence used for ranking. Missing eye identification
-remains explicit; selecting a region does not manufacture a species prediction.
+uses this path. `POST /api/photos/<id>/subjects/analyze` measures retained
+boxes for crop and exposure suggestions. With a `detection_id`, it also
+computes or reuses comparison evidence for that detection. The job returns
+the detection and verified generation in `result.photos` on success.
 
 ### Burst adjudication
 
@@ -439,8 +439,12 @@ comparison has no suggested best frame.
 
 To compute missing evidence, POST the same comparison to
 `/api/v1/photos/burst-evidence` with `"analyze": true`. It returns `job_id`;
-poll `/api/jobs/<job_id>`, then fetch the comparison again. Job results report
-`analyzed`, `cached`, unresolved identities, and per-photo errors separately.
+poll `/api/jobs/<job_id>`, then fetch the comparison again. A selection with
+one photo and its `subject_overrides` entry supports both analysis and readback.
+Its card contains the evidence and has no relative rank. Each entry in
+`result.photos` reports `analyzed`, `cached`, `skipped` with a reason, or
+`failed` with an error. For an analyzed or cached entry, match its
+`detection_id` and `analysis_key` to the returned card's `subject` fields.
 Analysis uses original-derived images capped at 1024 pixels on the longest
 edge, SAM masks, and the existing mask-gated eye policy when enabled and its
 model is available. Each card reports the actual analysis dimensions and eye
