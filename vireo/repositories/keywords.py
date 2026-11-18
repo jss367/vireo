@@ -650,6 +650,21 @@ class KeywordRepository:
         ).fetchone()
         return dict(row) if row else None
 
+    def scoped_species_keyword_id(self, name: str) -> int | None:
+        """Reuse an eligible species keyword without changing catalog-wide taxonomy."""
+        target = self.species_confirmation_target(name)
+        keyword = target['keyword']
+        if keyword is None:
+            return None
+        rank = next((t['rank'] for t in target['taxa'] if t['id'] == keyword['taxon_id']), None)
+        if (keyword['type'] != 'taxonomy' or rank not in (None, 'species')
+                or not (keyword['is_species'] or rank == 'species')):
+            raise ValueError(
+                'The existing keyword needs explicit review of its type or taxon in keyword management '
+                'before a scoped species assignment; no photos were changed'
+            )
+        return keyword['id']
+
     def species_confirmation_target(self, name: str) -> dict[str, Any]:
         """Snapshot the exact add target, its source identity and inferred taxon.
 

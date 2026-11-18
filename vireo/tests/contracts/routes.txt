@@ -145,6 +145,7 @@ GET          /api/settings/schema
 GET          /api/settings/values
 GET          /api/species
 GET          /api/species-best
+GET          /api/species/assignment-conflicts
 GET          /api/species/search
 GET          /api/stats
 GET          /api/storage
@@ -384,6 +385,7 @@ POST         /api/photos/<int:photo_id>/location
 POST         /api/photos/<int:photo_id>/location/text
 POST         /api/photos/<int:photo_id>/rating
 POST         /api/photos/<int:photo_id>/species/<int:keyword_id>/provenance
+POST         /api/photos/<int:photo_id>/species/<int:keyword_id>/review
 POST         /api/photos/<int:photo_id>/subjects/analyze
 POST         /api/photos/<int:photo_id>/wildlife_excluded
 POST         /api/photos/analysis-readiness

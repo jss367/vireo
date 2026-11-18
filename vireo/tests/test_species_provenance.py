@@ -622,3 +622,103 @@ def test_failed_identity_replay_cannot_contaminate_a_later_evidence_edit(app_and
     db.commit()
     undo_last_edit(db)
     assert assignments(client)[candidate]['reason'] == 'New evidence'
+
+
+@pytest.mark.parametrize('action', ['retain', 'amend', 'remove'])
+def test_assignment_review_lifecycle(app_and_db, action):
+    app, db = app_and_db
+    client = app.test_client()
+    confirm(client, 'Falcon', provenance={'method': 'adjacent_frames', 'supporting_photo_ids': [2]})
+    confirm(client, 'Robin')
+    db.photo_review.set_flag(1, 'flagged')
+    db.conn.execute('UPDATE photos SET latitude=12, longitude=34 WHERE id=1')
+    db.commit()
+    original = assignments(client)
+    falcon = original['Falcon']
+    path = f"/api/photos/1/species/{falcon['keyword_id']}/review"
+    body = {'action': 'report', 'observed_workspace_id': db.require_workspace_id(),
+            'review_version': falcon['review_version'], 'reviewer': 'First reviewer',
+            'reason': 'Bird not identifiable', 'evidence_source': 'Native frame 1'}
+    assert client.post(path, json=body).status_code == 200
+    assert client.post(path, json=body).status_code == 409
+    pending = assignments(client)
+    assert pending['Falcon']['supporting_photo_ids'] == [2]
+    assert pending['Robin'] == original['Robin']
+    scoped = client.get('/api/species/assignment-conflicts').json['assignments']
+    assert scoped == [{'photo_id': 1, 'keyword_id': falcon['keyword_id'], 'species': 'Falcon'}]
+    with Database(db._db_path) as reopened:
+        assert reopened.species_provenance.assignments(1) == list(pending.values())
+    assert client.post('/api/undo').status_code == 200
+    assert assignments(client) == original
+    assert client.post('/api/redo').status_code == 200
+    body.update(action=action, reviewer='Second reviewer', review_version=pending['Falcon']['review_version'],
+                species='Mallard', reason='Rechecked the original', evidence_source='Full frame review')
+    assert client.post(path, json=body).status_code == 200
+    assert client.post(path, json=body).status_code == 409
+    resolved = assignments(client)
+    assert set(resolved) == {'Robin'} | ({'Falcon'} if action == 'retain' else {'Mallard'} if action == 'amend' else set())
+    assert resolved['Robin'] == original['Robin']
+    photo = client.get('/api/photos/1').json
+    record, = photo['assignment_reviews']
+    assert record['original_provenance']['supporting_photo_ids'] == [2]
+    assert record['resolution']['reviewer'] == 'Second reviewer'
+    assert record['conflict']['reviewer'] == 'First reviewer'
+    assert (photo['flag'], photo['latitude'], photo['longitude']) == ('flagged', 12, 34)
+    assert client.get('/api/species/assignment-conflicts').json['assignments'] == []
+    assert client.post('/api/undo').status_code == 200
+    assert assignments(client) == pending
+    assert client.post('/api/redo').status_code == 200
+    assert assignments(client) == resolved
+
+
+def test_concurrent_species_evidence_refuses_stale_resolution_and_undo(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    confirm(client, 'Falcon')
+    assignment = assignments(client)['Falcon']
+    kid = assignment['keyword_id']
+    path = f'/api/photos/1/species/{kid}/review'
+    body = {'action': 'report', 'observed_workspace_id': db.require_workspace_id(),
+            'review_version': assignment['review_version'], 'reviewer': 'Reviewer',
+            'reason': 'Unclear', 'evidence_source': 'Native frame'}
+    assert client.post(path, json=body).status_code == 200
+    pending = assignments(client)['Falcon']
+    with Database(db._db_path) as other:
+        other.species_provenance.set(1, kid, {'method': 'direct_visual', 'reviewer': 'Another reviewer'})
+        other.commit()
+    assert client.post(path, json={**body, 'action': 'remove', 'review_version': pending['review_version']}).status_code == 409
+    assert client.post('/api/undo').status_code == 409
+    assert assignments(client)['Falcon']['review'] == pending['review']
+    assert db.edit_history.list_recent()[0]['action_type'] == 'assignment_review_superseded'
+
+
+def test_two_reviewers_resolving_same_version_only_commit_once(app_and_db):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    from testing.waits import synchronization_timeout
+
+    app, db = app_and_db
+    client = app.test_client()
+    confirm(client, 'Robin')
+    assignment = assignments(client)['Robin']
+    path = f"/api/photos/1/species/{assignment['keyword_id']}/review"
+    body = {'observed_workspace_id': db.require_workspace_id(), 'review_version': assignment['review_version'],
+            'action': 'report', 'reason': 'Identification uncertain', 'reviewer': 'Observer', 'evidence_source': 'RAW'}
+    assert client.post(path, json=body).status_code == 200
+    body['review_version'] = assignments(client)['Robin']['review_version']
+    barrier = Barrier(2)
+
+    def resolve(action):
+        with app.test_client() as reviewer:
+            barrier.wait(timeout=synchronization_timeout(5))
+            return reviewer.post(path, json={**body, 'action': action, 'reviewer': action}).status_code
+
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        statuses = list(workers.map(resolve, ['retain', 'remove']))
+    assert sorted(statuses) == [200, 409]
+    photo = client.get('/api/photos/1').json
+    record, = photo['assignment_reviews']
+    assert bool(photo['species_assignments']) == (record['resolution']['action'] == 'retain')
+    assert client.post('/api/undo').status_code == 200
+    assert assignments(client)['Robin']['review']['resolution'] is None
