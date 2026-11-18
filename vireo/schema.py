@@ -383,6 +383,15 @@ def _validate_flag_attribution_keeper(conn):
         raise RuntimeError("current_flag_attribution is missing its keeper columns")
 
 
+def _add_primary_projection_policy(conn):
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(photo_subject_state)")}
+    for name, definition in (
+        ("min_conf", "REAL"), ("detector_model", "TEXT"), ("refresh_pending", "INTEGER NOT NULL DEFAULT 0"),
+    ):
+        if name not in columns:
+            conn.execute(f"ALTER TABLE photo_subject_state ADD COLUMN {name} {definition}")
+
+
 MIGRATIONS = (
     Migration(
         13, "companion_identities_file_mtime",
@@ -437,6 +446,7 @@ MIGRATIONS = (
     Migration(36, "species_choices", create_species_choices),
     Migration(37, "subject_candidates", create_subject_candidates),
     Migration(38, "subject_focus", create_subject_focus),
+    Migration(39, "primary_projection_policy", _add_primary_projection_policy),
 )
 
 

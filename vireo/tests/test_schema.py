@@ -633,3 +633,17 @@ def test_version_34_catalog_gains_subject_detail_columns(tmp_path):
             assert {"subject_detail", "subject_detail_px"} <= columns
         # Existing rows are unmeasured, never zero.
         assert conn.execute("SELECT COUNT(*) FROM photos WHERE subject_detail IS NOT NULL").fetchone()[0] == 0
+
+
+def test_primary_policy_migration_preserves_projected_subject(tmp_path):
+    path = str(tmp_path / "vireo.db")
+    schema.ensure_schema(path)
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP TABLE photo_subject_state")
+        conn.execute("CREATE TABLE photo_subject_state (photo_id INTEGER PRIMARY KEY, detection_id INTEGER NOT NULL)")
+        conn.execute("INSERT INTO photo_subject_state VALUES (10, 20)")
+        conn.execute("PRAGMA user_version=38")
+    schema.ensure_schema(path)
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT detection_id, min_conf, detector_model, refresh_pending "
+                            "FROM photo_subject_state WHERE photo_id=10").fetchone() == (20, None, None, 0)

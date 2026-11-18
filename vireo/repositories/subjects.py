@@ -81,9 +81,11 @@ class SubjectsRepository:
                 return reason
         return "Only retained animal"
 
-    def save_focus_evidence(self, photo_id, rows):
+    def clear_focus_evidence(self, photo_id):
         self.conn.execute("DELETE FROM subject_focus WHERE detection_id IN "
                           "(SELECT id FROM detections WHERE photo_id=?)", (photo_id,))
+
+    def insert_focus_evidence(self, rows):
         self.conn.executemany("INSERT INTO subject_focus(detection_id,af,sharp,continuity) VALUES (?,?,?,?)", rows)
 
     # -- analysis cache ---------------------------------------------------------
@@ -205,14 +207,20 @@ class SubjectsRepository:
     def primary_state(self, photo_id: int) -> sqlite3.Row | None:
         """``photo_id``'s projected primary (``detection_id``), or None."""
         return self.conn.execute(
-            "SELECT detection_id FROM photo_subject_state WHERE photo_id=?", (photo_id,)
+            "SELECT detection_id, min_conf, detector_model, refresh_pending FROM photo_subject_state WHERE photo_id=?", (photo_id,)
         ).fetchone()
 
-    def set_primary_state(self, photo_id: int, detection_id: int) -> None:
-        """Record ``detection_id`` as ``photo_id``'s projected primary."""
-        self.conn.execute("INSERT INTO photo_subject_state(photo_id,detection_id) VALUES (?,?) "
-                          "ON CONFLICT(photo_id) DO UPDATE SET detection_id=excluded.detection_id",
-                          (photo_id, detection_id))
+    def set_primary_state(
+        self, photo_id: int, detection_id: int, min_conf: float | None = None, detector_model: str | None = None,
+    ) -> None:
+        """Save the primary detection together with its confidence floor and model filter."""
+        self.conn.execute("""INSERT INTO photo_subject_state(photo_id, detection_id, min_conf, detector_model)
+            VALUES (?, ?, ?, ?) ON CONFLICT(photo_id) DO UPDATE SET detection_id=excluded.detection_id,
+            min_conf=excluded.min_conf, detector_model=excluded.detector_model, refresh_pending=0""",
+            (photo_id, detection_id, min_conf, detector_model))
+
+    def defer_primary_refresh(self, photo_id: int) -> None:
+        self.conn.execute("UPDATE photo_subject_state SET refresh_pending=1 WHERE photo_id=?", (photo_id,))
 
     def clear_primary_state(self, photo_id: int) -> None:
         """Forget ``photo_id``'s projected primary."""

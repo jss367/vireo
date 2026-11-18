@@ -299,3 +299,96 @@ def test_manual_choice_and_history_refresh_an_already_projected_burst(db):
     with db.transaction():
         replay_history(db, [{"photo_id": pid, "old_value": json.dumps({"choice": None, "boxes": []})}], undo=True)
     assert all(db.subjects.primary_state(p)["detection_id"] == left for p, left, _ in frames)
+
+
+def _consecutive_pair(db):
+    fid = _folder(db)
+    return tuple(
+        db.conn.execute("INSERT INTO photos(folder_id,filename,timestamp) VALUES (?,?,?)",
+                        (fid, f"bird{i}.NEF", f"2026-11-14T09:00:17.{i}00")).lastrowid
+        for i in range(2)
+    )
+
+
+@pytest.mark.parametrize("rescued_successor", [False, True])
+def test_successor_keeps_its_projection_floor_and_model(db, rescued_successor):
+    first, second = _consecutive_pair(db)
+    left, right = (.1, .1, .2, .2), (.6, .6, .2, .2)
+    model = "megadetector-v6"
+    normal, rescue = .2, .05
+    _regions(db, first, (right, .8 if rescued_successor else .1))
+    fallback, overlap = _regions(db, second, (left, .15 if rescued_successor else .8), (right, .09))
+    if rescued_successor:
+        # A stronger overlapping region from a different model is ineligible for rescue.
+        db.detections.save(second, [{"box": dict(zip("xywh", (.61, .61, .2, .2), strict=True)),
+                                     "confidence": .9, "category": "animal"}], detector_model="other")
+    sync_primary(db, second, min_conf=rescue if rescued_successor else normal,
+                 detector_model=model if rescued_successor else None)
+    assert db.subjects.primary_state(second)["detection_id"] == fallback
+    db.conn.execute("UPDATE photos SET mask_path='second.png' WHERE id=?", (second,))
+
+    sync_primary(db, first, min_conf=normal if rescued_successor else rescue,
+                 detector_model=None if rescued_successor else model)
+
+    assert db.subjects.primary_state(second)["detection_id"] == (overlap if rescued_successor else fallback)
+    db.commit()
+    mask = db.conn.execute("SELECT mask_path FROM photos WHERE id=?", (second,)).fetchone()[0]
+    assert mask == (None if rescued_successor else "second.png")
+
+
+@pytest.mark.parametrize("rollback", [False, True])
+def test_busy_successor_refresh_follows_committed_manual_choice(db, monkeypatch, rollback):
+    from threading import Event
+
+    import subjects
+    from pipeline_locks import acquire_photo_mask
+    from services.subject_selections import set_selection
+
+    first, second = _consecutive_pair(db)
+    left, right = (.1, .1, .2, .2), (.6, .6, .2, .2)
+    first_left, first_right = _regions(db, first, (left, .8), (right, .7))
+    second_left, second_right = _regions(db, second, (left, .8), (right, .7))
+    sync_primary(db, first)
+    sync_primary(db, second)
+    db.commit()
+    finished = Event()
+    refresh = subjects._refresh_when_available
+
+    def observe_refresh(*args):
+        try:
+            refresh(*args)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(subjects, "_refresh_when_available", observe_refresh)
+    with acquire_photo_mask(second):
+        if rollback:
+            with pytest.raises(RuntimeError, match="cancel edit"), db.transaction():
+                set_selection(db, first, {"detection_id": first_right})
+                raise RuntimeError("cancel edit")
+        else:
+            assert set_selection(db, first, {"detection_id": first_right})["changed"]
+        assert db.subjects.primary_state(first)["detection_id"] == (first_left if rollback else first_right)
+        state = db.subjects.primary_state(second)
+        assert state["detection_id"] == second_left
+        assert state["refresh_pending"] == (0 if rollback else 1)
+    assert finished.wait(timeout=5)
+    state = db.subjects.primary_state(second)
+    assert state["detection_id"] == (second_left if rollback else second_right)
+    assert not state["refresh_pending"]
+
+
+def test_legacy_successor_waits_for_its_own_policy(db):
+    first, second = _consecutive_pair(db)
+    left, right = (.1, .1, .2, .2), (.6, .6, .2, .2)
+    _regions(db, first, (right, .9))
+    fallback, overlap = _regions(db, second, (left, .15), (right, .09))
+    db.subjects.set_primary_state(second, fallback)
+
+    sync_primary(db, first, min_conf=.2)
+    state = db.subjects.primary_state(second)
+    assert (state["detection_id"], state["refresh_pending"]) == (fallback, 1)
+    sync_primary(db, second, min_conf=.05, detector_model="megadetector-v6")
+    db.commit()
+    state = db.subjects.primary_state(second)
+    assert (state["detection_id"], state["refresh_pending"]) == (overlap, 0)

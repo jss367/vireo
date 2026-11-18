@@ -68,6 +68,13 @@ def write_detection_batch(
         )
 
 
+def detector_floor(db: Database, min_conf: float | None) -> float:
+    return (
+        min_conf if min_conf is not None
+        else config_value(db.get_effective_config(cfg.load()), "detector_confidence")
+    )
+
+
 def get_detections(
     db: Database, photo_id: int, min_conf: float | None = None,
     detector_model: str | None = None, *, include_rejected: bool = False,
@@ -87,10 +94,7 @@ def get_detections(
             background (``subject_verdict``); by default they are not
             retained, whatever the floor.
     """
-    floor: float = (
-        min_conf if min_conf is not None
-        else config_value(db.get_effective_config(cfg.load()), "detector_confidence")
-    )
+    floor = detector_floor(db, min_conf)
     return db.detections.get(photo_id, floor, detector_model, include_rejected=include_rejected)
 
 
@@ -172,10 +176,7 @@ def get_detections_for_photos(
     """
     if not photo_ids:
         return {}
-    floor: float = (
-        min_conf if min_conf is not None
-        else config_value(db.get_effective_config(cfg.load()), "detector_confidence")
-    )
+    floor = detector_floor(db, min_conf)
     return db.detections.get_for_photos(photo_ids, floor, detector_model)
 
 

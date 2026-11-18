@@ -5,8 +5,11 @@ percentile scores used by culling. Suggestions never modify an edit recipe.
 """
 import hashlib
 import json
+import logging
 import math
 import os
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 
 import numpy as np
 from focus_point import FocusMatch
@@ -14,6 +17,7 @@ from services import detection_store
 
 ANALYSIS_VERSION = 1
 REVIEWER_MODEL = "reviewer-selected"
+_BURST_REFRESH = ThreadPoolExecutor(max_workers=1, thread_name_prefix="burst-subject-refresh")
 
 
 def retained(db, photo_id, min_conf=None, *, detector_model=None):
@@ -160,6 +164,9 @@ BURST_SUBJECT_MIN_IOU = 0.35
 
 def _refresh_focus(db, photo_id):
     """Refresh image evidence independently of the caller's model or confidence floor."""
+    # Take the writer lock before reading the predecessor. A worker that was
+    # already analyzing this frame must observe any committed refresh request.
+    db.subjects.clear_focus_evidence(photo_id)
     candidates = db.subjects.focus_candidates(photo_id)
     point = db.subjects.focus_point(photo_id)
     previous = db.subjects.previous_burst_subject(photo_id)
@@ -175,7 +182,7 @@ def _refresh_focus(db, photo_id):
         continuity = bool(previous and _burst_overlap(previous, d) >= BURST_SUBJECT_MIN_IOU)
         if af or sharp_id == d["id"] or continuity:
             rows.append((d["id"], af, sharp_id == d["id"], continuity))
-    db.subjects.save_focus_evidence(photo_id, rows)
+    db.subjects.insert_focus_evidence(rows)
 
 
 def selection_evidence(db, photo_id, detections):
@@ -208,22 +215,64 @@ def sync_primary(db, photo_id, *, min_conf=None, detector_model=None):
     Mask snapshots referenced by manual edits are immutable and untouched.
     Existing photo_masks remain cached, and prompt matching decides reuse.
     """
-    from services.subject_verdicts import _photo_free_of_analysis
-
     changed = _project_primary(db, photo_id, min_conf, detector_model)
-    while changed:
-        successor = db.subjects.burst_neighbor(photo_id, following=True)
-        if successor is None or db.subjects.primary_state(successor) is None:
-            break
-        # Writer transactions may already hold SQLite's writer lock. Never
-        # wait on a mask worker that needs that same lock to finish.
-        with _photo_free_of_analysis(successor):
-            changed = _project_primary(db, successor, min_conf, None)
+    if changed:
+        _refresh_successors(db, photo_id)
+
+
+def _refresh_successors(db, photo_id):
+    from pipeline_locks import acquire_photo_mask
+
+    while (successor := db.subjects.burst_neighbor(photo_id, following=True)) is not None:
+        state = db.subjects.primary_state(successor)
+        if state is None:
+            return
+        if state["min_conf"] is None:
+            # Older catalogs did not record whether this frame used weak rescue.
+            # Its own next analysis supplies the policy needed to rerank it.
+            db.subjects.defer_primary_refresh(successor)
+            return
+        lock = acquire_photo_mask(successor)
+        if not lock.acquire(blocking=False):
+            # The caller holds the SQLite writer lock. Publish the retry marker
+            # atomically with its edit; only the worker may wait for this frame.
+            db.subjects.defer_primary_refresh(successor)
+            if db._db_path != ":memory:":
+                job = _BURST_REFRESH.submit(_refresh_when_available, db._db_path, db.active_workspace_id, successor)
+                job.add_done_callback(partial(_log_refresh_failure, successor))
+            return
+        try:
+            changed = _project_primary(db, successor, state["min_conf"], state["detector_model"])
+        finally:
+            lock.release()
+        if not changed:
+            return
         photo_id = successor
+
+
+def _refresh_when_available(db_path, workspace_id, photo_id):
+    from db import Database
+    from pipeline_locks import acquire_photo_mask
+
+    with acquire_photo_mask(photo_id), Database(db_path, initialize_schema=False) as db:
+        db.set_active_workspace(workspace_id)
+        with db.transaction(immediate=True):
+            # A rollback, deletion, or the lock holder's own sync may have
+            # superseded the request. Re-read the committed policy as well.
+            state = db.subjects.primary_state(photo_id)
+            if state and state["refresh_pending"]:
+                sync_primary(db, photo_id, min_conf=state["min_conf"], detector_model=state["detector_model"])
+
+
+def _log_refresh_failure(photo_id, job):
+    error = job.exception()
+    if error:
+        logging.getLogger(__name__).error("Failed to refresh burst subject for photo %s", photo_id, exc_info=error)
 
 
 def _project_primary(db, photo_id, min_conf, detector_model):
     _refresh_focus(db, photo_id)
+    min_conf = detection_store.detector_floor(db, min_conf)
     detections = retained(db, photo_id, min_conf, detector_model=detector_model)
     previous = db.subjects.primary_state(photo_id)
     if not detections:
@@ -243,7 +292,7 @@ def _project_primary(db, photo_id, min_conf, detector_model):
         db.subjects.set_primary_quality(photo_id, analysis["quality_score"], features["subject_sharpness"])
         if changed or not mask_matches:
             db.subjects.set_primary_box_features(photo_id, features)
-    db.subjects.set_primary_state(photo_id, primary["id"])
+    db.subjects.set_primary_state(photo_id, primary["id"], min_conf, detector_model)
     return previous is None or changed
 
 

@@ -286,7 +286,7 @@
    "table",
    "photo_subject_state",
    "photo_subject_state",
-   "CREATE TABLE photo_subject_state (\n                photo_id INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,\n                detection_id INTEGER NOT NULL\n            )"
+   "CREATE TABLE photo_subject_state (\n                photo_id INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,\n                detection_id INTEGER NOT NULL,\n                min_conf REAL,\n                detector_model TEXT,\n                refresh_pending INTEGER NOT NULL DEFAULT 0\n            )"
   ],
   [
    "table",
