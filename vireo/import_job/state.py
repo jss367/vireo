@@ -171,8 +171,8 @@ class _ImportRunState:
     # A file whose copy fails verification, or whose landing is later
     # reclassified as failed, keeps its bytes here: they were transferred,
     # which is what the copy phase's rate measures. A file rsync skipped
-    # because it already existed at the destination was not, and is not
-    # counted.
+    # because it already existed at the destination, or was interrupted
+    # while sending, was not, and is not counted.
     phase_seconds: dict[str, float] = field(default_factory=dict)
     transferred_bytes: int = 0
     # The runner's cumulative paused seconds for this job; a phase's time

@@ -85,12 +85,17 @@ def _unescape_rsync_name(name: str) -> str:
 
 
 class _SentBytes:
-    """Counts the bytes of the files rsync reports sending.
+    """Counts the bytes of the files rsync finished sending.
 
-    Counted from the names rsync prints as it transfers them, not from its
-    exit code: ``--ignore-existing`` lets it succeed without sending a file
-    another writer already put there, and a batch that fails partway still
-    sent the files it named. Each file counts once.
+    Counted from the names rsync prints, not from its exit code:
+    ``--ignore-existing`` lets it succeed without sending a file another
+    writer already put there, and a batch that fails partway still sent the
+    files before the failure. rsync prints a name when it STARTS that file,
+    so a named file is credited only once rsync moves on to the next name
+    or exits cleanly (``settle``); the file a Stop, a stall or an error
+    interrupted is not counted. Each file counts once, at its full size:
+    this is the volume of files transferred, not the bytes on the wire,
+    which rsync can reduce when it resumes a partial file.
     """
 
     def __init__(self, state: _ImportRunState, flat: Sequence[tuple[Path, str, str | None, int, int]]) -> None:
@@ -98,23 +103,30 @@ class _SentBytes:
         # A flat batch's files land under their own, distinct basenames,
         # so the reported name identifies the file.
         self._unsent = {sf.name: sz or 0 for sf, _bn, _sh, sz, _mt in flat}
+        # Size of the file rsync last named and may still be sending.
+        self._in_flight = 0
 
     def named(self, name: str) -> None:
-        """rsync reported ``name`` from the flat batch."""
-        self._state.transferred_bytes += self._unsent.pop(
+        """rsync started ``name`` from the flat batch, so it finished the one before."""
+        self._state.transferred_bytes += self._in_flight
+        self._in_flight = self._unsent.pop(
             os.path.basename(_unescape_rsync_name(name).rstrip("/")), 0)
 
-    def once(self, size: int | None) -> Callable[..., None]:
+    def single(self, size: int | None) -> Callable[..., None]:
         """A progress callback for one renamed file's own rsync.
 
-        That rsync has a single source, so any name it reports means the
-        file was sent.
+        That rsync has a single source, so any name it reports means it
+        started this file.
         """
-        pending = [size or 0]
+        def _started(*_args: object) -> None:
+            self._in_flight = size or 0
+        return _started
 
-        def _sent(*_args: object) -> None:
-            self._state.transferred_bytes += pending.pop() if pending else 0
-        return _sent
+    def settle(self, completed: bool) -> None:
+        """An rsync returned: credit the file it was on if it exited cleanly."""
+        if completed:
+            self._state.transferred_bytes += self._in_flight
+        self._in_flight = 0
 
 
 def _landed_copied(source_file: Path, *, dest_path: str, verified_hash: str, src_size: int,
@@ -703,6 +715,7 @@ class _RsyncTransport:
                 extra_args,
                 progress_cb=functools.partial(
                     self._flat_progress, state, sent, rel, batch_size))
+            sent.settle(rc == 0 and not timed_out)
             if timed_out:
                 for sf, _bn, _sh, _sz, _mt in flat:
                     _fail(state, rel, sf, "rsync stalled (no progress)")
@@ -729,7 +742,8 @@ class _RsyncTransport:
                 extra_args,
                 # A single source: whatever name rsync reports, it sent
                 # this file.
-                progress_cb=sent.once(sz))
+                progress_cb=sent.single(sz))
+            sent.settle(rc == 0 and not timed_out)
             if timed_out:
                 _fail(state, rel, sf, "rsync stalled (no progress)")
             elif self._rsync_cancelled(rc):

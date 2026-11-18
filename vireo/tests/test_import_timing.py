@@ -250,9 +250,10 @@ def test_the_import_reads_paused_time_from_its_runner(tmp_path):
     assert result["timing"]["seconds"] == {FIND: 0.0, COPY: 0.0, CATALOG: 0.0}
 
 
-def _remote_import(tmp_path, monkeypatch, names, *, rsync_reports, verify=None):
+def _remote_import(tmp_path, monkeypatch, names, *, rsync_reports, verify=None, rsync_rc=0):
     """A remote import of ``names`` whose fake rsync lands every file at the
-    mount but reports only ``rsync_reports`` as transferred."""
+    mount but names only ``rsync_reports`` as it starts them, then exits
+    with ``rsync_rc``."""
     import move as _move
     from db import Database
     from import_job import ImportParams, run_import_job
@@ -273,7 +274,7 @@ def _remote_import(tmp_path, monkeypatch, names, *, rsync_reports, verify=None):
             shutil.copy2(source, os.path.join(mount_dir, os.path.basename(source)))
             if os.path.basename(source) in rsync_reports and progress_cb:
                 progress_cb(done, len(src_specs), os.path.basename(source), "")
-        return (0, "", False)
+        return (rsync_rc, "connection reset" if rsync_rc else "", False)
 
     monkeypatch.setattr(_move, "_run_rsync_streamed", fake_rsync)
     monkeypatch.setattr(_move, "_remote_mkdir_p", lambda remote, path: (True, ""))
@@ -341,5 +342,39 @@ def test_a_file_whose_name_rsync_escapes_is_still_counted():
 
     sent.named("foo\\#012bar.jpg")
     sent.named("foo\\#012bar.jpg")
+    sent.settle(completed=True)
 
     assert state.transferred_bytes == 1234
+
+
+def test_the_file_rsync_was_sending_when_it_failed_is_not_counted(tmp_path, monkeypatch):
+    """rsync prints a name when it starts the file. A batch that dies during
+    its second file finished only the first."""
+    names = ["DSC_0001.jpg", "DSC_0002.jpg"]
+
+    result, sizes = _remote_import(
+        tmp_path, monkeypatch, names, rsync_reports=set(names), rsync_rc=12,
+    )
+
+    assert (result["copied"], result["failed"]) == (0, 2)
+    assert result["timing"]["transferred_bytes"] == sizes["DSC_0001.jpg"]
+
+
+def test_a_renamed_files_own_rsync_counts_it_only_when_it_exits_cleanly():
+    from import_job.transports import _SentBytes
+
+    state = _state()
+    sent = _SentBytes(state, [])
+
+    sent.single(500)("DSC_0001_1.jpg")
+    sent.settle(completed=False)
+    assert state.transferred_bytes == 0
+
+    sent.single(700)("DSC_0002_1.jpg")
+    sent.settle(completed=True)
+    assert state.transferred_bytes == 700
+
+    # An rsync that reported nothing sent nothing.
+    sent.single(900)
+    sent.settle(completed=True)
+    assert state.transferred_bytes == 700
