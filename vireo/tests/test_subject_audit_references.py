@@ -1,6 +1,7 @@
 """Reference crops use the same saved selection policy as the audit."""
 import json
 
+import config as cfg
 import pytest
 from services.subject_audit import subject_audit
 from test_one_primary_subject import _analysis
@@ -28,10 +29,16 @@ def test_reference_crop_respects_recorded_detector_model(db):
     assert _references(db, pid)[0]['detection_id'] == did
 
 
-def test_reference_with_no_recorded_floor_uses_workspace_floor(db):
+def test_reference_with_no_recorded_floor_uses_workspace_floor(db, tmp_path, monkeypatch):
+    global_config = tmp_path / 'synthetic-config.json'
+    global_config.write_text(json.dumps({'detector_confidence': .05}))
+    monkeypatch.setattr(cfg, 'CONFIG_PATH', str(global_config))
+    db.workspaces.update(db.require_workspace_id(), config_overrides={'detector_confidence': .2})
     pid, _ = _photo(db, floor=.05)
     db.conn.execute('UPDATE photo_subject_state SET min_conf=NULL WHERE photo_id=?', (pid,))
     db.commit()
+    assert cfg.load()['detector_confidence'] == .05
+    assert db.get_effective_config(cfg.load())['detector_confidence'] == .2
     assert _references(db, pid)[0]['detection_id'] is None
 
 
