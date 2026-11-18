@@ -270,7 +270,7 @@ export function renderPhotoCard(/** @type {BrowsePhoto} */ p, /** @type {number}
   }
   var inatBadge = state.inatSubmitted[String(p.id)] ? '<span class="inat-badge">iNat</span>' : '';
   var wildlifeBadge = p.wildlife_excluded ? '<span class="no-wildlife-badge">No Wildlife</span>' : '';
-  var representativeBadge = p.is_species_representative ? '<span class="representative-badge">Representative</span>' : '';
+  var representativeBadge = p.is_species_representative ? '<span class="representative-badge">Top highlight</span>' : '';
   var pairBadge = isRawJpegPair
     ? '<span class="pair-source-badge" data-pair-source-id="' + p.id + '">'
       + (pairSource === 'raw' ? 'RAW · JPEG pair' : 'JPEG · RAW pair')

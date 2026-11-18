@@ -33,7 +33,7 @@ interface HighlightsBucket extends HighlightsSection {
   best_decision?: HighlightsBestDecision | null;
 }
 interface HighlightsBestDecision {
-  kind: 'chosen' | 'tie' | 'highlight' | 'pick' | 'score' | 'unanalyzed';
+  kind: 'highlight' | 'tie' | 'pick' | 'score' | 'unanalyzed';
   photo_id: number; contender_ids: number[]; tied_photo_ids: number[];
   source: string | null; reason: string | null; chosen_at: string | null;
 }

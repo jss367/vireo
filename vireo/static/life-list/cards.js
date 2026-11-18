@@ -36,7 +36,7 @@ export const LIFE_LIST_PAGE_SIZE = 100;
   var badges = '';
   if (best && (best.is_species_representative || best.flag === 'flagged')) {
     badges = '<div class="lifelist-badges">'
-      + (best.is_species_representative ? '<div class="lifelist-ribbon">Representative</div>' : '')
+      + (best.is_species_representative ? '<div class="lifelist-ribbon">Top highlight</div>' : '')
       + (best.flag === 'flagged' ? '<div class="lifelist-pick-badge" title="Flagged as Pick">Pick</div>' : '')
       + '</div>';
   }

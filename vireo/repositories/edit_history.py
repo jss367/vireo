@@ -470,67 +470,6 @@ class EditHistoryRepository:
 
     # -- relabel curation -----------------------------------------------------
 
-    def _restore_relabel_highlight(
-        self, workspace_id: int, photo_id: int, new_species: str, hl: Any,
-    ) -> None:
-        """Move one relabeled highlight back to its old species bucket."""
-        # Newer relabels record {species, rank, dst_existed}; entries
-        # from older relabels (before PR #1161 landed rank capture)
-        # are plain species-name strings and fall back to
-        # append-at-end with dst_existed=False.
-        if isinstance(hl, dict):
-            old_species = hl.get("species")
-            target_rank = hl.get("rank")
-            dst_existed = bool(hl.get("dst_existed", False))
-        else:
-            old_species = hl
-            target_rank = None
-            dst_existed = False
-        if not old_species or old_species == new_species:
-            return
-        if not dst_existed:
-            # Only delete the destination row when the relabel
-            # actually created it. If the photo was already
-            # highlighted at `new_species` before the relabel,
-            # rename_species_highlights_species skipped inserting a
-            # duplicate — undo must not remove the pre-existing row.
-            self.conn.execute(
-                """DELETE FROM species_highlights
-                       WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
-                (workspace_id, new_species, photo_id),
-            )
-        existing = self.conn.execute(
-            """SELECT 1 FROM species_highlights
-                   WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
-            (workspace_id, old_species, photo_id),
-        ).fetchone()
-        if existing:
-            return
-        if target_rank is None:
-            rank = int(self.conn.execute(
-                """SELECT COALESCE(MAX(rank), 0) AS max_rank
-                       FROM species_highlights
-                       WHERE workspace_id = ? AND species = ?""",
-                (workspace_id, old_species),
-            ).fetchone()["max_rank"] or 0) + 1
-        else:
-            try:
-                rank = int(target_rank)
-            except (TypeError, ValueError):
-                rank = int(self.conn.execute(
-                    """SELECT COALESCE(MAX(rank), 0) AS max_rank
-                           FROM species_highlights
-                           WHERE workspace_id = ? AND species = ?""",
-                    (workspace_id, old_species),
-                ).fetchone()["max_rank"] or 0) + 1
-        self.conn.execute(
-            """INSERT INTO species_highlights
-                       (workspace_id, species, photo_id, rank,
-                        created_at, updated_at)
-                   VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))""",
-            (workspace_id, old_species, photo_id, rank),
-        )
-
     def _restore_relabel_preference(
         self, workspace_id: int, photo_id: int, new_species: str, pref: Any,
         restore_species_representative: Callable[..., Any],
@@ -612,11 +551,8 @@ class EditHistoryRepository:
         restore_species_representative = self.restore_species_representative
         if not curation:
             return
-        hl_prev = curation.get("hl_prev") or []
         pref_prev = curation.get("pref_prev") or []
         rep_prev = curation.get("rep_prev") or []
-        for hl in hl_prev:
-            self._restore_relabel_highlight(workspace_id, photo_id, new_species, hl)
         for pref in pref_prev:
             self._restore_relabel_preference(
                 workspace_id, photo_id, new_species, pref,
@@ -645,51 +581,6 @@ class EditHistoryRepository:
             restore_species_representative(
                 old_species, photo_id, selected_order=rep_selected_order,
             )
-
-    def _reapply_relabel_highlight(
-        self, workspace_id: int, photo_id: int, new_species: str, hl: Any,
-    ) -> None:
-        """Move one highlight from its old species bucket to ``new_species``."""
-        # Accept both new dict form ({species, rank}) and legacy
-        # string form for compatibility with older edit-history rows.
-        if isinstance(hl, dict):
-            old_species = hl.get("species")
-        else:
-            old_species = hl
-        if not old_species or old_species == new_species:
-            return
-        src = self.conn.execute(
-            """SELECT 1 FROM species_highlights
-                   WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
-            (workspace_id, old_species, photo_id),
-        ).fetchone()
-        if not src:
-            return
-        self.conn.execute(
-            """DELETE FROM species_highlights
-                   WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
-            (workspace_id, old_species, photo_id),
-        )
-        existing = self.conn.execute(
-            """SELECT 1 FROM species_highlights
-                   WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
-            (workspace_id, new_species, photo_id),
-        ).fetchone()
-        if existing:
-            return
-        next_rank = int(self.conn.execute(
-            """SELECT COALESCE(MAX(rank), 0) AS max_rank
-                   FROM species_highlights
-                   WHERE workspace_id = ? AND species = ?""",
-            (workspace_id, new_species),
-        ).fetchone()["max_rank"] or 0) + 1
-        self.conn.execute(
-            """INSERT INTO species_highlights
-                       (workspace_id, species, photo_id, rank,
-                        created_at, updated_at)
-                   VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))""",
-            (workspace_id, new_species, photo_id, next_rank),
-        )
 
     def _reapply_relabel_preference(
         self, workspace_id: int, photo_id: int, new_species: str, pref: Any,
@@ -749,11 +640,8 @@ class EditHistoryRepository:
         restore_species_representative = self.restore_species_representative
         if not curation:
             return
-        hl_prev = curation.get("hl_prev") or []
         pref_prev = curation.get("pref_prev") or []
         rep_prev = curation.get("rep_prev") or []
-        for hl in hl_prev:
-            self._reapply_relabel_highlight(workspace_id, photo_id, new_species, hl)
         for pref in pref_prev:
             self._reapply_relabel_preference(
                 workspace_id, photo_id, new_species, pref,

@@ -1,23 +1,25 @@
-"""Persistence for species choices: which chosen photo was picked over which.
+"""Persistence for species choices: how a species' highlights were ordered.
 
-Owns ``species_choices`` and ``species_choice_losers``. A choice is one
-decision, "this photo is the best of this species among those photos", with
-who decided (``source``) and why (``reason``). Each loser row is one
-comparison, the chosen photo over that photo. A choice with no losers records
-only who chose the photo and why.
+Owns ``species_choices``, ``species_choice_losers`` and
+``species_choice_winners``. A choice is one decision about one photo of a
+species, with who decided (``source``) and why (``reason``). Its loser rows
+are the photos it was placed ahead of and its winner rows the photos it was
+placed behind; each row is one comparison. A choice with neither records
+only who highlighted the photo and why.
 
-Catalog-wide, like ``species_representatives``: a choice is about the photos,
-not about the workspace it was made in. ``species`` holds the spelling the
-representative rows use (``KeywordTaxonRepository.resolve_species_display``),
-which the caller resolves before writing.
+Catalog-wide, like ``species_representatives`` (the highlights themselves):
+a choice is about the photos, not about the workspace it was made in.
+``species`` holds the spelling the highlight rows use
+(``KeywordTaxonRepository.resolve_species_display``), which the caller
+resolves before writing.
 
 A comparison is between two photos and counts for any species both are
-chosen for; ``species`` on a choice records what was being chosen. So a
-species rename, a relabel and their undo need no bookkeeping here: the rows
-of photos that no longer share a species are inert until they share one
-again. Deleting a photo cascades.
+highlights of; ``species`` on a choice records what was being chosen. So a
+relabel and its undo need no bookkeeping here: the rows of photos that no
+longer share a species are inert until they share one again. Deleting a
+photo cascades.
 
-What stays elsewhere: which photos are chosen at all
+What stays elsewhere: which photos are highlights at all
 (``species_representatives``, in ``repositories.species_curation``), the
 ranking the comparisons imply (``species_preference``) and the write workflow
 that removes contradicted comparisons (``services.species_choices``).
@@ -39,20 +41,29 @@ class SpeciesChoiceRepository:
         self.conn = conn
 
     def record(
-        self, species: str, photo_id: int, loser_ids: Iterable[int],
+        self, species: str, photo_id: int, loser_ids: Iterable[int] = (),
         source: str | None = None, reason: str | None = None,
+        *, winner_ids: Iterable[int] = (),
     ) -> int:
-        """Record one choice of ``photo_id`` over ``loser_ids``; return its id."""
+        """Record one choice about ``photo_id``; return its id.
+
+        The photo is placed ahead of ``loser_ids`` and behind ``winner_ids``.
+        """
         cur = self.conn.execute(
             """INSERT INTO species_choices (species, photo_id, source, reason)
                VALUES (?, ?, ?, ?)""",
             (species, photo_id, source, reason),
         )
         choice_id = int(cur.lastrowid or 0)
-        losers = sorted({int(pid) for pid in loser_ids} - {int(photo_id)})
+        losers = {int(pid) for pid in loser_ids} - {int(photo_id)}
+        winners = {int(pid) for pid in winner_ids} - {int(photo_id)} - losers
         self.conn.executemany(
             "INSERT INTO species_choice_losers (choice_id, photo_id) VALUES (?, ?)",
-            [(choice_id, pid) for pid in losers],
+            [(choice_id, pid) for pid in sorted(losers)],
+        )
+        self.conn.executemany(
+            "INSERT INTO species_choice_winners (choice_id, photo_id) VALUES (?, ?)",
+            [(choice_id, pid) for pid in sorted(winners)],
         )
         return choice_id
 
@@ -70,12 +81,16 @@ class SpeciesChoiceRepository:
                           l.photo_id AS worse
                    FROM species_choices c
                    JOIN species_choice_losers l ON l.choice_id = c.id
-                   ORDER BY c.id, l.photo_id"""
+                   UNION ALL
+                   SELECT c.id, w.photo_id, c.photo_id
+                   FROM species_choices c
+                   JOIN species_choice_winners w ON w.choice_id = c.id
+                   ORDER BY 1, 2, 3"""
             )
         ]
 
     def notes(self) -> dict[int, list[dict[str, Any]]]:
-        """``{photo_id: [note, ...]}``: each chosen photo's choices, oldest
+        """``{photo_id: [note, ...]}``: each highlight's choices, oldest
         first, each with ``species``, ``source``, ``reason`` and
         ``chosen_at``. Read one with ``species_preference.choice_note``."""
         result: dict[int, list[dict[str, Any]]] = {}
@@ -93,15 +108,69 @@ class SpeciesChoiceRepository:
         return result
 
     def delete_comparisons(self, comparisons: Sequence[Comparison]) -> int:
-        """Remove single comparisons, keeping the choices they belonged to."""
-        cur = self.conn.executemany(
+        """Remove single comparisons, keeping the choices they belonged to.
+
+        A comparison is a loser row when its better photo is the choice's
+        own, and a winner row otherwise; the other statement matches nothing.
+        """
+        losers = self.conn.executemany(
             "DELETE FROM species_choice_losers WHERE choice_id = ? AND photo_id = ?",
             [(c.choice_id, c.worse) for c in comparisons],
         )
-        return cur.rowcount
+        winners = self.conn.executemany(
+            "DELETE FROM species_choice_winners WHERE choice_id = ? AND photo_id = ?",
+            [(c.choice_id, c.better) for c in comparisons],
+        )
+        return losers.rowcount + winners.rowcount
+
+    def forget_photo(self, species: str, photo_id: int) -> None:
+        """Drop ``photo_id`` from the comparisons made for ``species``.
+
+        Every photo recorded ahead of it is first recorded ahead of the
+        photos it was itself ahead of, so removing the middle of a chain
+        (first over second over third) leaves first over third instead of an
+        unsettled pair. Then its own choices for the species, and the
+        comparisons other choices for the species made with it, are deleted,
+        so nothing revives if the photo is highlighted again.
+        """
+        ahead: set[int] = set()
+        behind: set[int] = set()
+        for row in self.conn.execute(
+            """SELECT c.photo_id AS subject, l.photo_id AS other, 1 AS subject_wins
+               FROM species_choices c
+               JOIN species_choice_losers l ON l.choice_id = c.id
+               WHERE c.species = ? AND ? IN (c.photo_id, l.photo_id)
+               UNION ALL
+               SELECT c.photo_id, w.photo_id, 0
+               FROM species_choices c
+               JOIN species_choice_winners w ON w.choice_id = c.id
+               WHERE c.species = ? AND ? IN (c.photo_id, w.photo_id)""",
+            (species, photo_id, species, photo_id),
+        ).fetchall():
+            better, worse = (
+                (row["subject"], row["other"]) if row["subject_wins"]
+                else (row["other"], row["subject"])
+            )
+            if worse == photo_id:
+                ahead.add(better)
+            else:
+                behind.add(worse)
+        for better in sorted(ahead - behind):
+            self.record(species, better, sorted(behind - ahead - {better}))
+        for table in ("species_choice_losers", "species_choice_winners"):
+            self.conn.execute(
+                f"""DELETE FROM {table}
+                    WHERE photo_id = ?
+                      AND choice_id IN (SELECT id FROM species_choices WHERE species = ?)""",
+                (photo_id, species),
+            )
+        self.conn.execute(
+            "DELETE FROM species_choices WHERE photo_id = ? AND species = ?",
+            (photo_id, species),
+        )
 
     def remap_photos(self, mapping: Mapping[int, int | None]) -> None:
-        """Carry representatives and their choices onto surviving catalog photos."""
+        """Carry highlights and their choices onto surviving catalog photos."""
         comparisons_changed = False
         for source, target in mapping.items():
             if target is None or source == target:
@@ -122,18 +191,19 @@ class SpeciesChoiceRepository:
                    AND purpose IN ('species_representative', 'life_list', 'highlights')""",
                 (target, source),
             )
-            choices = self.conn.execute(
+            changed = self.conn.execute(
                 "UPDATE species_choices SET photo_id = ? WHERE photo_id = ?",
                 (target, source),
-            )
-            losers = self.conn.execute(
-                "UPDATE OR IGNORE species_choice_losers SET photo_id = ? WHERE photo_id = ?",
-                (target, source),
-            )
-            self.conn.execute(
-                "DELETE FROM species_choice_losers WHERE photo_id = ?", (source,),
-            )
-            comparisons_changed |= bool(choices.rowcount or losers.rowcount)
+            ).rowcount
+            for table in ("species_choice_losers", "species_choice_winners"):
+                changed += self.conn.execute(
+                    f"UPDATE OR IGNORE {table} SET photo_id = ? WHERE photo_id = ?",
+                    (target, source),
+                ).rowcount
+                self.conn.execute(
+                    f"DELETE FROM {table} WHERE photo_id = ?", (source,),
+                )
+            comparisons_changed |= bool(changed)
 
         if comparisons_changed:
             # Folding two photo IDs can create self-comparisons and cycles.

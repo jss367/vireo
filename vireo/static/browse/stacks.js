@@ -203,7 +203,7 @@ function renderBrowseStackMember(/** @type {BrowsePhoto} */ p, /** @type {number
     + renderDetectionBoxes(p)
     + (state.inatSubmitted[String(p.id)] ? '<span class="inat-badge">iNat</span>' : '')
     + (p.wildlife_excluded ? '<span class="no-wildlife-badge">No Wildlife</span>' : '')
-    + (p.is_species_representative ? '<span class="representative-badge">Representative</span>' : '')
+    + (p.is_species_representative ? '<span class="representative-badge">Top highlight</span>' : '')
     + (state.cardFields.indexOf('species') === -1 ? renderSpeciesBadges(p.species, false) : '')
     + '</div><div class="grid-card-info">' + renderCardInfo(p) + '</div></div>';
 }

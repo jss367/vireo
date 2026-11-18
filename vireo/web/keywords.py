@@ -140,11 +140,6 @@ def _queue_keyword_rename_sidecars(db: Database, old_row: Row, new_row: Row, aff
             new_name,
             pairs,
         )
-        db.species_curation.rename_highlights(
-            old_name,
-            new_name,
-            pairs,
-        )
         # species_choices rows store the species name at write time and are
         # catalog-wide, so the rename is a plain name change here.
         db.species_choices.rename(old_name, new_name)

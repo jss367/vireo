@@ -139,7 +139,7 @@ function refreshCardBadgesAndInfo(/** @type {HTMLElement} */ card, /** @type {Br
   }
   var rep = /** @type {HTMLElement | null} */ (wrap.querySelector('.representative-badge'));
   if (p.is_species_representative && !rep) {
-    wrap.insertAdjacentHTML('beforeend', '<span class="representative-badge">Representative</span>');
+    wrap.insertAdjacentHTML('beforeend', '<span class="representative-badge">Top highlight</span>');
   } else if (!p.is_species_representative && rep) {
     rep.remove();
   }

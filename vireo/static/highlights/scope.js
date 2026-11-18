@@ -23,14 +23,24 @@ export function selectedFolderId() {
   return isNaN(id) ? null : id;
 }
 
-// What a representative click just claimed: how many other representatives
-// of the species the photo was chosen over, and within what.
+// What a "make top highlight" click just claimed: how many other highlights
+// of the species the photo was placed ahead of, and within what.
 /** @param {number} overCount @param {boolean} inFolder */
-export function representativeToast(overCount, inFolder) {
+export function topHighlightToast(overCount, inFolder) {
   var where = inFolder ? ' in this folder' : '';
-  if (!overCount) return 'Representative set' + (inFolder ? ' for this folder' : '');
-  return 'Representative set, chosen over ' + overCount + ' other representative'
+  if (!overCount) return 'Top highlight set' + (inFolder ? ' for this folder' : '');
+  return 'Top highlight set, ahead of ' + overCount + ' other highlight'
     + (overCount === 1 ? '' : 's') + where;
+}
+
+// What adding a highlight just claimed: it goes after the highlights the
+// page was showing, and says nothing about the ones outside the folder.
+/** @param {{added?: boolean, after?: number[]} | null | undefined} result @param {boolean} inFolder */
+export function addedHighlightToast(result, inFolder) {
+  if (result && result.added === false) return 'Already a highlight';
+  var afterCount = result && result.after ? result.after.length : 0;
+  if (!afterCount) return 'Added to Highlights';
+  return 'Added to Highlights, after the other highlight' + (inFolder ? 's in this folder' : 's');
 }
 
 export function requestScopeParams() {
@@ -46,7 +56,6 @@ export function requestScopeParams() {
   params.set('confidence_threshold', (parseInt(/** @type {HTMLInputElement} */ (document.getElementById('confidenceSlider')).value) / 100).toFixed(2));
   params.set('confirmation', /** @type {HTMLSelectElement} */ (document.getElementById('confirmationFilter')).value || 'all');
   params.set('highlight_selection', /** @type {HTMLSelectElement} */ (document.getElementById('highlightSelectionFilter')).value || 'all');
-  params.set('species_representative', /** @type {HTMLSelectElement} */ (document.getElementById('representativeFilter')).value || 'all');
   return params;
 }
 
