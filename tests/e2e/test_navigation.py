@@ -477,42 +477,47 @@ def test_rapid_review_ephemeral_tab_pin_button_persists_tab(live_server, page):
     )
 
 
-def test_close_ephemeral_navigates_to_rightmost_visible_pinned_tab(live_server, page):
-    """When pinned tabs overflow, closing the ephemeral tab must navigate to
-    the rightmost *visible* pinned tab — not the last pinned id, which may be
-    hidden under overflow."""
+def test_pinned_navigation_stays_in_order_across_pages(live_server, page):
     url = live_server["url"]
-    # Narrow viewport forces overflow with the default pinned tabs.
-    page.set_viewport_size({"width": 700, "height": 800})
-    page.goto(f"{url}/keywords")  # unpinned → ephemeral
-    page.wait_for_selector(".nav-tab[data-nav-id='keywords'].is-ephemeral", timeout=3000)
-    # Identify the rightmost pinned tab that is actually visible (display != 'none').
-    rightmost_visible = page.evaluate("""() => {
-        const tabs = Array.from(document.querySelectorAll(
-          '#navTabStrip .nav-tab:not(.is-ephemeral)'
-        ));
-        for (let i = tabs.length - 1; i >= 0; i--) {
-            if (tabs[i].style.display !== 'none') return tabs[i].dataset.navId;
-        }
-        return null;
-    }""")
-    assert rightmost_visible is not None, "expected at least one visible pinned tab"
-    # And confirm overflow is in effect (some pinned tab is hidden).
-    has_hidden = page.evaluate("""() => {
-        const tabs = Array.from(document.querySelectorAll(
-          '#navTabStrip .nav-tab:not(.is-ephemeral)'
-        ));
-        return tabs.some(t => t.style.display === 'none');
-    }""")
-    assert has_hidden, "expected overflow to hide at least one pinned tab at 700px"
-    # Close the ephemeral tab — should land on rightmost_visible's URL.
-    page.click(".nav-tab[data-nav-id='keywords'] .nav-tab-close")
-    page.wait_for_function(
-        "(want) => document.querySelector('.nav-tab[data-nav-id=\"' + want + '\"]')"
-        " && document.querySelector('.nav-tab[data-nav-id=\"' + want + '\"]').classList.contains('active')",
-        arg=rightmost_visible,
-        timeout=3000,
-    )
+    page.set_viewport_size({"width": 900, "height": 800})
+    expected = None
+    for path in ["/review", "/cull", "/pipeline/rapid-review", "/dashboard"]:
+        page.goto(f"{url}{path}")
+        if path == "/review":
+            expect(page).to_have_title("Vireo - Review")
+            expect(page.locator('a[href="/classify"]')).to_have_count(0)
+        strip = page.locator("#navTabStrip")
+        tabs = strip.locator(".nav-tab:not(.is-ephemeral):visible")
+        expect(tabs.filter(has_text="Misses")).to_have_count(1)
+        expect(tabs.filter(has_text="Highlights")).to_have_count(1)
+        order = tabs.evaluate_all("tabs => tabs.map(tab => tab.dataset.navId)")
+        if expected is None:
+            expected = order
+        assert order == expected
+        assert strip.evaluate("el => el.scrollWidth > el.clientWidth")
+        if path == "/review":
+            strip.evaluate("el => { el.scrollLeft = 120; }")
+        else:
+            assert strip.evaluate("el => el.scrollLeft") == 120
+
+    page.locator(".nav-tab.is-ephemeral .nav-tab-close").click()
+    expect(page.locator(".nav-tab.active")).to_have_attribute("data-nav-id", expected[-1])
+
+
+def test_pages_menu_exposes_destinations(live_server, page):
+    url = live_server["url"]
+    page.goto(f"{url}/review")
+    toggle = page.get_by_role("button", name="Pages")
+    toggle.click()
+    menu = page.locator("#navOverflowMenu")
+    for name in ["Map", "Dashboard", "Workspace", "Audit", "Duplicates"]:
+        expect(menu.get_by_role("button", name=name, exact=True)).to_be_visible()
+    page.keyboard.press("Escape")
+    expect(toggle).to_be_focused()
+    expect(menu).to_be_hidden()
+    toggle.click()
+    menu.get_by_role("button", name="Duplicates", exact=True).click()
+    expect(page).to_have_url(f"{url}/duplicates")
 
 
 def test_palette_seeded_from_fallback_when_tabs_api_fails(live_server, page):
