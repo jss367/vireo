@@ -223,7 +223,7 @@ def sync_primary(db, photo_id, *, min_conf=None, detector_model=None):
 def _refresh_successors(db, photo_id):
     from pipeline_locks import acquire_photo_mask
 
-    while (successor := db.subjects.burst_neighbor(photo_id, following=True)) is not None:
+    for successor in db.subjects.following_burst_frames(photo_id):
         state = db.subjects.primary_state(successor)
         if state is None:
             return
@@ -247,7 +247,6 @@ def _refresh_successors(db, photo_id):
             lock.release()
         if not changed:
             return
-        photo_id = successor
 
 
 def _refresh_when_available(db_path, workspace_id, photo_id):

@@ -19,7 +19,7 @@ still matches it — stay in ``subjects``.
 
 import json
 import sqlite3
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from typing import Any
 
 from repositories.prediction_review import prediction_review_join, prediction_review_status
@@ -53,6 +53,12 @@ class SubjectsRepository:
             WHERE p.id=? AND ROUND(ABS(julianday(p.timestamp) - julianday(adjacent.timestamp))*86400000) <= 500""",
             (photo_id,)).fetchone()
         return row[0] if row else None
+
+    def following_burst_frames(self, photo_id: int) -> Iterator[int]:
+        """Walk ahead in capture order until the first gap in the burst."""
+        while (successor := self.burst_neighbor(photo_id, following=True)) is not None:
+            yield successor
+            photo_id = successor
 
     def previous_burst_subject(self, photo_id):
         previous = self.burst_neighbor(photo_id)
