@@ -278,3 +278,23 @@ def test_repeated_resets_after_a_gps_verified_clock_move_forward():
     assert set(shifts) == {f.ref for f in middle + last}
     corrected = [f.captured + timedelta(minutes=shifts.get(f.ref, 0)) for f in frames]
     assert all(a < b for a, b in pairwise(corrected))
+
+
+def test_sparse_dcf_numbers_do_not_create_a_reset():
+    start = datetime(2026, 1, 25, 10)
+    frames = [
+        ClockFrame(ref=n, filename=f"DSC_{n:04d}.JPG", captured=start + timedelta(hours=i))
+        for i, n in enumerate([100, 9000])
+    ]
+    assert find_clock_problems(frames, use_gps=False) == []
+
+
+def test_sparse_dcf_runs_preserve_local_reset_evidence():
+    start = datetime(2026, 1, 25, 10)
+    frames = [
+        ClockFrame(ref=n, filename=f"DSC_{n:04d}.JPG", captured=start + timedelta(hours=h))
+        for n, h in [(100, 0), (101, 1), (9000, 4), (9001, 3)]
+    ]
+    [problem] = find_clock_problems(frames, use_gps=False)
+    [fix] = problem.fixes
+    assert [frame.ref for frame in fix.frames] == [9000]

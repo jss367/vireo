@@ -252,24 +252,28 @@ def dcf_frame_number(filename: str) -> tuple[str, int] | None:
 # -- shot order -----------------------------------------------------------------
 
 
-def _rotate_at_wrap(frames: list[tuple[int, ClockFrame]]) -> list[ClockFrame]:
-    """Order DCF-numbered frames, starting after the numbering wrapped.
+def _dcf_sequences(frames: list[tuple[int, ClockFrame]]) -> list[list[ClockFrame]]:
+    """Order surviving file numbers without guessing across a large gap.
 
-    Numbers run 0001-9999 and then start over, so a card holding 9685-9999
-    and 0001-1848 was shot from 9685. The sequence starts after the largest
-    circular gap between used numbers: the range the camera did not use.
+    A gap spanning most of the counter leaves two runs whose relative order
+    is ambiguous. Join them only when both consecutive rollover numbers are
+    present and their timestamps support that direction.
     """
     frames.sort(key=lambda item: (item[0], item[1].filename))
-    numbers = [n for n, _ in frames]
-    if len(numbers) < 2:
-        return [f for _, f in frames]
-    best_gap, start = numbers[0] + DCF_NUMBER_SPAN - numbers[-1], 0
-    for i in range(1, len(numbers)):
-        gap = numbers[i] - numbers[i - 1]
-        if gap > best_gap:
-            best_gap, start = gap, i
-    rotated = frames[start:] + frames[:start]
-    return [f for _, f in rotated]
+    ordered = [frame for _, frame in frames]
+    for i in range(1, len(frames)):
+        if frames[i][0] - frames[i - 1][0] <= DCF_NUMBER_SPAN // 2:
+            continue
+        low, high = ordered[:i], ordered[i:]
+        if frames[0][0] == 1 and frames[-1][0] == DCF_NUMBER_SPAN:
+            before, after = high[-1], low[0]
+            first, second = before.instant(), after.instant()
+            if first is None or second is None:
+                first, second = before.captured, after.captured
+            if second >= first:
+                return [high + low]
+        return [low, high]
+    return [ordered]
 
 
 def shot_sequences(frames: Iterable[ClockFrame]) -> list[list[ClockFrame]]:
@@ -290,7 +294,8 @@ def shot_sequences(frames: Iterable[ClockFrame]) -> list[list[ClockFrame]]:
         if dcf is not None:
             by_prefix[dcf[0]].append((dcf[1], frame))
     sequences = [sorted(by_counter, key=lambda f: (f.shutter_count or 0, f.filename))]
-    sequences.extend(_rotate_at_wrap(group) for group in by_prefix.values())
+    for group in by_prefix.values():
+        sequences.extend(_dcf_sequences(group))
     return [s for s in sequences if len(s) >= 2]
 
 
