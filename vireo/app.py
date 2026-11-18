@@ -115,6 +115,7 @@ ALL_PAGES = [
     {"id": "misses",          "label": "Misses",          "href": "/misses"},
     {"id": "highlights",      "label": "Highlights",      "href": "/highlights"},
     {"id": "life_list",       "label": "Life List",       "href": "/life-list"},
+    {"id": "inaturalist",    "label": "iNaturalist",     "href": "/inaturalist"},
     {"id": "browse",          "label": "Browse",          "href": "/browse"},
     {"id": "edit",            "label": "Edit",            "href": "/edit"},
     {"id": "map",             "label": "Map",             "href": "/map"},

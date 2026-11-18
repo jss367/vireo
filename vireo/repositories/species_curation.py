@@ -660,6 +660,7 @@ class SpeciesCurationRepository:
                       p.eye_tenengrad,
                       k.name AS species,
                       t.id AS taxon_id,
+                      t.inat_id,
                       t.rank AS taxon_rank,
                       t.name AS scientific_name,
                       t.common_name

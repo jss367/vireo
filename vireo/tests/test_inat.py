@@ -1465,3 +1465,45 @@ def test_api_inat_prepare_preserves_distinct_taxa_sharing_a_common_name(app_and_
     primary = [o for o in options if o["primary"]]
     assert len(primary) == 1
     assert primary[0]["scientific_name"] == "Amazona viridigenalis"
+
+
+def test_account_species_includes_subspecies_ancestors_and_all_grades():
+    import inat
+    calls = []
+
+    def page(path, params=None):
+        if path == "users/birder":
+            return {"results": [{"login": "Birder", "id": 52}]}
+        calls.append(params.copy())
+        taxon = {"id": 782, "ancestor_ids": [7, 781]} if params["page"] == 1 else {
+            "id": 901, "ancestor_ids": [7]}
+        return {"per_page": 1, "total_results": 2, "results": [{"taxon": taxon}]}
+
+    with patch("inat._public_page", side_effect=page):
+        result = inat.account_species("birder")
+    assert result["login"] == "Birder"
+    assert result["taxon_ids"] == [7, 781, 782, 901]
+    assert [call["page"] for call in calls] == [1, 2]
+    assert all(call["user_id"] == 52 and call["quality_grade"] == "casual,needs_id,research"
+               for call in calls)
+
+
+def test_account_species_incomplete_refresh_fails():
+    import inat
+    with patch("inat._public_page", side_effect=[
+        {"results": [{"login": "birder", "id": 52}]},
+        {"per_page": 500, "total_results": 10, "results": []},
+    ]), pytest.raises(inat.InatApiError, match="refresh"):
+        inat.account_species("birder")
+
+
+def test_queue_upload_checks_token_owner_before_creating_observation(app_and_db):
+    import config as cfg
+    app, _, pid = app_and_db
+    cfg.save({"inat_token": "fake-token"})
+    with patch("inat.validate_token", return_value={"login": "other"}), patch("inat.submit_observation") as submit:
+        response = app.test_client().post("/api/inat/submit", json={
+            "photo_id": pid, "expected_login": "birder", "taxon_id": 781,
+        })
+    assert response.status_code == 403
+    submit.assert_not_called()
