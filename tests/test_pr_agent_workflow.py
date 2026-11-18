@@ -400,9 +400,11 @@ def test_merge_jobs_can_read_the_exact_heads_tests_run():
 
     # ``actions: write`` includes reading the Tests run; the write half lets
     # the job dispatch the post-merge suite (see
-    # test_every_bot_merge_starts_the_post_merge_suite).
+    # test_every_bot_merge_starts_the_post_merge_suite). ``issues: write``
+    # lets it close the PR's linked issues (see
+    # test_every_bot_merge_closes_the_prs_linked_issues).
     merge_permissions = (
-        "permissions:\n      actions: write\n      contents: write\n      issues: read\n      pull-requests: write"
+        "permissions:\n      actions: write\n      contents: write\n      issues: write\n      pull-requests: write"
     )
     assert workflow.count(merge_permissions) == 4
 
@@ -799,3 +801,23 @@ def test_every_bot_merge_starts_the_post_merge_suite():
     assert "git show --no-renames --name-only" in action
     assert "gh api \"repos/$REPO/pulls/$PR/files\"" not in action
     assert "workflow_dispatch" in _read(FULL_TEST_WORKFLOW)
+
+
+def test_every_bot_merge_closes_the_prs_linked_issues():
+    # GitHub ignores a PR's closing keywords when GITHUB_TOKEN merges it, so
+    # "Closes #N" left issues open after every bot merge. The post-merge
+    # action closes them, after the dispatch so a failure here never keeps
+    # Full tests from starting.
+    steps = yaml.safe_load(_read(POST_MERGE_ACTION))["runs"]["steps"]
+    names = [step["name"] for step in steps]
+    assert names == ["Dispatch main workflows", "Close linked issues"]
+    close = steps[1]["run"]
+    assert "closingIssuesReferences" in close
+    assert "$ENV.REPO" in close  # only this repository's issues
+    assert 'gh issue close "$issue" --repo "$REPO" --reason completed' in close
+    assert '== "CLOSED"' in close  # an issue closed by hand gets no comment
+
+    jobs = yaml.safe_load(_read(WORKFLOW))["jobs"]
+    for name, job in jobs.items():
+        if any("gh pr merge" in step.get("run", "") for step in job.get("steps", [])):
+            assert job["permissions"]["issues"] == "write", name

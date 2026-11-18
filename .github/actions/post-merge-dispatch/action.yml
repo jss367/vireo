@@ -1,8 +1,10 @@
 name: Start post-merge workflows on main
 description: >-
-  Dispatch the push-triggered main workflows after a merge made with
-  GITHUB_TOKEN. GitHub does not start workflows for pushes made with that
-  token, so without this a bot merge never runs the full suite.
+  Dispatch the push-triggered main workflows and close the PR's linked
+  issues after a merge made with GITHUB_TOKEN. GitHub neither starts
+  workflows for pushes made with that token nor acts on the PR's closing
+  keywords, so without this a bot merge never runs the full suite and
+  leaves every "Closes #N" issue open.
 
 inputs:
   repo:
@@ -12,7 +14,7 @@ inputs:
     description: The PR that was just merged.
     required: true
   token:
-    description: Token with actions:write and pull-requests:read.
+    description: Token with actions:write, issues:write and pull-requests:read.
     required: true
 
 runs:
@@ -54,3 +56,43 @@ runs:
           gh workflow run deploy-website.yml --repo "$REPO" --ref main
           echo "Dispatched the website deploy: #${PR} changed website/."
         fi
+
+    # Runs after the dispatch step so a failure here can never keep the
+    # full suite from starting on main.
+    - name: Close linked issues
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        REPO: ${{ inputs.repo }}
+        PR: ${{ inputs.pr }}
+      run: |
+        set -euo pipefail
+        # closingIssuesReferences is GitHub's own parse of the PR's closing
+        # keywords ("Closes #N", "Fixes #N", ...) plus issues linked in the
+        # sidebar, so this closes exactly what a human merge would have.
+        # GITHUB_TOKEN can only write this repository, so issues linked in
+        # other repositories are left alone.
+        issues=$(gh pr view "$PR" --repo "$REPO" --json closingIssuesReferences \
+          --jq '.closingIssuesReferences[]
+                | select((.repository.owner.login + "/" + .repository.name) == $ENV.REPO)
+                | .number')
+        if [[ -z "$issues" ]]; then
+          echo "PR #${PR} links no issues to close."
+          exit 0
+        fi
+        failed=0
+        for issue in $issues; do
+          state=$(gh issue view "$issue" --repo "$REPO" --json state --jq .state) || state=""
+          if [[ "$state" == "CLOSED" ]]; then
+            echo "Issue #${issue} is already closed."
+            continue
+          fi
+          if gh issue close "$issue" --repo "$REPO" --reason completed \
+            --comment "Closed by #${PR}, which was merged to main."; then
+            echo "Closed issue #${issue}, linked from #${PR}."
+          else
+            echo "::warning::Could not close issue #${issue}, linked from #${PR}."
+            failed=1
+          fi
+        done
+        exit "$failed"
