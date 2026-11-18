@@ -406,7 +406,7 @@ def test_ambiguous_zones_on_both_sides_offer_only_joint_ordered_writes():
     assert pairs == {(0, 60), (-60, 0)}
 
 
-def test_unmeasured_epoch_leaves_correct_zone_frames_available_for_reset():
+def test_unmeasured_mixed_epoch_keeps_reset_evidence_without_unsafe_fixes():
     from dataclasses import replace
 
     frames = _reset_frames(gps_error_before=0)
@@ -418,11 +418,10 @@ def test_unmeasured_epoch_leaves_correct_zone_frames_available_for_reset():
 
     problem = analyze_camera(frames, zone_lookup=zone)
     assert problem is not None
-    boundary = [fix for fix in problem.fixes if frames[6] in fix.frames]
-    assert len(boundary) == 1
-    assert boundary[0].frames == frames[6:9]
-    assert boundary[0].shift_minutes == 60
-    assert all(fix.frames == frames[9:] for fix in problem.fixes if fix not in boundary)
+    assert problem.fixes == []
+    assert problem.jump_count == 1
+    assert any("clock went back" in line for line in problem.evidence)
+    assert any("Automatic corrections are unavailable" in line for line in problem.evidence)
 
 
 def test_distinct_paired_choices_propagate_to_the_next_reset():
