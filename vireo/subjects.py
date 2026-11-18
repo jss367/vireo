@@ -132,7 +132,7 @@ def analyze_photo(db, photo_id, image_path, *, min_conf=None, force=False, check
     if image is None:
         raise ValueError("Could not load photo for subject analysis")
     try:
-        for detection in pending:
+        for detection in detections:
             require_aligned_detector_prompt(image, detection_prompt_runtime(detection), detector_model=detection.get("detector_model"))
         results = analyze_image(image, pending)
     finally:
@@ -412,13 +412,16 @@ def select_reviewer_box(db, photo_id, box, *, frame_runtime=None):
     if min(x, y) < 0 or min(w, h) <= 0 or x + w > 1 or y + h > 1:
         raise ValueError("Choose a nonempty box inside the source image")
     with db.transaction(immediate=True):
-        for previous in detection_store.get_detections(db, photo_id, min_conf=0, detector_model=REVIEWER_MODEL):
-            db.masks_features.clear_detection_embeddings(photo_id, previous["id"])
+        previous_ids = [d["id"] for d in detection_store.get_detections(
+            db, photo_id, min_conf=0, detector_model=REVIEWER_MODEL, include_rejected=True)]
+        for previous_id in previous_ids:
+            db.masks_features.clear_detection_embeddings(photo_id, previous_id)
         # Clear previous measurements even if a legacy catalog lacks primary state.
         db.subjects.clear_primary_features(photo_id)
         db.masks_features.retire_prompt_masks(photo_id, REVIEWER_MODEL)
         ids = db.detections.upsert_rows(photo_id, REVIEWER_MODEL, [
             {"box": box, "confidence": 1.0, "category": "animal"}], frame_runtime or "reviewer-v1")
+        detection_store.delete_detections_by_ids(db, set(previous_ids).difference(ids))
         # Re-saving an identical or quantization-equivalent box reuses its ID.
         # Retire that ID's cached box analysis before sync_primary can project it.
         db.subjects.clear_analysis(ids[0])

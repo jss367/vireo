@@ -54,7 +54,7 @@ subject came from the JPEG after all. One 259 px subject measured 19,413
 from the JPEG and 9,773 from the demosaic.
 
 `load_detail_source` therefore asks for the camera's rendering
-(`RAW_DECODE_CAMERA_RENDERED`), sized while the request stays inside the
+(`RAW_DECODE_ALIGNED`), sized while the request stays inside the
 frame and whole (`max_size=None`) once it reaches `NEAR_FULL_PREVIEW` of the
 native edge, which is the one request a full-size preview answers at any
 subject size. Scored against 59 bursts holding both a flagged and a rejected
@@ -68,8 +68,8 @@ catalog:
 
 Nine of those bursts had frames on both sides of the 512 px line, so frames
 of one burst were being ranked on two renderings. A RAW without a full-size
-preview is demosaiced at full resolution before resizing, falling back to its embedded
-JPEG only if libraw cannot decode it.
+preview is demosaiced at full resolution before resizing. If that decode fails,
+the detail measurement stays pending. Browsing can still use the embedded JPEG.
 None of this catalog's cameras (D7200, D850, Z 8) is one. Migration 46
 returns every nonempty historical detail measurement to "not measured".
 Preview dimensions were not recorded with the score: even a middle-band
@@ -252,7 +252,7 @@ cached-mask use compare that proof with a fresh aligned original read; a
 transient thumbnail failure cannot silently switch preview boxes to sensor
 coordinates. Detail reloads must match that same frame identity. Fresh bound
 detection writes retire prior detector mask rows, including when a runtime
-replacement deleted the old detection first. Migration 53 retires unproven
+replacement deleted the old detection first. Migration 54 retires unproven
 detector measurements and adds the nullable frame field without fabricating
 proof for historical boxes. Those boxes/predictions remain browsable and require
 Re-classify on the original before coordinate analysis. Portable detector

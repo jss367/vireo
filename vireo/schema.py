@@ -563,18 +563,36 @@ def _invalidate_ambiguous_companion_boxes(conn):
     ambiguous = "SELECT id FROM detections WHERE runtime_fingerprint=?"
     for table in ("detection_subjects", "subject_ranking_analysis", "subject_raw_analysis"):
         conn.execute(f"DELETE FROM {table} WHERE detection_id IN ({ambiguous})", (COMPANION_FRAME_RUNTIME,))
+    affected_mask = (
+        "EXISTS (SELECT 1 FROM detections d WHERE d.photo_id=m.photo_id "
+        "AND d.runtime_fingerprint=? AND d.detector_model=m.detector_model AND "
+        "(d.box_x,d.box_y,d.box_w,d.box_h)=(m.prompt_x,m.prompt_y,m.prompt_w,m.prompt_h))"
+    )
     projected = conn.execute(
-        f"SELECT photo_id FROM photo_subject_state WHERE detection_id IN ({ambiguous})", (COMPANION_FRAME_RUNTIME,)
+        f"SELECT photo_id FROM photo_subject_state WHERE detection_id IN ({ambiguous}) "
+        "UNION SELECT p.id FROM photos p JOIN photo_masks m ON m.photo_id=p.id AND m.path=p.mask_path "
+        f"WHERE {affected_mask}", (COMPANION_FRAME_RUNTIME, COMPANION_FRAME_RUNTIME),
     ).fetchall()
     subjects = SubjectsRepository(conn)
     for photo_id, in projected:
         subjects.clear_primary_features(photo_id)
-    conn.execute(
-        "DELETE FROM photo_masks AS m WHERE EXISTS (SELECT 1 FROM detections d WHERE d.photo_id=m.photo_id "
-        "AND d.runtime_fingerprint=? AND d.detector_model=m.detector_model AND "
-        "(d.box_x,d.box_y,d.box_w,d.box_h)=(m.prompt_x,m.prompt_y,m.prompt_w,m.prompt_h))",
+    conn.execute(f"DELETE FROM photo_masks AS m WHERE {affected_mask}", (COMPANION_FRAME_RUNTIME,))
+
+
+def _clear_orphaned_companion_mask_projections(conn):
+    """Repair active projections left behind when a companion mask row was retired."""
+    from detection_id import COMPANION_FRAME_RUNTIME
+    from repositories.subjects import SubjectsRepository
+
+    subjects = SubjectsRepository(conn)
+    for photo_id, in conn.execute(
+        "SELECT p.id FROM photos p WHERE p.mask_path IS NOT NULL AND EXISTS "
+        "(SELECT 1 FROM detections d WHERE d.photo_id=p.id AND d.runtime_fingerprint=?) "
+        "AND NOT EXISTS (SELECT 1 FROM photo_masks m WHERE m.photo_id=p.id AND m.path=p.mask_path) "
+        "AND NOT EXISTS (SELECT 1 FROM photo_subject_state s WHERE s.photo_id=p.id)",
         (COMPANION_FRAME_RUNTIME,),
-    )
+    ).fetchall():
+        subjects.clear_primary_features(photo_id)
 
 
 def _reconcile_highlights_and_detail(conn):
@@ -721,7 +739,8 @@ MIGRATIONS = (
     Migration(50, "reconcile_companion_box_frames", _invalidate_ambiguous_companion_boxes),
     Migration(51, "reviewer_history_mask_frames", _retire_reviewer_frame_caches),
     Migration(52, "reviewed_gps", _add_reviewed_gps),
-    Migration(53, "detector_decoded_frames", _retire_unbound_detector_caches),
+    Migration(53, "orphaned_companion_masks", _clear_orphaned_companion_mask_projections),
+    Migration(54, "detector_decoded_frames", _retire_unbound_detector_caches),
 )
 
 
