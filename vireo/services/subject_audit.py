@@ -50,7 +50,8 @@ def _references(db: Database, floor: float) -> list[JsonDict]:
             subject_model = policy["detector_model"] if policy is not None else None
             subjects = retained(db, pid, subject_floor, detector_model=subject_model)
             det = subjects[0]["id"] if subjects else None
-            predictions = db.predictions.top_unrejected_by_detection([pid]).get(pid, [])
+            predictions = db.predictions.top_unrejected_by_detection(
+                [pid], min_detector_confidence=subject_floor).get(pid, [])
             name = next((p["species"] for p in predictions if p["detection_id"] == det), None)
             rows.append(dict(id=pid, filename=photo["filename"], detection_id=det, species=name))
     return rows

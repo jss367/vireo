@@ -491,3 +491,24 @@ def test_subject_audit_reference_label_excludes_rejected_prediction(db):
     db.commit()
     after = next(r for r in subject_audit(db)["references"] if r["id"] == pid)
     assert (after["detection_id"], after["species"]) == (hawk, None)
+
+
+def test_subject_audit_reference_label_honors_saved_weak_rescue_floor(db):
+    """A reference photo whose primary detection sits below the workspace
+    detector floor but is kept by the saved per-photo weak-rescue floor must
+    still caption the crop with its current unrejected prediction."""
+    from services.subject_audit import subject_audit
+
+    fid = _folder(db)
+    pid = db.conn.execute(
+        "INSERT INTO photos(folder_id,filename) VALUES (?,'weak-rescue.jpg')", (fid,),
+    ).lastrowid
+    det = db.detections.save(pid, [dict(
+        box=dict(x=.1, y=.1, w=.3, h=.3), confidence=.1, category='animal',
+    )], detector_model='megadetector-v6')[0]
+    _classify(db, det, "Great Horned Owl", 1.0, match=.5)
+    db.subjects.set_primary_state(pid, det, min_conf=.05, detector_model='megadetector-v6')
+    db.collections.add_import("Subject audit references", [pid])
+    db.commit()
+    row = next(r for r in subject_audit(db)["references"] if r["id"] == pid)
+    assert (row["detection_id"], row["species"]) == (det, "Great Horned Owl")
