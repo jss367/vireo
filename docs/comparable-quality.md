@@ -21,10 +21,15 @@ NEAREST, and the mean squared gradient is taken over the resampled mask.
 
 The frame is decoded at whatever size puts the subject at that scale
 (`quality.detail_decode_edge`; `quality.load_detail_source` reads the whole
-frame once that size reaches the native one). The 1536 px proxy
-the mask stage already holds serves when the subject spans 512 px in it; in
-this catalog the median subject covers 1.25% of the frame, about 170 px in
-the proxy, so most photos are read again from the working copy or original.
+frame once that size reaches the native one). The source is always read
+again for it, even when the 1536 px proxy the mask stage holds would be
+large enough: in this catalog the median subject covers 1.25% of the frame,
+about 170 px in the proxy, so most photos needed the second read anyway,
+and one read path is what makes a mask measured when it is made and the
+same mask measured later from the cache store the same value. Resampled
+down from the proxy, 29 large subjects of this catalog read a median 0.6%
+and at most 6% off what the cached path stores for the same mask; and a
+proxy is a demosaic for a RAW whose embedded preview is smaller than it.
 A subject smaller than 512 px even at native resolution is upsampled and
 reads low, which is the honest answer: that frame holds little detail.
 
@@ -64,8 +69,10 @@ Nine of those bursts had frames on both sides of the 512 px line, so frames
 of one burst were being ranked on two renderings. A RAW without a full-size
 preview is still demosaiced when its preview is smaller than the request;
 none of this catalog's cameras (D7200, D850, Z 8) is one. Migration 38
-returns every stored value with `subject_detail_px` under 518 to "not
-measured", and the mask stage measures those cached masks again.
+returns to "not measured" every stored value that came another way (a
+subject under 518 px, read from either rendering, and a subject spanning a
+third of the frame or more, measured on the proxy when its mask was fresh),
+and the mask stage measures those cached masks again.
 
 `photos.subject_detail_px` is the subject box's longer side in native pixels,
 kept so a reader can see what the value came from ("measured at 512 px from

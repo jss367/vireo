@@ -317,24 +317,45 @@ def _validate_subject_detail(conn):
 # does not cover such a request, so 512 / 0.99 rounded up bounds the rows.
 SUBJECT_DETAIL_MIXED_RENDERING_PX = 518
 
+# A subject spanning at least this share of the frame's long edge reached the
+# 512 px detail scale inside the 1536 px analysis proxy, so a mask measured as
+# it was made was resampled down from that proxy instead of read from the
+# source at the needed edge.
+SUBJECT_DETAIL_PROXY_SHARE = 512 / 1536
 
-def _clear_small_subject_detail(conn):
-    """Unmeasure the subject detail of subjects smaller than the detail scale.
 
-    Those rows were read from whichever rendering the loader fell through
+def _clear_subject_detail_from_other_read_paths(conn):
+    """Unmeasure the subject detail that did not come from the one read path.
+
+    Two groups of rows were read differently from the rest. Subjects under
+    the detail scale came from whichever rendering the loader fell through
     to (a demosaic where libraw could decode the file, the embedded JPEG
-    where it could not), so they compare with neither each other nor the
-    larger subjects, which were always read from the embedded JPEG. NULL
-    means "not measured": the mask stage counts the cached masks as pending
-    and the next Process run measures them from the camera's rendering
-    without rerunning SAM. Larger subjects keep their values.
+    where it could not). Subjects large enough for the analysis proxy were
+    measured on that proxy when their mask was fresh, in whatever rendering
+    it held, and from the source when the mask was cached. A row whose frame
+    size is unrecorded cannot be placed, so it goes with them. NULL means
+    "not measured": the mask stage counts the cached masks as pending and
+    the next Process run measures them without rerunning SAM. The subjects
+    in between keep their values, always read from the source at the needed
+    edge.
     """
-    for table in ("photo_masks", "photos"):
-        conn.execute(
-            f"UPDATE {table} SET subject_detail=NULL, subject_detail_px=NULL "
-            "WHERE subject_detail_px < ?",
-            (SUBJECT_DETAIL_MIXED_RENDERING_PX,),
-        )
+    stale = (
+        "{px} < ? OR p.width IS NULL OR p.height IS NULL "
+        "OR {px} >= MAX(p.width, p.height) * ?"
+    )
+    params = (SUBJECT_DETAIL_MIXED_RENDERING_PX, SUBJECT_DETAIL_PROXY_SHARE)
+    conn.execute(
+        "UPDATE photo_masks SET subject_detail=NULL, subject_detail_px=NULL "
+        "WHERE subject_detail_px IS NOT NULL AND EXISTS ("
+        "  SELECT 1 FROM photos p WHERE p.id = photo_masks.photo_id AND ("
+        + stale.format(px="photo_masks.subject_detail_px") + "))",
+        params,
+    )
+    conn.execute(
+        "UPDATE photos AS p SET subject_detail=NULL, subject_detail_px=NULL "
+        "WHERE p.subject_detail_px IS NOT NULL AND (" + stale.format(px="p.subject_detail_px") + ")",
+        params,
+    )
 
 
 # Job types only Vireo itself started before ``origin`` was recorded: the
@@ -462,7 +483,7 @@ MIGRATIONS = (
     Migration(35, "subject_detail", _add_subject_detail, _validate_subject_detail),
     Migration(36, "species_choices", create_species_choices),
     Migration(37, "subject_candidates", create_subject_candidates),
-    Migration(38, "subject_detail_camera_rendering", _clear_small_subject_detail),
+    Migration(38, "subject_detail_one_read_path", _clear_subject_detail_from_other_read_paths),
 )
 
 

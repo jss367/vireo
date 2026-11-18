@@ -362,13 +362,13 @@ class _MaskExtractionRun:
         completeness = deps.crop_completeness(mask)
         features = deps.compute_all_quality_features(proxy, mask)
         detail = deps.measure_subject_detail(
-            proxy, mask, source_path=item.image_path, frame_size=deps.frame_size(photo),
+            mask, source_path=item.image_path, frame_size=deps.frame_size(photo),
         )
         if detail:
             features.update(detail)
         else:
-            # Source went unreadable between the proxy decode and this
-            # larger-edge re-read: the mask is stored but its detail
+            # Source went unreadable between the proxy decode and the
+            # measurement's own read of it: the mask is stored but its detail
             # measurement stays pending, counted so the final job status
             # does not claim completion with planned work left behind.
             self.detail_unreadable += 1

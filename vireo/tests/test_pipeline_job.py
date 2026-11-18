@@ -47,7 +47,7 @@ def stub_subject_detail(monkeypatch):
 
     monkeypatch.setattr(
         quality, "measure_subject_detail",
-        lambda proxy, mask, *, source_path, frame_size=None: {"subject_detail": 100.0, "subject_detail_px": 40.0},
+        lambda mask, *, source_path, frame_size=None: {"subject_detail": 100.0, "subject_detail_px": 40.0},
     )
     monkeypatch.setattr(
         quality, "measure_cached_subject_detail",
@@ -19783,7 +19783,7 @@ def test_fresh_mask_detail_unmeasured_fails_the_stage_like_cached(tmp_path, monk
     _stub_extract_masks_heavy_ops(monkeypatch)
     monkeypatch.setattr(
         quality, "measure_subject_detail",
-        lambda proxy, mask, *, source_path, frame_size=None: {},
+        lambda mask, *, source_path, frame_size=None: {},
     )
 
     runner, result = _run_extract_masks_only(db_path, ws_id, collection_id)
@@ -20005,7 +20005,7 @@ def test_detail_reread_outage_records_the_reason_for_the_fatal_message(tmp_path,
     # on the latched folder.
     monkeypatch.setattr(
         quality, "measure_subject_detail",
-        lambda proxy, mask, *, source_path, frame_size=None: {},
+        lambda mask, *, source_path, frame_size=None: {},
     )
     monkeypatch.setattr(
         pj, "_source_offline_reason",

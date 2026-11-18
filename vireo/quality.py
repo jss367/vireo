@@ -463,20 +463,22 @@ def load_detail_source(source_path, needed, frame_size=None):
     return load_image(source_path, max_size=None if whole else needed, raw_decode=RAW_DECODE_CAMERA_RENDERED)
 
 
-def measure_subject_detail(proxy, mask, *, source_path, frame_size=None):
-    """Subject detail from the proxy, or from a larger decode of the source.
+def measure_subject_detail(mask, *, source_path, frame_size=None):
+    """Subject detail for ``mask``, read from ``source_path`` through ``load_detail_source``.
 
-    The proxy serves when the subject already spans DETAIL_SCALE_PX in it;
-    a smaller subject reads ``source_path`` again through
-    ``load_detail_source``. Returns the ``compute_subject_detail`` dict, or
-    {} when the source cannot be read, so the measurement stays unmade
-    rather than interpolated.
+    The source is always read again, even when the caller already holds a
+    proxy large enough for the scale: a proxy is whatever rendering the
+    loader chose for its own size (a demosaic when the embedded preview is
+    smaller than the proxy), and resampling the subject down from it gives
+    a slightly different value than decoding at the needed edge. One read
+    path is what makes a mask measured when it is made and the same mask
+    measured later from the cache store the same value. Returns the
+    ``compute_subject_detail`` dict, or {} when the source cannot be read,
+    so the measurement stays unmade rather than interpolated.
     """
     needed = detail_decode_edge(mask)
     if needed is None:
         return {"subject_detail": 0.0, "subject_detail_px": None}
-    if needed <= max(proxy.size):
-        return compute_subject_detail(proxy, mask, frame_size=frame_size)
     image = load_detail_source(source_path, needed, frame_size)
     if image is None:
         return {}
@@ -489,8 +491,8 @@ def measure_subject_detail(proxy, mask, *, source_path, frame_size=None):
 def measure_cached_subject_detail(mask_path, source_path, frame_size=None):
     """Subject detail for a saved mask PNG whose row predates the measurement.
 
-    Reads the mask from disk and the source through ``load_detail_source``;
-    SAM does not run. Returns the ``compute_subject_detail`` dict on
+    Reads the mask from disk and measures it as ``measure_subject_detail``
+    does; SAM does not run. Returns the ``compute_subject_detail`` dict on
     success, ``MASK_CACHE_INVALID`` when the mask PNG cannot be decoded (the
     cached mask is lost; the caller should drop it so the next run
     regenerates), or None when the source cannot be read.
@@ -507,20 +509,10 @@ def measure_cached_subject_detail(mask_path, source_path, frame_size=None):
         # DecompressionBombError. The cache file is lost either way, so
         # the caller drops the row and the next run regenerates. Scoped
         # to the open+convert read so unrelated processing failures in
-        # detail_decode_edge / load_image / compute_subject_detail below
-        # still propagate.
+        # the measurement below still propagate.
         log.warning("Could not read mask %s for the subject detail measurement", mask_path, exc_info=True)
         return MASK_CACHE_INVALID
-    needed = detail_decode_edge(mask)
-    if needed is None:
-        return {"subject_detail": 0.0, "subject_detail_px": None}
-    image = load_detail_source(source_path, needed, frame_size)
-    if image is None:
-        return None
-    try:
-        return compute_subject_detail(image, mask, frame_size=frame_size)
-    finally:
-        image.close()
+    return measure_subject_detail(mask, source_path=source_path, frame_size=frame_size) or None
 
 
 def compute_all_quality_features(image, mask):

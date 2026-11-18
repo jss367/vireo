@@ -616,36 +616,53 @@ def test_subject_comparison_cache_migrates_without_changing_photographer_choices
             "detection_id", "source_key", "features", "mask_png"]
 
 
-def test_version_37_catalog_unmeasures_the_detail_of_subjects_under_the_scale(tmp_path):
-    """Subjects under 512 px were read from a rendering the larger ones never
-    use, so their detail returns to "not measured" and the rest is kept."""
+def test_version_37_catalog_unmeasures_the_detail_read_another_way(tmp_path):
+    """Subjects under 512 px came from a rendering the larger ones never use,
+    and subjects that fit the analysis proxy were measured on it when fresh;
+    both return to "not measured" and the subjects in between are kept."""
     path = str(tmp_path / "vireo.db")
     schema.ensure_schema(path)
-    rows = {1: (19413.16, 259.2), 2: (708.37, 517.9), 3: (9026.48, 518.0), 4: (24410.87, 1015.7), 5: (0.0, None)}
+    # photo id: (detail, subject px, frame width, frame height)
+    rows = {
+        1: (19413.16, 259.2, 5408, 3608),    # under the scale
+        2: (708.37, 517.9, 5408, 3608),      # under a full-size preview's coverage
+        3: (9026.48, 518.0, 5408, 3608),     # read from the source at the needed edge: kept
+        4: (24410.87, 1015.7, 5408, 3608),   # kept
+        5: (0.0, None, 5408, 3608),          # empty mask, nothing was read: kept
+        6: (5462.9, 2137.0, 5408, 3608),     # at least a third of the frame: fit the proxy
+        7: (4000.0, 1802.6, 5408, 3608),     # just under a third: kept
+        8: (4000.0, 1900.0, 3608, 5408),     # portrait frame, the long edge decides
+        9: (4000.0, 900.0, None, None),      # frame size unrecorded
+    }
     with sqlite3.connect(path) as conn:
         conn.execute("INSERT INTO folders (id, path) VALUES (1, '/photos')")
-        for photo_id, (detail, px) in rows.items():
+        for photo_id, (detail, px, width, height) in rows.items():
             conn.execute(
-                "INSERT INTO photos (id, folder_id, filename, subject_detail, subject_detail_px) VALUES (?, 1, ?, ?, ?)",
-                (photo_id, f"{photo_id}.nef", detail, px),
+                "INSERT INTO photos (id, folder_id, filename, width, height, subject_detail, subject_detail_px) "
+                "VALUES (?, 1, ?, ?, ?, ?, ?)",
+                (photo_id, f"{photo_id}.nef", width, height, detail, px),
             )
-            conn.execute(
-                "INSERT INTO photo_masks (photo_id, variant, path, created_at, detector_model, prompt_x, prompt_y, "
-                "prompt_w, prompt_h, subject_detail, subject_detail_px) VALUES (?, 'sam2-large', ?, 0, 'md', 0, 0, 1, 1, ?, ?)",
-                (photo_id, f"/masks/{photo_id}.png", detail, px),
-            )
+            for variant in ("sam2-large", "sam2-small"):
+                conn.execute(
+                    "INSERT INTO photo_masks (photo_id, variant, path, created_at, detector_model, prompt_x, prompt_y, "
+                    "prompt_w, prompt_h, subject_detail, subject_detail_px) VALUES (?, ?, ?, 0, 'md', 0, 0, 1, 1, ?, ?)",
+                    (photo_id, variant, f"/masks/{photo_id}.{variant}.png", detail, px),
+                )
         conn.execute("PRAGMA user_version=37")
     schema.ensure_schema(path)
     schema.ensure_schema(path)
-    kept = {3: (9026.48, 518.0), 4: (24410.87, 1015.7), 5: (0.0, None)}
+    kept = {photo_id: rows[photo_id][:2] for photo_id in (3, 4, 5, 7)}
+    cleared = dict.fromkeys((1, 2, 6, 8, 9), (None, None))
     with sqlite3.connect(path) as conn:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
-        for table, key in (("photos", "id"), ("photo_masks", "photo_id")):
+        got = {row[0]: (row[1], row[2]) for row in conn.execute("SELECT id, subject_detail, subject_detail_px FROM photos")}
+        assert got == {**cleared, **kept}
+        for variant in ("sam2-large", "sam2-small"):
             got = {row[0]: (row[1], row[2]) for row in conn.execute(
-                f"SELECT {key}, subject_detail, subject_detail_px FROM {table}")}
-            assert got == {1: (None, None), 2: (None, None), **kept}, table
+                "SELECT photo_id, subject_detail, subject_detail_px FROM photo_masks WHERE variant=?", (variant,))}
+            assert got == {**cleared, **kept}, variant
         # The masks themselves stay: only the measurement is pending again.
-        assert conn.execute("SELECT COUNT(*) FROM photo_masks WHERE path IS NOT NULL").fetchone()[0] == 5
+        assert conn.execute("SELECT COUNT(*) FROM photo_masks WHERE path IS NOT NULL").fetchone()[0] == 18
 
 
 def test_version_34_catalog_gains_subject_detail_columns(tmp_path):

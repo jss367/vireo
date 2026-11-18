@@ -1270,23 +1270,21 @@ class _MaskPass:
                 analysis_report.update(self.raw_session.source_metadata())
                 features = scoring_features(analysis_report)
                 features["quality_input_recipe"] = RECIPE
-        features.update(self._measure_detail(item, proxy, mask))
+        features.update(self._measure_detail(item, mask))
         return completeness, features, analysis_report
 
-    def _measure_detail(
-        self, item: _MaskPhoto, proxy: Image.Image, mask: np.ndarray,
-    ) -> dict[str, Any]:
+    def _measure_detail(self, item: _MaskPhoto, mask: np.ndarray) -> dict[str, Any]:
         """Subject detail for a freshly made mask (``quality.measure_subject_detail``).
 
         A source that cannot be re-read for it leaves the measurement
         unmade, which the next run treats as pending work. Empty results
-        (the source went unreachable between the proxy decode and this
-        larger-edge re-read) also credit ``detail_unreadable`` so finalize
+        (the source went unreachable between the proxy decode and the
+        measurement's own read of it) also credit ``detail_unreadable`` so finalize
         does not report "completed" with planned work left behind.
         """
         with self._timed("detail"):
             measured = self.measure_subject_detail(
-                proxy, mask, source_path=item.image_path, frame_size=self.frame_size(item.photo),
+                mask, source_path=item.image_path, frame_size=self.frame_size(item.photo),
             )
         if not measured:
             self.detail_unreadable += 1

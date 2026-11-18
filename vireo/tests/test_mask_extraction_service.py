@@ -47,7 +47,7 @@ def extraction(db, tmp_path, monkeypatch):
     deps.generate_mask = generate
     deps.crop_completeness = lambda mask: 0.9
     deps.compute_all_quality_features = lambda proxy, mask: {"subject_tenengrad": 1.5}
-    deps.measure_subject_detail = lambda proxy, mask, *, source_path, frame_size=None: {
+    deps.measure_subject_detail = lambda mask, *, source_path, frame_size=None: {
         "subject_detail": 100.0, "subject_detail_px": 40.0}
     deps.measure_cached_subject_detail = lambda mask_path, source_path, frame_size=None: {
         "subject_detail": 100.0, "subject_detail_px": 40.0}
@@ -209,7 +209,7 @@ def test_fresh_mask_whose_detail_reread_fails_credits_detail_unreadable(db, tmp_
     # with planned work left behind.
     first = seed_photo(db, tmp_path, "source-lost-midrun")
     extraction.deps.measure_subject_detail = (
-        lambda proxy, mask, *, source_path, frame_size=None: {}
+        lambda mask, *, source_path, frame_size=None: {}
     )
 
     result = run(extraction)
