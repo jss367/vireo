@@ -985,6 +985,29 @@ class PredictionRepository:
             result.update((row['id'], dict(row)) for row in rows)
         return result
 
+    def region_removal_state(self, detection_id: int) -> dict[str, list[dict[str, Any]]]:
+        """Capture global output and every workspace's decisions before a reversible delete."""
+        return {
+            "predictions": [dict(row) for row in self.conn.execute(
+                "SELECT * FROM predictions WHERE detection_id=? ORDER BY id", (detection_id,))],
+            "prediction_review": [dict(row) for row in self.conn.execute(
+                "SELECT r.* FROM prediction_review r JOIN predictions p ON p.id=r.prediction_id "
+                "WHERE p.detection_id=? ORDER BY r.prediction_id, r.workspace_id", (detection_id,))],
+            "prediction_history_instances": [dict(row) for row in self.conn.execute(
+                "SELECT h.* FROM prediction_history_instances h JOIN predictions p ON p.id=h.prediction_id "
+                "WHERE p.detection_id=? ORDER BY h.prediction_id", (detection_id,))],
+            "detection_evidence_reviews": [dict(row) for row in self.conn.execute(
+                "SELECT * FROM detection_evidence_reviews WHERE detection_id=? ORDER BY workspace_id", (detection_id,))],
+        }
+
+    def restore_region_removal_state(self, state: dict[str, list[dict[str, Any]]]) -> None:
+        """Restore exact identities atomically; a reused id must fail rather than overwrite."""
+        for table in ("predictions", "prediction_review", "prediction_history_instances", "detection_evidence_reviews"):
+            for row in state.get(table, []):
+                columns = ",".join(row)
+                placeholders = ",".join("?" for _ in row)
+                self.conn.execute(f"INSERT INTO {table} ({columns}) VALUES ({placeholders})", tuple(row.values()))
+
     def evidence_review(self, detection_id):
         """Read the observed subject assessment, or None outside this workspace."""
         return self.conn.execute(

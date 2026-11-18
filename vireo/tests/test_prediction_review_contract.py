@@ -34,6 +34,8 @@ CROSS_WORKSPACE_REVIEWS = {
 # reads. These do not present workspace review state. Keep their query counts
 # fixed; a new reader must explicitly opt out of workspace review semantics.
 RAW_READS = {
+    # Removal history captures raw identities and all workspaces so Undo can restore the cascade exactly.
+    "repositories/predictions.py:PredictionRepository.region_removal_state": 3,
     # Primary-region selection is shared with global processing stages. Its
     # raw-confidence tie-break must not vary with workspace species decisions.
     'repositories/subject_order.py:primary_terms': 1,

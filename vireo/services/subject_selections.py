@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from typing import TYPE_CHECKING
 
 from detection_id import detection_id as legacy_detection_id
@@ -18,7 +19,6 @@ from subjects import (
 )
 
 if TYPE_CHECKING:
-    import sqlite3
     from collections.abc import Mapping, Sequence
 
     from db import Database
@@ -108,6 +108,12 @@ def set_selection(
         if db.photos.get(photo_id, verify_workspace=True) is None:
             raise SubjectVerdictError("Photo not found in the active workspace", 404)
         before = _snapshot(db, photo_id)
+        if reviewer_box and body.get("operation") == "remove":
+            region_id = body.get("detection_id")
+            if type(region_id) is int and 0 <= region_id < 2**53:
+                state = json.loads(before)
+                state["removed_evidence"] = {"region_id": region_id, "rows": db.predictions.region_removal_state(region_id)}
+                before = json.dumps(state, sort_keys=True)
         if reviewer_box:
             description = _save_box(db, photo_id, body)
         else:
@@ -147,6 +153,27 @@ def _regions(photo_id: int, state: JsonDict) -> dict[int, JsonDict]:
     return regions
 
 
+def _replay_region(db: Database, photo_id: int, region_id: int, old: JsonDict | None,
+                   new: JsonDict | None, expected: JsonDict, desired: JsonDict) -> None:
+    archive = expected.get("removed_evidence", {})
+    if new is None:
+        evidence = db.predictions.region_removal_state(region_id)
+        if archive.get("region_id") == region_id:
+            if evidence != archive["rows"]:
+                raise SubjectVerdictError("Species decisions changed since this removal. Reload before changing the region.", 409)
+        elif (evidence["prediction_history_instances"]
+                or any(row["status"] != "pending" for row in evidence["prediction_review"])
+                or any(row["decision"] != "unreviewed" for row in evidence["detection_evidence_reviews"])):
+            raise SubjectVerdictError("This history entry cannot preserve the region's newer decisions. Remove it explicitly instead.", 409)
+    _write_region(db, photo_id, region_id, old, new)
+    archive = desired.get("removed_evidence", {})
+    if old is None and new is not None and archive.get("region_id") == region_id:
+        try:
+            db.predictions.restore_region_removal_state(archive["rows"])
+        except sqlite3.IntegrityError as exc:
+            raise SubjectVerdictError("Saved species decisions conflict with current catalog identities", 409) from exc
+
+
 def replay_history(db: Database, items: Sequence[Mapping], *, undo: bool) -> None:
     for item in items:
         photo_id = int(item["photo_id"])
@@ -160,7 +187,7 @@ def replay_history(db: Database, items: Sequence[Mapping], *, undo: bool) -> Non
                 if old != new:
                     if live.get(region_id) != old:
                         raise SubjectVerdictError("Region changed since this edit", 409)
-                    _write_region(db, photo_id, region_id, old, new)
+                    _replay_region(db, photo_id, region_id, old, new, expected, desired)
             if expected["choice"] != desired["choice"]:
                 if current["choice"] != expected["choice"]:
                     raise SubjectVerdictError("Primary subject changed since this edit", 409)
