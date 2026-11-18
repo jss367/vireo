@@ -7,7 +7,7 @@ import os
 import pytest
 from page_scripts import page_with_scripts
 from PIL import Image
-from services import keyword_tagging, photo_ingest, workspace_folders
+from services import keyword_tagging, photo_ingest, species_choices, workspace_folders
 
 
 @pytest.fixture
@@ -141,10 +141,10 @@ def test_page_renders(life_app):
     assert "Taxonomic group" in html
     assert "Identification level" in html
     assert 'id="exportColumns"' in html
-    assert "Representative filename" in html
+    assert "Top photo filename" in html
     assert "Quality score" in html
     assert 'id="publishLifeList" type="checkbox" checked' in html
-    assert "Representative photo only" in html
+    assert "Top photo only" in html
     assert 'id="publishHighlights" type="checkbox"' in html
     assert "Include Highlights" in html
     assert "/api/jobs/publish-site/preflight" in html
@@ -215,7 +215,7 @@ def test_life_list_species_page_validates_species(life_app):
 
 
 def test_life_list_pick_promotes_lower_scored_photo(life_app):
-    """A Pick is the lead Life List photo unless a representative overrides it."""
+    """A Pick is the lead Life List photo unless a highlight overrides it."""
     app, db, ids = life_app
     # p1's quality_score (0.5) is lower than p2's (0.9), proving that the
     # explicit Pick tier, rather than the algorithmic score, promoted it.
@@ -231,7 +231,7 @@ def test_life_list_pick_promotes_lower_scored_photo(life_app):
     assert [p["flag"] for p in cardinal["photos"]] == ["flagged", "none"]
 
 
-def test_life_list_representative_stays_ahead_of_pick(life_app):
+def test_life_list_highlight_stays_ahead_of_pick(life_app):
     app, db, ids = life_app
     db.photo_review.set_flag(ids["p2"], "flagged")
     db.commit()
@@ -246,7 +246,8 @@ def test_life_list_representative_stays_ahead_of_pick(life_app):
     cardinal = _entry(_get_life_list(app), "Northern Cardinal")
     assert cardinal["best"]["id"] == ids["p1"]
     assert cardinal["best"]["is_species_representative"] is True
-    assert cardinal["best_source"] == "representative"
+    assert cardinal["best"]["is_highlighted"] is True
+    assert cardinal["best_source"] == "highlight"
     assert [p["id"] for p in cardinal["photos"]] == [ids["p1"], ids["p2"]]
     assert cardinal["photos"][1]["flag"] == "flagged"
 
@@ -267,10 +268,10 @@ def test_life_list_photo_preference_overrides_best_photo(life_app):
     assert cardinal["best"]["is_life_list_photo"] is True
     assert cardinal["best"]["is_species_representative"] is True
     assert cardinal["has_preferred_photo"] is True
-    assert cardinal["best_source"] == "representative"
+    assert cardinal["best_source"] == "highlight"
     assert [p["id"] for p in cardinal["photos"][:2]] == [ids["p1"], ids["p2"]]
     assert db.species_curation.get_highlights("Northern Cardinal") == {
-        "Northern Cardinal": {ids["p1"]: 1},
+        "Northern Cardinal": [ids["p1"]],
     }
 
     highlights = client.get("/api/highlights?scope=workspace").get_json()
@@ -282,47 +283,56 @@ def test_life_list_photo_preference_overrides_best_photo(life_app):
     assert cardinal_highlights["photos"][0]["highlight_rank"] == 1
 
 
-def test_representative_preference_promotes_existing_highlight_to_top(life_app):
+def test_representative_preference_puts_an_existing_highlight_first(life_app):
     app, db, ids = life_app
-    db.species_curation.add_highlight("Northern Cardinal", ids["p1"])
-    db.species_curation.add_highlight("Northern Cardinal", ids["p2"])
-    db.commit()
+    with db.transaction():
+        species_choices.add_highlight(db, "Northern Cardinal", ids["p1"])
+        species_choices.add_highlight(db, "Northern Cardinal", ids["p2"])
+    assert species_choices.ranked_in_scope(db, "Northern Cardinal") == [
+        ids["p1"], ids["p2"],
+    ]
 
-    resp = app.test_client().post("/api/photo-preferences", json={
+    client = app.test_client()
+    resp = client.post("/api/photo-preferences", json={
         "purpose": "species_representative",
         "species": "Northern Cardinal",
         "photo_id": ids["p2"],
     })
     assert resp.status_code == 200
     body = resp.get_json()
-    assert body["highlight_rank"] == 1
+    assert body["over"] == [ids["p1"]]
+    # Its number is its place on the page, not a stored value.
+    assert "highlight_rank" not in body
 
-    assert db.species_curation.get_highlights("Northern Cardinal") == {
-        "Northern Cardinal": {ids["p2"]: 1, ids["p1"]: 2},
-    }
+    assert species_choices.ranked_in_scope(db, "Northern Cardinal") == [
+        ids["p2"], ids["p1"],
+    ]
+    data = client.get("/api/highlights?scope=workspace").get_json()
+    cardinal = next(
+        b for b in data["buckets"] if b["species"] == "Northern Cardinal"
+    )
+    assert [
+        (p["id"], p["highlight_rank"]) for p in cardinal["photos"]
+        if p["is_highlighted"]
+    ] == [(ids["p2"], 1), (ids["p1"], 2)]
 
 
-@pytest.mark.parametrize(
-    "failing_method",
-    ["get_highlights_candidates", "promote_highlight"],
-)
-def test_representative_preference_rolls_back_when_promotion_step_raises(
-    life_app, monkeypatch, failing_method,
+def test_representative_preference_rolls_back_when_recording_the_choice_raises(
+    life_app, monkeypatch,
 ):
-    # The route writes the representative with _commit=False, then runs the
-    # Highlights eligibility check (species_curation.get_highlights_candidates) and the
-    # promotion. If either raises, the uncommitted representative write must
-    # be rolled back rather than left open on the request connection, where
-    # a later commit on it would persist it.
+    # The route makes the photo a highlight and then records the choice that
+    # puts it first, in one unit of work. If recording raises, the highlight
+    # must be rolled back rather than left open on the request connection,
+    # where a later commit on it would persist it.
     from flask import g
-    from repositories.species_curation import SpeciesCurationRepository
+    from repositories.species_choices import SpeciesChoiceRepository
 
     app, db, ids = life_app
 
     def boom(self, *args, **kwargs):
         raise RuntimeError("forced failure")
 
-    monkeypatch.setattr(SpeciesCurationRepository, failing_method, boom)
+    monkeypatch.setattr(SpeciesChoiceRepository, "record", boom)
 
     # teardown_appcontext runs in reverse registration order, so this runs
     # before close_request_db and sees the request connection still open.
@@ -346,11 +356,11 @@ def test_representative_preference_rolls_back_when_promotion_step_raises(
     assert db.species_curation.get_highlights("Northern Cardinal") == {}
 
 
-def test_representative_preference_promotes_unscored_pick_to_highlight(life_app):
-    # p3 (sparrow) has no quality_score, but Highlights now admits
-    # unscored photos at min_quality=0 so users can curate a pick before
-    # analysis. Setting an unscored photo as representative must create
-    # the species_highlights row so it shows up on the Highlights page.
+def test_representative_preference_makes_an_unscored_photo_a_highlight(life_app):
+    # p3 (sparrow) has no quality_score, but Highlights admits unscored
+    # photos at min_quality=0 so users can curate a pick before analysis.
+    # Making an unscored photo the top highlight must store a highlight the
+    # Highlights page still counts as eligible.
     app, db, ids = life_app
 
     resp = app.test_client().post("/api/photo-preferences", json={
@@ -360,10 +370,11 @@ def test_representative_preference_promotes_unscored_pick_to_highlight(life_app)
     })
     assert resp.status_code == 200
     body = resp.get_json()
-    assert body["highlight_rank"] == 1
+    assert body["over"] == []
+    assert "highlight_rank" not in body
 
-    assert db.species_curation.get_highlights("House Sparrow") == {
-        "House Sparrow": {ids["p3"]: 1},
+    assert db.species_curation.get_highlights("House Sparrow", eligible_only=True) == {
+        "House Sparrow": [ids["p3"]],
     }
 
 
@@ -382,10 +393,10 @@ def test_unscored_species_highlight_renders_as_highlighted(life_app):
     })
     assert resp.status_code == 200
 
-    # The eligibility-filtered read (what apply_ordered_highlights uses) must
-    # include the unscored row.
+    # The eligibility-filtered read (what apply_highlight_preferences uses)
+    # must include the unscored row.
     assert db.species_curation.get_highlights("House Sparrow", eligible_only=True) == {
-        "House Sparrow": {ids["p3"]: 1},
+        "House Sparrow": [ids["p3"]],
     }
 
     # And the rendered bucket marks it as a highlight.
@@ -448,7 +459,7 @@ def test_representatives_are_global_but_filtered_to_workspace(life_app):
     entry = _entry(data, species)
     assert entry["best"]["id"] == feb_pid
     assert entry["best"]["is_species_representative"] is True
-    assert entry["best_source"] == "representative"
+    assert entry["best_source"] == "highlight"
     assert [p["id"] for p in entry["photos"][:2]] == [feb_pid, jan_pid]
     assert [p["is_species_representative"] for p in entry["photos"][:2]] == [
         True, True,
@@ -505,14 +516,16 @@ def test_clearing_representative_removes_legacy_fallbacks(life_app):
     assert cardinal["best_source"] == "algorithm"
 
 
-def test_photo_preferences_highlights_purpose_adds_ordered_highlight(life_app):
-    """POST /api/photo-preferences with purpose='highlights' must add an
-    ordered species highlight — not silently overwrite the species
-    representative. Guards against legacy clients (or a cached Highlights
-    page) whose POST would otherwise mislabel a highlight pick as the
-    canonical representative."""
+def test_photo_preferences_highlights_purpose_adds_a_highlight_after_the_others(life_app):
+    """POST /api/photo-preferences with purpose='highlights' must add the
+    photo after the highlights already there, the same as
+    ``POST /api/species-highlights`` — not put it first. Guards against
+    legacy clients (or a cached Highlights page) whose POST would otherwise
+    turn "add a highlight" into "make this the top highlight"."""
     app, db, ids = life_app
     client = app.test_client()
+    with db.transaction():
+        species_choices.add_highlight(db, "Northern Cardinal", ids["p1"])
 
     resp = client.post("/api/photo-preferences", json={
         "purpose": "highlights",
@@ -523,24 +536,24 @@ def test_photo_preferences_highlights_purpose_adds_ordered_highlight(life_app):
     body = resp.get_json()
     assert body["ok"] is True
     assert body["purpose"] == "highlights"
-    assert body["rank"] == 1
+    assert body["added"] is True
+    assert body["after"] == [ids["p1"]]
+    assert "rank" not in body
 
-    # The photo landed in species_highlights, not in photo_preferences
-    # as a representative.
-    assert db.species_curation.get_highlights("Northern Cardinal") == {
-        "Northern Cardinal": {ids["p2"]: 1},
-    }
-    assert db.species_curation.get_photo_preferences("species_representative") == {}
+    # The earlier highlight still leads.
+    assert species_choices.ranked_in_scope(db, "Northern Cardinal") == [
+        ids["p1"], ids["p2"],
+    ]
+    assert db.get_species_representatives() == {"Northern Cardinal": ids["p1"]}
 
 
-def test_photo_preferences_highlights_delete_removes_ordered_highlight(life_app):
+def test_photo_preferences_highlights_delete_removes_one_highlight(life_app):
     """DELETE /api/photo-preferences with purpose='highlights' + photo_id
-    must remove that specific ordered highlight and leave the species
-    representative alone."""
+    must remove that one highlight and leave the species' others alone."""
     app, db, ids = life_app
-    db.species_curation.add_highlight("Northern Cardinal", ids["p1"])
-    db.set_species_representative("Northern Cardinal", ids["p2"])
-    db.commit()
+    with db.transaction():
+        species_choices.add_highlight(db, "Northern Cardinal", ids["p1"])
+        species_choices.choose_best(db, "Northern Cardinal", ids["p2"])
 
     resp = app.test_client().delete("/api/photo-preferences", json={
         "purpose": "highlights",
@@ -549,19 +562,21 @@ def test_photo_preferences_highlights_delete_removes_ordered_highlight(life_app)
     })
     assert resp.status_code == 200
 
-    assert db.species_curation.get_highlights("Northern Cardinal") == {}
-    # The species_representative pick is untouched — DELETE with
-    # purpose=highlights must not clear the representative.
+    # The other highlight is untouched — DELETE with purpose=highlights
+    # must not clear every highlight of the species.
+    assert db.species_curation.get_highlights("Northern Cardinal") == {
+        "Northern Cardinal": [ids["p2"]],
+    }
     assert db.get_species_representatives() == {"Northern Cardinal": ids["p2"]}
 
 
 def test_photo_preferences_highlights_delete_requires_photo_id(life_app):
     """DELETE with purpose='highlights' but no photo_id is ambiguous
-    (ordered highlights are per-photo) and must 400 rather than clearing
+    (that purpose removes one photo) and must 400 rather than clearing
     all highlights for the species."""
     app, db, ids = life_app
-    db.species_curation.add_highlight("Northern Cardinal", ids["p1"])
-    db.commit()
+    with db.transaction():
+        species_choices.add_highlight(db, "Northern Cardinal", ids["p1"])
 
     resp = app.test_client().delete("/api/photo-preferences", json={
         "purpose": "highlights",
@@ -570,14 +585,13 @@ def test_photo_preferences_highlights_delete_requires_photo_id(life_app):
     assert resp.status_code == 400
     # The highlight is still there.
     assert db.species_curation.get_highlights("Northern Cardinal") == {
-        "Northern Cardinal": {ids["p1"]: 1},
+        "Northern Cardinal": [ids["p1"]],
     }
 
 
 def test_photo_preferences_highlights_rejects_predicted_only_photo(life_app):
-    """Highlights eligibility is stricter than life-list eligibility: a
-    photo that lacks the accepted species keyword should be checked via
-    the highlights-bucket eligibility path, not the life-list one."""
+    """A photo that neither carries the species nor sits in its Highlights
+    bucket through a prediction cannot be added as a highlight of it."""
     app, _, ids = life_app
     # p3 belongs to House Sparrow, not Northern Cardinal — so it is not
     # a valid Northern Cardinal highlight.
@@ -589,29 +603,38 @@ def test_photo_preferences_highlights_rejects_predicted_only_photo(life_app):
     assert resp.status_code == 400
 
 
-def test_ordered_highlight_is_life_list_fallback(life_app):
+def test_a_highlight_leads_the_life_list(life_app):
     app, db, ids = life_app
-    db.species_curation.add_highlight("Northern Cardinal", ids["p1"])
-    db.commit()
+    with db.transaction():
+        species_choices.add_highlight(db, "Northern Cardinal", ids["p1"])
 
     data = _get_life_list(app)
     cardinal = _entry(data, "Northern Cardinal")
+    # p2 scores higher, so only the highlight puts p1 first.
     assert cardinal["best"]["id"] == ids["p1"]
     assert cardinal["best"]["is_highlighted"] is True
+    assert cardinal["best"]["highlight_rank"] == 1
     assert cardinal["best_source"] == "highlight"
 
 
-def test_species_representative_beats_ordered_highlight_for_life_list(life_app):
+def test_a_chosen_best_photo_leads_the_other_highlights_on_the_life_list(life_app):
     app, db, ids = life_app
-    db.species_curation.add_highlight("Northern Cardinal", ids["p1"])
-    db.set_species_representative("Northern Cardinal", ids["p2"])
-    db.commit()
+    with db.transaction():
+        species_choices.add_highlight(db, "Northern Cardinal", ids["p1"])
+        species_choices.choose_best(db, "Northern Cardinal", ids["p2"])
+        # Selecting p1 again makes it the newest selection, so only the
+        # recorded choice keeps p2 ahead of it.
+        db.set_species_representative("Northern Cardinal", ids["p1"])
 
     data = _get_life_list(app)
     cardinal = _entry(data, "Northern Cardinal")
     assert cardinal["best"]["id"] == ids["p2"]
     assert cardinal["best"]["is_species_representative"] is True
-    assert cardinal["best_source"] == "representative"
+    assert cardinal["best_source"] == "highlight"
+    assert cardinal["best_decision"]["kind"] == "highlight"
+    assert [
+        (p["id"], p["highlight_rank"]) for p in cardinal["photos"][:2]
+    ] == [(ids["p2"], 1), (ids["p1"], 2)]
 
 
 def test_ordered_highlights_control_highlights_bucket_order(life_app):
@@ -805,15 +828,15 @@ def test_higher_rank_photo_can_be_life_list_representative(life_app):
     Regression test for the eligibility guards in
     :func:`species_curation.get_photo_life_list_species` and
     :func:`_photo_can_be_life_list_preference` that previously filtered to
-    ``t.rank = 'species' OR t.rank IS NULL`` — which hid the shared Set
-    Representative row on the higher-rank Life List entry and 400'd a
-    representative POST for the entry the user could actually see.
+    ``t.rank = 'species' OR t.rank IS NULL`` — which hid the shared Make
+    Top Highlight row on the higher-rank Life List entry and 400'd a
+    top-highlight POST for the entry the user could actually see.
     """
     app, db, ids = life_app
     seed = _seed_higher_rank_accipiter(db, ids["folder"])
     client = app.test_client()
 
-    # The shared Set-Representative row (browse context menu / lightbox
+    # The shared Make Top Highlight row (browse context menu / lightbox
     # panel) reads the photo's life_list block, which comes from
     # ``species_curation.get_photo_life_list_species``. Without the broadened eligibility,
     # this list would be empty and the affordance would not render.
@@ -841,7 +864,7 @@ def test_higher_rank_photo_can_be_life_list_representative(life_app):
     # ``GET /api/photos/<id>`` to decide whether the button is current.
     # Without the broadened eligibility EXISTS, the higher-rank row would
     # be dropped and ``is_current_photo`` would come back false, so the
-    # UI would keep offering "Set Representative" for a save that
+    # UI would keep offering "Make Top Highlight" for a save that
     # already succeeded.
     assert db.species_curation.get_representative_lists(eligible_only=True) == {
         "Accipiter": [seed["photo"]],
@@ -1034,7 +1057,7 @@ def test_life_list_ancestor_only_photo_still_listed(life_app):
 def test_life_list_ancestor_representative_write_denied_when_descendant_exists(life_app):
     """When a photo carries both a species-rank identification and a linked
     ancestor keyword, ``POST /api/photo-preferences`` for the ancestor
-    entry must return 400. Otherwise a Set-Representative call for
+    entry must return 400. Otherwise a Make Top Highlight call for
     ``Aves`` would succeed on a photo the Life List Aves bucket does not
     even render, leaving orphaned curation the next eligible-only reader
     silently drops.
@@ -1070,7 +1093,7 @@ def test_species_representative_lists_suppress_ancestor_with_descendant(life_app
     an ancestor keyword's representative when the photo also carries a
     descendant identification. That reader powers ``is_current_photo`` on
     ``GET /api/photos/<id>``, so a lingering ancestor eligibility would
-    make the lightbox re-offer "Set Representative" on a photo the
+    make the lightbox re-offer "Make Top Highlight" on a photo the
     ancestor bucket does not render.
     """
     app, db, ids = life_app
@@ -1670,11 +1693,11 @@ def test_life_list_groups_taxon_aliases_with_paging_and_curation(
     for photo, name in zip(photos, ("France", "Hawaii", "France"), strict=True):
         keyword_tagging.tag_photo(db, photo, db.keywords.add(name, kw_type="location"))
         db.commit()
-    # The most recent representative was selected under the second alias.
+    # Highlights saved under both aliases; the most recent one was selected
+    # under the second alias.
     db.species_curation.set_global_representative(stored_names[0], photos[0])
+    db.species_curation.set_global_representative(stored_names[1], photos[2])
     db.species_curation.set_global_representative(stored_names[1], photos[1])
-    db.species_curation.add_highlight(stored_names[0], photos[0])
-    db.species_curation.add_highlight(stored_names[1], photos[2])
     db.commit()
 
     data = _get_life_list(app)
@@ -1690,10 +1713,13 @@ def test_life_list_groups_taxon_aliases_with_paging_and_curation(
     assert entry["preferred_photo_id"] == photos[1]
     assert entry["best"]["id"] == photos[1]
     by_id = {photo["id"]: photo for photo in entry["photos"]}
-    assert by_id[photos[0]]["is_species_representative"] is True
-    assert by_id[photos[1]]["is_species_representative"] is True
-    assert by_id[photos[0]]["is_highlighted"] is True
-    assert by_id[photos[2]]["is_highlighted"] is True
+    for photo in photos:
+        assert by_id[photo]["is_species_representative"] is True
+        assert by_id[photo]["is_highlighted"] is True
+    # One list across both spellings, newest selection first.
+    assert [by_id[photo]["highlight_rank"] for photo in (photos[1], photos[2], photos[0])] == [
+        1, 2, 3,
+    ]
     assert data["meta"]["species_count"] == 3
 
     client = app.test_client()

@@ -1292,9 +1292,6 @@ def test_rename_keyword_dependents(db, lib, monkeypatch):
     from repositories.species_curation import SpeciesCurationRepository
 
     calls = []
-    monkeypatch.setattr(SpeciesCurationRepository, "rename_highlights",
-                        lambda _repo, o, n, photo_workspace_pairs=None:
-                        calls.append(("hl", o, n, photo_workspace_pairs)))
     monkeypatch.setattr(SpeciesCurationRepository, "rename_photo_preferences",
                         lambda _repo, o, n, photo_workspace_pairs=None:
                         calls.append(("pref", o, n, photo_workspace_pairs)))
@@ -1305,7 +1302,6 @@ def test_rename_keyword_dependents(db, lib, monkeypatch):
     assert statements == []
     db.keyword_tree.rename_dependents(kid, "'Verdin'", "Verdin")
     assert calls == [
-        ("hl", "'Verdin'", "Verdin", [(p0, ws)]),
         ("pref", "'Verdin'", "Verdin", [(p0, ws)]),
     ]
     rows = sorted(

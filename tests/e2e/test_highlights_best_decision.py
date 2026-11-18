@@ -1,9 +1,10 @@
 """Highlights says why each species' first photo leads.
 
-A species row carries one line under its title: the photo was chosen (by
-whom, why), several chosen photos were never compared, or nobody chose and
-Vireo ordered the row. Setting a representative from the page settles a tie,
-and with one folder selected it claims only that folder.
+A species row carries one line under its title: the photo is the top
+highlight there (chosen by whom, why), several highlights were never compared,
+or nothing is highlighted and Vireo ordered the row. Making a photo the top
+highlight from the page settles a tie, and with one folder selected it claims
+only that folder.
 """
 import re
 
@@ -51,7 +52,7 @@ def test_row_says_vireo_ordered_it_until_someone_chooses(live_server, page):
 
     line = _hawk_row(page).locator(".bucket-decision")
     expect(line).to_have_text(
-        "First photo: ranked by Vireo's score; nobody has chosen one here",
+        "First photo: ranked by Vireo's score; nothing is highlighted here",
         timeout=5000,
     )
 
@@ -62,17 +63,17 @@ def test_row_says_vireo_ordered_it_until_someone_chooses(live_server, page):
     expose_page_modules(page, "highlights", "highlightsState")
 
     expect(_hawk_row(page).locator(".bucket-decision")).to_have_text(
-        "First photo: chosen as representative by claude (wings fully spread)",
+        "First photo: the top highlight here, chosen by claude (wings fully spread)",
         timeout=5000,
     )
     first = _hawk_row(page).locator(".highlights-card").first
     assert int(first.get_attribute("data-photo-id")) == hawks[2]
 
 
-def test_setting_a_representative_settles_a_tie_within_the_folder(live_server, page):
+def test_making_a_top_highlight_settles_a_tie_within_the_folder(live_server, page):
     db = live_server["db"]
     hawks = _seed_hawks(db, live_server["data"])
-    # Two hawks chosen on their own, never against each other.
+    # Two hawks highlighted on their own, never against each other.
     with db.transaction():
         choose_best(db, "Red-tailed Hawk", hawks[0], over=[])
         choose_best(db, "Red-tailed Hawk", hawks[1], over=[])
@@ -83,7 +84,7 @@ def test_setting_a_representative_settles_a_tie_within_the_folder(live_server, p
     _goto_highlights(page, live_server["url"])
     line = _hawk_row(page).locator(".bucket-decision")
     expect(line).to_contain_text(
-        "the newest of 2 representatives here that were never compared", timeout=5000,
+        "the newest of 2 highlights here that were never compared", timeout=5000,
     )
     expect(line).to_have_class(re.compile(r"\btie\b"))
     first = _hawk_row(page).locator(".highlights-card").first
@@ -97,15 +98,20 @@ def test_setting_a_representative_settles_a_tie_within_the_folder(live_server, p
     page.wait_for_function(
         "pid => vireoLightboxSession.requestedPhotoId() === pid", arg=hawks[0], timeout=3000,
     )
-    page.locator('[data-lb-action="set-representative"]').click()
+    button = page.locator('[data-lb-action="make-top-highlight"]')
+    expect(button).to_have_text("Make Top Highlight")
+    button.click()
 
     expect(page.locator("#toastContainer")).to_contain_text(
-        "Representative set, chosen over 1 other representative in this folder",
+        "Top highlight set, ahead of 1 other highlight in this folder",
         timeout=5000,
+    )
+    expect(page.locator('[data-lb-action="make-top-highlight"]')).to_have_text(
+        "Top Highlight", timeout=5000,
     )
     page.keyboard.press("Escape")
     expect(_hawk_row(page).locator(".bucket-decision")).to_have_text(
-        "First photo: chosen as representative", timeout=5000,
+        "First photo: the top highlight here", timeout=5000,
     )
     first = _hawk_row(page).locator(".highlights-card").first
     assert int(first.get_attribute("data-photo-id")) == hawks[0]
@@ -127,11 +133,11 @@ def test_decision_is_below_title_and_metadata(live_server, page):
             assert decision["y"] >= preceding["y"] + preceding["height"]
 
 
-def test_shared_unscoped_representative_button_is_hidden(live_server, page):
+def test_shared_unscoped_top_highlight_button_is_hidden(live_server, page):
     hawks = _seed_hawks(live_server["db"], live_server["data"])
     _goto_highlights(page, live_server["url"])
     _hawk_row(page).locator(f'.highlights-card[data-photo-id="{hawks[0]}"]').click()
-    expect(page.locator('[data-lb-action="set-representative"]')).to_be_visible()
+    expect(page.locator('[data-lb-action="make-top-highlight"]')).to_be_visible()
     # Wait for the async photo detail, which creates the shared panel later.
     page.wait_for_function(
         "document.querySelector('#lifeListLightboxPanel .lifelist-lb-row') !== null",
@@ -139,7 +145,7 @@ def test_shared_unscoped_representative_button_is_hidden(live_server, page):
     expect(page.locator("#lifeListLightboxPanel")).to_be_hidden()
 
 
-def test_rejecting_nonleading_tied_representative_refreshes_decision(live_server, page):
+def test_rejecting_nonleading_tied_highlight_refreshes_decision(live_server, page):
     db = live_server["db"]
     hawks = _seed_hawks(db, live_server["data"])
     with db.transaction():
@@ -147,7 +153,6 @@ def test_rejecting_nonleading_tied_representative_refreshes_decision(live_server
         choose_best(db, "Red-tailed Hawk", hawks[1], over=[])
     _goto_highlights(page, live_server["url"])
     page.select_option("#highlightSelectionFilter", "all")
-    page.select_option("#representativeFilter", "all")
     row = _hawk_row(page)
     expect(row.locator(".bucket-decision")).to_contain_text("newest of 2")
     row.locator(f'.highlights-card[data-photo-id="{hawks[0]}"]').click()
@@ -162,7 +167,7 @@ def test_rejecting_nonleading_tied_representative_refreshes_decision(live_server
 
 
 @pytest.mark.parametrize("opening", ["right-click", "keyboard"])
-def test_folder_highlights_menu_omits_unscoped_representative(live_server, page, opening):
+def test_folder_highlights_menu_omits_unscoped_top_highlight(live_server, page, opening):
     db = live_server["db"]
     hawks = _seed_hawks(db, live_server["data"])
     park_id = db.conn.execute(
@@ -193,7 +198,7 @@ def test_folder_highlights_menu_omits_unscoped_representative(live_server, page,
         page.keyboard.press("Shift+F10")
     menu = page.locator(".vireo-ctx-menu")
     expect(menu).to_be_visible()
-    expect(menu.locator(".vireo-ctx-item", has_text="Set Representative")).to_have_count(0)
+    expect(menu.locator(".vireo-ctx-item", has_text="Make Top Highlight")).to_have_count(0)
     expect(menu.locator(".vireo-ctx-item", has_text="Close Lightbox")).to_be_visible()
     page.keyboard.press("Escape")
-    expect(page.locator('[data-lb-action="set-representative"]')).to_be_visible()
+    expect(page.locator('[data-lb-action="make-top-highlight"]')).to_be_visible()

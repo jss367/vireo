@@ -2008,7 +2008,7 @@ def test_read_only_scope_blocks_collection_and_keyword_writes(live_server, page)
         expect(item).to_have_class(re.compile(r"\bvireo-ctx-disabled\b"))
         expect(item).to_have_attribute("title", "Switch Scope to All reviewed photos to make changes")
     assert "Add to Highlights" not in menu.inner_text()
-    assert "Set Representative" not in menu.inner_text()
+    assert "Make Top Highlight" not in menu.inner_text()
     page.keyboard.press("Escape")
 
     original_url = page.url

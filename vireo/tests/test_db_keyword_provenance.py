@@ -341,18 +341,18 @@ def test_merge_keyword_into_retargets_pending_and_curation_through_the_facade(
     db.commit()
     from repositories.species_curation import SpeciesCurationRepository
 
-    highlights = _class_spy(monkeypatch, SpeciesCurationRepository, "rename_highlights")
     prefs = _class_spy(monkeypatch, SpeciesCurationRepository, "rename_photo_preferences")
 
     db.keyword_provenance.merge_keyword_into(src, dst, pending_source_only=True)
 
+    # One curation rename: it carries the highlights (catalog-wide rows)
+    # along with the workspace's preference rows.
     pairs = sorted([(p0, ws), (p1, ws)])
-    for calls in (highlights, prefs):
-        assert len(calls) == 1
-        args, kwargs = calls[0]
-        assert args == ("Egret", "Heron")
-        assert sorted(kwargs.pop("photo_workspace_pairs")) == pairs
-        assert kwargs == {}
+    assert len(prefs) == 1
+    args, kwargs = prefs[0]
+    assert args == ("Egret", "Heron")
+    assert sorted(kwargs.pop("photo_workspace_pairs")) == pairs
+    assert kwargs == {}
     rows = sorted(tuple(r) for r in db.conn.execute(
         "SELECT photo_id, change_type, value FROM pending_changes"
     ).fetchall())
@@ -755,8 +755,8 @@ def test_accept_prediction_replace_species_queues_removals_through_the_facade(
     db.pending_changes.queue(p1, "keyword_add", "Wren", workspace_id=ws)
     db.commit()
     db.conn.execute(
-        "INSERT INTO species_highlights (workspace_id, species, photo_id, rank) "
-        "VALUES (?, 'Jay', ?, 1)", (ws, p0),
+        "INSERT INTO species_representatives (species, photo_id, selected_order) "
+        "VALUES ('Jay', ?, 1)", (p0,),
     )
     pred0 = _pred(db, _det(db, p0), "Robin")
     pred1 = _pred(db, _det(db, p1), "Robin")
@@ -767,7 +767,6 @@ def test_accept_prediction_replace_species_queues_removals_through_the_facade(
     queued = _class_spy(monkeypatch, SyncRepository, "queue")
     from repositories.species_curation import SpeciesCurationRepository
 
-    highlights = _class_spy(monkeypatch, SpeciesCurationRepository, "rename_highlights")
     prefs = _class_spy(monkeypatch, SpeciesCurationRepository, "rename_photo_preferences")
     from repositories.keyword_provenance import KeywordProvenanceRepository
 
@@ -794,10 +793,9 @@ def test_accept_prediction_replace_species_queues_removals_through_the_facade(
         ((p0, "keyword_add", "Robin"), {}),
         ((p1, "keyword_add", "Robin"), {}),
     ]
-    assert highlights[0] == (("Jay", "Robin", [(p0, ws)]), {})
     assert prefs[0] == (("Jay", "Robin", [(p0, ws)]), {})
     assert _visible(
-        db, "SELECT species FROM species_highlights WHERE photo_id = ?", (p0,),
+        db, "SELECT species FROM species_representatives WHERE photo_id = ?", (p0,),
     ) == [("Robin",)]
     assert sorted(_visible(
         db, "SELECT photo_id, change_type, value FROM pending_changes",
