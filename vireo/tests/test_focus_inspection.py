@@ -39,7 +39,10 @@ def test_stale_mask_and_invalid_primary_require_explicit_inspection(app_and_db):
     db.commit()
     assert client.get(f'/photos/{pid}/focus-crop').status_code == 404
     assert client.get(f'/photos/{pid}/focus-crop?basis=eye').status_code == 404
-    manual = client.get(f'/photos/{pid}/focus-crop?center=.75,.25&size=128&mask=1')
+    masked = client.get(f'/photos/{pid}/focus-crop?center=.75,.25&size=128&mask=1')
+    assert masked.status_code == 404
+    assert 'stale' in masked.get_json()['error']
+    manual = client.get(f'/photos/{pid}/focus-crop?center=.75,.25&size=128')
     assert manual.status_code == 200
     assert manual.headers['X-Vireo-Focus-Basis'] == 'point'
     assert manual.headers['X-Vireo-Focus-Mask'] == '0'
@@ -128,13 +131,15 @@ def test_focus_evidence_reports_missing_eye_reason_and_exact_subject(status):
     assert focus_evidence_headers(photo, [box], bound=True)['X-Vireo-Focus-Eye-Status'] == 'not_located'
 
 
-def test_primary_changed_while_decoding_does_not_serve_old_association(app_and_db, monkeypatch):
+@pytest.mark.parametrize("query", ["", "?center=.75,.25&mask=1"])
+def test_primary_changed_while_decoding_does_not_serve_old_association(app_and_db, monkeypatch, query):
     import web.media_crops as media
     app, db = app_and_db
     pid = db.photos.list_page()[0]['id']
     _working_copy(app, db, pid)
     db.detections.save(pid, [{'box': {'x': .1, 'y': .2, 'w': .2, 'h': .2}, 'confidence': .9, 'category': 'animal'}], detector_model='test')
     db.commit()
+    monkeypatch.setattr(media, '_focus_mask_bytes', lambda *args: b'mask-not-rendered')
     original = media._focus_source_image
     def changed(*args):
         result = original(*args)
@@ -142,7 +147,7 @@ def test_primary_changed_while_decoding_does_not_serve_old_association(app_and_d
         db.commit()
         return result
     monkeypatch.setattr(media, '_focus_source_image', changed)
-    response = app.test_client().get(f'/photos/{pid}/focus-crop')
+    response = app.test_client().get(f'/photos/{pid}/focus-crop{query}')
     assert response.status_code == 404
     assert 'changed while decoding' in response.get_json()['error']
 

@@ -138,6 +138,24 @@ def _focus_mask_bytes(db_path: str, db: Database, photo_id: int) -> bytes | None
     return _read_mask_bytes(abs_mask) if inside else None
 
 
+def _needs_primary_focus_subject(args: Mapping[str, str], basis: str) -> bool:
+    """Manual centers change the window, not the ownership of a requested mask."""
+    return args.get("detection_id") is None and (
+        args.get("mask") == "1" or (args.get("center") is None and basis != "frame")
+    )
+
+
+def _requested_focus_mask(
+    db_path: str, db: Database, photo_id: int, selected_analysis: JsonDict | None,
+) -> bytes | None:
+    if request.args.get("mask") != "1":
+        return None
+    mask = selected_analysis["mask_png"] if selected_analysis else _focus_mask_bytes(db_path, db, photo_id)
+    if mask is None:
+        raise ValueError("Subject mask is unavailable; analyze the subject or inspect without a mask")
+    return mask
+
+
 def _validated_focus_source(
     config: AppConfig, db: Database, photo: JsonDict, args: Mapping[str, str], effective: JsonDict,
     source_choice: str, boxes: Sequence[Row | JsonDict] = (), basis: str = "auto",
@@ -150,7 +168,7 @@ def _validated_focus_source(
         except ValueError:
             img.close()
             raise
-    if img is not None and args.get("detection_id") is None and args.get("center") is None and basis != "frame":
+    if img is not None and _needs_primary_focus_subject(args, basis):
         from focus_crop import focus_subject_detections
         try:
             current = focus_subject_detections(db, photo["id"])
@@ -298,7 +316,7 @@ class CropRoutes:
         effective = db.get_effective_config(cfg.load())
         eye_enabled = bool(_normalize_scoring_config(effective).get("eye_detect_enabled", False))
         boxes = []
-        if point is None and basis != "frame" and request.args.get("detection_id") is None:
+        if _needs_primary_focus_subject(request.args, basis):
             try:
                 boxes = focus_subject_detections(db, photo_id)
             except ValueError as exc:
@@ -318,6 +336,7 @@ class CropRoutes:
             photo = {**dict(photo), "eye_x": None, "eye_y": None, "eye_tenengrad": None}
         try:
             center, used = focus_point(photo, boxes, basis, eye_enabled=eye_enabled, point=point)
+            mask_bytes = _requested_focus_mask(self._db_path, db, photo_id, selected_analysis)
             img, source = _validated_focus_source(self._config, db, photo, request.args, effective, source_choice, boxes, basis)
         except ValueError as exc:
             return self._json_error(str(exc), 404)
@@ -330,9 +349,6 @@ class CropRoutes:
             return self._json_error(geometry_error, 404)
         window, center = focus_window(img.size, center, size)
         crop = img.crop(window).convert("RGB")
-        mask_bytes = None
-        if request.args.get("mask") == "1" and (selected_analysis or (point is None and boxes)):
-            mask_bytes = selected_analysis["mask_png"] if selected_analysis else _focus_mask_bytes(self._db_path, db, photo_id)
         if mask_bytes is not None:
             crop = shade_focus_mask(crop, mask_bytes, img.size, window, Image)
         buf = io.BytesIO()
