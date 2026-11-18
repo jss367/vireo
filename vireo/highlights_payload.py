@@ -23,6 +23,7 @@ from species_memberships import (
     subject_is_whole_frame,
 )
 from species_preference import Preferences, choice_note
+from species_presence import IN_FRAME, SUBJECT, Presence, species_presence
 
 
 class _Ranks:
@@ -68,6 +69,21 @@ def _highlight_area_score(subject_size):
     return min(1.0, math.sqrt(subject_size) * 2.0)
 
 
+def _species_is_subject(photo):
+    """False for an entry in the bucket of a species the photo is not a
+    picture of (``species_presence``): another bird is its subject, or the
+    crop leaves this species out. Entries built without a presence (the Life
+    List's, the unidentified section's) are their photo's subject."""
+    return photo.get("species_presence", SUBJECT) == SUBJECT
+
+
+def _pick_counts(photo):
+    """Whether the photo's pick flag is a pick of this entry's species. The
+    flag belongs to the photo, so it speaks for the bird the photo is of and
+    not for every species in the frame."""
+    return photo.get("flag") == "flagged" and _species_is_subject(photo)
+
+
 def _highlight_score_bucket(photos, picked_first=False):
     """Attach highlight scores and compact reason labels to one species bucket.
 
@@ -76,11 +92,14 @@ def _highlight_score_bucket(photos, picked_first=False):
     such as Life List can calculate the ranked baseline before applying their
     own Representative / Pick curation tiers.
     """
-    subject_values = _Ranks(p.get("subject_tenengrad") for p in photos)
-    eye_values = _Ranks(p.get("eye_tenengrad") for p in photos)
-    bg_values = _Ranks(p.get("bg_tenengrad") for p in photos)
-    bg_sep_values = [p.get("bg_separation") for p in photos if p.get("bg_separation") is not None]
-    noise_values = _Ranks(p.get("noise_estimate") for p in photos)
+    # Ranked against the photos this species is the subject of: the others'
+    # measurements describe a different bird.
+    ranked = [p for p in photos if _species_is_subject(p)]
+    subject_values = _Ranks(p.get("subject_tenengrad") for p in ranked)
+    eye_values = _Ranks(p.get("eye_tenengrad") for p in ranked)
+    bg_values = _Ranks(p.get("bg_tenengrad") for p in ranked)
+    bg_sep_values = [p.get("bg_separation") for p in ranked if p.get("bg_separation") is not None]
+    noise_values = _Ranks(p.get("noise_estimate") for p in ranked)
     max_bg_sep = max(bg_sep_values) if bg_sep_values else None
 
     for p in photos:
@@ -133,7 +152,7 @@ def _highlight_score_bucket(photos, picked_first=False):
         # (e.g. base 0.97 → cached 1.0 → subtract 0.08 → 0.92, but the
         # correct unpicked value is 0.97).
         base_score_pre_pick = score
-        if p.get("flag") == "flagged":
+        if _pick_counts(p):
             score += 0.08
 
         reasons = _highlight_reasons(
@@ -180,6 +199,10 @@ def _highlight_focus(p, eye_values, subject_values):
 def _highlight_reasons(p, rating, focus, focus_label, rich_available,
                        exposure, crop, area):
     """The compact reason labels shown for one scored photo."""
+    if not _species_is_subject(p):
+        # The measurements below describe the photo's own subject, which is
+        # a different bird from this entry's species.
+        return ["scored on another bird"]
     reasons = []
     if p.get("flag") == "flagged":
         reasons.append("picked")
@@ -208,11 +231,17 @@ def _highlight_reasons(p, rating, focus, focus_label, rich_available,
 def _sort_highlight_bucket(photos, picked_first):
     """Order a scored bucket for the Highlights page or the ranked baseline."""
     if picked_first:
-        # Highlights page ordering: three contiguous regions —
+        # Highlights page ordering: four contiguous regions —
         #   1. picks (flagged): analyzed first (by score desc), then
         #      unanalyzed picks in capture order;
         #   2. analyzed non-picks: by highlight_score desc;
-        #   3. unanalyzed non-picks: capture order (earliest first).
+        #   3. unanalyzed non-picks: capture order (earliest first);
+        #   4. photos this species is not the subject of
+        #      (``species_presence``): the ones with it in frame first, the
+        #      bird that fills most of the frame leading, then the ones
+        #      whose crop leaves it out; capture order within a tie. A pick
+        #      or a score there describes another bird, so neither orders
+        #      this region.
         # The analyzed-before-unanalyzed tier separates the groups so the
         # score term only reorders analyzed rows and the timestamp term only
         # reorders unanalyzed rows — they never compete. Timestamps are ISO
@@ -222,7 +251,17 @@ def _sort_highlight_bucket(photos, picked_first):
         def _bucket_sort_key(p):
             analyzed = p.get("quality_score") is not None
             ts = p.get("timestamp")
+            if not _species_is_subject(p):
+                return (
+                    1,
+                    0 if p.get("species_presence") == IN_FRAME else 1,
+                    0,
+                    -(p.get("species_frame_share") or 0.0),
+                    (ts is None, ts),
+                    p.get("id", 0),
+                )
             return (
+                0,
                 0 if p.get("flag") == "flagged" else 1,
                 0 if analyzed else 1,
                 -(p.get("highlight_score") or 0) if analyzed else 0.0,
@@ -260,8 +299,13 @@ def bucket_best_score(photos):
     Ranks buckets on the Highlights page. Reads the max across all
     photos so a pick-first (or user-preferred) reorder at photos[0] can't
     demote a species by anchoring the bucket score to a lower-scored photo.
+    Only photos the species is the subject of count: another photo's score
+    measures a different bird.
     """
-    scores = [p.get("highlight_score") for p in photos if p.get("highlight_score") is not None]
+    scores = [
+        p.get("highlight_score") for p in photos
+        if p.get("highlight_score") is not None and _species_is_subject(p)
+    ]
     return max(scores) if scores else None
 
 
@@ -278,12 +322,18 @@ def _bucket_unanalyzed_count(photos):
     can promote an unscored, non-flagged photo to the front as a species
     highlight or representative — doesn't inflate the count with photos that
     now live above the divider. Unscored picks are excluded because they
-    stay grouped with the other picks at the front regardless.
+    stay grouped with the other picks at the front regardless. The photos
+    the species is not the subject of trail the bucket under their own
+    divider, so the run is counted above them.
     """
     if not photos:
         return 0
     tail = 0
     for p in reversed(photos):
+        if not _species_is_subject(p):
+            if tail:
+                break
+            continue
         if p.get("quality_score") is None and p.get("flag") != "flagged":
             tail += 1
         else:
@@ -299,9 +349,11 @@ def best_decision(top, ranking, note, fallback_kind=None):
     (``tied_photo_ids``) and the newest choice is shown meanwhile. Otherwise
     nobody chose a photo here, and ``fallback_kind`` (or, when None, the
     Highlights page's own order) names what put it first: ``highlight`` (the
-    workspace's ranked highlights), ``pick`` (a flagged pick, by Vireo's
-    score among picks), ``score`` (Vireo's score) or ``unanalyzed`` (no
-    score yet, so nothing but capture order).
+    workspace's ranked highlights), ``in_frame`` or ``outside_crop`` (no
+    photo here has the species as its subject, so one where it is only in
+    frame, or cropped out, leads; ``species_presence``), ``pick`` (a flagged
+    pick, by Vireo's score among picks), ``score`` (Vireo's score) or
+    ``unanalyzed`` (no score yet, so nothing but capture order).
 
     ``note`` is the photo's newest recorded choice, None when it was chosen
     before choices were recorded.
@@ -326,6 +378,8 @@ def best_decision(top, ranking, note, fallback_kind=None):
         decision["kind"] = fallback_kind
     elif top.get("is_highlighted"):
         decision["kind"] = "highlight"
+    elif not _species_is_subject(top):
+        decision["kind"] = top["species_presence"]
     elif top.get("flag") == "flagged":
         decision["kind"] = "pick"
     elif top.get("quality_score") is None:
@@ -433,6 +487,9 @@ def apply_ordered_highlights(db, buckets):
                 key=lambda p: (
                     0 if p.get("is_highlighted") else 1,
                     p.get("highlight_rank") if p.get("highlight_rank") is not None else 10**9,
+                    # A score describes the photo's own subject, so the
+                    # photos this species is not the subject of stay last.
+                    0 if _species_is_subject(p) else 1,
                     -(p.get("highlight_score") or 0),
                     -(p.get("predicted_confidence") or 0),
                     -(p.get("quality_score") or 0),
@@ -578,6 +635,7 @@ def collect_highlight_buckets(
         memberships = photo_species_memberships(
             r, canonicalize_species, confidence_threshold,
         )
+        presence = species_presence(r, memberships, canonicalize_species)
         confirmed = [m.species for m in memberships if m.accepted_name]
         all_buckets = [m.species for m in memberships]
         if seen_species is not None:
@@ -609,9 +667,9 @@ def collect_highlight_buckets(
                 membership.species, {"is_accepted": True, "photos": []}
             )
             entry["is_accepted"] = entry["is_accepted"] and is_accepted
-            entry["photos"].append(
-                _highlight_candidate_photo(r, membership, confirmed, all_buckets)
-            )
+            entry["photos"].append(_highlight_candidate_photo(
+                r, membership, confirmed, all_buckets, presence,
+            ))
 
     buckets = []
     for species, entry in bucket_map.items():
@@ -632,8 +690,15 @@ def collect_highlight_buckets(
     return buckets, unidentified_photos
 
 
-def _highlight_candidate_photo(r, membership, confirmed_species, bucket_species):
+def _highlight_candidate_photo(
+    r, membership, confirmed_species, bucket_species, presence=None,
+):
     """The Highlights photo entry for one candidate row in one bucket.
+
+    ``presence`` is the photo's ``species_presence`` map. The entry carries
+    this bucket's part of it (``species_presence``, ``species_frame_share``)
+    and ``subject_species_list``, the species the photo is a picture of, so
+    a card in another species' bucket can name them.
 
     ``confirmed_species`` lists every species the photo carries as a
     keyword, so an entry in one species' bucket can say what else the
@@ -644,6 +709,8 @@ def _highlight_candidate_photo(r, membership, confirmed_species, bucket_species)
     accepted = membership.accepted_name
     species = membership.species
     prediction = membership.prediction or {}
+    presence = presence or {}
+    here = presence.get(species) or Presence(SUBJECT)
     return {
         "id": r["id"],
         "filename": r["filename"],
@@ -673,6 +740,11 @@ def _highlight_candidate_photo(r, membership, confirmed_species, bucket_species)
         "bucket_species": species,
         "confirmed_species_list": list(confirmed_species),
         "bucket_species_list": list(bucket_species),
+        "species_presence": here.kind,
+        "species_frame_share": here.frame_share,
+        "subject_species_list": [
+            name for name, value in presence.items() if value.kind == SUBJECT
+        ],
         "prediction_id": prediction.get("prediction_id"),
         "predicted_species": prediction.get("species"),
         "predicted_confidence": prediction.get("confidence"),
@@ -929,6 +1001,23 @@ class HighlightsQuery:
     confirmation_filter: str = "all"
     highlight_filter: str = "all"
     representative_filter: str = "all"
+    collection_id: int | None = None
+    rules: object = None
+    """Visual membership resolved for this collection, when applicable."""
+
+    def resolved_folder(self, folders):
+        """Use the most recent folder only when no broader scope was requested."""
+        if self.collection_id is not None or self.scope == "workspace":
+            return None
+        if self.folder_id is not None or not folders:
+            return self.folder_id
+        return folders[0]["id"]
+
+    def candidates(self, db, folder_id):
+        return db.species_curation.get_highlights_candidates(
+            folder_id, min_quality=self.min_quality,
+            collection_id=self.collection_id, rules=self.rules,
+        )
 
 
 def build_highlights_payload(db, query=None):
@@ -937,11 +1026,7 @@ def build_highlights_payload(db, query=None):
     if query is None:
         query = HighlightsQuery()
     folders = db.folders.with_quality_data()
-    folder_id = query.folder_id
-    if query.scope == "workspace":
-        folder_id = None
-    elif folder_id is None and folders:
-        folder_id = folders[0]["id"]  # Most recent
+    folder_id = query.resolved_folder(folders)
     limit_per_bucket = max(1, min(int(query.limit_per_bucket), 100))
     species_filter = (query.species.text or "").strip()
     confirmation_filter = normalize_highlight_confirmation_filter(
@@ -952,8 +1037,15 @@ def build_highlights_payload(db, query=None):
         query.representative_filter
     )
 
-    candidates = db.species_curation.get_highlights_candidates(folder_id, min_quality=query.min_quality)
-    total_in_scope = db.photos.count_filtered(folder_id=folder_id)
+    candidates = query.candidates(db, folder_id)
+    if query.collection_id is None:
+        scope_name = "workspace" if folder_id is None else "folder"
+        total_in_scope = db.photos.count_filtered(folder_id=folder_id)
+    else:
+        scope_name = "collection"
+        total_in_scope = db.collections.count_photos_for_rules(
+            query.rules or [], collection_id=query.collection_id,
+        )
 
     buckets, unidentified_photos = collect_highlight_buckets(
         candidates, query.confidence_threshold, confirmation_filter,
@@ -1011,7 +1103,7 @@ def build_highlights_payload(db, query=None):
             "species_representative": representative_filter,
             "search": (query.search.text or "").strip(),
         },
-        "scope": "workspace" if folder_id is None else "folder",
+        "scope": scope_name,
     }
 
 

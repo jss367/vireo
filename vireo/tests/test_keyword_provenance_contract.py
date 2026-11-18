@@ -395,7 +395,9 @@ def _production_functions():
 # exception cannot admit an INSERT or a future association move.
 SPECIES_EVIDENCE_UPDATES = {
     ("repositories/species_provenance.py", "set"):
-        "update photo_keywords set species_provenance=? where photo_id=? and keyword_id=?",
+        "update photo_keywords set species_provenance=case when json_extract(species_provenance, '$.review_id') "
+        "is null then :value else json_set(:value, '$.review_id', json_extract(species_provenance, '$.review_id')) "
+        "end where photo_id=:pid and keyword_id=:kid",
     ("repositories/species_provenance.py", "restore"):
         "update photo_keywords set source=?, species_provenance=? where photo_id=? and keyword_id=?",
 }

@@ -3,7 +3,7 @@
 // ES module.
 
 import { escapeAttr, safeFetch } from './shared.js';
-import { attachCardClicks, attachHighlightOrderButtons, renderCard } from './cards.js';
+import { attachCardClicks, attachHighlightOrderButtons, renderCard, speciesIsSubject } from './cards.js';
 import { updateHighlightsLightboxControls } from './lightbox.js';
 import { isHighlightsAdvancedMode, sortedBuckets } from './loading.js';
 import { formatPercent, formatScore, highlightsScopeParams } from './scope.js';
@@ -19,10 +19,19 @@ import { state } from './state.js';
 // If the visible slice ends on an analyzed photo (or on a flagged photo),
 // there is no tail and no divider fires. Unscored picks (flagged, at the
 // front) are always excluded from the tail.
+// The photos this species is not the subject of trail the row (the server
+// orders them last) under their own divider, found the same way: the
+// trailing run, so one promoted to the front by a highlight or
+// representative choice stays above it. The "Not yet analyzed" tail is the
+// run before that one.
 /** @param {HighlightsPhoto[]} photos */
 export function renderStripCards(photos) {
-  var tailStart = photos.length;
-  for (var j = photos.length - 1; j >= 0; j--) {
+  var otherStart = photos.length;
+  while (otherStart > 0 && !speciesIsSubject(/** @type {HighlightsPhoto} */ (photos[otherStart - 1]))) {
+    otherStart--;
+  }
+  var tailStart = otherStart;
+  for (var j = otherStart - 1; j >= 0; j--) {
     var q = /** @type {HighlightsPhoto} */ (photos[j]);
     if (!q.is_analyzed && q.flag !== 'flagged') {
       tailStart = j;
@@ -30,12 +39,15 @@ export function renderStripCards(photos) {
       break;
     }
   }
-  var tailCount = photos.length - tailStart;
+  var tailCount = otherStart - tailStart;
   var html = '';
   for (var i = 0; i < photos.length; i++) {
     if (i === tailStart && tailCount) {
       html += '<div class="analyzed-divider">Not yet analyzed — ' + tailCount
         + ' photo' + (tailCount === 1 ? '' : 's') + '</div>';
+    }
+    if (i === otherStart) {
+      html += '<div class="analyzed-divider other-subject-divider">Another bird is the subject of the photos below</div>';
     }
     html += renderCard(/** @type {HighlightsPhoto} */ (photos[i]), i);
   }
@@ -77,6 +89,11 @@ export function bucketDecision(bucket) {
       + ' representatives here that were never compared. Set the better one as Representative to settle it.';
   } else if (kind === 'highlight') {
     text = 'First photo: your top-ranked highlight';
+  } else if (kind === 'in_frame') {
+    text = 'First photo: ' + bucket.species + ' is not the subject of any photo here; '
+      + 'ordered by how much of the frame it fills where Vireo found it';
+  } else if (kind === 'outside_crop') {
+    text = 'First photo: every photo here crops ' + bucket.species + ' out, so the order is capture order';
   } else if (kind === 'pick') {
     text = 'First photo: a pick, ranked by Vireo\'s score among picks';
   } else if (kind === 'score') {
@@ -314,7 +331,8 @@ export function render() {
   var hasBuckets = (data.buckets || []).length > 0;
   var hasUnidentified = !!(data.unidentified
     && data.unidentified.photo_count);
-  if (!data.folders.length && !hasBuckets && !hasUnidentified) {
+  var scopeSelect = /** @type {HTMLSelectElement} */ (document.getElementById('folderSelect'));
+  if (scopeSelect.options.length <= 1 && !hasBuckets && !hasUnidentified) {
     content.innerHTML = '';
     empty.style.display = 'block';
     meta.textContent = '';

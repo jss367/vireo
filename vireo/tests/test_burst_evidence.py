@@ -594,7 +594,8 @@ def test_focus_crop_validates_size_and_basis_and_workspace(app_and_db):
     assert client.get(f"/photos/{pid}/focus-crop").status_code == 404
 
 
-def test_focus_crop_shades_outside_the_mask(app_and_db):
+@pytest.mark.parametrize("center", ["", "&center=.52,.35", "&center=.52,.35&basis=frame"])
+def test_focus_crop_shades_outside_the_mask(app_and_db, center):
     app, db = app_and_db
     pid = db.photos.list_page()[0]["id"]
     _working_copy(app, db, pid, color=(200, 200, 200))
@@ -615,9 +616,13 @@ def test_focus_crop_shades_outside_the_mask(app_and_db):
     db.conn.commit()
 
     client = app.test_client()
-    resp = client.get(f"/photos/{pid}/focus-crop?size=256&mask=1")
+    resp = client.get(f"/photos/{pid}/focus-crop?size=256&mask=1{center}")
     assert resp.status_code == 200
     assert resp.headers["X-Vireo-Focus-Mask"] == "1"
+    assert resp.headers["X-Vireo-Focus-Detection-Id"]
+    assert resp.headers["X-Vireo-Focus-Basis"] == ("point" if center else "subject")
+    if center:
+        assert resp.headers["X-Vireo-Focus-Center"] == "0.5200,0.3500"
     import io
     img = Image.open(io.BytesIO(resp.data))
     left = img.getpixel((10, 128))[0]
@@ -649,9 +654,9 @@ def test_focus_crop_shades_outside_the_mask(app_and_db):
     db.commit()
     db.conn.execute("UPDATE photos SET mask_path = ? WHERE id = ?", ("/etc/hosts", pid))
     db.conn.commit()
-    resp = client.get(f"/photos/{pid}/focus-crop?size=256&mask=1")
+    resp = client.get(f"/photos/{pid}/focus-crop?size=256&mask=1{center}")
     assert resp.status_code == 404
-    assert "mask unavailable" in resp.get_json()["error"]
+    assert "mask is unavailable" in resp.get_json()["error"]
 
 
 def test_focus_crop_falls_back_to_the_original_file(app_and_db, tmp_path):

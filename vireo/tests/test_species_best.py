@@ -612,3 +612,58 @@ def test_a_bucket_page_carries_the_decision_for_its_order(trips):
     assert page["best_decision"]["kind"] == "chosen"
     assert page["best_decision"]["reason"] == "in flight"
     assert page["photos"][0]["id"] == photos["b1"]
+
+
+@pytest.mark.parametrize("visual", [False, True])
+def test_collection_highlights_scope_counts_paging_and_choices(trips, monkeypatch, visual):
+    from services.visual_scope import VisualScope
+
+    app, db, _, photos = trips
+    members = [photos["a1"], photos["b1"]]
+    rules = [{"field": "photo_ids", "value": members}]
+    visual_json = None
+    if visual:
+        visual_json = json.dumps({"prompt": "flying eagles", "strength": "balanced"})
+        monkeypatch.setattr(VisualScope, "resolve", lambda *args, **kwargs: (
+            {"status": "ok"}, members, {},
+        ))
+    with db.transaction():
+        cid = db.collections.add("Trip highlights", json.dumps([] if visual else rules), visual_json)
+    client = app.test_client()
+    for pid in [photos["a2"], photos["b1"]]:
+        _choose(client, species="Bald Eagle", photo_id=pid, over=[])
+    params = {"collection_id": cid, "limit_per_bucket": 1}
+    payload = client.get("/api/highlights", query_string=params).get_json()
+    assert payload["scope"] == "collection"
+    assert payload["meta"]["total_in_scope"] == payload["meta"]["eligible"] == 2
+    bucket, = payload["buckets"]
+    assert bucket["has_more"]
+    page = client.get("/api/highlights/bucket", query_string={
+        **params, "species": "Bald Eagle", "offset": 1,
+    }).get_json()
+    assert {p["id"] for p in bucket["photos"] + page["photos"]} == set(members)
+    choice = client.post("/api/photo-preferences", json={
+        "purpose": "species_representative", "species": "Bald Eagle",
+        "photo_id": photos["a1"], "collection_id": cid,
+    })
+    assert choice.get_json()["over"] == [photos["b1"]]
+
+
+def test_unavailable_visual_collection_cannot_broaden_highlights(trips, monkeypatch):
+    from services.visual_scope import VisualScope
+
+    app, db, _, photos = trips
+    monkeypatch.setattr(VisualScope, "resolve", lambda *args, **kwargs: (
+        {"status": "no_embeddings"}, None, None,
+    ))
+    with db.transaction():
+        cid = db.collections.add("Flying eagles", "[]", json.dumps({"prompt": "flying eagles"}))
+    client = app.test_client()
+    params = {"collection_id": cid, "species": "Bald Eagle"}
+    for url in ["/api/highlights", "/api/highlights/bucket"]:
+        assert client.get(url, query_string=params).status_code == 400
+    response = client.post("/api/photo-preferences", json={
+        **params, "purpose": "species_representative", "photo_id": photos["a1"],
+    })
+    assert response.status_code == 400
+    assert db.species_choices.notes() == {}

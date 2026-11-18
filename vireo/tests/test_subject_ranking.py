@@ -196,7 +196,8 @@ def test_single_subject_frames_and_existing_decisions(comparison_library):
     assert not set(pids[:2]) & set(pack["suggested_reject_ids"])
 
 
-def test_selected_mask_focus_and_measurements_share_generation(comparison_library, monkeypatch):
+@pytest.mark.parametrize("center", ["", "&center=.25,.5"])
+def test_selected_mask_focus_and_measurements_share_generation(comparison_library, monkeypatch, center):
     app, db, pids, ids = comparison_library
     import config as cfg
     _analyze(db, pids, SubjectComparison(TARGET), cfg.load())
@@ -209,10 +210,14 @@ def test_selected_mask_focus_and_measurements_share_generation(comparison_librar
     assert mask.status_code == 200
     pixels = np.asarray(Image.open(io.BytesIO(mask.data)))
     assert pixels[80, 70] == 255 and pixels[80, 240] == 0
-    focus = client.get(card["focus_crop_mask_url"])
+    focus = client.get(card["focus_crop_mask_url"] + center)
     assert focus.status_code == 200
     assert focus.headers["X-Vireo-Detection-Id"] == str(ids[card["id"]][0])
-    assert focus.headers["X-Vireo-Focus-Basis"] == "subject"
+    assert focus.headers["X-Vireo-Focus-Basis"] == ("point" if center else "subject")
+    assert focus.headers["X-Vireo-Focus-Mask"] == "1"
+    assert focus.headers["X-Vireo-Analysis-Key"] == card["subject"]["analysis_key"]
+    crop = np.asarray(Image.open(io.BytesIO(focus.data)))
+    assert crop[80, 70, 0] > 240 and crop[80, 240, 0] < 100
     assert focus.headers["X-Vireo-Focus-Detection-Id"] == str(ids[card["id"]][0])
     assert focus.headers["X-Vireo-Focus-Eye-Status"] == "disabled"
     manual = client.get(card["focus_crop_mask_url"] + "&center=.5,.5")
@@ -646,3 +651,62 @@ def test_selected_subject_provisional_ranking_requires_review(comparison_library
     assert pack["ambiguity"]["reasons"] == [{
         "code": "positive_keep_not_validated", "detail": KEEP_REVIEW_MESSAGE,
     }]
+
+
+def test_one_photo_repair_returns_the_selected_generation(comparison_library, monkeypatch):
+    from vireo.tests.wait import wait_for_job_via_client
+
+    app, db, pids, ids = comparison_library
+    pid = pids[0]
+    did = ids[pid][0]
+    client = app.test_client()
+    scope = {"subject_overrides": {str(pid): did}}
+    assert client.post("/api/photos/burst-evidence", json={"photo_ids": [], **scope}).status_code == 400
+    launched = client.post(f"/api/photos/{pid}/subjects/analyze", json={"detection_id": did}).get_json()
+    job = wait_for_job_via_client(client, launched["job_id"])
+    assert job["progress"]["current"] == job["progress"]["total"] == 1
+    outcome, = job["result"]["photos"]
+    assert outcome["status"] == "analyzed"
+    card, = _pack(app, [pid], **scope)["cards"]
+    key = card["subject"]["analysis_key"]
+    assert card["subject"]["detection_id"] == did and key == outcome["analysis_key"]
+    assert card["evidence_status"] == "ready" and card["rank"] is None
+    assert card["analysis"]["source"] == "original"
+    saved = db.subjects.ranking_analysis(did, key)
+    assert card["sharpness"] == saved["features"]["subject_tenengrad"]
+    assert client.get(card["mask_url"]).data == saved["mask_png"]
+    with Image.open(io.BytesIO(saved["mask_png"])) as mask:
+        assert mask.getbbox() == (19, 19, 121, 140)
+    monkeypatch.setattr("masking.generate_mask", lambda *a, **kw: pytest.fail("compatible mask recomputed"))
+    cached = _pack(app, [pid], analyze=True, **scope)
+    second = wait_for_job_via_client(client, cached["job_id"])
+    assert second["result"]["photos"] == [{**outcome, "status": "cached"}]
+
+
+def test_cached_subject_changed_during_readback_is_reported_failed(comparison_library, monkeypatch):
+    import subject_analysis
+
+    from vireo.tests.wait import wait_for_job_via_client
+
+    app, db, pids, ids = comparison_library
+    pid = pids[0]
+    scope = {"compare_subjects": True}
+    client = app.test_client()
+    first = _pack(app, [pid], analyze=True, **scope)
+    assert wait_for_job_via_client(client, first["job_id"])["result"]["analyzed"] == 1
+    original = subject_analysis.analyze_detection
+
+    def change_primary_after_cache_hit(*args, **kwargs):
+        changed = original(*args, **kwargs)
+        assert not changed
+        db.subjects.set_choice(pid, ids[pid][0])
+        db.commit()
+        return changed
+
+    monkeypatch.setattr(subject_analysis, "analyze_detection", change_primary_after_cache_hit)
+    second = _pack(app, [pid], analyze=True, **scope)
+    result = wait_for_job_via_client(client, second["job_id"])["result"]
+    assert result["cached"] == result["analyzed"] == 0
+    assert result["photos"][0]["status"] == "failed"
+    assert "changed" in result["errors"][0]["error"]
+    assert _pack(app, [pid], **scope)["cards"][0]["evidence_status"] == "subject_analysis_missing"

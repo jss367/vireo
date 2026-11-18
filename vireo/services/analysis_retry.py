@@ -225,8 +225,13 @@ def retry_features(db: Database, pid: int, effective: JsonDict, cache_dir: str,
         if expected_primary_detection_id is not None and detection["id"] != expected_primary_detection_id:
             raise ValueError("Primary subject changed before analysis started; retry the chosen subject")
         mask_path = db.masks_features.get_mask(pid, effective.get("pipeline", {}).get("sam2_variant") or "sam2-small")
+        existing_path = None
+        if (quality_only and mask_path and mask_path["detector_model"] == detection["detector_model"]
+                and all(mask_path["prompt_" + k] == detection["box_" + k] for k in "xywh")
+                and os.path.isfile(mask_path["path"])):
+            existing_path = mask_path["path"]
         analysis = analyze_detection(db, photo, detection, effective, checkpoint, force=True,
-                          existing_mask_path=mask_path["path"] if quality_only and mask_path else None,
+                          existing_mask_path=existing_path,
                           defer_publication=True)
         if not isinstance(analysis, dict):
             raise ValueError("No current subject analysis was published")
@@ -236,11 +241,14 @@ def retry_features(db: Database, pid: int, effective: JsonDict, cache_dir: str,
             raise ValueError("Primary subject changed during analysis; retry the chosen subject")
         _publish_features(db, pid, detection, analysis, effective, cache_dir, checkpoint,
                           lambda: _unchanged(db, pid, path, identity),
-                          existing_mask_path=mask_path["path"] if quality_only and mask_path else None)
+                          existing_mask_path=existing_path)
     if on_published:
         on_published()
     if expected_primary_detection_id is not None:
+        from subject_analysis import verify_selected_analysis
+        from subject_ranking import SubjectComparison
         _refresh_box_analysis(db, pid, detection["id"], cache_dir, checkpoint)
+        verify_selected_analysis(db, pid, SubjectComparison(), effective, detection["id"], analysis["source_key"])
 
 
 def _refresh_box_analysis(db: Database, pid: int, detection_id: int, cache_dir: str,
@@ -333,9 +341,10 @@ def _publish_features(db: Database, pid: int, detection: JsonDict, analysis: Jso
                 tuple(detection["box_" + key] for key in "xywh"),
                 MaskQuality(**{field: features.get(field) for field in MaskQuality.__dataclass_fields__}))
             current = _current_photo(db, pid, effective)
+            min_conf = config_value(effective, "detector_confidence")
             weak_floor = (rescue_floor(current, config_value(effective.get("pipeline", {}), "weak_detection_confidence", section="pipeline"))
-                          if current.get("subject_uncertain") else None)
-            db.masks_features.set_active_variant(pid, variant, config_value(effective, "detector_confidence"), weak_rescue_min_conf=weak_floor)
+                          if current.get("subject_uncertain") and detection["detector_confidence"] < min_conf else None)
+            db.masks_features.set_active_variant(pid, variant, min_conf, weak_rescue_min_conf=weak_floor)
             db.masks_features.update_pipeline_features(pid, PipelineFeatures(
                 **{field: features.get(field) for field in ("eye_x", "eye_y", "eye_conf", "eye_tenengrad")},
                 eye_kp_fingerprint=(EYE_KP_FINGERPRINT_VERSION

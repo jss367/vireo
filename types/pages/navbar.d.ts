@@ -7,6 +7,7 @@ interface NavPage {
   keywords?: string;
 }
 interface NavTabState {
+  workspace_id: number | null;
   tabs: string[];
   all_pages: NavPage[];
 }

@@ -50,6 +50,8 @@
   .pick-flag-badge { position:absolute; top:6px; right:6px; z-index:2; padding:3px 8px; border-radius:999px; background:var(--accent); color:var(--accent-text); border:1px solid color-mix(in srgb, var(--accent-text) 65%, transparent); box-shadow:0 1px 6px rgba(0,0,0,0.45); font-size:10px; font-weight:800; text-transform:uppercase; letter-spacing:0.5px; pointer-events:none; }
   .highlight-order { position:absolute; top:6px; right:6px; display:flex; gap:4px; opacity:0; transition:opacity .12s; }
   .pick-flag-card .highlight-order { top:34px; }
+  .pick-flag-badge.other-subject { max-width:calc(100% - 12px); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; background:var(--bg-tertiary); color:var(--text-secondary); border-color:var(--border-primary); font-weight:700; }
+  .other-pick-card .highlight-order { top:34px; }
   .highlights-card:hover .highlight-order,
   .highlights-card:focus-within .highlight-order { opacity:1; }
   .highlight-order button { padding:2px 6px; border-radius:999px; border:1px solid rgba(255,255,255,.45); background:rgba(0,0,0,.62); color:#fff; font-size:10px; cursor:pointer; }
@@ -61,6 +63,7 @@
   .card-chip.score { color:var(--text-primary); font-weight:600; }
   .card-chip.conf { color:var(--text-secondary); }
   .card-chip.reason { color:var(--text-secondary); max-width:100%; overflow:hidden; text-overflow:ellipsis; }
+  .card-chip.presence { color:var(--text-secondary); border:1px solid var(--border-primary); }
   .bucket-expand { margin-top:8px; font-size:13px; color:var(--accent); cursor:pointer; background:none; border:none; padding:0; }
   .bucket-expand:hover { text-decoration:underline; }
 
@@ -109,7 +112,7 @@
 
 <div class="highlights-controls" id="controlsBar">
   <div class="control-group">
-    <label for="folderSelect">Folder</label>
+    <label for="folderSelect">Show highlights from</label>
     <select id="folderSelect"></select>
   </div>
   <div class="control-group">

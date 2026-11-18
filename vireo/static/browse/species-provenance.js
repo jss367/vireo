@@ -1,3 +1,4 @@
+import {loadDetail} from './detail.js';
 import {safeFetch, escapeHtml, showToast} from './shared.js';
 
 const methods = {
@@ -19,7 +20,8 @@ export function renderSpeciesProvenance(/** @type {BrowsePhoto} */ photo, /** @t
     panel.className = 'species-provenance';
     panel.style.cssText = 'margin-top:8px;white-space:normal;';
     const label = methods[/** @type {keyof typeof methods} */ (assignment.method)] || assignment.method;
-    panel.innerHTML = '<summary>' + escapeHtml(speciesDisplayLabel(assignment, assignment.species)) + ': ' + escapeHtml(label) + '</summary>';
+    panel.innerHTML = '<summary>' + escapeHtml(speciesDisplayLabel(assignment, assignment.species)) + ': ' + escapeHtml(label) + ' · ' +
+      (assignment.review ? (assignment.review.resolution ? 'Reviewed' : 'Conflict needs review') : 'Saved') + '</summary>';
     const evidence = document.createElement('div');
     const notes = [assignment.scientific_name && 'Taxon: ' + assignment.scientific_name +
         ' (catalog ID ' + assignment.taxon_id + ')',
@@ -43,9 +45,94 @@ export function renderSpeciesProvenance(/** @type {BrowsePhoto} */ photo, /** @t
       evidence.appendChild(link);
     });
     panel.appendChild(evidence);
+    if (assignment.review) appendReview(panel, assignment.review);
     panel.appendChild(evidenceForm(photo.id, assignment));
+    if (assignment.review_version) panel.appendChild(reviewForm(photo, assignment));
     container.appendChild(panel);
   });
+  const attached = new Set(photo.species_assignments?.map(a => a.review?.id));
+  for (const review of photo.assignment_reviews || []) {
+    if (attached.has(review.id)) continue;
+    const details = document.createElement('details');
+    const summary = document.createElement('summary');
+    summary.textContent = 'Past assignment review · ' + review.species;
+    details.appendChild(summary);
+    appendReview(details, review);
+    container.appendChild(details);
+  }
+}
+
+function appendReview(/** @type {HTMLElement} */ panel, /** @type {BrowseAssignmentReview} */ review) {
+  const original = review.original_provenance;
+  const source = document.createElement('p');
+  const method = methods[/** @type {keyof typeof methods} */ (original.method)] || original.method;
+  source.textContent = ['Original assignment: ' + review.species, method, original.reviewer,
+    original.reason, original.evidence_source, original.supporting_photo_ids?.length &&
+    'Supporting frames: ' + original.supporting_photo_ids.join(', ')].filter(Boolean).join(' · ');
+  panel.appendChild(source);
+  for (const [title, note] of /** @type {[string, BrowseReviewNote | null][]} */ ([
+    ['Conflict reported for ' + review.species, review.conflict],
+    ['Resolution (' + review.resolution?.action + ')', review.resolution],
+  ])) {
+    if (!note) continue;
+    const line = document.createElement('p');
+    line.textContent = title + ' by ' + note.reviewer + ' · ' + note.reason + ' · Evidence: ' + note.evidence_source;
+    panel.appendChild(line);
+  }
+}
+
+function reviewForm(/** @type {BrowsePhoto} */ photo, /** @type {BrowseSpeciesAssignment} */ assignment) {
+  const pending = assignment.review && !assignment.review.resolution;
+  const details = document.createElement('details');
+  const summary = document.createElement('summary');
+  summary.textContent = pending ? 'Resolve conflict' : 'Report conflicting evidence';
+  details.appendChild(summary);
+  const form = document.createElement('form');
+  const action = document.createElement('select');
+  action.name = 'action';
+  action.setAttribute('aria-label', 'Resolution');
+  for (const [key, label] of pending ? [['retain', 'Retain assignment'], ['amend', 'Change species'],
+    ['remove', 'Remove assignment']] : [['report', 'Report conflict']]) action.add(new Option(label, key));
+  action.hidden = !pending;
+  form.appendChild(action);
+  for (const [key, label] of Object.entries({species: 'Replacement species', reviewer: 'Reviewer',
+    reason: 'Reason', evidence_source: 'Evidence reference'})) {
+    const field = document.createElement('label');
+    field.style.display = 'block';
+    field.textContent = label;
+    const input = document.createElement('input');
+    input.name = key;
+    input.required = true;
+    field.appendChild(input);
+    if (key === 'species') {
+      const toggle = () => {
+        input.disabled = action.value !== 'amend';
+        field.style.display = input.disabled ? 'none' : 'block';
+      };
+      toggle();
+      action.addEventListener('change', toggle);
+    }
+    form.appendChild(field);
+  }
+  const save = document.createElement('button');
+  save.textContent = pending ? 'Save resolution' : 'Save conflict';
+  form.appendChild(save);
+  form.addEventListener('submit', async event => {
+    event.preventDefault();
+    save.disabled = true;
+    try {
+      const body = {...Object.fromEntries(new FormData(form)), observed_workspace_id: photo.review_workspace_id,
+        review_version: assignment.review_version};
+      const response = await safeFetch('/api/photos/' + photo.id + '/species/' + assignment.keyword_id + '/review',
+        {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+      if (form.isConnected) await loadDetail(photo.id);
+      showToast(response.pipeline_cache_stale ? 'Review saved. Refresh Process results.' : 'Assignment review saved');
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not save review', 'error');
+    } finally { save.disabled = false; }
+  });
+  details.appendChild(form);
+  return details;
 }
 
 function evidenceForm(/** @type {number} */ photoId, /** @type {BrowseSpeciesAssignment} */ assignment) {
@@ -87,14 +174,9 @@ function evidenceForm(/** @type {number} */ photoId, /** @type {BrowseSpeciesAss
         subject_photo_id: assignment.subject_photo_id ?? null,
         supporting_photo_ids: inputs.supporting_photo_ids.value.trim() ?
           inputs.supporting_photo_ids.value.split(',').map(id => Number(id.trim())) : []};
-      const response = await safeFetch('/api/photos/' + photoId + '/species/' + assignment.keyword_id + '/provenance',
+      await safeFetch('/api/photos/' + photoId + '/species/' + assignment.keyword_id + '/provenance',
         {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
-      const container = form.closest('.species-provenance')?.parentElement;
-      if (container) {
-        container.querySelectorAll('.species-provenance').forEach(panel => panel.remove());
-        renderSpeciesProvenance({id: photoId, filename: '', rating: null,
-          species_assignments: response.species_assignments}, container);
-      }
+      if (form.isConnected) await loadDetail(photoId);
       showToast('Species evidence saved');
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Could not save species evidence', 'error');

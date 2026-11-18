@@ -18,7 +18,7 @@ has no Jinja values to hand over, and its controls name their handlers in
 | --- | --- |
 | `state.js` | Page state: the `state` object (the last `/api/highlights` response, expanded rows, the folder name, the debounce timer, collections, the species modal, the lightbox photo, the reject undo and the load and refetch sequences) and `WORKSPACE_SCOPE` |
 | `shared.js` | The boundary with shared code: every navbar, lightbox and `vireo-utils.js` global the page uses, and `registerPageHooks()` |
-| `scope.js` | Score formatting, the scope and filter request parameters, the selected folder, and what a representative click claimed (`representativeToast`) |
+| `scope.js` | Score formatting, the scope and filter request parameters, the selected folder or collection, and what a representative click claimed (`representativeToast`) |
 | `loading.js` | `loadHighlights()` with its reject-prune guard, bucket sorting, the advanced-mode sort options, `debounceLoad`, and the undo/redo hook |
 | `render.js` | `render()`, each species row with the line saying why its first photo leads (`bucketDecision`), the unidentified row, the expand and row action buttons, and `loadMoreBucket` |
 | `cards.js` | Photo cards, their thumbnails, and their click and highlight-order buttons |
@@ -89,7 +89,6 @@ while `best_decision.photo_id` is still the row's first loaded photo, and a
 bucket refetch copies the page's `best_decision` with the new order
 (`applyBucketOrderingKeysFromPage`).
 
-Set Representative sends the selected folder (`selectedFolderId`), so with one
-folder shown the photo is chosen over that folder's other representatives
-only; with every folder shown it is chosen over all of them. The toast says
-how many it was chosen over.
+Set Representative sends the selected folder or collection. The photo is
+chosen over the other representatives in that scope. The toast shows how
+many representatives were compared.
