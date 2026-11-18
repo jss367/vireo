@@ -620,9 +620,13 @@ class _SpeciesConfirmation:
     def encounter_results(self, changed: set[int]) -> list[JsonDict]:
         selected = set(self.photo_ids)
         results = []
-        for index, _ in self.review_encounters:
-            enc = cast("JsonDict", self.before_cached)["encounters"][index]
+        # A split creates a new encounter on apply. Resolve its index from the
+        # resulting membership, including when it sorts before the source.
+        groups = enumerate(self.cached["encounters"]) if self.split and self.cached else self.review_encounters
+        for index, enc in groups:
             ids = [pid for pid in enc["photo_ids"] if pid in selected]
+            if self.split and not ids:
+                continue
             results.append({"encounter_index": index, "photo_ids": ids,
                             "changed_photo_ids": [pid for pid in ids if pid in changed],
                             "unchanged_photo_ids": [pid for pid in ids if pid not in changed]})

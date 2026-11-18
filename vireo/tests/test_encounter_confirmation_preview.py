@@ -1313,3 +1313,22 @@ def test_review_across_encounters_binds_membership_and_undoes_once(app_and_db):
     assert client.post('/api/undo', json=result.json['undo']).status_code == 200
     assert json.loads(path.read_text())['encounters'] == regrouped
     assert all(not db.species_provenance.assignments(pid) for pid in ids)
+
+
+@pytest.mark.parametrize('response_mode', ['compact', 'full'])
+@pytest.mark.parametrize(('selected_index', 'applied_index'), [(0, 0), (2, 1)])
+def test_split_reports_selected_encounter_at_apply_time(app_and_db, response_mode, selected_index, applied_index):
+    app, db = app_and_db
+    client = app.test_client()
+    ids, path = seed(app, db)
+    selected = [ids[selected_index]]
+    body = {'species': 'Wood Duck', 'photo_ids': selected, 'source_photo_ids': ids, 'add': True,
+            'split': True, 'response_mode': response_mode}
+    preview = request_preview(client, body)
+    assert preview['encounter_results'] == [{'encounter_index': 0, 'photo_ids': selected}]
+    result = apply(client, body, preview)
+    assert result.status_code == 200, result.json
+    group, = result.json['encounter_results']
+    assert group['encounter_index'] == applied_index
+    assert group['photo_ids'] == group['changed_photo_ids'] == selected
+    assert json.load(open(path))['encounters'][applied_index]['photo_ids'] == selected
