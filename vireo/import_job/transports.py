@@ -48,8 +48,8 @@ _ENQ_QUEUED = "queued"
 _ENQ_CANCELLED = "cancelled"
 
 
-def _book_copied(state: _ImportRunState, rel: str, attests_bytes: bool, size: int | None) -> None:
-    """Book one landed copy of ``size`` bytes into the run counters.
+def _book_copied(state: _ImportRunState, rel: str, attests_bytes: bool) -> None:
+    """Book one landed copy into the run counters.
 
     The two pre-merge sites incremented in different statement orders
     (local: copied → verified → folder count; rsync: copied → folder
@@ -63,7 +63,6 @@ def _book_copied(state: _ImportRunState, rel: str, attests_bytes: bool, size: in
     _counts(state, rel)["copied"] += 1
     if attests_bytes:
         state.verified += 1
-    state.transferred_bytes += size or 0
 
 
 def _landed_copied(source_file: Path, *, dest_path: str, verified_hash: str, src_size: int,
@@ -197,6 +196,11 @@ class _LocalTransport:
         except OSError as e:
             _fail(state, rel, source_file, str(e))
             return _ENQ_HANDLED
+        # The file was written and read back whether or not it verified, and
+        # that time is in the copy phase, so its bytes count toward the
+        # phase's rate either way (``import_job.timing``). A copy that raised
+        # partway is not counted: how much of it was written is unknown.
+        state.transferred_bytes += src_size
         if not ok:
             _fail(
                 state, rel, source_file,
@@ -204,7 +208,7 @@ class _LocalTransport:
                 "match the source)",
             )
             return _ENQ_HANDLED
-        _book_copied(state, rel, self.attests_bytes, src_size)
+        _book_copied(state, rel, self.attests_bytes)
         batch_st.landed.append(_landed_copied(
             source_file, dest_path=dest_file,
             # ``copy_and_hash_verify`` returns the destination-read hash
@@ -690,6 +694,10 @@ class _RsyncTransport:
         dest_folder = batch_st.dest_folder
         for sf, bn, src_hash, sz, mt, nas_full in transferred:
             dest_path = os.path.join(dest_folder, bn)
+            # rsync landed this file; its bytes crossed the network during
+            # the copy phase whether or not the verification below lets it
+            # into the copied ledger.
+            state.transferred_bytes += sz or 0
             # Independent verification (Task 2.7 FIX 1): card -> NAS,
             # opt-in behind ``verify_by_hash`` (it reads every NAS
             # byte; same knob the local path uses). This compares the
@@ -723,7 +731,7 @@ class _RsyncTransport:
                     )
                     _fail(state, rel, sf, reason)
                     continue
-            _book_copied(state, rel, attests_bytes, sz)
+            _book_copied(state, rel, attests_bytes)
             batch_st.landed.append(_landed_copied(
                 sf, dest_path=dest_path,
                 # checker.content_hash returns None for size-0;

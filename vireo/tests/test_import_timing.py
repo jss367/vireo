@@ -172,3 +172,61 @@ def test_the_jobs_details_show_the_timing_sentence_and_not_its_raw_numbers(tmp_p
     assert result["timing_notice"] in described["details"]
     assert "Timing" not in described["summary"]
     assert "transferred" not in described["summary"].lower()
+
+
+def test_a_copy_that_fails_verification_still_counts_its_bytes(tmp_path, monkeypatch):
+    """The file was written and read back; that time is in the copy phase,
+    so leaving its bytes out would understate the rate of a failing run."""
+    import import_job.transports as transports
+    from import_job import ImportParams
+
+    card = _card(tmp_path)
+    card_bytes = sum(p.stat().st_size for p in card.iterdir())
+    monkeypatch.setattr(
+        transports, "copy_and_hash_verify", lambda *args, **kwargs: (False, None),
+    )
+
+    _db, _ws, result = _run_import(tmp_path, ImportParams(
+        sources=[str(card)], destination=str(tmp_path / "archive"),
+    ))
+
+    assert (result["copied"], result["failed"]) == (0, 3)
+    assert result["timing"]["transferred_bytes"] == card_bytes
+
+
+def test_an_rsync_landing_that_fails_remote_verification_still_counts_its_bytes(
+    tmp_path, monkeypatch,
+):
+    from db import Database
+    from import_job import ImportParams, run_import_job
+    from test_import_job import (
+        FakeRunner,
+        _install_fake_remote_rsync,
+        _make_job,
+        _remote_archive_for,
+        _remote_calls,
+    )
+
+    remote_archive = _remote_archive_for(tmp_path)
+    calls = _remote_calls(remote_archive)
+    _install_fake_remote_rsync(
+        monkeypatch, calls, verify=("DSC_0001.jpg", "checksum differs"),
+    )
+    card = _make_card(tmp_path, [
+        ("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+    ])
+    card_bytes = (card / "DSC_0001.jpg").stat().st_size
+    db_path = str(tmp_path / "test.db")
+    workspace_id = Database(db_path)._active_workspace_id
+
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, workspace_id,
+        ImportParams(
+            sources=[str(card)], destination=remote_archive["mount_base"],
+            remote_target=remote_archive, verify_by_hash=True,
+        ),
+    )
+
+    assert (result["copied"], result["failed"]) == (0, 1)
+    assert calls["verify"] == 1
+    assert result["timing"]["transferred_bytes"] == card_bytes

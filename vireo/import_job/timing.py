@@ -11,7 +11,8 @@ catalog" with no way to tell which part was slow.
 ``timed`` adds a phase's wall-clock seconds to ``state.phase_seconds``.
 Copying and cataloging alternate per batch, so each phase is a sum over the
 run, not one interval. ``state.transferred_bytes`` counts the bytes of every
-file the transport landed, so the copy phase has a rate.
+file the transport landed, verified or not, so the copy phase has a rate
+that a failed verification does not understate.
 
 ``timing_result`` is the result's ``timing`` block (raw numbers) and
 ``timing_notice`` the sentence the Jobs page and the Import page show.

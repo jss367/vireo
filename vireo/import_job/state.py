@@ -163,8 +163,9 @@ class _ImportRunState:
     wc_pass_error: str | None = None
     # Wall-clock seconds per phase and the bytes of every file the
     # transport landed, for the result's timing (``import_job.timing``).
-    # A landing later reclassified as failed keeps its bytes here: they
-    # were copied, which is what the copy phase's rate measures.
+    # A file whose copy fails verification, or whose landing is later
+    # reclassified as failed, keeps its bytes here: they were transferred,
+    # which is what the copy phase's rate measures.
     phase_seconds: dict[str, float] = field(default_factory=dict)
     transferred_bytes: int = 0
     # One line per sidecar whose keywords a batch scan could not import
