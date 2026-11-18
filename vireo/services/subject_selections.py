@@ -77,6 +77,8 @@ def replay_history(db: Database, items: Sequence[Mapping], *, undo: bool) -> Non
             if previous != restored:
                 # A matching numeric box can belong to another verified rendition.
                 # Retire derived rows; history and immutable PNGs remain intact.
+                for row in get_detections(db, photo_id, 0, REVIEWER_MODEL, include_rejected=True):
+                    db.masks_features.clear_detection_embeddings(photo_id, row["id"])
                 db.masks_features.retire_prompt_masks(photo_id, REVIEWER_MODEL)
                 if [entry["box"] for entry in previous] != [entry["box"] for entry in restored]:
                     db.detections.clear(photo_id, REVIEWER_MODEL)

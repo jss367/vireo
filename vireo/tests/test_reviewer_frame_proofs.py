@@ -70,6 +70,49 @@ def test_source_change_while_drawing_preserves_the_previous_choice(original_phot
     assert _save(client, pid, _token(client, pid)).get_json()["primary_detection_id"] == first
 
 
+def test_redrawing_on_a_changed_frame_replaces_the_previous_box(original_photo):
+    from subjects import analyze_photo, retained
+
+    app, db, pid, source = original_photo
+    client = app.test_client()
+    old = _save(client, pid, _token(client, pid)).get_json()["primary_detection_id"]
+    Image.new("RGB", (320, 200), "blue").save(source)
+    response = client.put(f"/api/photos/{pid}/subjects/reviewer-box", json={
+        "box": {"x": .3, "y": .1, "w": .2, "h": .5}, "frame_token": _token(client, pid),
+    })
+    new = response.get_json()["primary_detection_id"]
+    assert new != old
+    assert [row["id"] for row in retained(db, pid)] == [new]
+    assert analyze_photo(db, pid, str(source)) == 1
+    assert client.post("/api/undo").status_code == 200
+    assert [row["id"] for row in retained(db, pid)] == [old]
+
+
+def test_cached_reviewer_proof_checked_when_another_box_needs_analysis(original_photo, monkeypatch):
+    import image_loader
+    from masking import PromptFrameError
+    from subjects import analyze_photo
+
+    app, db, pid, source = original_photo
+    client = app.test_client()
+    _save(client, pid, _token(client, pid))
+    assert analyze_photo(db, pid, str(source)) == 1
+    box = {"x": .1, "y": .1, "w": .2, "h": .2}
+    other, = db.detections.upsert_rows(pid, "megadetector-v6", [{"box": box, "confidence": .95}])
+    db.commit()
+    original_load = image_loader.load_image
+
+    def switched_frame(*args, **kwargs):
+        image = original_load(*args, **kwargs)
+        image.info["vireo_subject_frame_id"] = "changed-rendition"
+        return image
+
+    monkeypatch.setattr(image_loader, "load_image", switched_frame)
+    with pytest.raises(PromptFrameError, match="frame changed"):
+        analyze_photo(db, pid, str(source))
+    assert db.subjects.analysis(other) is None
+
+
 def test_confirmed_frame_is_checked_again_during_analysis_and_history_replay(original_photo):
     from masking import PromptFrameError
     from subjects import analyze_photo
@@ -267,6 +310,7 @@ def test_history_retires_masks_from_a_different_verified_rendition(original_phot
     Image.new("L", (320, 200), 255).save(mask)
     db.masks_features.upsert_mask(pid, "sam2-small", str(mask), "reviewer-selected", (.2, .2, .4, .4),
                                   MaskQuality(subject_detail=123, subject_detail_px=100))
+    db.masks_features.upsert_embedding(pid, "test", b"frame B", f"det:{first}")
     db.commit()
     rendition[0] = "embedded-preview"
     assert client.post("/api/undo").status_code == 200
@@ -275,6 +319,8 @@ def test_history_retires_masks_from_a_different_verified_rendition(original_phot
     # during a quality-only retry after restoring the preview-frame proof.
     assert db.masks_features.get_mask(pid, "sam2-small") is None
     assert mask.exists()
+    assert db.conn.execute("SELECT 1 FROM photo_embeddings WHERE photo_id=? AND variant=?",
+                           (pid, f"det:{first}")).fetchone() is None
     import subject_analysis
     from services.analysis_retry import retry_features
 
