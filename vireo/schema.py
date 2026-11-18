@@ -382,6 +382,12 @@ def _validate_flag_attribution_keeper(conn):
         raise RuntimeError("current_flag_attribution is missing its keeper columns")
 
 
+def _add_classifier_input_source(conn):
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(classifier_runs)")}
+    if "input_source" not in columns:
+        conn.execute("ALTER TABLE classifier_runs ADD COLUMN input_source TEXT")
+
+
 MIGRATIONS = (
     Migration(
         13, "companion_identities_file_mtime",
@@ -435,6 +441,7 @@ MIGRATIONS = (
     Migration(35, "subject_detail", _add_subject_detail, _validate_subject_detail),
     Migration(36, "species_choices", create_species_choices),
     Migration(37, "subject_candidates", create_subject_candidates),
+    Migration(38, "classifier_input_source", _add_classifier_input_source),
 )
 
 
