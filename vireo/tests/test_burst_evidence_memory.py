@@ -270,6 +270,7 @@ def focus(photo=None, args=None, size=(3000, 2000), enabled=True, mask_path=None
                 next(row for row in (db.get_detections(pid) or [active_prompt])
                      if row["id"] == choice["subject_overrides"][pid]), {}),
             cached_analysis=lambda *args: (None, None),
+            comparison_analysis=lambda *args: (None, None, {}),
             source_path=forbidden,
         ),
         "detection_id": types.SimpleNamespace(detection_prompt_runtime=lambda row: None, prompt_frame_id=lambda runtime: None),

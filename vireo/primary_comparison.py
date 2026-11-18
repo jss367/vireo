@@ -81,10 +81,38 @@ def primary_owner(row, candidates):
     }
 
 
-def compatible_primary(row, owner, detection, path, effective_cfg, masks_dir):
-    """Read the measured row itself. Photo-level eyes have no generation binding."""
+def _load_primary_mask(row, inputs, path, masks_dir):
     from image_loader import aligned_source_state, source_generation
 
+    try:
+        if inputs["source_generation"] != source_generation(aligned_source_state(path)):
+            return None, "source_changed", "The original has changed since primary analysis. Analyze this selection."
+        mask_path = Path(row["path"]).resolve()
+        if not masks_dir or not mask_path.is_relative_to(masks_dir):
+            return (
+                None,
+                "mask_unavailable",
+                "The primary mask is outside the catalog masks folder. Analyze this selection.",
+            )
+        png = mask_path.read_bytes()
+        with Image.open(io.BytesIO(png)) as mask:
+            if mask.format != "PNG" or list(mask.size) != inputs["size"] or mask.mode != "L" or mask.getbbox() is None:
+                return (None, "mask_unavailable",
+                        "The primary mask does not match the measured raster. Analyze this selection.")
+    except (SyntaxError, Image.DecompressionBombError, Image.UnidentifiedImageError):
+        return (None, "mask_unavailable",
+                "The primary mask could not be decoded. Analyze this selection.")
+    except (OSError, ValueError):
+        return (
+            None,
+            "source_unavailable",
+            "The original or primary mask is unavailable. Restore the file or analyze this selection.",
+        )
+    return png, None, None
+
+
+def compatible_primary(row, owner, detection, path, effective_cfg, masks_dir):
+    """Read the measured row itself. Photo-level eyes have no generation binding."""
     if not row:
         return None, "selected_missing", "No primary mask measurements are available for this selection."
     inputs = owner["raster"]
@@ -126,30 +154,9 @@ def compatible_primary(row, owner, detection, path, effective_cfg, masks_dir):
             "scale_mismatch",
             "The primary measurements use a different pixel scale. Analyze this selection at the comparison scale.",
         )
-    try:
-        if inputs["source_generation"] != source_generation(aligned_source_state(path)):
-            return None, "source_changed", "The original has changed since primary analysis. Analyze this selection."
-        mask_path = Path(row["path"]).resolve()
-        if not masks_dir or not mask_path.is_relative_to(masks_dir):
-            return (
-                None,
-                "mask_unavailable",
-                "The primary mask is outside the catalog masks folder. Analyze this selection.",
-            )
-        png = mask_path.read_bytes()
-        with Image.open(io.BytesIO(png)) as mask:
-            if mask.format != "PNG" or list(mask.size) != inputs["size"] or mask.mode != "L" or mask.getbbox() is None:
-                return (None, "mask_unavailable",
-                        "The primary mask does not match the measured raster. Analyze this selection.")
-    except (SyntaxError, Image.DecompressionBombError, Image.UnidentifiedImageError):
-        return (None, "mask_unavailable",
-                "The primary mask could not be decoded. Analyze this selection.")
-    except (OSError, ValueError):
-        return (
-            None,
-            "source_unavailable",
-            "The original or primary mask is unavailable. Restore the file or analyze this selection.",
-        )
+    png, status, reason = _load_primary_mask(row, inputs, path, masks_dir)
+    if status is not None:
+        return None, status, reason
     features = {
         k: row[k] for k in MaskQuality.__dataclass_fields__ if k not in {"comparison_inputs", "quality_input_recipe"}
     }

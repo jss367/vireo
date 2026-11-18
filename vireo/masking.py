@@ -60,7 +60,7 @@ def _sam2_model_dir(variant):
 
 
 def sam_generation(variant):
-    """Identify the pair of local weight files used to construct SAM sessions."""
+    """Identify the pair of local weight files that back SAM sessions."""
     files = []
     for name in ("image_encoder.onnx", "mask_decoder.onnx"):
         path = os.path.join(_sam2_model_dir(variant), name)
