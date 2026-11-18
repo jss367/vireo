@@ -838,7 +838,7 @@ def test_build_summary_states(tmp_path):
     assert s['status'] == 'unverified'
 
     # Five checks ran clean but hashes never verified: still not intact
-    for name in ('drift', 'orphans', 'untracked', 'sidecars', 'clocks', 'gps'):
+    for name in ('drift', 'orphans', 'untracked', 'sidecars', 'subjects', 'clocks', 'gps'):
         db.audit.record_run(name, 0)
         db.commit()
     s = build_summary(db)
@@ -883,7 +883,7 @@ def test_verify_hashes_missing_file_updates_orphans_verdict(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     scan(root, db)
-    for name in ('drift', 'orphans', 'untracked', 'sidecars', 'clocks', 'gps'):
+    for name in ('drift', 'orphans', 'untracked', 'sidecars', 'subjects', 'clocks', 'gps'):
         db.audit.record_run(name, 0)
         db.commit()
     verify_hashes(db)
@@ -928,7 +928,7 @@ def test_build_summary_missing_folder_blocks_intact(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     scan(root, db)
-    for name in ('drift', 'orphans', 'untracked', 'sidecars', 'clocks', 'gps'):
+    for name in ('drift', 'orphans', 'untracked', 'sidecars', 'subjects', 'clocks', 'gps'):
         db.audit.record_run(name, 0)
         db.commit()
     verify_hashes(db)

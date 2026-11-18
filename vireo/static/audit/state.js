@@ -25,7 +25,7 @@ export const state = {
 /** @type {Record<string, string>} */
 export const CHECK_LABELS = {
   drift: 'Drift', orphans: 'Orphans', untracked: 'Untracked',
-  sidecars: 'Sidecars', clocks: 'Camera Clocks', gps: 'GPS Jumps', integrity: 'Integrity',
+  sidecars: 'Sidecars', subjects: 'Subject Evidence', clocks: 'Camera Clocks', gps: 'GPS Jumps', integrity: 'Integrity',
 };
 
 /** @type {Record<string, {label: string, cls: string, hint: string}>} */

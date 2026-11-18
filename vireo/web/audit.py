@@ -108,6 +108,24 @@ def create_audit_blueprint(
         except (ValueError, OSError):
             return False
 
+    @blueprint.route("/api/audit/subjects")
+    def api_subject_audit() -> ResponseReturnValue:
+        from services.subject_audit import subject_audit
+
+        db = get_db()
+        report = subject_audit(db)
+        with db.transaction():
+            db.audit.record_run("subjects", len(report["findings"]))
+        return jsonify(report)
+
+    @blueprint.route("/api/audit/subjects/counts")
+    def api_subject_counts() -> ResponseReturnValue:
+        from services.subject_audit import subject_findings
+
+        rows = subject_findings(get_db())
+        return jsonify({key: sum(row[key] for row in rows)
+                        for key in ("unnamed", "stale_mask", "stale_score")})
+
     @blueprint.route("/api/audit/drift")
     def api_audit_drift() -> ResponseReturnValue:
         db = get_db()

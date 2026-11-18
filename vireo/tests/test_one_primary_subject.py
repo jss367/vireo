@@ -392,3 +392,123 @@ def test_legacy_successor_waits_for_its_own_policy(db):
     db.commit()
     state = db.subjects.primary_state(second)
     assert (state["detection_id"], state["refresh_pending"]) == (overlap, 0)
+
+
+def test_audit_compares_active_evidence_with_retained_region(app_and_db):
+    app, db = app_and_db
+    fid = _folder(db)
+    pid, hawk, strip, _ = _hawk_frame(db, fid)
+    db.subjects.set_primary_state(pid, strip)
+    db.commit()
+    client = app.test_client()
+    report = client.get('/api/audit/subjects').get_json()
+    assert report['findings'] == [dict(id=pid, filename='DSC_8166.jpg', detection_id=hawk,
+                                      unnamed=0, stale_score=1, stale_mask=0)]
+    assert [(r['species'], r['detection_id'], r['bucket_size']) for r in report['review']] == [
+        ('Red-shouldered Hawk', hawk, 1)]
+    assert client.get('/api/audit/subjects/counts').get_json() == dict(
+        unnamed=0, stale_score=1, stale_mask=0)
+
+
+def test_subject_audit_checks_only_active_mask_and_visible_workspace(app_and_db):
+    app, db = app_and_db
+    fid = _folder(db)
+    pid, hawk, strip, _ = _hawk_frame(db, fid)
+    db.conn.execute("DELETE FROM predictions WHERE detection_id=?", (hawk,))
+    anchor = db.detections.save(pid, [{"box": dict(x=0, y=0, w=1, h=1),
+                                      "confidence": 1, "category": "animal"}], detector_model="full-image")[0]
+    db.predictions.add(anchor, "Whole frame guess", 0.9, "BioCLIP-2.5")
+    db.conn.execute("""INSERT INTO photo_masks(photo_id,variant,path,created_at,detector_model,
+                    prompt_x,prompt_y,prompt_w,prompt_h) SELECT photo_id,'test','test.png',1,
+                    detector_model,box_x,box_y,box_w,box_h FROM detections WHERE id=?""", (strip,))
+    db.commit()
+    assert db.audit.subject_findings(.2)[0]['unnamed'] == 1
+    assert db.audit.subject_findings(.2)[0]['stale_mask'] == 0
+    db.conn.execute("UPDATE photos SET active_mask_variant='test' WHERE id=?", (pid,))
+    assert db.audit.subject_findings(.2)[0]['stale_mask'] == 1
+    db.conn.execute("DELETE FROM workspace_folders WHERE folder_id=?", (fid,))
+    assert db.audit.subject_findings(.2) == []
+
+
+def test_subject_audit_treats_legacy_score_without_state_as_stale(db):
+    """A migrated catalog with a quality_score but no photo_subject_state
+    row cannot prove which detection produced the score, so the audit must
+    report it stale (matching ``SubjectsRepository.has_stale_primary_state``)."""
+    fid = _folder(db)
+    pid, _hawk, _strip, _ = _hawk_frame(db, fid)
+    db.conn.execute("DELETE FROM photo_subject_state WHERE photo_id=?", (pid,))
+    db.commit()
+    assert db.audit.subject_findings(.2)[0]['stale_score'] == 1
+
+
+def test_subject_audit_excludes_rejected_and_superseded_predictions(db):
+    """Audit's 'unnamed' check reflects the same evidence Highlights uses:
+    rejected or stale-fingerprint predictions no longer count as a
+    classification, and a stale full-image prediction no longer manufactures
+    a whole-frame fallback."""
+    fid = _folder(db)
+    pid, hawk, _strip, _ = _hawk_frame(db, fid)
+    anchor = db.detections.save(pid, [{"box": dict(x=0, y=0, w=1, h=1),
+                                      "confidence": 1, "category": "animal"}],
+                                detector_model="full-image")[0]
+    db.predictions.add(anchor, "Whole frame guess", 0.9, "BioCLIP-2.5")
+    db.conn.execute(
+        "INSERT INTO prediction_review(prediction_id, workspace_id, status, reviewed_at) "
+        "SELECT id, ?, 'rejected', '2026-11-18' FROM predictions WHERE detection_id=?",
+        (db._ws_id(), hawk),
+    )
+    db.commit()
+    assert db.audit.subject_findings(.2)[0]['unnamed'] == 1
+    db.conn.execute(
+        "UPDATE predictions SET labels_fingerprint='stale' WHERE detection_id=?", (anchor,),
+    )
+    db.predictions.add(anchor, "Current guess", 0.9, "BioCLIP-2.5",
+                       labels_fingerprint="current")
+    db.commit()
+    assert db.audit.subject_findings(.2)[0]['unnamed'] == 1
+    db.predictions.add(hawk, "Red-shouldered Hawk", 1.0, "BioCLIP-2.5",
+                       labels_fingerprint="current")
+    db.commit()
+    assert db.audit.subject_findings(.2)[0]['unnamed'] == 0
+
+
+def test_subject_audit_reference_label_excludes_rejected_prediction(db):
+    """A reference photo whose primary prediction is rejected in this
+    workspace must not caption the crop with the rejected species."""
+    from services.subject_audit import subject_audit
+
+    fid = _folder(db)
+    pid, hawk, _strip, _ = _hawk_frame(db, fid)
+    db.collections.add_import("Subject audit references", [pid])
+    db.commit()
+    before = next(r for r in subject_audit(db)["references"] if r["id"] == pid)
+    assert (before["detection_id"], before["species"]) == (hawk, "Red-shouldered Hawk")
+    db.conn.execute(
+        "INSERT INTO prediction_review(prediction_id, workspace_id, status, reviewed_at) "
+        "SELECT id, ?, 'rejected', '2026-11-18' FROM predictions WHERE detection_id=?",
+        (db._ws_id(), hawk),
+    )
+    db.commit()
+    after = next(r for r in subject_audit(db)["references"] if r["id"] == pid)
+    assert (after["detection_id"], after["species"]) == (hawk, None)
+
+
+def test_subject_audit_reference_label_honors_saved_weak_rescue_floor(db):
+    """A reference photo whose primary detection sits below the workspace
+    detector floor but is kept by the saved per-photo weak-rescue floor must
+    still caption the crop with its current unrejected prediction."""
+    from services.subject_audit import subject_audit
+
+    fid = _folder(db)
+    pid = db.conn.execute(
+        "INSERT INTO photos(folder_id,filename) VALUES (?,'weak-rescue.jpg')", (fid,),
+    ).lastrowid
+    det = db.detections.save(pid, [dict(
+        box=dict(x=.1, y=.1, w=.3, h=.3), confidence=.1, category='animal',
+    )], detector_model='megadetector-v6')[0]
+    _classify(db, det, "Great Horned Owl", 1.0, match=.5)
+    db.subjects.set_primary_state(pid, det, min_conf=.05, detector_model='megadetector-v6')
+    db.collections.add_import("Subject audit references", [pid])
+    db.commit()
+    row = next(r for r in subject_audit(db)["references"] if r["id"] == pid)
+    assert (row["detection_id"], row["species"]) == (det, "Great Horned Owl")

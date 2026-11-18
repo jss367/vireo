@@ -1396,7 +1396,7 @@ class PredictionRepository:
             for pid, rows in self.top_unrejected_by_detection(photo_ids).items()
         }
 
-    def top_unrejected_by_detection(self, photo_ids):
+    def top_unrejected_by_detection(self, photo_ids, min_detector_confidence=None):
         """``{photo_id: [row, ...]}``: one row per detection, that detection's
         highest-confidence prediction the active workspace has not rejected,
         from its latest label set; each photo's list runs highest confidence
@@ -1411,13 +1411,17 @@ class PredictionRepository:
         ``box_h``), so a photo with two subjects keeps both species instead of
         only the most confident one. Each photo's list runs in
         ``subject_evidence_order``: the photo's primary subject first,
-        whole-frame rows last. Same detector floor, visibility and
+        whole-frame rows last. ``min_detector_confidence`` overrides the
+        workspace detector floor for callers that already selected the
+        detections under a saved per-photo policy (weak-rescue floor); the
+        workspace floor still applies when it is None. Same visibility and
         empty-input rules.
         """
         if not photo_ids:
             return {}
         ws = self.workspace_id
-        detector_floor = config_value(self.effective_config(), "detector_confidence")
+        detector_floor = (min_detector_confidence if min_detector_confidence is not None
+                          else config_value(self.effective_config(), "detector_confidence"))
         # Rank retained regions before prediction filtering: an unclassified
         # or rejected primary must not promote a secondary into its place.
         results = {}

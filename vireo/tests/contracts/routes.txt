@@ -26,6 +26,8 @@ GET          /api/audit/gps-jumps
 GET          /api/audit/integrity
 GET          /api/audit/orphans
 GET          /api/audit/sidecars
+GET          /api/audit/subjects
+GET          /api/audit/subjects/counts
 GET          /api/audit/summary
 GET          /api/audit/untracked
 GET          /api/browse

@@ -3,9 +3,10 @@
 // Integrity tab.
 // ES module.
 
+import { runSubjectCheck } from './subjects.js';
 import { runGpsCheck } from './gps.js';
 import { byId } from './helpers.js';
-import { bindTabs, loadSummary, runAllChecks } from './summary.js';
+import { bindTabs, loadSummary, runAllChecks, switchTab } from './summary.js';
 import { bindDriftTable, resolveAll, runDriftCheck } from './drift.js';
 import { bindOrphanTable, removeAllOrphans, runOrphanCheck } from './orphans.js';
 import { bindUntrackedTable, importAllUntracked, runUntrackedCheck, sendToPipeline } from './untracked.js';
@@ -19,6 +20,7 @@ function onClick(id, action) {
 }
 
 bindTabs();
+if (location.hash === '#subjects') switchTab('subjects');
 onClick('btnRunAll', runAllChecks);
 onClick('btnDrift', runDriftCheck);
 onClick('btnSyncAllFromXmp', function() { return resolveAll('use_xmp'); });
@@ -30,6 +32,7 @@ onClick('btnImportAllUntracked', importAllUntracked);
 onClick('sendToPipelineBtn', sendToPipeline);
 onClick('btnSidecars', runSidecarCheck);
 onClick('btnDeleteAllSidecars', deleteAllSidecars);
+onClick('btnSubjects', runSubjectCheck);
 onClick('btnGps', runGpsCheck);
 onClick('btnClocks', runClockCheck);
 onClick('btnVerify', runHashVerify);

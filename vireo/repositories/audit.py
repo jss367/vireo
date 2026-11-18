@@ -26,6 +26,8 @@ from typing import Any
 
 from repositories.photo_row_deletion import photo_row_deletion
 from repositories.photo_sql import CAPTURE_TIME_STATE_SQL
+from repositories.prediction_review import prediction_review_join, prediction_review_status
+from repositories.subject_order import primary_order_sql
 
 
 class AuditRepository:
@@ -69,6 +71,80 @@ class AuditRepository:
             }
             for r in rows
         }
+
+    def subject_findings(self, floor: float) -> list[dict[str, Any]]:
+        """Inspect active outputs against the same retained animal the reviewer sees.
+
+        Treats a classification as evidence only when it is not rejected in
+        this workspace and carries the current labels fingerprint for its
+        (detection, classifier_model), matching the reads Highlights and
+        product surfaces use. A legacy ``photos.quality_score`` without a
+        ``photo_subject_state`` row is reported as stale too, so a migrated
+        catalog with no provenance for its scores cannot look clean. The saved
+        per-photo floor and model define the candidate set for projected
+        outputs, including weak rescues; legacy rows use the workspace floor.
+        A score is proven only by the selected region's matching measurement;
+        selecting a primary alone does not measure a legacy score.
+        """
+        ws = self.workspace_id_fn()
+        rows = self.conn.execute(f"""
+            WITH evidence AS MATERIALIZED (
+                SELECT p.id, p.filename, p.quality_score, p.active_mask_variant,
+                       (SELECT d.id FROM detections d WHERE d.photo_id=p.id
+                        AND d.category='animal' AND d.detector_model!='full-image'
+                        AND d.subject_verdict IS NULL
+                        AND d.detector_confidence >= COALESCE(policy.min_conf, ?)
+                        AND (policy.detector_model IS NULL OR d.detector_model=policy.detector_model)
+                        ORDER BY {primary_order_sql("d")} LIMIT 1) AS detection_id
+                FROM photo_workspace_visibility v JOIN photos p ON p.id=v.photo_id
+                LEFT JOIN photo_subject_state policy ON policy.photo_id=p.id
+                JOIN folders f ON f.id=p.folder_id
+                WHERE v.workspace_id=? AND f.status IN ('ok','partial')
+            )
+            SELECT e.id, e.filename, e.detection_id,
+                   d.id IS NOT NULL AND NOT EXISTS (
+                       SELECT 1 FROM predictions pr
+                       {prediction_review_join('pr')}
+                       WHERE pr.detection_id = d.id
+                         AND pr.species IS NOT NULL
+                         AND {prediction_review_status()} != 'rejected'
+                         AND pr.labels_fingerprint = (
+                             SELECT pr2.labels_fingerprint FROM predictions pr2
+                             WHERE pr2.detection_id = pr.detection_id
+                               AND pr2.classifier_model = pr.classifier_model
+                             ORDER BY pr2.created_at DESC, pr2.id DESC LIMIT 1
+                         )
+                   ) AND EXISTS (
+                       SELECT 1 FROM detections old
+                       JOIN predictions pr ON pr.detection_id = old.id
+                       {prediction_review_join('pr')}
+                       WHERE old.photo_id = e.id
+                         AND old.detector_model = 'full-image'
+                         AND pr.species IS NOT NULL
+                         AND {prediction_review_status()} != 'rejected'
+                         AND pr.labels_fingerprint = (
+                             SELECT pr2.labels_fingerprint FROM predictions pr2
+                             WHERE pr2.detection_id = pr.detection_id
+                               AND pr2.classifier_model = pr.classifier_model
+                             ORDER BY pr2.created_at DESC, pr2.id DESC LIMIT 1
+                         )
+                   ) AS unnamed,
+                   pm.photo_id IS NOT NULL AND (d.id IS NULL OR NOT (
+                       pm.detector_model IS d.detector_model AND pm.prompt_x IS d.box_x
+                       AND pm.prompt_y IS d.box_y AND pm.prompt_w IS d.box_w
+                       AND pm.prompt_h IS d.box_h)) AS stale_mask,
+                   e.quality_score IS NOT NULL AND
+                       (st.photo_id IS NULL OR st.detection_id IS NOT d.id OR NOT EXISTS (
+                           SELECT 1 FROM detection_subjects measured
+                           WHERE measured.detection_id=d.id
+                             AND measured.quality_score=e.quality_score
+                       )) AS stale_score
+            FROM evidence e LEFT JOIN detections d ON d.id=e.detection_id
+            LEFT JOIN photo_subject_state st ON st.photo_id=e.id
+            LEFT JOIN photo_masks pm ON pm.photo_id=e.id AND pm.variant=e.active_mask_variant
+            WHERE unnamed OR stale_mask OR stale_score ORDER BY e.id
+        """, (floor, ws, ws, ws))
+        return [dict(row) for row in rows]
 
     # -- hash integrity ------------------------------------------------------
 
