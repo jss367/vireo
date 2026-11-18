@@ -46,6 +46,8 @@ def comparison_library(app_and_db, tmp_path, monkeypatch):
     db.commit()
 
     def mask_for_box(image, box, variant):
+        from masking import sam_generation
+        image.info["vireo_sam_generation"] = sam_generation(variant)
         mask = np.zeros((image.height, image.width), bool)
         x, y, w, h = (box[k] for k in "xywh")
         mask[int(y * image.height):int((y + h) * image.height),

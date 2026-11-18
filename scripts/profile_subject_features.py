@@ -69,7 +69,7 @@ def profile(rows, sam2, dinov2, longest_edge):
     import onnx_runtime
     from quality import compute_all_quality_features
 
-    encoder, decoder = masking._get_sam2_sessions(sam2)
+    encoder, decoder, _ = masking._get_sam2_sessions(sam2)
     dino_embed._get_dinov2_session(dinov2)
     timings = {}
 

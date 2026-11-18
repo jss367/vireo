@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from detection_id import detection_prompt_runtime
+from masking import sam_generation
 from PIL import Image
 from repositories.masks_features import MaskQuality
 from subject_readiness import subject_analysis_readiness
@@ -15,21 +16,7 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
-def sam_generation(variant):
-    from masking import _sam2_model_dir
-
-    files = []
-    for name in ("image_encoder.onnx", "mask_decoder.onnx"):
-        path = Path(_sam2_model_dir(variant), name)
-        try:
-            st = path.stat()
-            files.append((str(path), st.st_size, st.st_mtime_ns))
-        except FileNotFoundError:
-            return None
-    return digest(files)
-
-
-def measurement_inputs(proxy, detection_id, runtime, variant):
+def measurement_inputs(proxy, detection_id, runtime, generation):
     info = getattr(proxy, "info", {})
     if not info.get("vireo_source_generation"):
         return None
@@ -43,7 +30,7 @@ def measurement_inputs(proxy, detection_id, runtime, variant):
             "size": proxy.size,
             "detection_id": detection_id,
             "runtime": runtime,
-            "sam_generation": sam_generation(variant),
+            "sam_generation": generation,
         },
         sort_keys=True,
     )

@@ -32,6 +32,8 @@ def retry_library(app_and_db, tmp_path, monkeypatch):
         return original_frame_detections(path, [{"box": {"x": .1, "y": .1, "w": .7, "h": .7}, "confidence": .9, "category": "animal"}])
 
     def mask(image, box, variant):
+        from masking import sam_generation
+        image.info["vireo_sam_generation"] = sam_generation(variant)
         calls["segmentation"].append(variant)
         pixels = np.zeros((image.height, image.width), bool)
         pixels[8:64, 10:80] = True
@@ -1189,3 +1191,21 @@ def test_selected_cache_decoder_failure_is_unusable(retry_library, tmp_path, mon
 
     monkeypatch.setattr(Image, "open", fail_decode)
     assert not usable_selected_analysis(analysis)
+
+
+def test_pinned_quality_retry_publishes_selected_evidence_with_legacy_mask(retry_library, tmp_path):
+    from services.analysis_retry import retry_features
+    from subject_readiness import usable_selected_analysis
+
+    _, db, ids, calls = retry_library
+    pid = ids[0]
+    execute(db, [pid], tmp_path)
+    did, key = db.conn.execute("SELECT detection_id,source_key FROM subject_ranking_analysis").fetchone()
+    db.conn.execute("DELETE FROM subject_ranking_analysis")
+    db.conn.execute("UPDATE photo_masks SET comparison_inputs=NULL WHERE photo_id=?", (pid,))
+    db.commit()
+    calls["segmentation"].clear()
+    retry_features(db, pid, db.get_effective_config({}), str(tmp_path), lambda: None,
+                   quality_only=True, expected_primary_detection_id=did)
+    assert calls["segmentation"] == ["sam2-small"]
+    assert usable_selected_analysis(db.subjects.ranking_analysis(did, key))

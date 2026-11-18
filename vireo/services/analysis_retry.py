@@ -233,7 +233,7 @@ def retry_features(db: Database, pid: int, effective: JsonDict, cache_dir: str,
             raise ValueError("Primary subject changed before analysis started; retry the chosen subject")
         mask_path = db.masks_features.get_mask(pid, effective.get("pipeline", {}).get("sam2_variant") or "sam2-small")
         existing_path = None
-        if (quality_only and mask_path and mask_path["detector_model"] == detection["detector_model"]
+        if (quality_only and expected_primary_detection_id is None and mask_path and mask_path["detector_model"] == detection["detector_model"]
                 and all(mask_path["prompt_" + k] == detection["box_" + k] for k in "xywh")
                 and os.path.isfile(mask_path["path"])):
             existing_path = mask_path["path"]

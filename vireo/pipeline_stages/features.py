@@ -1216,8 +1216,9 @@ class _MaskPass:
         with self._timed("segment"):
             item.frame_id = getattr(proxy, "info", {}).get("vireo_subject_frame_id")
             self.require_aligned_detector_prompt(proxy, item.detector_runtime, detector_model=item.entry.get("detector_model"))
-            item.comparison_inputs = measurement_inputs(proxy, item.entry["detection_id"], item.detector_runtime, self.sam2_variant)
-            return self.generate_mask(proxy, item.det_box, variant=self.sam2_variant)
+            mask = self.generate_mask(proxy, item.det_box, variant=self.sam2_variant)
+            item.comparison_inputs = measurement_inputs(proxy, item.entry["detection_id"], item.detector_runtime, getattr(proxy, "info", {}).get("vireo_sam_generation"))
+            return mask
 
     def _analyze_and_embed(
         self, item: _MaskPhoto, proxy: Image.Image, mask: np.ndarray,

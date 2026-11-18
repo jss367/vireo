@@ -363,8 +363,8 @@ class _MaskExtractionRun:
 
         # Generate mask via SAM2
         deps.require_aligned_detector_prompt(proxy, photo.get("detector_runtime"), detector_model=photo.get("detector_model"))
-        item.comparison_inputs = measurement_inputs(proxy, photo["detection_id"], photo["detector_runtime"], self.sam2_variant)
         mask = deps.generate_mask(proxy, det_box, variant=self.sam2_variant)
+        item.comparison_inputs = measurement_inputs(proxy, photo["detection_id"], photo["detector_runtime"], getattr(proxy, "info", {}).get("vireo_sam_generation"))
         if mask is None:
             self.skipped += 1
             return False

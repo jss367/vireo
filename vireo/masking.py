@@ -6,6 +6,8 @@ ONNX models, then provides utilities for subject cropping and background blurrin
 Masks are saved as single-channel PNGs in ~/.vireo/masks/{photo_id}.png.
 """
 
+import hashlib
+import json
 import logging
 import os
 import threading
@@ -55,6 +57,19 @@ def _sam2_model_dir(variant):
     return os.path.join(
         default_path("models"), variant
     )
+
+
+def sam_generation(variant):
+    """Identify the pair of local weight files used to construct SAM sessions."""
+    files = []
+    for name in ("image_encoder.onnx", "mask_decoder.onnx"):
+        path = os.path.join(_sam2_model_dir(variant), name)
+        try:
+            st = os.stat(path)
+        except FileNotFoundError:
+            return None
+        files.append((path, st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns))
+    return hashlib.sha256(json.dumps(files).encode()).hexdigest()
 
 
 def sam2_status(variant):
@@ -182,7 +197,7 @@ def _get_sam2_sessions(variant="sam2-small"):
         variant: one of sam2-tiny, sam2-small, sam2-base-plus, sam2-large
 
     Returns:
-        (image_encoder_session, mask_decoder_session) tuple
+        (image_encoder_session, mask_decoder_session, weight_generation) tuple
     """
     global _encoder_session, _decoder_session, _sam2_variant_loaded
 
@@ -195,12 +210,13 @@ def _get_sam2_sessions(variant="sam2-small"):
         _sam2_session_lock,
         label="SAM2 session cache",
     ):
+        generation = sam_generation(variant)
         if (
             _encoder_session is not None
             and _decoder_session is not None
-            and _sam2_variant_loaded == variant
+            and _sam2_variant_loaded == (variant, generation)
         ):
-            return _encoder_session, _decoder_session
+            return _encoder_session, _decoder_session, generation
 
         if variant not in SAM2_VARIANTS:
             raise ValueError(
@@ -208,9 +224,7 @@ def _get_sam2_sessions(variant="sam2-small"):
                 f"Choose from: {list(SAM2_VARIANTS.keys())}"
             )
 
-        model_dir = os.path.join(
-            default_path("models"), variant
-        )
+        model_dir = _sam2_model_dir(variant)
         encoder_path = os.path.join(model_dir, "image_encoder.onnx")
         decoder_path = os.path.join(model_dir, "mask_decoder.onnx")
 
@@ -259,11 +273,13 @@ def _get_sam2_sessions(variant="sam2-small"):
             decoder_path, providers=providers_no_coreml, cancel_check=pure_probe,
         )
 
+        if generation is None or sam_generation(variant) != generation:
+            raise RuntimeError("SAM2 weights changed while loading sessions. Retry segmentation.")
         _encoder_session = enc_sess
         _decoder_session = dec_sess
-        _sam2_variant_loaded = variant
+        _sam2_variant_loaded = (variant, generation)
         log.info("SAM2 ONNX loaded (%s)", variant)
-        return enc_sess, dec_sess
+        return enc_sess, dec_sess, generation
 
 
 def _sam2_box_prompt(bx, by, bw, bh, orig_w, orig_h):
@@ -356,7 +372,8 @@ def generate_mask(image, detection_box, variant="sam2-small"):
     Returns:
         numpy boolean array (H, W) — True where subject is, or None on failure
     """
-    encoder_session, decoder_session = _get_sam2_sessions(variant)
+    encoder_session, decoder_session, generation = _get_sam2_sessions(variant)
+    image.info["vireo_sam_generation"] = generation
     img_array = np.array(image.convert("RGB"))
     orig_h, orig_w = img_array.shape[:2]
 

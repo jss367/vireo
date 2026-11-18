@@ -369,9 +369,9 @@ def test_sam2_sessions_singleton_caching():
     mock_dec = MagicMock()
     masking._encoder_session = mock_enc
     masking._decoder_session = mock_dec
-    masking._sam2_variant_loaded = "sam2-small"
+    masking._sam2_variant_loaded = ("sam2-small", masking.sam_generation("sam2-small"))
 
-    enc, dec = masking._get_sam2_sessions("sam2-small")
+    enc, dec, generation = masking._get_sam2_sessions("sam2-small")
     assert enc is mock_enc
     assert dec is mock_dec
 
@@ -412,11 +412,11 @@ def test_sam2_sessions_reloads_for_different_variant(tmp_path):
 
     with patch.dict(os.environ, {"HOME": str(tmp_path)}):
         with patch("masking.onnx_runtime.create_session", side_effect=mock_create_session):
-            enc, dec = masking._get_sam2_sessions("sam2-small")
+            enc, dec, generation = masking._get_sam2_sessions("sam2-small")
 
     assert enc is mock_new_enc
     assert dec is mock_new_dec
-    assert masking._sam2_variant_loaded == "sam2-small"
+    assert masking._sam2_variant_loaded == ("sam2-small", generation)
 
     # Cleanup
     masking._encoder_session = None
@@ -558,7 +558,7 @@ def test_generate_mask_with_mock():
 
     masking._encoder_session = mock_enc
     masking._decoder_session = mock_dec
-    masking._sam2_variant_loaded = "sam2-small"
+    masking._sam2_variant_loaded = ("sam2-small", masking.sam_generation("sam2-small"))
 
     img = Image.new("RGB", (150, 100))
     detection_box = {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}
@@ -636,7 +636,7 @@ def test_generate_mask_releases_gpu_lock_outside_inference():
 
     masking._encoder_session = mock_enc
     masking._decoder_session = mock_dec
-    masking._sam2_variant_loaded = "sam2-small"
+    masking._sam2_variant_loaded = ("sam2-small", masking.sam_generation("sam2-small"))
 
     img = Image.new("RGB", (150, 100))
     detection_box = {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}
@@ -862,7 +862,7 @@ def test_generate_mask_reraises_resource_wait_cancelled(monkeypatch):
 
     monkeypatch.setattr(masking, "_encoder_session", mock_enc)
     monkeypatch.setattr(masking, "_decoder_session", mock_dec)
-    monkeypatch.setattr(masking, "_sam2_variant_loaded", "sam2-small")
+    monkeypatch.setattr(masking, "_sam2_variant_loaded", ("sam2-small", masking.sam_generation("sam2-small")))
 
     img = Image.new("RGB", (150, 100))
     detection_box = {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}
@@ -902,7 +902,7 @@ def test_generate_mask_still_swallows_ordinary_inference_failures(monkeypatch):
 
     monkeypatch.setattr(masking, "_encoder_session", mock_enc)
     monkeypatch.setattr(masking, "_decoder_session", mock_dec)
-    monkeypatch.setattr(masking, "_sam2_variant_loaded", "sam2-small")
+    monkeypatch.setattr(masking, "_sam2_variant_loaded", ("sam2-small", masking.sam_generation("sam2-small")))
 
     img = Image.new("RGB", (150, 100))
     detection_box = {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}
@@ -911,3 +911,32 @@ def test_generate_mask_still_swallows_ordinary_inference_failures(monkeypatch):
         img, detection_box, variant="sam2-small",
     )
     assert result is None
+
+
+def test_sam_sessions_track_replaced_weights_and_reject_mid_load_change(tmp_path, monkeypatch):
+    import masking
+    import pytest
+
+    monkeypatch.setattr(masking, "_sam2_model_dir", lambda _: str(tmp_path))
+    for filename in ("image_encoder.onnx", "mask_decoder.onnx"):
+        (tmp_path / filename).write_bytes(b"first")
+    for name in ("_encoder_session", "_decoder_session", "_sam2_variant_loaded"):
+        monkeypatch.setattr(masking, name, None)
+    monkeypatch.setattr(masking.onnx_runtime, "create_session", lambda *a, **kw: object())
+    first = masking._get_sam2_sessions()
+    assert masking._get_sam2_sessions() == first
+    encoder = tmp_path / "image_encoder.onnx"
+    encoder.write_bytes(b"replacement")
+    second = masking._get_sam2_sessions()
+    assert all(old != new for old, new in zip(first, second, strict=True))
+    assert second[2] == masking.sam_generation("sam2-small")
+
+    encoder.write_bytes(b"third")
+    def change_weights_during_load(*a, **kw):
+        with encoder.open("ab") as weights:
+            weights.write(b"x")
+        return object()
+    monkeypatch.setattr(masking.onnx_runtime, "create_session", change_weights_during_load)
+    with pytest.raises(RuntimeError, match="weights changed"):
+        masking._get_sam2_sessions()
+    assert masking._encoder_session is second[0]

@@ -51,6 +51,7 @@ def analyze_detection(db, photo, detection, effective_cfg, checkpoint, *, force=
         render_proxy,
         require_aligned_detector_prompt,
         require_original_reviewer_frame,
+        sam_generation,
         write_mask_png,
     )
     from primary_comparison import measurement_inputs
@@ -76,13 +77,13 @@ def analyze_detection(db, photo, detection, effective_cfg, checkpoint, *, force=
                 else:
                     existing_mask_path = None
         variant = effective_cfg.get("pipeline", {}).get("sam2_variant") or "sam2-small"
-        # For a reused mask this describes the requested inputs. Publication
-        # checks them against the original mask generation under the writer lock.
-        inputs = (measurement_inputs(image, detection["id"], detection_prompt_runtime(detection), variant)
-                  if defer_publication else None)
         if not existing_mask_path:
             mask = generate_mask(image, {k: detection["box_" + k] for k in "xywh"},
                                  variant=variant)
+        inputs = None
+        if defer_publication:
+            generation = sam_generation(variant) if existing_mask_path else image.info.get("vireo_sam_generation")
+            inputs = measurement_inputs(image, detection["id"], detection_prompt_runtime(detection), generation)
         if mask is None or not np.any(mask):
             raise ValueError("No subject mask was produced")
         checkpoint()
