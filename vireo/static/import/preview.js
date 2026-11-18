@@ -374,14 +374,11 @@ async function previewImport(opts) {
             /** @type {ImportDuplicateFrame} */ const d = JSON.parse(m[1] || '');
             applyCaptureDates(d.capture_dates);
             if (d.recovered) recoveredPathsNoDedup.push(...d.recovered);
-            if (!d.done && requestSeq === importPreviewSeq &&
-                !importPreviewSignatureChanged(requestSignature) &&
-                Number.isFinite(Number(d.checked)) &&
-                Number.isFinite(Number(d.total))) {
-              summary.textContent = files.length +
-                ' files found — checking for interrupted-run leftovers… ' +
-                Number(d.checked).toLocaleString() + ' of ' +
-                Number(d.total).toLocaleString();
+            if (requestSeq !== importPreviewSeq || importPreviewSignatureChanged(requestSignature)) continue;
+            if (d.clock_problems) renderImportClockProblems(d.clock_problems);
+            if (!d.done && Number.isFinite(Number(d.checked)) && Number.isFinite(Number(d.total))) {
+              summary.textContent = files.length + ' files found — checking for interrupted-run leftovers… ' +
+                Number(d.checked).toLocaleString() + ' of ' + Number(d.total).toLocaleString();
             }
           } catch (e) { /* partial frame */ }
         }
