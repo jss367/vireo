@@ -196,7 +196,8 @@ def test_single_subject_frames_and_existing_decisions(comparison_library):
     assert not set(pids[:2]) & set(pack["suggested_reject_ids"])
 
 
-def test_selected_mask_focus_and_measurements_share_generation(comparison_library, monkeypatch):
+@pytest.mark.parametrize("center", ["", "&center=.25,.5"])
+def test_selected_mask_focus_and_measurements_share_generation(comparison_library, monkeypatch, center):
     app, db, pids, ids = comparison_library
     import config as cfg
     _analyze(db, pids, SubjectComparison(TARGET), cfg.load())
@@ -209,10 +210,14 @@ def test_selected_mask_focus_and_measurements_share_generation(comparison_librar
     assert mask.status_code == 200
     pixels = np.asarray(Image.open(io.BytesIO(mask.data)))
     assert pixels[80, 70] == 255 and pixels[80, 240] == 0
-    focus = client.get(card["focus_crop_mask_url"])
+    focus = client.get(card["focus_crop_mask_url"] + center)
     assert focus.status_code == 200
     assert focus.headers["X-Vireo-Detection-Id"] == str(ids[card["id"]][0])
-    assert focus.headers["X-Vireo-Focus-Basis"] == "subject"
+    assert focus.headers["X-Vireo-Focus-Basis"] == ("point" if center else "subject")
+    assert focus.headers["X-Vireo-Focus-Mask"] == "1"
+    assert focus.headers["X-Vireo-Analysis-Key"] == card["subject"]["analysis_key"]
+    crop = np.asarray(Image.open(io.BytesIO(focus.data)))
+    assert crop[80, 70, 0] > 240 and crop[80, 240, 0] < 100
     assert focus.headers["X-Vireo-Focus-Detection-Id"] == str(ids[card["id"]][0])
     assert focus.headers["X-Vireo-Focus-Eye-Status"] == "disabled"
     # Foreign detection ids and a different generation cannot borrow the primary mask.
