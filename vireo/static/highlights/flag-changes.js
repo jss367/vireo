@@ -36,7 +36,7 @@ export function onHighlightFlagChanged(e) {
     // another bucket's state goes stale.
     var filterAffected = findAllHighlightPhotoContainers(detail.photoId)
       .some(function(h) { return curationFilterAffectedByReject(h.photo); });
-    if (filterAffected) {
+    if (filterAffected || state.currentData?.scope === 'collection') {
       removeRejectedPhotoFromModel(detail.photoId);
       loadHighlights();
     } else if (removeRejectedPhotoFromModel(detail.photoId)) {
@@ -50,6 +50,9 @@ export function onHighlightFlagChanged(e) {
     state.rejectedFromGrid.delete(detail.photoId);
     delete state.rejectedAtLoadSeq[detail.photoId];
     loadHighlights();
+  } else if (state.currentData?.scope === 'collection') {
+    // A flag can change smart collection membership, including its last species row.
+    loadHighlights();
   } else {
     handleHighlightPickChange(detail);
   }
@@ -58,10 +61,9 @@ export function onHighlightFlagChanged(e) {
 /**
  * Pick/Unpick from the lightbox: the visible row is a slice(0, perRow) of
  * bucket.photos, and the backend applies the +0.08 highlight_score bonus +
- * picked_first ordering + `_apply_ordered_highlights` +
- * `_apply_highlight_preferences` before serving that ordering. Rather than
- * mirror all of that in JS (which has already produced a stream of ordering
- * bugs against representatives, curated highlights, the score clamp,
+ * picked_first ordering + `apply_highlight_preferences` before serving that
+ * ordering. Rather than mirror all of that in JS (which has already produced
+ * a stream of ordering bugs against highlights, the score clamp,
  * best_timestamp, and the has_more offset), refetch the bucket
  * authoritatively so the client window is always what a full reload would
  * produce.

@@ -274,10 +274,9 @@ def _bucket_unanalyzed_count(photos):
 
     Only the trailing run is counted (not every unscored non-pick in the
     bucket) so that curated ordering — where
-    :func:`apply_ordered_highlights` or :func:`apply_highlight_preferences`
-    can promote an unscored, non-flagged photo to the front as a species
-    highlight or representative — doesn't inflate the count with photos that
-    now live above the divider. Unscored picks are excluded because they
+    :func:`apply_highlight_preferences` can promote an unscored, non-flagged
+    photo to the front as a species highlight — doesn't inflate the count
+    with photos that now live above the divider. Unscored picks are excluded because they
     stay grouped with the other picks at the front regardless.
     """
     if not photos:
@@ -870,6 +869,23 @@ class HighlightsQuery:
     """The free-text search over sections and photos."""
     confirmation_filter: str = "all"
     highlight_filter: str = "all"
+    collection_id: int | None = None
+    rules: object = None
+    """Visual membership resolved for this collection, when applicable."""
+
+    def resolved_folder(self, folders):
+        """Use the most recent folder only when no broader scope was requested."""
+        if self.collection_id is not None or self.scope == "workspace":
+            return None
+        if self.folder_id is not None or not folders:
+            return self.folder_id
+        return folders[0]["id"]
+
+    def candidates(self, db, folder_id):
+        return db.species_curation.get_highlights_candidates(
+            folder_id, min_quality=self.min_quality,
+            collection_id=self.collection_id, rules=self.rules,
+        )
 
 
 def build_highlights_payload(db, query=None):
@@ -878,11 +894,7 @@ def build_highlights_payload(db, query=None):
     if query is None:
         query = HighlightsQuery()
     folders = db.folders.with_quality_data()
-    folder_id = query.folder_id
-    if query.scope == "workspace":
-        folder_id = None
-    elif folder_id is None and folders:
-        folder_id = folders[0]["id"]  # Most recent
+    folder_id = query.resolved_folder(folders)
     limit_per_bucket = max(1, min(int(query.limit_per_bucket), 100))
     species_filter = (query.species.text or "").strip()
     confirmation_filter = normalize_highlight_confirmation_filter(
@@ -890,8 +902,15 @@ def build_highlights_payload(db, query=None):
     )
     highlight_filter = _normalize_highlight_presence_filter(query.highlight_filter)
 
-    candidates = db.species_curation.get_highlights_candidates(folder_id, min_quality=query.min_quality)
-    total_in_scope = db.photos.count_filtered(folder_id=folder_id)
+    candidates = query.candidates(db, folder_id)
+    if query.collection_id is None:
+        scope_name = "workspace" if folder_id is None else "folder"
+        total_in_scope = db.photos.count_filtered(folder_id=folder_id)
+    else:
+        scope_name = "collection"
+        total_in_scope = db.collections.count_photos_for_rules(
+            query.rules or [], collection_id=query.collection_id,
+        )
 
     buckets, unidentified_photos = collect_highlight_buckets(
         candidates, query.confidence_threshold, confirmation_filter,
@@ -946,7 +965,7 @@ def build_highlights_payload(db, query=None):
             "highlight_selection": highlight_filter,
             "search": (query.search.text or "").strip(),
         },
-        "scope": "workspace" if folder_id is None else "folder",
+        "scope": scope_name,
     }
 
 

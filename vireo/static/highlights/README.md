@@ -18,11 +18,11 @@ has no Jinja values to hand over, and its controls name their handlers in
 | --- | --- |
 | `state.js` | Page state: the `state` object (the last `/api/highlights` response, expanded rows, the folder name, the debounce timer, collections, the species modal, the lightbox photo, the reject undo and the load and refetch sequences) and `WORKSPACE_SCOPE` |
 | `shared.js` | The boundary with shared code: every navbar, lightbox and `vireo-utils.js` global the page uses, and `registerPageHooks()` |
-| `scope.js` | Score formatting, the scope and filter request parameters, the selected folder, and what a highlight write claimed (`topHighlightToast`, `addedHighlightToast`) |
+| `scope.js` | Score formatting, the scope and filter request parameters, the selected folder or collection, and what a highlight write claimed (`topHighlightToast`, `addedHighlightToast`) |
 | `loading.js` | `loadHighlights()` with its reject-prune guard, bucket sorting, the advanced-mode sort options, `debounceLoad`, and the undo/redo hook |
 | `render.js` | `render()`, each species row with the line saying why its first photo leads (`bucketDecision`), the unidentified row, the expand and row action buttons, and `loadMoreBucket` |
 | `cards.js` | Photo cards, their thumbnails, and their click and highlight-order buttons |
-| `species.js` | Confirming a row, the species modal, and adding, removing, reordering and promoting highlights, each scoped to the selected folder |
+| `species.js` | Confirming a row, the species modal, and adding, removing, reordering and promoting highlights, each scoped to the selected folder or collection |
 | `ordering.js` | Finding a photo in the loaded rows, and `refetchBucketFromZero` with its per-bucket sequence guard |
 | `rejects.js` | Whether a reject needs a reload under a curation filter, and pruning a rejected photo from the loaded rows |
 | `lightbox.js` | Advancing the lightbox after a reject, the reject undo bar, and the highlight controls beside the open photo |
@@ -94,9 +94,10 @@ bucket refetch copies the page's `best_decision` with the new order
 A species has one list of highlights, numbered in the row from the server's
 `highlight_rank`. The numbers are not stored: every write records a comparison
 and the server ranks the highlights it can show. Add, Up, Down and Make Top
-Highlight send the selected folder (`selectedFolderId`), so with one folder
-shown they order that folder's highlights only; with every folder shown they
-cover all of them. Up and Down also send the neighbor the row showed
-(`highlightNeighborId`), so the row changes by the step the user saw. Up on
-the first highlight sends no neighbor and settles a tie in its favor. The
-toasts say what was claimed.
+Highlight send the selected folder or collection (`selectedScope`), so with
+one shown they order its highlights only; with the whole workspace shown they
+cover all of them. A write is skipped while the loaded rows are for another
+scope or filter than the controls show. Up and Down also send the neighbor
+the row showed (`highlightNeighborId`), so the row changes by the step the
+user saw. Up on the first highlight sends no neighbor and settles a tie in
+its favor. The toasts say what was claimed.

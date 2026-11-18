@@ -6,11 +6,11 @@ import { safeFetch, showToast } from './shared.js';
 import { updateHighlightsLightboxControls } from './lightbox.js';
 import { loadHighlights } from './loading.js';
 import { loadMoreBucket } from './render.js';
-import { addedHighlightToast, highlightsScopeParams, selectedFolderId, topHighlightToast } from './scope.js';
+import { addedHighlightToast, highlightsScopeParams, selectedScope, selectedScopeName, topHighlightToast } from './scope.js';
 import { state } from './state.js';
 
 var INCOMPLETE_ROW_MESSAGE = 'Nothing was changed: this row\'s photos could not all be loaded '
-  + 'for the current folder and filters. Try again.';
+  + 'for the current selection and filters. Try again.';
 
 /** Tell the user a bulk action stopped before changing anything. @returns {null} */
 function cancelBulkAction() {
@@ -186,15 +186,20 @@ export async function submitSpeciesModal() {
   }
 }
 
-// A highlight write claims what the page shows: with one folder selected it
-// covers the highlights in that folder only, so it does not reorder another
-// trip's highlights the user never saw beside this one. With every folder
-// shown it covers all of them.
-/** @param {{species: string, photo_id: number, folder_id?: number}} body */
-function withFolderScope(body) {
-  var folderId = selectedFolderId();
-  if (folderId != null) body.folder_id = folderId;
-  return body;
+// A highlight write claims what the page shows: with one folder or collection
+// selected it covers the highlights there only, so it does not reorder
+// another trip's highlights the user never saw beside this one. With the
+// whole workspace shown it covers all of them.
+/** @template {{species: string, photo_id: number}} T @param {T} body */
+function withSelectedScope(body) {
+  return Object.assign(body, selectedScope());
+}
+
+// The rows on screen are for another scope or filter than the controls now
+// show (a reload is in flight), so a write would claim a set of highlights
+// the user is not looking at.
+function loadedRowsAreStale() {
+  return state.loadedHighlightsScope !== highlightsScopeParams().toString();
 }
 
 /** @param {string | null | undefined} species @param {number} photoId @param {HTMLButtonElement | null | undefined} button */
@@ -202,18 +207,19 @@ export async function makeTopHighlight(species, photoId, button) {
   if (!species || !photoId) return;
   if (button) button.disabled = true;
   try {
+    if (loadedRowsAreStale()) return;
     /** @type {{over?: number[]}} */
     var result = await safeFetch('/api/photo-preferences', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(withFolderScope(Object.assign(
-        { purpose: 'species_representative' }, { species: species, photo_id: photoId }
-      ))),
+      body: JSON.stringify(withSelectedScope(
+        { purpose: 'species_representative', species: species, photo_id: photoId }
+      )),
     });
     await loadHighlights();
     updateHighlightsLightboxControls(state.activeLightboxPhotoId);
     if (typeof showToast === 'function') {
-      showToast(topHighlightToast(result && result.over ? result.over.length : 0, selectedFolderId() != null), 'success');
+      showToast(topHighlightToast(result && result.over ? result.over.length : 0, selectedScopeName()), 'success');
     }
   } finally {
     if (button) button.disabled = false;
@@ -225,16 +231,17 @@ export async function addSpeciesHighlight(species, photoId, button) {
   if (!species || !photoId) return;
   if (button) button.disabled = true;
   try {
+    if (loadedRowsAreStale()) return;
     /** @type {{added?: boolean, after?: number[]}} */
     var result = await safeFetch('/api/species-highlights', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(withFolderScope({ species: species, photo_id: photoId })),
+      body: JSON.stringify(withSelectedScope({ species: species, photo_id: photoId })),
     });
     await loadHighlights();
     updateHighlightsLightboxControls(state.activeLightboxPhotoId);
     if (typeof showToast === 'function') {
-      showToast(addedHighlightToast(result, selectedFolderId() != null), 'success');
+      showToast(addedHighlightToast(result, selectedScopeName()), 'success');
     }
   } finally {
     if (button) button.disabled = false;
@@ -280,14 +287,15 @@ export async function moveSpeciesHighlight(species, photoId, direction, button) 
   if (!species || !photoId || !direction) return;
   if (button) button.disabled = true;
   try {
-    /** @type {{species: string, photo_id: number, direction: string, neighbor_id?: number, folder_id?: number}} */
+    if (loadedRowsAreStale()) return;
+    /** @type {{species: string, photo_id: number, direction: string, neighbor_id?: number}} */
     var body = { species: species, photo_id: photoId, direction: direction };
     var neighborId = highlightNeighborId(species, photoId, direction);
     if (neighborId != null) body.neighbor_id = neighborId;
     await safeFetch('/api/species-highlights/order', {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(withFolderScope(body)),
+      body: JSON.stringify(withSelectedScope(body)),
     });
     await loadHighlights();
     updateHighlightsLightboxControls(state.activeLightboxPhotoId);

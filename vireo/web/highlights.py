@@ -34,6 +34,7 @@ from photo_payload import attach_edit_recipes
 from services import keyword_tagging, prediction_decisions, review_decisions, species_choices
 from services.pending_changes import queue_keyword_add, queue_keyword_remove
 from services.species_choices import PhotoScope
+from services.visual_scope import VisualScope, collection_rules_state
 from species_memberships import photo_species_memberships, subject_from_row
 from web.photo_review import flag_provenance
 from web.request_args import request_bool_arg
@@ -45,7 +46,7 @@ if TYPE_CHECKING:
     from db import Database
     from flask import Response
     from flask.typing import ResponseReturnValue
-    from services.service_types import JsonDict, JsonError
+    from services.service_types import ErrorResponse, JsonDict, JsonError
     from web.web_types import GetDb
 
 
@@ -605,7 +606,7 @@ class _HighlightWrite:
     reason: str | None
 
 
-def create_highlights_blueprint(get_db: GetDb, json_error: JsonError) -> Blueprint:
+def create_highlights_blueprint(get_db: GetDb, json_error: JsonError, visual_scope: VisualScope) -> Blueprint:
     """Build the highlights / photo-preferences blueprint.
 
     The payload builder and highlight-bucket helpers come from
@@ -745,7 +746,7 @@ def create_highlights_blueprint(get_db: GetDb, json_error: JsonError) -> Bluepri
         provenance, error = flag_provenance(body)
         if provenance is None:
             return json_error(error or "invalid source or reason")
-        scope = scope_from(db, body, json_error=json_error)
+        scope = scope_from(db, body, json_error=json_error, visual_scope=visual_scope)
         if not isinstance(scope, PhotoScope):
             return scope
         return _HighlightWrite(scope, provenance[0], provenance[1])
@@ -912,10 +913,16 @@ def create_highlights_blueprint(get_db: GetDb, json_error: JsonError) -> Bluepri
             return json_error("highlight not found", 404)
         return jsonify({"ok": True, **parsed, **result})
 
-    @blueprint.route("/api/highlights")
-    def api_highlights() -> ResponseReturnValue:
-        db = get_db()
-        payload = build_highlights_payload(db, HighlightsQuery(
+    def highlights_query(db: Database) -> HighlightsQuery | ErrorResponse:
+        scope = scope_from(
+            db, {"collection_id": request.args.get("collection_id")},
+            json_error=json_error, visual_scope=visual_scope,
+        )
+        if not isinstance(scope, PhotoScope):
+            return scope
+        return HighlightsQuery(
+            collection_id=scope.collection_id,
+            rules=scope.rules,
             scope=request.args.get("scope", "folder"),
             folder_id=request.args.get("folder_id", type=int),
             min_quality=request.args.get("min_quality", 0.0, type=float),
@@ -935,7 +942,24 @@ def create_highlights_blueprint(get_db: GetDb, json_error: JsonError) -> Bluepri
             ),
             confirmation_filter=request.args.get("confirmation") or "all",
             highlight_filter=request.args.get("highlight_selection") or "all",
-        ))
+        )
+
+    @blueprint.route("/api/highlights")
+    def api_highlights() -> ResponseReturnValue:
+        db = get_db()
+        query = highlights_query(db)
+        if not isinstance(query, HighlightsQuery):
+            return query
+        try:
+            payload = build_highlights_payload(db, query)
+        except ValueError as exc:
+            return json_error(str(exc), 400)
+        if request_bool_arg("include_collections"):
+            payload["collections"] = [
+                {"id": row["id"], "name": row["name"],
+                 "degraded": collection_rules_state(db, row["rules"])[1]}
+                for row in db.collections.list_for_picker()
+            ]
         return jsonify(payload)
 
     @blueprint.route("/api/highlights/confirm", methods=["POST"])
@@ -1070,44 +1094,35 @@ def create_highlights_blueprint(get_db: GetDb, json_error: JsonError) -> Bluepri
     @blueprint.route("/api/highlights/bucket")
     def api_highlights_bucket() -> ResponseReturnValue:
         db = get_db()
-        folders = db.folders.with_quality_data()
-        scope = request.args.get("scope", "folder")
-        folder_id = request.args.get("folder_id", type=int)
-        if scope == "workspace":
-            folder_id = None
-        elif folder_id is None and folders:
-            folder_id = folders[0]["id"]
-
-        min_quality = request.args.get("min_quality", 0.0, type=float)
-        confidence_threshold = request.args.get(
-            "confidence_threshold", 0.70, type=float
-        )
-        confirmation_filter = normalize_highlight_confirmation_filter(
-            request.args.get("confirmation") or "all"
-        )
-        species = (request.args.get("species") or "").strip()
+        query = highlights_query(db)
+        if not isinstance(query, HighlightsQuery):
+            return query
+        folder_id = query.resolved_folder(db.folders.with_quality_data())
+        confirmation_filter = normalize_highlight_confirmation_filter(query.confirmation_filter)
+        species = query.species.text.strip()
         offset = max(0, request.args.get("offset", 0, type=int))
         limit = max(1, min(request.args.get("limit", 100, type=int), 500))
         if not species:
             return json_error("species required")
 
-        candidates = db.species_curation.get_highlights_candidates(folder_id, min_quality=min_quality)
+        try:
+            candidates = query.candidates(db, folder_id)
+        except ValueError as exc:
+            return json_error(str(exc), 400)
         buckets, unidentified_photos = collect_highlight_buckets(
-            candidates, confidence_threshold, confirmation_filter,
+            candidates, query.confidence_threshold, confirmation_filter,
             canonicalize_species=species_canonicalizer(db),
         )
         buckets, unidentified_photos = filter_highlight_sections(
             buckets,
             unidentified_photos,
-            request.args.get("q") or "",
-            request_bool_arg("q_match_case"),
-            request_bool_arg("q_whole_word"),
+            query.search.text, query.search.match_case, query.search.whole_word,
         )
         apply_highlight_preferences(db, buckets)
         buckets, unidentified_photos = filter_highlight_curation_state(
             buckets,
             unidentified_photos,
-            request.args.get("highlight_selection") or "all",
+            query.highlight_filter,
         )
         if species == "__unidentified__":
             photos = unidentified_photos

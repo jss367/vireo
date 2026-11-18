@@ -13,7 +13,7 @@ export var WORKSPACE_SCOPE = '__workspace__';
  * @property {string | null} loadedHighlightsScope The filters and folder of that response.
  * @property {Set<string>} expandedBuckets Species names whose row is expanded.
  * @property {boolean} unidentifiedExpanded Whether the unidentified row is expanded.
- * @property {string} currentFolderName The selected folder's name, for the Save default.
+ * @property {string} currentScopeName The selected scope's name, for the Save default.
  * @property {ReturnType<typeof setTimeout> | null} debounceTimer The pending reload of a typed filter.
  * @property {{id: number, name: string}[]} existingCollections Collections the Save modal checks names against.
  * @property {boolean} speciesSuggestionsLoaded Whether the species modal's datalist is filled.
@@ -62,7 +62,7 @@ export const state = {
   loadedHighlightsScope: null,
   expandedBuckets: new Set(),
   unidentifiedExpanded: false,
-  currentFolderName: '',
+  currentScopeName: '',
   debounceTimer: null,
   existingCollections: [],
   speciesSuggestionsLoaded: false,
