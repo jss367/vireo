@@ -737,24 +737,18 @@
     if (dateFrom) rules.push(makeRule('timestamp', '>=', dateFrom));
     const dateTo = params.get('date_to');
     if (dateTo) rules.push(makeRule('timestamp', '<=', dateTo));
-    // Preserve legacy Browse deep-link semantics. The old backend distinguished
-    // three coordinate sources: `exif` = photo has EXIF GPS; `assigned` = no
-    // EXIF GPS but a location keyword supplies coordinates; `none` = neither.
-    // `has_gps` was a JS-side alias for `exif`, and `?missing_gps=1` a legacy
-    // alias for `?location_status=none`. `assigned`/`none` require the
-    // coordinate-bearing keyword check (`has_coord_location_keyword`) — the
-    // plain `has_location_keyword` field also matches free-text locations
-    // without lat/lng, so it would misclassify photos the map cannot place.
+    // Match the map's coordinate-source precedence while preserving older URL aliases.
     let locationStatus = params.get('location_status');
     if (!locationStatus && params.get('missing_gps') === '1') locationStatus = 'none';
-    if (locationStatus === 'has_gps' || locationStatus === 'exif') {
-      rules.push(makeRule('has_gps', 'is', 1));
-    } else if (locationStatus === 'assigned') {
-      rules.push(makeRule('has_gps', 'is', 0));
-      rules.push(makeRule('has_coord_location_keyword', 'is', 1));
-    } else if (locationStatus === 'none') {
-      rules.push(makeRule('has_gps', 'is', 0));
-      rules.push(makeRule('has_coord_location_keyword', 'is', 0));
+    if (locationStatus === 'has_gps') locationStatus = 'exif';
+    if (locationStatus === 'reviewed_gps') {
+      rules.push(makeRule('has_reviewed_gps', 'is', 1));
+    } else if (locationStatus === 'exif' || locationStatus === 'assigned' || locationStatus === 'none') {
+      rules.push(makeRule('has_reviewed_gps', 'is', 0));
+      rules.push(makeRule('has_gps', 'is', locationStatus === 'exif' ? 1 : 0));
+      if (locationStatus !== 'exif') {
+        rules.push(makeRule('has_coord_location_keyword', 'is', locationStatus === 'assigned' ? 1 : 0));
+      }
     }
     const keyword = params.get('keyword');
     if (keyword) {

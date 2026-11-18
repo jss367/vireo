@@ -25,7 +25,7 @@ import os
 from repositories.collections import CollectionRepository
 from repositories.folder_subtrees import folder_subtree_ids
 from repositories.photo_row_deletion import photo_row_deletion
-from repositories.photo_sql import CAPTURE_TIME_STATE_SQL, location_keyword_exists_sql
+from repositories.photo_sql import CAPTURE_TIME_STATE_SQL, REVIEWED_GPS_EXISTS, location_keyword_exists_sql
 from repositories.top_species import TOP_SPECIES_RANKING_SQL
 from sql_chunks import chunked
 
@@ -39,18 +39,17 @@ def append_location_status_filter(conditions: list[str], location_status: str | 
     if location_status is None:
         return
     assigned_exists = location_keyword_exists_sql(with_coordinates=True)
-    reviewed_exists = "EXISTS (SELECT 1 FROM reviewed_gps g WHERE g.photo_id = p.id)"
     no_exif = "(p.latitude IS NULL OR p.longitude IS NULL)"
     if location_status == "reviewed_gps":
-        conditions.append(reviewed_exists)
+        conditions.append(REVIEWED_GPS_EXISTS)
     elif location_status == "exif":
         conditions.append(
-            f"p.latitude IS NOT NULL AND p.longitude IS NOT NULL AND NOT {reviewed_exists}"
+            f"p.latitude IS NOT NULL AND p.longitude IS NOT NULL AND NOT {REVIEWED_GPS_EXISTS}"
         )
     elif location_status == "assigned":
-        conditions.append(f"{no_exif} AND NOT {reviewed_exists} AND {assigned_exists}")
+        conditions.append(f"{no_exif} AND NOT {REVIEWED_GPS_EXISTS} AND {assigned_exists}")
     elif location_status == "none":
-        conditions.append(f"{no_exif} AND NOT {reviewed_exists} AND NOT {assigned_exists}")
+        conditions.append(f"{no_exif} AND NOT {REVIEWED_GPS_EXISTS} AND NOT {assigned_exists}")
     else:
         raise ValueError(
             "location_status must be 'reviewed_gps', 'exif', 'assigned', or 'none'"

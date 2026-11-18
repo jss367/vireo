@@ -51,3 +51,18 @@ test('raw EXIF, assigned and absent detail statuses retain their behavior', () =
   context.renderCoordinateStatus({location_status: 'none'});
   assert.ok(status.textContent.includes('No coordinates'));
 });
+
+test('a GPS review hides the raw EXIF suggestion before reverse-geocoding', async () => {
+  const {context, status} = harness();
+  status.hidden = false;
+  status.dataset = {photoId: '4'};
+  context._cfgPromise = Promise.resolve();
+  context.state.googleMapsApiKey = 'synthetic';
+  const requests = [];
+  context.fetch = url => { requests.push(url); return Promise.resolve({ok: false}); };
+  context.URLSearchParams = URLSearchParams;
+  await context.maybeShowExifSuggestion({id: 4, location_status: 'reviewed_gps', latitude: 3, longitude: 4});
+  assert.equal(status.hidden, true);
+  assert.equal(status.dataset.photoId, undefined);
+  assert.deepEqual(requests, []);
+});

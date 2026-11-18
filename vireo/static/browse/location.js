@@ -531,7 +531,7 @@ export async function maybeShowExifSuggestion(/** @type {BrowsePhoto | null | un
   if (!sugg) return;
 
   if (!photo) return;
-  if (photo.location) return;
+  if (photo.location || photo.location_status === 'reviewed_gps') return;
   if (photo.latitude == null || photo.longitude == null) return;
 
   // Capture the photo id at request time so a slow reverse-geocode for an

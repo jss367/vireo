@@ -48,6 +48,7 @@ from repositories.photo_sql import (
     PHOTO_COLS,
     PHOTO_DATE_ASC_ORDER,
     PHOTO_DATE_DESC_ORDER,
+    REVIEWED_GPS_EXISTS,
     TOP_PREDICTION_CONFIDENCE_EXPR,
     inclusive_date_to,
     location_keyword_exists_sql,
@@ -3350,6 +3351,9 @@ class _RuleQueryBuilder:
         has = "p.latitude IS NOT NULL AND p.longitude IS NOT NULL"
         return _boolean_predicate(has, op, value)
 
+    def _has_reviewed_gps_rule(self, field, op, value, rule):
+        return _boolean_predicate(REVIEWED_GPS_EXISTS, op, value)
+
     def _has_location_keyword_rule(self, field, op, value, rule):
         return _boolean_predicate(location_keyword_exists_sql(), op, value)
 
@@ -3507,6 +3511,7 @@ _LEAF_RULE_BUILDERS = {
     "has_jpeg_companion": _RuleQueryBuilder._has_jpeg_companion_rule,
     "active_mask_variant": _RuleQueryBuilder._active_mask_variant_rule,
     "has_gps": _RuleQueryBuilder._has_gps_rule,
+    "has_reviewed_gps": _RuleQueryBuilder._has_reviewed_gps_rule,
     "has_location_keyword": _RuleQueryBuilder._has_location_keyword_rule,
     "has_coord_location_keyword": _RuleQueryBuilder._has_coord_location_keyword_rule,
     "location_keyword_missing": _RuleQueryBuilder._location_keyword_missing_rule,
