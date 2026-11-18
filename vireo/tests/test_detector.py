@@ -1138,7 +1138,8 @@ def test_focus_crop_maps_proposals_back_to_the_full_frame(monkeypatch):
     assert found[0]["box"] == pytest.approx({"x": .725, "y": .2, "w": .05, "h": .1})
 
 
-def test_confident_bystander_still_triggers_focus_crop(monkeypatch, tmp_path):
+@pytest.mark.parametrize("shadow_retry", [False, True])
+def test_confident_bystander_still_triggers_focus_crop(monkeypatch, tmp_path, shadow_retry):
     from unittest.mock import MagicMock
 
     import detector
@@ -1146,14 +1147,17 @@ def test_confident_bystander_still_triggers_focus_crop(monkeypatch, tmp_path):
     from PIL import Image
 
     path = tmp_path / "birds.jpg"
-    Image.new("RGB", (640, 640)).save(path)
+    Image.new("RGB", (640, 640), (36, 36, 36)).save(path)
     bystander = {"box": {"x": .1, "y": .1, "w": .15, "h": .15}, "confidence": .95, "category": "animal"}
     bird = {"box": {"x": .3, "y": .3, "w": .4, "h": .4}, "confidence": .75, "category": "animal"}
-    infer = MagicMock(side_effect=[[bystander], [bystander], [bird], []])
+    crop_results = [[], [], [bird]] if shadow_retry else [[bird], []]
+    infer = MagicMock(side_effect=[[bystander], [bystander], *crop_results])
     monkeypatch.setattr(detector, "_infer_array", infer)
     monkeypatch.setattr(detector, "_get_session", MagicMock())
     focus = FocusArea(.65, .7, .04, .04)
     detections = detector.detect_animals(path, focus=focus)
-    assert infer.call_count == 4
+    assert infer.call_count == 2 + len(crop_results)
+    if shadow_retry:
+        assert infer.call_args_list[-1].args[2].mean() > infer.call_args_list[-2].args[2].mean()
     assert detections[0] == bystander
     assert focus.match(detections[1]["box"]) == FocusMatch.CENTER
