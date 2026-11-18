@@ -34,6 +34,7 @@
       "POST /api/photos/<int:photo_id>/location/text",
       "POST /api/photos/<int:photo_id>/rating",
       "POST /api/photos/<int:photo_id>/species/<int:keyword_id>/provenance",
+      "POST /api/photos/<int:photo_id>/species/<int:keyword_id>/review",
       "POST /api/photos/<int:photo_id>/versions",
       "POST /api/photos/<int:photo_id>/wildlife_excluded",
       "POST /api/photos/edit-recipe/apply",

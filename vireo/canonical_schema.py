@@ -20,7 +20,7 @@ This module must not import ``db``: ``schema.py`` imports ``db``, and
 # database it creates from nothing. It is the newest registry migration in
 # ``schema.MIGRATIONS``: ``create_tables`` builds every migration's end state,
 # so a fresh database has nothing to migrate.
-SCHEMA_VERSION = 37
+SCHEMA_VERSION = 38
 
 # Promoted EXIF summary columns in the ``photos`` table — the canonical
 # list the scanner uses to clear absent fields on rescan (a metadata write
@@ -220,6 +220,15 @@ def create_detection_evidence_reviews(conn):
     )""")
 
 
+def create_assignment_reviews(conn):
+    conn.execute("""CREATE TABLE IF NOT EXISTS assignment_reviews (
+        id TEXT PRIMARY KEY,
+        photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+        record TEXT NOT NULL
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_assignment_reviews_photo ON assignment_reviews(photo_id)")
+
+
 def create_identity_alternatives(conn):
     """Catalog-wide uncertainty follows the same identity scope as species tags."""
     conn.execute("""CREATE TABLE IF NOT EXISTS photo_identity_alternatives (
@@ -325,6 +334,7 @@ def create_auxiliary_schema_objects(conn):
     create_current_flag_attribution(conn)
     create_subject_ranking_analysis(conn)
     create_identity_alternatives(conn)
+    create_assignment_reviews(conn)
     create_detection_evidence_reviews(conn)
     create_same_shot_reviews(conn)
     create_photo_versions(conn)

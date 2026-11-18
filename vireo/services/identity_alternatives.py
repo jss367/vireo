@@ -132,7 +132,7 @@ def _queue_shared_keyword(
             mark_sync_started(db, photo_id, workspace_id, kind, name)
 
 
-def _reconcile_keyword_intents(db: Database, photo_id: int, names: list[str], batch: _IdentityBatch | None = None) -> None:
+def reconcile_keyword_intents(db: Database, photo_id: int, names: list[str], batch: _IdentityBatch | None = None) -> None:
     """Reconcile candidate spellings even when no catalog attachment changed."""
     batch = batch or _IdentityBatch(db)
     identities = batch.identities(names)
@@ -176,7 +176,7 @@ def prepare_photo_merge(db: Database, losing: int, survivor: int) -> None:
     db.moves_merge.reconcile_conflicting_keyword_edits(losing, survivor)
     db.identity_alternatives.prepare_photo_merge(losing, survivor, after_reconciliation=True)
     db.pending_changes.remap_photo_keyword_intents(losing, survivor)
-    _reconcile_keyword_intents(db, survivor, names)
+    reconcile_keyword_intents(db, survivor, names)
     # Later generic metadata carries must not copy an outvoted source tag back
     # onto the canonical row after the winning pending removal settled it.
     kept = {link['keyword_id'] for link in db.identity_alternatives.candidate_links([survivor], names).get(survivor, [])}
@@ -201,7 +201,7 @@ def replay_identity_edit(db: Database, photo_id: int, previous: str, replacement
     names = [name for data in (before, after) if data['identity']
              and data['identity']['status'] == 'unresolved' for name in data['identity']['candidates']]
     names.extend(name for kid in old_links.keys() | new_links.keys() if (name := db.keywords.name_of(kid)))
-    _reconcile_keyword_intents(db, photo_id, names, batch)
+    reconcile_keyword_intents(db, photo_id, names, batch)
     db.identity_alternatives.set_state(photo_id, after['identity'])
 
 
