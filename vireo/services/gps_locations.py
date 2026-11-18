@@ -301,7 +301,9 @@ def _preview_group(group: JsonDict) -> JsonDict:
     }
 
 
-def _group_resolved_places(photos_map, resolved) -> dict[str, JsonDict]:
+def _group_resolved_places(
+    photos_map: Mapping[int, sqlite3.Row], resolved: Mapping[int, JsonDict],
+) -> dict[str, JsonDict]:
     groups = {}
     for pid, details in resolved.items():
         photo = photos_map[pid]

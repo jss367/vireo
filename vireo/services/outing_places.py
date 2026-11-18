@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
+from typing import TYPE_CHECKING
 
 import places
 from location_review import capture_time, distance_meters, has_usable_coordinates
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 # Allow GPS jitter between burst frames, but break at driving speeds, long
 # pauses, and sparse jumps where the intervening route is unknown.
@@ -50,7 +55,7 @@ def _offer(run: list[dict]) -> Outing | None:
     return Outing(place, [f["id"] for f in run], [f["id"] for f in anchors], [f["id"] for f in broad])
 
 
-def outing_offers(frames) -> list[Outing]:
+def outing_offers(frames: Iterable[dict]) -> list[Outing]:
     """Return only unambiguous runs. An unresolved dated frame breaks a run."""
     dated = []
     for frame in frames:
@@ -79,13 +84,15 @@ def outing_offers(frames) -> list[Outing]:
     return offers
 
 
-def _point_key(frame):
+def _point_key(frame: dict) -> tuple[float, float]:
     if has_usable_coordinates(frame):
         return float(frame["latitude"]), float(frame["longitude"])
     return 0.0, 0.0
 
 
-def _remaining_jitter(previous, frame, time, jitter):
+def _remaining_jitter(
+    previous: dict, frame: dict, time: datetime, jitter: float,
+) -> float | None:
     if (previous["time"].tzinfo is None) != (time.tzinfo is None):
         return None
     seconds = (time - previous["time"]).total_seconds()
