@@ -195,17 +195,17 @@ def subject_urls(photo_id, selection, size=512):
 
 def mask_review_state(db, photo_id, selection, analysis):
     digest = hashlib.sha256(analysis["mask_png"]).hexdigest() if analysis else None
-    verdict = "unreviewed"
+    verdict, revision = "unreviewed", 0
     history = []
     for row in db.subjects.mask_reviews(photo_id):
         if (row["detection_id"] == selection["detection_id"] and row["source_key"] == selection["analysis_key"]
                 and row["mask_digest"] == digest):
-            verdict = row["verdict"]
+            verdict, revision = row["verdict"], row["revision"]
         else:
             history.append({"analysis_key": row["source_key"], "mask_digest": row["mask_digest"],
                             "detection_id": row["detection_id"], "box": json.loads(row["box"]),
                             "verdict": row["verdict"], "url": f"/api/photos/{photo_id}/mask-reviews/{row['id']}.png"})
-    return {"verdict": verdict, "mask_digest": digest, "history": history}
+    return {"verdict": verdict, "revision": revision, "mask_digest": digest, "history": history}
 
 
 def mask_review_hint(detection, features, candidates):

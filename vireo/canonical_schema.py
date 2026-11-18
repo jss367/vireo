@@ -20,7 +20,7 @@ This module must not import ``db``: ``schema.py`` imports ``db``, and
 # database it creates from nothing. It is the newest registry migration in
 # ``schema.MIGRATIONS``: ``create_tables`` builds every migration's end state,
 # so a fresh database has nothing to migrate.
-SCHEMA_VERSION = 55
+SCHEMA_VERSION = 56
 
 # Promoted EXIF summary columns in the ``photos`` table — the canonical
 # list the scanner uses to clear absent fields on rescan (a metadata write
@@ -253,6 +253,7 @@ def create_subject_mask_reviews(conn):
         source_key TEXT NOT NULL,
         mask_digest TEXT NOT NULL,
         verdict TEXT NOT NULL CHECK(verdict IN ('valid', 'invalid')),
+        revision INTEGER NOT NULL DEFAULT 1,
         box TEXT NOT NULL,
         mask_png BLOB NOT NULL,
         UNIQUE(photo_id, detection_id, source_key, mask_digest)

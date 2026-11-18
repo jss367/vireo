@@ -460,8 +460,10 @@ comparison has no suggested best frame.
 A ready card can still segment a reed or another animal. Inspect its
 `focus_crop_mask_url` and `mask_url`. To record the result, PUT
 `detection_id`, `analysis_key`, `mask_digest` (from `card.mask_review`), and
-`verdict` (`valid` or `invalid`) to `/api/v1/photos/<id>/mask-review`.
-A stale generation returns HTTP 409. Invalid masks remain inspectable and
+`verdict` (`valid` or `invalid`), and `expected_revision` (from
+`card.mask_review.revision`) to `/api/v1/photos/<id>/mask-review`.
+A stale generation or review revision returns HTTP 409 without changing the
+verdict. Reload the comparison before submitting another decision. Invalid masks remain inspectable and
 count toward analysis coverage but are excluded from selected-subject scoring.
 Unreviewed masks retain provisional scoring. Best Batch lets you draw a tighter
 reviewer box on the original and analyze that region. Earlier reviewed mask

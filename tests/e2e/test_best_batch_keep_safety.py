@@ -77,7 +77,7 @@ def test_mask_review_targets_inspected_generation_and_opens_region_editor(live_s
     def comparison(route):
         cards = [{"id": photo_id, "filename": f"frame{index}.jpg", "rank": None,
                   "evidence_status": "ready", "subject": {"detection_id": index, "analysis_key": "analysis",
-                  "selection": "selected", "candidates": []}, "mask_review": {"mask_digest": "pixels",
+                  "selection": "selected", "candidates": []}, "mask_review": {"mask_digest": "pixels", "revision": 1 if photo_id == pid and verdict != "unreviewed" else 0,
                   "verdict": verdict if photo_id == pid else "unreviewed", "history": []}}
                  for index, photo_id in enumerate(ids, 1)]
         route.fulfill(json={"cards": cards, "count": len(ids), "photo_ids": ids,
@@ -86,7 +86,7 @@ def test_mask_review_targets_inspected_generation_and_opens_region_editor(live_s
     def review(route):
         nonlocal verdict
         assert route.request.post_data_json == {"detection_id": 2, "analysis_key": "analysis",
-                                                "mask_digest": "pixels", "verdict": "invalid"}
+                                                "mask_digest": "pixels", "verdict": "invalid", "expected_revision": 0}
         verdict = "invalid"
         route.fulfill(json={"verdict": verdict})
 

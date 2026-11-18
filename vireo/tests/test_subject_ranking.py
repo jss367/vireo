@@ -752,16 +752,17 @@ def test_review_excludes_only_exact_mask_and_retains_evidence_after_refinement(c
     url = f"/api/v1/photos/{pid}/mask-review"
     assert before["mask_review"]["verdict"] == "unreviewed"
     for verdict in ("invalid", "valid", "invalid"):
-        response = client.put(url, json={**binding, "verdict": verdict}, headers=headers)
+        response = client.put(url, json={**binding, "verdict": verdict, "expected_revision": before["mask_review"]["revision"]}, headers=headers)
         assert response.status_code == 200, response.get_json()
         pack = _pack(app, pids, requested_species=TARGET)
         card = next(c for c in pack["cards"] if c["id"] == pid)
         assert card["evidence_status"] == "ready" and pack["coverage"]["with_quality"] == 3
+        before = card
         assert card["mask_review"]["verdict"] == verdict
         assert (card["rank"] is None) == (verdict == "invalid")
         assert (pid in pack["focus_cohorts"]["detail"]["photo_ids"]) == (verdict == "valid")
         assert client.get(card["focus_crop_mask_url"]).status_code == 200
-    assert client.put(url, json={**binding, "mask_digest": "stale", "verdict": "valid"}, headers=headers).status_code == 409
+    assert client.put(url, json={**binding, "mask_digest": "stale", "verdict": "valid", "expected_revision": before["mask_review"]["revision"]}, headers=headers).status_code == 409
 
     token = client.get(f"/photos/{pid}/preview?view=subject&size=1920").headers["X-Vireo-Subject-Frame"]
     saved = client.put(f"/api/photos/{pid}/subjects/reviewer-box", json={

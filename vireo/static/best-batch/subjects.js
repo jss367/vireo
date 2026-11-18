@@ -83,21 +83,26 @@ function renderMaskReview(card) {
   byId('inspectMask').setAttribute('href', card.focus_crop_mask_url || '');
   byId('inspectFullMask').setAttribute('href', card.mask_url || '');
   byId('refineMask').hidden = review.verdict !== 'invalid';
+  var pending = false;
   for (const verdict of ['valid', 'invalid']) {
     const button = /** @type {HTMLButtonElement} */ (byId(verdict + 'Mask'));
     button.disabled = review.verdict === verdict;
     button.addEventListener('click', async () => {
-      if (state.analyzing || !state.bestBatchData?.comparison) return;
-      button.disabled = true;
+      if (pending || state.analyzing || !state.bestBatchData?.comparison) return;
+      pending = true;
+      for (const value of ['valid', 'invalid']) {
+        /** @type {HTMLButtonElement} */ (byId(value + 'Mask')).disabled = true;
+      }
       try {
         await fetchJson('/api/photos/' + card.id + '/mask-review', {method: 'PUT',
-          headers: {'Content-Type': 'application/json'}, body: JSON.stringify({verdict,
+          headers: {'Content-Type': 'application/json'}, body: JSON.stringify({verdict, expected_revision: review.revision,
             detection_id: card.subject?.detection_id, analysis_key: card.subject?.analysis_key, mask_digest: review.mask_digest})});
         await loadBatch();
       } catch (error) {
-        if (state.inspectedId === card.id) {
-          status.textContent = error instanceof Error ? error.message : String(error);
-          button.disabled = false;
+        if (!options.signal.aborted && state.inspectedId === card.id) {
+          status.textContent = 'Review not confirmed. Reload the comparison before choosing again. ' +
+            (error instanceof Error ? error.message : String(error));
+          // Keep this snapshot read-only until a fresh comparison is loaded.
         }
       }
     }, options);

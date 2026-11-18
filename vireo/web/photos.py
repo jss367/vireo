@@ -1578,6 +1578,8 @@ def create_photos_blueprint(
             return json_error("Mask digest is required")
         if type(body.get("detection_id")) is not int:
             return json_error("Choose a detection from this photo")
+        if type(body.get("expected_revision")) is not int or not 0 <= body["expected_revision"] < 2**63:
+            return json_error("Send the displayed mask review revision")
         db = get_db()
         with db.transaction(immediate=True):
             photo = db.photos.get(photo_id, verify_workspace=True)
@@ -1585,11 +1587,12 @@ def create_photos_blueprint(
                 return json_error("Photo not found", 404)
             try:
                 detection, analysis = _comparison_media_subject(db, photo, body, db.get_effective_config(cfg.load()))
+                revision = db.subjects.save_mask_review(photo_id, detection["id"], body["analysis_key"], body["mask_digest"], body["verdict"],
+                    {k: detection["box_" + k] for k in "xywh"}, analysis["mask_png"],
+                    expected_revision=body["expected_revision"])
             except ValueError as exc:
                 return json_error(str(exc), 409)
-            db.subjects.save_mask_review(photo_id, detection["id"], body["analysis_key"], body["mask_digest"], body["verdict"],
-                                         {k: detection["box_" + k] for k in "xywh"}, analysis["mask_png"])
-        return jsonify({"verdict": body["verdict"]})
+        return jsonify({"verdict": body["verdict"], "revision": revision})
 
     @blueprint.route("/api/photos/<int:photo_id>/subjects")
     def api_photo_subjects(photo_id: int) -> ResponseReturnValue:

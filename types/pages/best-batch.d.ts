@@ -11,7 +11,7 @@ interface BestBatchCard {
   crop_url?: string | null; focus_crop_url?: string | null; evidence_status?: string;
   eye_status?: string | null; analysis?: {width: number; height: number} | null;
   mask_url?: string; focus_crop_mask_url?: string;
-  mask_review?: {verdict: string; mask_digest: string | null; hint?: string; history: {
+  mask_review?: {revision: number; verdict: string; mask_digest: string | null; hint?: string; history: {
     detection_id: number; verdict: string; url: string;
   }[]};
   subject?: {analysis_key?: string; detection_id: number | null; selection: string; candidates: {
