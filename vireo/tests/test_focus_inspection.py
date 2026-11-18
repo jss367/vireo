@@ -234,3 +234,47 @@ def test_focus_crop_reports_when_the_window_cuts_off_part_of_the_subject(app_and
     db.conn.execute('DELETE FROM detections WHERE photo_id=?', (pid,))
     db.commit()
     assert client.get(f'/photos/{pid}/focus-crop?size=512').headers['X-Vireo-Focus-Subject-Clipped'] == 'unknown'
+
+
+@pytest.mark.parametrize('change', ['clear', 'replace'])
+@pytest.mark.parametrize('center', ['', '&center=.52,.35'])
+def test_mask_changed_during_decode_never_serves_captured_bytes(app_and_db, monkeypatch, change, center):
+    from pathlib import Path
+
+    import web.media_crops as media
+    app, db = app_and_db
+    pid = db.photos.list_page()[0]['id']
+    _working_copy(app, db, pid, color=(200, 200, 200))
+    masks = Path(app.config['DB_PATH']).parent / 'masks'
+    masks.mkdir(exist_ok=True)
+    original_mask = masks / f'{pid}.original.png'
+    replacement = masks / f'{pid}.replacement.png'
+    Image.new('L', (1024, 683), 255).save(original_mask)
+    new_mask = Image.new('L', (1024, 683), 0)
+    new_mask.paste(255, (0, 0, 512, 683))
+    new_mask.save(replacement)
+    box = {'x': .4, 'y': .4, 'w': .2, 'h': .2}
+    db.detections.save(pid, [{'box': box, 'confidence': .9, 'category': 'animal'}], detector_model='test')
+    for variant, path in [('original', original_mask), ('replacement', replacement)]:
+        db.masks_features.upsert_mask(pid, variant, str(path), 'test', tuple(box.values()))
+    db.conn.execute('UPDATE photos SET mask_path=?, active_mask_variant=? WHERE id=?',
+                    (str(original_mask), 'original', pid))
+    db.commit()
+    decode = media._focus_source_image
+    def change_mask(*args):
+        result = decode(*args)
+        path, variant = (None, None) if change == 'clear' else (str(replacement), 'replacement')
+        db.conn.execute('UPDATE photos SET mask_path=?, active_mask_variant=? WHERE id=?', (path, variant, pid))
+        db.commit()
+        return result
+    monkeypatch.setattr(media, '_focus_source_image', change_mask)
+    response = app.test_client().get(f'/photos/{pid}/focus-crop?size=256&mask=1{center}')
+    if change == 'clear':
+        assert response.status_code == 404
+        assert 'mask is unavailable' in response.get_json()['error']
+    else:
+        assert response.status_code == 200
+        assert response.headers['X-Vireo-Focus-Mask'] == '1'
+        crop = Image.open(io.BytesIO(response.data))
+        assert crop.getpixel((10, 128))[0] > 180
+        assert crop.getpixel((245, 128))[0] < 110

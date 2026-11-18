@@ -206,6 +206,9 @@ class Image:
         self.events.append(("point", self.kind, fn(0), fn(128), fn(255)))
         return self
 
+    def close(self):
+        self.events.append(("close", self.kind))
+
     def save(self, buf, **kw):
         self.events.append(("save", self.size, kw))
         buf.write(b"fake-jpeg")
@@ -333,6 +336,7 @@ def focus_checks():
     res, events = focus(args={"mask": "1"}, mask_path="/elsewhere/mask.png")
     assert res[1] == 404 and "mask is unavailable" in res[0]
     assert not any(e[0] == "mask-read" for e in events)
+    assert ("close", "image") in events
     for args in [{"size": "12"}, {"basis": "nose"}]:
         res, events = focus(args=args)
         assert res[1] == 400 and not any(e[0] == "loader" for e in events)

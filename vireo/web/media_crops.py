@@ -334,11 +334,14 @@ class CropRoutes:
                 return self._json_error("Eye evidence has no subject/generation binding; analyze the selected subject", 404)
             # Legacy eyes have no detection/mask-generation binding, even when boxes overlap.
             photo = {**dict(photo), "eye_x": None, "eye_y": None, "eye_tenengrad": None}
+        img = None
         try:
             center, used = focus_point(photo, boxes, basis, eye_enabled=eye_enabled, point=point)
-            mask_bytes = _requested_focus_mask(self._db_path, db, photo_id, selected_analysis)
             img, source = _validated_focus_source(self._config, db, photo, request.args, effective, source_choice, boxes, basis)
+            mask_bytes = _requested_focus_mask(self._db_path, db, photo_id, selected_analysis)
         except ValueError as exc:
+            if img is not None:
+                img.close()
             return self._json_error(str(exc), 404)
         if img is None:
             if source_choice in {"working", "original"}:
