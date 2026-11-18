@@ -63,9 +63,14 @@ def subject_findings(db: Database) -> list[JsonDict]:
 
 
 def subject_audit(db: Database) -> JsonDict:
-    floor = config_value(db.get_effective_config(cfg.load()), "detector_confidence")
-    return {
-        "findings": db.audit.subject_findings(floor),
-        "review": _review_buckets(db),
-        "references": _references(db, floor),
-    }
+    # One catalog snapshot covers configuration, findings, review and references.
+    # Join any caller-owned transaction; otherwise release this read before the
+    # route opens its separate audit-run write transaction.
+    with db.transaction(join=True):
+        db.hold_read_snapshot()
+        floor = config_value(db.get_effective_config(cfg.load()), "detector_confidence")
+        return {
+            "findings": db.audit.subject_findings(floor),
+            "review": _review_buckets(db),
+            "references": _references(db, floor),
+        }
