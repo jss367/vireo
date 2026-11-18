@@ -667,6 +667,18 @@ def test_reviewer_redraw_invalidates_classifier_embeddings(db, subject_photo, re
     assert db.masks_features.get_embedding(pid, 'Second classifier') == b'sibling'
 
 
+@pytest.mark.parametrize('decision', ['not_enough_evidence', 'invalid_subject', 'subject_valid'])
+def test_reviewer_redraw_retires_crop_evidence_review(db, subject_photo, decision):
+    from reviewer_helpers import confirmed_reviewer_box as select_reviewer_box
+    pid, _, _ = subject_photo
+    chosen = select_reviewer_box(db, pid, dict(x=.1, y=.1, w=.2, h=.2))
+    with db.transaction():
+        db.predictions.set_evidence_review(chosen, decision)
+    assert db.predictions.evidence_review(chosen)['decision'] == decision
+    select_reviewer_box(db, pid, dict(x=.6, y=.1, w=.2, h=.2), edit=chosen)
+    assert db.predictions.evidence_review(chosen)['decision'] == 'unreviewed'
+
+
 @pytest.mark.parametrize('replacement_x', [.10001, .6])
 def test_cached_only_reviewer_results_reject_redraw(db, subject_photo, monkeypatch, replacement_x):
     from classify_job import cached_only

@@ -55,6 +55,10 @@ RAW_READS = {
     'repositories/computation_cache.py:ComputationCacheRepository.run_predictions': 1,
     'repositories/culling.py:CullingRepository.top_prediction': 1,
     'repositories/detections.py:DetectionsRepository.get_predictions': 1,
+    # A reviewer redraw retires predictions for the old crop but preserves any
+    # prediction any workspace has manually decided (correlated prediction_review
+    # subquery), the same spirit as CROSS_WORKSPACE_REVIEWS.
+    'repositories/detections.py:DetectionsRepository.update_reviewer_region': 1,
     'repositories/detections.py:DetectionsRepository.workspace_miss_rows': 1,
     'repositories/edit_history.py:EditHistoryRepository.ensure_prediction_instances': 1,
     'repositories/edit_history.py:EditHistoryRepository.prediction_scope': 1,

@@ -73,7 +73,8 @@ class DetectionsRepository:
             runtime_fingerprint=?, subject_verdict=? WHERE id=? AND detector_model='reviewer-selected'""",
             (*(box[k] for k in "xywh"), runtime, verdict, region_id))
         for table in ("detection_subjects", "subject_ranking_analysis", "subject_raw_analysis",
-                      "classifier_runs", "classifier_match_scores", "subject_focus"):
+                      "classifier_runs", "classifier_match_scores", "subject_focus",
+                      "detection_evidence_reviews"):
             self.conn.execute(f"DELETE FROM {table} WHERE detection_id=?", (region_id,))
         self.conn.execute("""DELETE FROM predictions WHERE detection_id=? AND NOT EXISTS
             (SELECT 1 FROM prediction_review WHERE prediction_id=predictions.id AND status!='pending')""",
