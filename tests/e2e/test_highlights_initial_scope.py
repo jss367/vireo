@@ -1388,3 +1388,40 @@ def test_highlights_unavailable_saved_folder_uses_workspace(live_server, page):
     _goto_highlights(page, live_server["url"])
     expect(page.locator("#folderSelect")).to_have_value("__workspace__")
     expect(page.locator(".highlights-card")).to_have_count(5)
+
+
+def test_collection_scope_spans_folders_and_survives_reload(live_server, page):
+    db, data = live_server["db"], live_server["data"]
+    _seed_quality_scores_and_species(db, data)
+    members = [data["photos"][0], data["photos"][3]]
+    with db.transaction():
+        cid = db.collections.add("Weekend birds", json.dumps([{"field": "photo_ids", "value": members}]))
+    _goto_highlights(page, live_server["url"])
+    picker = page.get_by_label("Show highlights from")
+    picker.select_option(f"collection:{cid}")
+    cards = page.locator(".highlights-card")
+    expect(cards).to_have_count(2)
+    page.reload()
+    expect(picker).to_have_value(f"collection:{cid}")
+    expect(cards).to_have_count(2)
+    assert {int(card.get_attribute("data-photo-id")) for card in cards.all()} == set(members)
+    picker.select_option("__workspace__")
+    expect(cards).to_have_count(5)
+
+
+def test_unpicking_last_smart_collection_member_empties_highlights(live_server, page):
+    db, data = live_server["db"], live_server["data"]
+    _seed_quality_scores_and_species(db, data)
+    pid = data["photos"][0]
+    with db.transaction():
+        db.conn.execute("UPDATE photos SET flag = 'flagged' WHERE id = ?", (pid,))
+        cid = db.collections.add("My picks", json.dumps([{"field": "flag", "op": "is", "value": "flagged"}]))
+    _goto_highlights(page, live_server["url"])
+    page.get_by_label("Show highlights from").select_option(f"collection:{cid}")
+    cards = page.locator(".highlights-card")
+    expect(cards).to_have_count(1)
+    cards.click()
+    page.wait_for_function("pid => vireoLightboxSession.requestedPhotoId() === pid", arg=pid)
+    page.keyboard.press("u")
+    expect(cards).to_have_count(0)
+    expect(page.locator("#content")).to_contain_text("Nothing matches")

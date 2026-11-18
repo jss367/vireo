@@ -313,7 +313,8 @@ export function render() {
   var hasBuckets = (data.buckets || []).length > 0;
   var hasUnidentified = !!(data.unidentified
     && data.unidentified.photo_count);
-  if (!data.folders.length && !hasBuckets && !hasUnidentified) {
+  var scopeSelect = /** @type {HTMLSelectElement} */ (document.getElementById('folderSelect'));
+  if (scopeSelect.options.length <= 1 && !hasBuckets && !hasUnidentified) {
     content.innerHTML = '';
     empty.style.display = 'block';
     meta.textContent = '';

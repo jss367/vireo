@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, TypeGuard
 
 from flask import Blueprint, jsonify, request
 from services.species_choices import MAX_CHOICE_OVER, PhotoScope, choose_best
-from services.visual_scope import coerce_collection_id, inject_active_visual_model
+from services.visual_scope import VisualScope, coerce_collection_id, inject_active_visual_model, validate_visual_arg
 from species_best import SpeciesBestQuery, build_species_best_payload
 from web.photo_review import flag_provenance
 from web.request_args import reject_visual_collection, request_bool_arg
@@ -41,6 +41,7 @@ def _valid_photo_id(value: object) -> TypeGuard[int]:
 
 def scope_from(
     db: Database, values: Mapping[str, object], *, json_error: JsonError,
+    visual_scope: VisualScope | None = None,
 ) -> PhotoScope | ErrorResponse:
     """The scope named by ``folder_id`` / ``collection_id`` / ``rules``, or
     the 400 response saying what is wrong with them. ``rules`` may be a JSON
@@ -54,12 +55,13 @@ def scope_from(
             folder_id = int(raw_folder)
         except ValueError:
             return json_error("folder_id must be an integer", 400)
-    invalid = reject_visual_collection(
-        db, values.get("collection_id"), json_error=json_error,
-    )
-    if invalid is not None:
-        return invalid
     collection_id = coerce_collection_id(values.get("collection_id"))
+    if collection_id is False or (collection_id is not None and not 0 < collection_id < 2**63):
+        return json_error("collection_id must be a positive integer", 400)
+    if visual_scope is None:
+        invalid = reject_visual_collection(db, collection_id, json_error=json_error)
+        if invalid is not None:
+            return invalid
     rules = values.get("rules")
     if isinstance(rules, str):
         if not rules.strip():
@@ -71,6 +73,20 @@ def scope_from(
                 return json_error("rules must be valid JSON", 400)
     if rules is not None:
         rules = inject_active_visual_model(rules)
+    if visual_scope is not None and collection_id is not None:
+        row = db.collections.get(collection_id)
+        if row is None:
+            return json_error("Collection not found in active workspace", 404)
+        if row["visual_json"] is not None:
+            try:
+                visual = validate_visual_arg(json.loads(row["visual_json"]))
+                rules, info = visual_scope.apply_to_rules(
+                    db, rules, visual, collection_id=collection_id, folder_id=folder_id,
+                )
+            except ValueError as exc:
+                return json_error(str(exc), 400)
+            if not info or info["status"] != "ok":
+                return json_error("Visual search is unavailable for this collection", 400)
     return PhotoScope(
         folder_id=folder_id,
         collection_id=collection_id if isinstance(collection_id, int) else None,
