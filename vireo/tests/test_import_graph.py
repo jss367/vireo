@@ -74,6 +74,7 @@ ROOT_PACKAGE = "vireo"
 # reports any import it makes above foundation as an upward edge.
 FOUNDATION = frozenset({
     "background_match",
+    "cache_identity",
     "catalog_stamps",
     "compare",
     "config_schema",
@@ -81,6 +82,8 @@ FOUNDATION = frozenset({
     "duplicates",
     "edit_batch",
     "edit_recipe",
+    "exif_orientation",
+    "focus_point",
     "keyword_normalization",
     "process_strategies",
     "settings_source",

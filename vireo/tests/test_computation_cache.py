@@ -2564,3 +2564,55 @@ def test_concurrent_trust_records_keep_every_runtime(tmp_path, monkeypatch):
         thread.join()
     detector, _classifier = real_read(ArtifactStore(root))
     assert detector == set(runtimes)
+
+
+def test_detection_cache_uses_the_autofocus_input_at_inference_and_reuse(tmp_path, monkeypatch):
+    import json
+
+    from classify_job import detection
+    from focus_point import focus_point
+
+    db, folder_id, pid = _database_with_photo(tmp_path / "catalog.db", "bird.jpg")
+    store = ArtifactStore(tmp_path / "artifacts")
+    job = {"_detector_runtime_fingerprint": RUNTIME, "_computation_cache_dir": str(store.root)}
+    photo = db.photos.get(pid)
+    run = detection._DetectBatchRun([photo], {folder_id: "/tmp"}, job, False, db, .2, set(), {})
+    seen = []
+
+    def detect(_path, *, focus=None):
+        seen.append(focus)
+        return []
+
+    def metadata(x):
+        return json.dumps({"MakerNotes": {"AFImageWidth": 1000, "AFImageHeight": 1000,
+                                          "AFAreaXPosition": x, "AFAreaYPosition": 500}})
+
+    monkeypatch.setattr(detection, "detect_animals", detect)
+    try:
+        for exif in (None, metadata(250), metadata(750)):
+            db.conn.execute("UPDATE photos SET exif_data=? WHERE id=?", (exif, pid))
+            db.commit()
+            assert pid not in db.model_runs.get_detector_run_photo_ids("megadetector-v6", RUNTIME)
+            mismatched = materialize_local_store(db, store, known_runtimes={RUNTIME})
+            assert mismatched["detector_runs_applied"] == 0
+            assert pid not in db.model_runs.get_detector_run_photo_ids("megadetector-v6", RUNTIME)
+
+            run.detect_photo(photo)
+            assert seen[-1] == focus_point(exif)
+            assert pid in db.model_runs.get_detector_run_photo_ids("megadetector-v6", RUNTIME)
+            exported, _summary = exportable_artifacts(db)
+            stored = db.model_runs.detector_run_identity(pid, "megadetector-v6")["input_fingerprint"]
+            assert exported[0]["input_fingerprint"] == stored
+            assert exported[0]["input"].get("focus_area") == (list(seen[-1]) if exif else None)
+
+        artifacts = [a for _, a in store.iter_artifacts()]
+        assert len({a["input_fingerprint"] for a in artifacts}) == 3
+        for exif in (metadata(250), None, metadata(750)):
+            db.conn.execute("UPDATE photos SET exif_data=? WHERE id=?", (exif, pid))
+            db.commit()
+            result = materialize_artifacts(db, artifacts, known_runtimes={RUNTIME})
+            assert result["detector_runs_applied"] == 1
+            assert result["stored_unmatched"] == 2
+            assert pid in db.model_runs.get_detector_run_photo_ids("megadetector-v6", RUNTIME)
+    finally:
+        db.close()

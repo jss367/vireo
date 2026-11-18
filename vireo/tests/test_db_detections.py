@@ -1192,8 +1192,7 @@ def test_pin_check_comes_from_the_model_runs_domain():
 
 
 @pytest.mark.parametrize("fn", [
-    detection_store.get_detections, detection_store.get_detections_for_photos,
-    detection_store.get_predictions_for_detection, miss_flags.list_misses,
+    detection_store.detector_floor, detection_store.get_predictions_for_detection, miss_flags.list_misses,
 ])
 def test_floors_read_config_through_the_facade(fn):
     assert "get_effective_config" in _db_attrs(fn)
