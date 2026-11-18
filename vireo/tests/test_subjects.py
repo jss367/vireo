@@ -742,3 +742,43 @@ def test_inspection_inventory_includes_filtered_regions_and_tracks_generation(db
     db.detections.clear(photo_id)
     assert inventory()["additional"] == []
     assert inventory()["generation"] != changed["generation"]
+
+
+@pytest.mark.parametrize("restoring", [False, True])
+def test_inspection_payload_uses_one_catalog_snapshot(db, subject_photo, monkeypatch, restoring):
+    import sqlite3
+
+    import subjects
+
+    photo_id, ids, _ = subject_photo
+    target = ids[1]
+    before = "not_animal" if restoring else None
+    after = None if restoring else "not_animal"
+    db.conn.execute("UPDATE detections SET subject_verdict=? WHERE id=?", (before, target))
+    db.commit()
+    photo = db.photos.get(photo_id, verify_workspace=True)
+    expected_generation = payload(db, photo_id, inspection_photo=photo)["inspection"]["generation"]
+    path = db.conn.execute("PRAGMA database_list").fetchone()[2]
+    original = subjects.retained
+    writes = []
+
+    def racing_retained(*args, **kwargs):
+        rows = original(*args, **kwargs)
+        if not writes:
+            with sqlite3.connect(path) as writer:
+                writer.execute("UPDATE detections SET subject_verdict=? WHERE id=?", (after, target))
+            writes.append(True)
+        return rows
+
+    monkeypatch.setattr(subjects, "retained", racing_retained)
+    result = payload(db, photo_id, inspection_photo=photo)
+    assert result["inspection"]["generation"] == expected_generation
+    subjects_ids = {r["id"] for r in result["subjects"]}
+    additional_ids = {r["id"] for r in result["inspection"]["additional"]}
+    assert (target in subjects_ids) is not restoring
+    assert (target in additional_ids) is restoring
+    assert not subjects_ids & additional_ids
+    assert not db.conn.in_transaction
+    fresh = payload(db, photo_id, inspection_photo=photo)
+    assert (target in {r["id"] for r in fresh["subjects"]}) is restoring
+    assert fresh["inspection"]["generation"] != result["inspection"]["generation"]
