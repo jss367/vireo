@@ -61,14 +61,21 @@ class SubjectsRepository:
             (photo_id,)).fetchone()
         return row[0] if row else None
 
+    def visible_burst_neighbor(self, photo_id: int, workspace_id: int) -> int | None:
+        previous = self.burst_neighbor(photo_id)
+        if previous is None or self.visible_inspection_source(workspace_id, previous) is None:
+            return None
+        return previous
+
     def following_burst_frames(self, photo_id: int) -> Iterator[int]:
         """Walk ahead in capture order until the first gap in the burst."""
         while (successor := self.burst_neighbor(photo_id, following=True)) is not None:
             yield successor
             photo_id = successor
 
-    def previous_burst_subject(self, photo_id):
-        previous = self.burst_neighbor(photo_id)
+    def previous_burst_subject(self, photo_id, *, workspace_id=None):
+        previous = (self.burst_neighbor(photo_id) if workspace_id is None
+                    else self.visible_burst_neighbor(photo_id, workspace_id))
         if previous is None:
             return None
         return self.conn.execute("""SELECT d.* FROM photo_subject_state st

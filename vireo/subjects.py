@@ -202,7 +202,7 @@ def _refresh_focus(db, photo_id):
 def selection_evidence(db, photo_id, detections):
     point = db.subjects.focus_point(photo_id)
     missed = bool(point and not any(point.match(_box(d)) == FocusMatch.CENTER for d in detections))
-    previous = db.subjects.previous_burst_subject(photo_id)
+    previous = db.subjects.previous_burst_subject(photo_id, workspace_id=db.require_workspace_id())
     switched = bool(previous and detections and _burst_overlap(previous, detections[0]) < BURST_SUBJECT_MIN_IOU)
     reason = ""
     if detections:
@@ -377,7 +377,7 @@ def inspection_candidates(db, photo, regions, retained_ids):
                          region["created_at"], _box(region), region["detector_confidence"], reason))
     source = [photo[key] for key in ("file_hash", "file_size", "file_mtime", "width", "height")]
     generation = hashlib.sha256(json.dumps([source, sorted(evidence)]).encode()).hexdigest()
-    previous_id = db.subjects.burst_neighbor(photo["id"])
+    previous_id = db.subjects.visible_burst_neighbor(photo["id"], db.require_workspace_id())
     previous = []
     primary_id = None
     if previous_id:

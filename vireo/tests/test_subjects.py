@@ -817,3 +817,35 @@ def test_source_replacement_and_visibility_lookup_share_inspection_snapshot(db, 
     after = visible_payload(db, photo_id, coverage=True)
     assert after["inspection"]["generation"] != second
     assert ids[0] in {row["id"] for row in after["inspection"]["additional"]}
+
+
+def test_inspection_neighbor_respects_photo_only_workspace_grants(db, subject_photo):
+    previous, ids, _ = subject_photo
+    folder = db.photos.get(previous)["folder_id"]
+    db.conn.execute("UPDATE photos SET timestamp='2026-01-01 10:00:00.100' WHERE id=?", (previous,))
+    current = photo_ingest.add_photo(db, folder_id=folder, filename="next.jpg", extension=".jpg",
+                                     file_size=100, file_mtime=1, timestamp="2026-01-01 10:00:00.200")
+    select_primary(db, previous, ids[1])
+    detection_store.write_detection_batch(db, current, "megadetector-v6", [
+        {"box": {"x": .02, "y": .1, "w": .1, "h": .2}, "confidence": .95, "category": "animal"},
+    ])
+    workspace = db.create_workspace("Selected frames")
+    db.conn.execute("INSERT INTO workspace_photos(workspace_id, photo_id) VALUES (?, ?)", (workspace, current))
+    db.commit()
+    db.set_active_workspace(workspace)
+
+    result = visible_payload(db, current, coverage=True)
+    inspection = result["inspection"]
+    assert inspection["previous_photo_id"] is None
+    assert inspection["previous_primary"] is None
+    assert inspection["previous_regions"] == []
+    assert not result["possible_subject_switch"]
+
+    db.conn.execute("INSERT INTO workspace_photos(workspace_id, photo_id) VALUES (?, ?)", (workspace, previous))
+    db.commit()
+    result = visible_payload(db, current, coverage=True)
+    inspection = result["inspection"]
+    assert inspection["previous_photo_id"] == previous
+    assert inspection["previous_primary"] == ids[1]
+    assert {r["id"] for r in inspection["previous_regions"]} == set(ids)
+    assert result["possible_subject_switch"]
