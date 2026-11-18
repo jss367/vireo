@@ -5,6 +5,8 @@ import os
 import sys
 from types import SimpleNamespace
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 
@@ -205,6 +207,35 @@ def test_subject_detail_source_is_the_embedded_jpeg_whatever_the_subject_size(
 
     assert load_image(str(nef), max_size=11284).size == (5408, 3608)
     assert fake.postprocess_calls == 1
+
+
+@pytest.mark.parametrize("preview_size,uses_preview", [
+    ((2048, 1365), False),
+    ((6000, 3376), False),
+    ((5940, 3960), True),
+    ((6000, 4000), True),
+])
+@pytest.mark.parametrize("needed", [1920, 8000])
+def test_detail_source_preview_eligibility_is_independent_of_request_size(
+    tmp_path, monkeypatch, preview_size, uses_preview, needed,
+):
+    """Reduced and cropped previews cannot change the rendering by subject size."""
+    from quality import load_detail_source
+
+    source = tmp_path / "synthetic.nef"
+    source.write_bytes(b"fake RAW; imread is patched")
+    fake = _install_fake_raw(monkeypatch, _FakeRaw(
+        embedded_jpeg=_jpeg_bytes(preview_size, color="green"),
+        sensor_size=(6000, 4000),
+        postprocess_size=(6000, 4000),
+    ))
+
+    with load_detail_source(str(source), needed, (6000, 4000)) as image:
+        assert fake.postprocess_calls == (0 if uses_preview else 1)
+        # The synthetic demosaic is black; the embedded JPEG is green.
+        assert (image.getpixel((0, 0))[1] > 100) == uses_preview
+        source_edge = preview_size[0] if uses_preview else 6000
+        assert max(image.size) == min(needed, source_edge)
 
 
 def test_raw_camera_rendered_mode_rejects_cropped_embedded_jpeg(

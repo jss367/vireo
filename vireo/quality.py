@@ -453,8 +453,8 @@ def load_detail_source(source_path, needed, frame_size=None):
 
     ``frame_size`` is the source's native ``(width, height)``; without it
     the whole rendering is read, since a sized request cannot be told from
-    one that exceeds the frame. A RAW with no full-size preview is still
-    demosaiced when its preview is smaller than the request.
+    one that exceeds the frame. A RAW with no near-full preview is demosaiced
+    at every requested size, falling back to its JPEG only if decode fails.
     """
     from image_loader import NEAR_FULL_PREVIEW, RAW_DECODE_CAMERA_RENDERED, load_image
 

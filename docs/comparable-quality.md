@@ -68,8 +68,9 @@ catalog:
 
 Nine of those bursts had frames on both sides of the 512 px line, so frames
 of one burst were being ranked on two renderings. A RAW without a full-size
-preview is still demosaiced when its preview is smaller than the request;
-none of this catalog's cameras (D7200, D850, Z 8) is one. Migration 40
+preview is demosaiced at every requested size, falling back to its embedded
+JPEG only if libraw cannot decode it.
+None of this catalog's cameras (D7200, D850, Z 8) is one. Migration 40
 returns to "not measured" every stored value that came another way (a
 subject under 518 px, read from either rendering, and a subject spanning a
 quarter of the frame or more, which fit the largest proxy a workspace can

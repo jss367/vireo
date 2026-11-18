@@ -1119,11 +1119,12 @@ def extract_working_copy(
 def _embedded_preview_suffices(raw, embedded, max_size, raw_decode):
     """Whether the camera's embedded JPEG can stand in for a demosaic."""
     # JPEG-first browsing uses the embedded preview when it covers the
-    # requested size. Full-resolution camera-rendered browsing also accepts
-    # a preview whose two axes are within 1% of the active sensor area; many
+    # requested size. Camera-rendered reads require a preview whose two axes
+    # are within 1% of the active sensor area, at every requested size; many
     # cameras omit a narrow border (for example 8256x5504 vs 8288x5520).
     # That JPEG is the rendition used by thumbnails and fit-to-window views,
-    # so retaining it at 1:1 prevents a visible tone jump.
+    # so retaining it at 1:1 prevents a visible tone jump. A reduced preview
+    # must not switch detail measurements from JPEG to demosaic by size.
     sensor_dims = sorted((raw.sizes.width, raw.sizes.height), reverse=True)
     embedded_dims = sorted(embedded.size, reverse=True) if embedded else None
     embedded_is_near_full = bool(
@@ -1140,13 +1141,11 @@ def _embedded_preview_suffices(raw, embedded, max_size, raw_decode):
         and max(embedded.size) >= max_size
     )
     return bool(
-        raw_decode in (RAW_DECODE_JPEG_FIRST, RAW_DECODE_CAMERA_RENDERED)
-        and embedded is not None
+        embedded is not None
         and (
-            embedded_covers_request
+            (raw_decode == RAW_DECODE_JPEG_FIRST and embedded_covers_request)
             or (
                 raw_decode == RAW_DECODE_CAMERA_RENDERED
-                and not max_size
                 and embedded_is_near_full
             )
         )
@@ -1183,8 +1182,8 @@ def _load_raw(path, max_size, raw_decode=RAW_DECODE_JPEG_FIRST):
          fall back to the embedded JPEG even if smaller than max_size.
 
     Camera-rendered:
-      1. Use a near-full embedded JPEG for full-resolution display requests.
-      2. Otherwise follow the JPEG-first demosaic/fallback behavior.
+      1. Use a near-full embedded JPEG regardless of the requested size.
+      2. Otherwise demosaic, falling back to the JPEG only if decode fails.
 
     Preserve-highlights:
       1. Demosaic the RAW with auto-bright disabled and highlight blending on.
