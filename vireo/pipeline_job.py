@@ -2456,7 +2456,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             stages=stages, result=result, errors=errors,
             collection_id=collection_id, database_factory=Database,
             emit_progress=_emit_progress, update_stages=_update_stages,
-            control=control.pipeline_control(),
+            control=control.pipeline_control(), effective_vireo_dir=effective_vireo_dir,
         )
         stage_fns = _wire_scan_stages(
             run, shared,

@@ -518,6 +518,21 @@ def _add_primary_projection_policy(conn):
             conn.execute(f"ALTER TABLE photo_subject_state ADD COLUMN {name} {definition}")
 
 
+def _add_classifier_input_source(conn):
+    """Converge alternate version-42 layouts while preserving both migrations."""
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(classifier_runs)")}
+    if "input_source" not in columns:
+        conn.execute("ALTER TABLE classifier_runs ADD COLUMN input_source TEXT")
+    _merge_species_highlights(conn)
+
+
+def _add_reviewed_gps(conn):
+    # Catalogs stamped 43 on the GPS branch already have reviewed locations
+    # but still need the classifier input source migration from main.
+    _add_classifier_input_source(conn)
+    create_reviewed_gps(conn)
+
+
 MIGRATIONS = (
     Migration(
         13, "companion_identities_file_mtime",
@@ -579,7 +594,8 @@ MIGRATIONS = (
         42, "merge_species_highlights",
         _merge_species_highlights, _validate_merged_species_highlights,
     ),
-    Migration(43, "reviewed_gps", create_reviewed_gps),
+    Migration(43, "classifier_input_source", _add_classifier_input_source),
+    Migration(44, "reviewed_gps", _add_reviewed_gps),
 )
 
 

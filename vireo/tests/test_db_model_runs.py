@@ -281,7 +281,7 @@ def test_record_classifier_run_inserts_upserts_and_leaves_commit_to_caller(
     assert dict(row) | {"run_at": None} == {
         "detection_id": det, "classifier_model": MODEL,
         "labels_fingerprint": "fp-a", "labels_fingerprint_full": None,
-        "runtime_fingerprint": "legacy", "input_recipe": None,
+        "runtime_fingerprint": "legacy", "input_recipe": None, "input_source": None,
         "input_fingerprint": None, "run_at": None, "prediction_count": 3,
     }
 
