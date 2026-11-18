@@ -403,6 +403,16 @@ The token also binds live species identities and provenance for every encounter
 member whose summaries will refresh, including sibling bursts outside the
 displayed source-photo matrix. Unrelated encounters remain outside that scope.
 
+A reviewed selection may span multiple cached encounters. Preview and apply
+report the selected IDs in `encounter_results`, grouped by the encounter index
+at preview or apply time. Apply also lists changed and unchanged IDs in each
+group. A stale membership refusal leaves the whole selection unchanged and
+lists its IDs. One Undo restores the selection, its evidence and its encounter
+summaries. Burst-specific edits and splits require a single source encounter.
+
+Grouping records undetected frames joined by capture time and image similarity
+in the encounter's `visual_neighbor_photo_ids` when that list has members.
+
 Use `add: true` to preserve existing species. To replace one explicitly named
 species, omit `add` and send `previous_species`; unrelated species are retained.
 `split: true` separates exactly the selected frames into another encounter and

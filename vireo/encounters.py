@@ -44,6 +44,10 @@ DEFAULTS = {
     # runner-up by the configured margin.
     "species_hard_cut_confidence": 0.80,
     "species_hard_cut_margin": 0.60,
+    # Close neighbors can corroborate a missing detection with image evidence.
+    "undetected_max_gap": 2.0,
+    "undetected_global_similarity": 0.85,
+    "undetected_hash_distance": 19,
     # Pass 2 merge thresholds
     "merge_score": 0.62,
     "merge_max_gap": 60.0,  # seconds
@@ -506,7 +510,7 @@ def _s_enc_components(values, cfg, weight_keys, used, missing, absent, uncertain
 # -- Pass 1: Cut timeline into microsegments (Section 2.2) --
 
 
-def cut_microsegments(photos, config=None, emit_trace=False):
+def cut_microsegments(photos, config=None, emit_trace=False, *, visual_join_ids=None):
     """Sort photos by timestamp and cut into microsegments.
 
     Args:
@@ -554,6 +558,8 @@ def cut_microsegments(photos, config=None, emit_trace=False):
             sorted_photos[i], sorted_photos[i + 1], ts_a, ts_b, dt, score,
             species_conflict, recent_scores, cfg,
         )
+        if decision == "kept_visual_neighbor" and visual_join_ids is not None:
+            visual_join_ids.update(p["id"] for p in sorted_photos[i:i + 2] if p.get("subject_absent") and "id" in p)
         if cut:
             cuts.add(i)
 
@@ -622,6 +628,23 @@ def _null_timestamp_pair_facts(photo_a, photo_b, ts_a, ts_b):
     return both_null, folder_changed, signal_less
 
 
+def _undetected_visual_neighbor(a, b, dt, cfg):
+    if dt > cfg["undetected_max_gap"] or not (a.get("subject_absent") or b.get("subject_absent")):
+        return False
+    ga, gb = a.get("dino_global_embedding"), b.get("dino_global_embedding")
+    if ga is not None and gb is not None and ga.shape == gb.shape:
+        return sim_embedding(ga, gb) >= cfg["undetected_global_similarity"]
+    for key in ("phash", "phash_crop"):
+        hashes = (a.get(key), b.get(key))
+        if all(isinstance(h, str) and len(h) == 16 for h in hashes):
+            try:
+                distance = (int(hashes[0], 16) ^ int(hashes[1], 16)).bit_count()
+            except ValueError:
+                continue
+            return distance <= cfg["undetected_hash_distance"]
+    return False
+
+
 def _classify_pair(photo_a, photo_b, ts_a, ts_b, dt, score, species_conflict, recent_scores, cfg):
     """Decide whether the timeline cuts between two adjacent photos.
 
@@ -672,6 +695,9 @@ def _classify_pair(photo_a, photo_b, ts_a, ts_b, dt, score, species_conflict, re
         cut = True
         recent_scores = []
         decision = "cut_time"
+    elif _undetected_visual_neighbor(photo_a, photo_b, dt, cfg):
+        decision = "kept_visual_neighbor"
+        recent_scores = []
     elif score < cfg["hard_cut_score"]:
         cut = True
         recent_scores = []
@@ -853,7 +879,26 @@ def merge_microsegments(segments, config=None):
     return merged
 
 
-def _merge_microsegments_with_map(segments, config=None):
+def _visual_boundary_support(left, right, cfg):
+    """Corroborate a missing-region boundary across one visually atypical frame.
+
+    Require two distinct close matches in capture order. Compare the nearest
+    two frames on each side, allowing one boundary frame to be skipped.
+    """
+    if not (left[-1].get("subject_absent") or right[0].get("subject_absent")):
+        return []
+    for tail, head in ((left[-2:], right[:2]), (left[-3:-1], right[:2]), (left[-2:], right[1:3])):
+        if len(tail) != 2 or len(head) != 2:
+            continue
+        pairs = list(zip(tail, head, strict=True))
+        if all(_undetected_visual_neighbor(
+            a, b, _time_delta_seconds(_parse_timestamp(a.get("timestamp")), _parse_timestamp(b.get("timestamp"))), cfg
+        ) and _confident_species_conflict(a, b, config=cfg) is None for a, b in pairs):
+            return [p for p in (*tail, *head, left[-1], right[0]) if p.get("subject_absent")]
+    return []
+
+
+def _merge_microsegments_with_map(segments, config=None, *, visual_join_ids=None):
     """Like merge_microsegments but also returns a per-merged-segment count
     of how many original microsegments were fused into it.
 
@@ -882,7 +927,12 @@ def _merge_microsegments_with_map(segments, config=None):
         )
         if species_conflict is None and gap <= cfg["merge_max_gap"]:
             s_seg = compute_s_seg(merged[-1], seg, config=cfg)
-            if s_seg > cfg["merge_score"]:
+            visual_support = []
+            if s_seg <= cfg["merge_score"] and gap <= min(cfg["hard_cut_time"], cfg["undetected_max_gap"]):
+                visual_support = _visual_boundary_support(merged[-1], seg, cfg)
+            if s_seg > cfg["merge_score"] or visual_support:
+                if visual_join_ids is not None:
+                    visual_join_ids.update(p["id"] for p in visual_support if "id" in p)
                 # Merge: extend the last segment
                 merged[-1] = merged[-1] + seg
                 counts[-1] += 1
@@ -953,24 +1003,21 @@ def segment_encounters(photos, config=None, emit_trace=False):
             - trace: (only when emit_trace) list of trace dicts for the
               internal adjacent pairs of this encounter
     """
+    visual_join_ids = set()
     # Pass 1: Cut into microsegments
     if emit_trace:
         microsegments, full_trace = cut_microsegments(
-            photos, config=config, emit_trace=True
+            photos, config=config, emit_trace=True, visual_join_ids=visual_join_ids
         )
     else:
-        microsegments = cut_microsegments(photos, config=config)
+        microsegments = cut_microsegments(photos, config=config, visual_join_ids=visual_join_ids)
         full_trace = None
     log.info("Pass 1: %d microsegments from %d photos", len(microsegments), len(photos))
 
     # Pass 2: Merge neighbors
-    if emit_trace:
-        merged, merge_counts = _merge_microsegments_with_map(
-            microsegments, config=config
-        )
-    else:
-        merged = merge_microsegments(microsegments, config=config)
-        merge_counts = None
+    merged, merge_counts = _merge_microsegments_with_map(
+        microsegments, config=config, visual_join_ids=visual_join_ids
+    )
     log.info("Pass 2: %d encounters after merging", len(merged))
 
     # Build encounter objects
@@ -991,6 +1038,7 @@ def segment_encounters(photos, config=None, emit_trace=False):
                 last_ts.isoformat() if last_ts else None,
             ),
         }
+        enc["visual_neighbor_photo_ids"] = [p["id"] for p in seg if p.get("id") in visual_join_ids]
         if emit_trace:
             n_micros = merge_counts[enc_idx]
             enc_trace = []

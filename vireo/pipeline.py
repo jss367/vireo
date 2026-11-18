@@ -868,6 +868,7 @@ class _FeatureLoad:
             "subject_clip_high": row["subject_clip_high"],
             "subject_clip_low": row["subject_clip_low"],
             "subject_y_median": row["subject_y_median"],
+            "phash": row["phash"],
             "phash_crop": row["phash_crop"],
             "dino_subject_embedding": subj_emb,
             "dino_global_embedding": global_emb,
@@ -1524,6 +1525,8 @@ def _serialize_encounter(enc, prior_empty_photo_ids):
     # Surface per-cut-point trace when run_full_pipeline was invoked with
     # emit_trace=True (e.g. from /api/pipeline/regroup-live so the
     # pipeline-review sidebar can show how each encounter was formed).
+    if enc.get("visual_neighbor_photo_ids"):
+        s_enc["visual_neighbor_photo_ids"] = enc["visual_neighbor_photo_ids"]
     if "trace" in enc:
         s_enc["trace"] = enc["trace"]
     if "focus_cohorts" in enc:

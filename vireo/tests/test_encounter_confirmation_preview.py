@@ -1269,3 +1269,43 @@ def test_scoped_edits_retain_shared_taxon_when_one_frame_has_same_name_homonym(a
     assert client.post('/api/redo').status_code == 200
     assert json.load(open(path))['encounters'] == response.get_json()['encounters']
     assert db.photo_species.get_species_for_photos(ids, include_identities=True) == after
+
+
+def test_review_across_encounters_binds_membership_and_undoes_once(app_and_db):
+    from pathlib import Path
+
+    app, db = app_and_db
+    client = app.test_client()
+    ids, filename = seed(app, db)
+    path = Path(filename)
+    cache = json.loads(path.read_text())
+
+    def group(members):
+        return {**cache['encounters'][0], 'photo_ids': members, 'photo_count': len(members),
+                'bursts': [members]}
+
+    cache['encounters'] = [group(ids[:1]), group(ids[1:])]
+    path.write_text(json.dumps(cache))
+    selection = [ids[0], ids[2]]
+    body = {'species': 'Wood Duck', 'photo_ids': selection, 'add': True, 'response_mode': 'compact',
+            'provenance': {'method': 'direct_visual', 'reviewer': 'Reviewer', 'reason': 'Reviewed frames'}}
+    preview = request_preview(client, body)
+    regrouped = [group(ids[:2]), group(ids[2:])]
+    path.write_text(json.dumps({**cache, 'encounters': regrouped}))
+    stale = apply(client, body, preview)
+    assert stale.status_code == 409
+    assert stale.json['unchanged_photo_ids'] == selection
+    assert [r['unchanged_photo_ids'] for r in stale.json['encounter_results']] == [[ids[0]], [ids[2]]]
+    assert all(not db.species_provenance.assignments(pid) for pid in ids)
+    result = apply(client, body, request_preview(client, body))
+    assert result.status_code == 200, result.json
+    assert [r['changed_photo_ids'] for r in result.json['encounter_results']] == [[ids[0]], [ids[2]]]
+    history = db.edit_history.action_and_new_value(result.json['undo']['edit_id'])
+    decision = json.loads(history['new_value'])['reviewed_selection']
+    assert decision['photo_ids'] == selection
+    assert decision['provenance']['reason'] == 'Reviewed frames'
+    assert db.species_provenance.assignments(ids[1]) == []
+    assert all(db.species_provenance.assignments(pid)[0]['reviewer'] == 'Reviewer' for pid in selection)
+    assert client.post('/api/undo', json=result.json['undo']).status_code == 200
+    assert json.loads(path.read_text())['encounters'] == regrouped
+    assert all(not db.species_provenance.assignments(pid) for pid in ids)

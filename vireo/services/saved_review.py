@@ -93,6 +93,8 @@ def _current_groups(data: JsonDict, photos: dict[int, JsonDict]) -> list[JsonDic
         encounter["photo_ids"] = ids
         encounter["photo_count"] = len(ids)
         members = set(ids)
+        if "visual_neighbor_photo_ids" in encounter:
+            encounter["visual_neighbor_photo_ids"] = [pid for pid in encounter["visual_neighbor_photo_ids"] if pid in members]
         bursts = []
         saved_bursts = []
         covered = set()

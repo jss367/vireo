@@ -245,6 +245,7 @@ def auto_detach_burst_for_species(results, enc_idx, burst_idx, new_species):
         # so the algorithm-trace panel renders an honest "needs recompute"
         # state instead of stale rows.
         enc.pop("trace", None)
+        enc.pop("visual_neighbor_photo_ids", None)
 
     detached["species_predictions"] = rebuild_species_predictions(results, detached_ids)
 

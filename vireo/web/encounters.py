@@ -114,9 +114,13 @@ def create_encounters_blueprint(get_db: GetDb, json_error: JsonError, db_path: s
         if not photo_ids:
             return json_error("photo_ids is required")
 
-        error = _photo_ids_error(db, photo_ids, json_error)
-        if error is not None:
-            return error
+        reviewed = bool(body.get("preview")) or "preview_token" in body
+        if not _valid_photo_ids(photo_ids):
+            return json_error("photo_ids must be a nonempty list of unique integers")
+        if not reviewed:
+            error = _photo_ids_error(db, photo_ids, json_error)
+            if error is not None:
+                return error
         from pipeline import load_results_raw
 
         confirmation = _SpeciesConfirmation(
@@ -125,15 +129,19 @@ def create_encounters_blueprint(get_db: GetDb, json_error: JsonError, db_path: s
             remove_mode=remove_mode,
             cache_dir=os.path.dirname(db_path),
         )
+        confirmation.load_cache(load_results_raw)
+        if reviewed:
+            error = confirmation.read_review_scope(body)
+            if error is not None:
+                return confirmation.refusal(error)
         error = confirmation.read_provenance(body)
         if error is not None:
-            return error
-        confirmation.load_cache(load_results_raw)
+            return confirmation.refusal(error) if reviewed else error
         error = confirmation.burst_error()
         if error is not None:
-            return error
+            return confirmation.refusal(error) if reviewed else error
         confirmation.read_current_species()
-        if body.get("preview") or "preview_token" in body:
+        if reviewed:
             # A mixed encounter may have no common cached species. The reviewer
             # may still explicitly replace a species carried by selected frames.
             actual = db.photo_species.get_species_for_photos(photo_ids)
@@ -141,9 +149,12 @@ def create_encounters_blueprint(get_db: GetDb, json_error: JsonError, db_path: s
                 for name in names:
                     if name not in confirmation.current_species_list:
                         confirmation.current_species_list.append(name)
+        if (len(confirmation.review_encounters) > 1 and not (add_mode or remove_mode)
+                and requested_previous is None and len(confirmation.current_species_list) > 1):
+            return confirmation.refusal(json_error("Choose previous_species or add for this mixed selection"))
         error = confirmation.resolve_previous_species(requested_previous)
         if error is not None:
-            return error
+            return confirmation.refusal(error) if reviewed else error
 
         confirmation.resolve_old_species_rows()
         error = _review_preview(db, confirmation, body, json_error)
@@ -301,38 +312,27 @@ def _review_preview(
         return None  # Existing API clients retain their established contract.
     from services.encounter_confirmation import preview
 
-    source = body.get("source_photo_ids", confirmation.photo_ids)
-    if (not isinstance(source, list) or not source
-            or any(type(pid) is not int for pid in source)
-            or len(set(source)) != len(source)
-            or not set(confirmation.photo_ids) <= set(source)):
-        return json_error("source_photo_ids must contain the selected photo_ids exactly once")
-    error = _photo_ids_error(db, source, json_error)
-    if error is not None:
-        return error
-    enc = confirmation.target_enc
-    if enc is None or not set(source) <= set(enc["photo_ids"]):
-        return json_error("Photo membership changed. Reload the review and preview again.", 409)
-    if confirmation.burst_index is not None:
-        burst = enc["bursts"][confirmation.burst_index]
-        if not set(source) <= set(burst["photo_ids"]):
-            return json_error("Burst membership changed. Preview again.", 409)
-    if body.get("split") and set(confirmation.photo_ids) == set(enc["photo_ids"]):
-        return json_error("Select fewer than all encounter photos to separate a transition")
     if confirmation.is_replacement and confirmation.old_kid_row is not None:
         key = keyword_match_key(confirmation._replaced_species)
         confirmation._collect_old_rows(key, _HomonymConflicts(db, key))
     from services.review_group_changes import InvalidGroupChanges, validate_group_changes
     try:
         # ``enc`` came from the loaded cache, so the cache is not None.
-        confirmation.group_plan = validate_group_changes(db, cast("JsonDict", confirmation.cached), enc, body)
+        if "group_changes" in body:
+            confirmation.group_plan = validate_group_changes(
+                db, cast("JsonDict", confirmation.cached), confirmation.review_encounters[0][1], body,
+            )
     except InvalidGroupChanges as exc:
-        return json_error(str(exc), 409)
+        return confirmation.refusal(json_error(str(exc), 409))
     result = preview(db, confirmation, body)
     if body.get("preview"):
+        result["encounter_results"] = [
+            {"encounter_index": group["encounter_index"], "photo_ids": group["photo_ids"]}
+            for group in confirmation.encounter_results(set())
+        ]
         return jsonify(result)
     if body.get("preview_token") != result["preview_token"]:
-        return json_error("Photos, species or review choices changed. Preview again before applying.", 409)
+        return confirmation.refusal(json_error("Photos, species or review choices changed. Preview again before applying.", 409))
     # The removal loop collects its rows again inside the write phase.
     confirmation.old_rows_by_photo = {}
     confirmation.preview_scope = True
@@ -340,11 +340,14 @@ def _review_preview(
     return None
 
 
+def _valid_photo_ids(ids: object) -> bool:
+    return (isinstance(ids, list) and bool(ids) and all(type(pid) is int for pid in ids)
+            and len(set(ids)) == len(ids))
+
+
 def _photo_ids_error(db: Database, photo_ids: object, json_error: _ErrorFor) -> ErrorResponse | None:
     """The error response for unknown or out-of-workspace photo_ids, else None."""
-    if (not isinstance(photo_ids, list) or not photo_ids
-            or any(type(pid) is not int for pid in photo_ids)
-            or len(set(photo_ids)) != len(photo_ids)):
+    if not isinstance(photo_ids, list) or not _valid_photo_ids(photo_ids):
         return json_error("photo_ids must be a nonempty list of unique integers")
     # Validate all photo_ids exist before mutating.
     found_ids = db.photos.existing_ids(photo_ids)
@@ -473,6 +476,7 @@ class _SpeciesConfirmation:
 
         self.group_plan: JsonDict | None = None
         self.group_photo_states: dict[int, JsonDict] | None = None
+        self.review_encounters: list[tuple[int, JsonDict]] = []
         self.preview_scope = False
         self.split = False
         self.cached: JsonDict | None = None
@@ -576,6 +580,58 @@ class _SpeciesConfirmation:
                 self.target_enc = enc
                 self.target_enc_idx = enc_idx
                 break
+
+    def read_review_scope(self, body: JsonDict) -> ErrorResponse | None:
+        source = body.get("source_photo_ids", self.photo_ids)
+        if (not isinstance(source, list) or not source or any(type(pid) is not int for pid in source)
+                or len(set(source)) != len(source) or not set(self.photo_ids) <= set(source)):
+            return self.json_error("source_photo_ids must contain the selected photo_ids exactly once")
+        wanted = set(source)
+        selected = set(self.photo_ids)
+        found = set()
+        for index, enc in enumerate((self.cached or {}).get("encounters", [])):
+            members = wanted.intersection(enc["photo_ids"])
+            if members:
+                self.review_encounters.append((index, enc))
+                if members & found:
+                    return self.json_error("Ambiguous encounter membership. Preview again.", 409)
+                found.update(members)
+                if selected.intersection(members) and enc is not self.target_enc:
+                    enc["bursts"] = [{"photo_ids": b} if isinstance(b, list) else b for b in enc.get("bursts", [])]
+        error = _photo_ids_error(self.db, source, self.json_error)
+        if error is not None:
+            if "preview_token" in body and error[1] == 400:
+                return self.json_error("Photo membership changed. Reload the review and preview again.", 409)
+            return error
+        if found != wanted:
+            return self.json_error("Photo membership changed. Reload the review and preview again.", 409)
+        if len(self.review_encounters) > 1:
+            if self.burst_index is not None or body.get("split") or "group_changes" in body:
+                return self.json_error("Burst edits and splits require a single encounter", 409)
+        elif self.target_enc is not None:
+            if body.get("split") and set(self.photo_ids) == set(self.target_enc["photo_ids"]):
+                return self.json_error("Select fewer than all encounter photos to separate a transition")
+            bursts = self.target_enc["bursts"]
+            if (type(self.burst_index) is int and 0 <= self.burst_index < len(bursts)
+                    and not wanted <= set(bursts[self.burst_index]["photo_ids"])):
+                return self.json_error("Burst membership changed. Preview again.", 409)
+        return None
+
+    def encounter_results(self, changed: set[int]) -> list[JsonDict]:
+        selected = set(self.photo_ids)
+        results = []
+        for index, _ in self.review_encounters:
+            enc = cast("JsonDict", self.before_cached)["encounters"][index]
+            ids = [pid for pid in enc["photo_ids"] if pid in selected]
+            results.append({"encounter_index": index, "photo_ids": ids,
+                            "changed_photo_ids": [pid for pid in ids if pid in changed],
+                            "unchanged_photo_ids": [pid for pid in ids if pid not in changed]})
+        return results
+
+    def refusal(self, error: ErrorResponse) -> ErrorResponse:
+        response, status = error
+        return jsonify({**response.get_json(), "encounter_results": self.encounter_results(set()),
+                        "unchanged_photo_ids": self.photo_ids}), status
 
     def burst_error(self) -> ErrorResponse | None:
         """Reject a burst_index that does not hold the submitted photos.
@@ -1219,7 +1275,7 @@ class _SpeciesConfirmation:
         requests derive summaries after removals establish final membership.
         """
         cached = self.cached
-        if not (cached and self.target_enc is not None):
+        if not cached or (self.target_enc is None and not self.review_encounters):
             return
         flag_items = []
         group_attribution: dict = {}
@@ -1231,8 +1287,11 @@ class _SpeciesConfirmation:
             group_attribution = group_result
         if self.preview_scope:
             from services.encounter_confirmation import apply_scope
-            apply_scope(self.db, cached, self.target_enc, self.photo_ids,
-                        split=self.split, preferred_order=self.new_species_list)
+            selected = set(self.photo_ids)
+            for _, enc in self.review_encounters:
+                ids = [pid for pid in enc["photo_ids"] if pid in selected]
+                if ids:
+                    apply_scope(self.db, cached, enc, ids, split=self.split, preferred_order=self.new_species_list)
         elif self.burst_index is not None:
             self._apply_burst_override()
         else:
@@ -1241,27 +1300,29 @@ class _SpeciesConfirmation:
         before_cached = cast("JsonDict", self.before_cached)
         if self.group_plan is not None:
             self._apply_combined_group(flag_items, group_attribution)
-        elif (
-            self.photo_edit_id is not None
-            and before_cached["encounters"] != cached["encounters"]
-        ):
-            # Labels and confirmation counts are part of the same user
-            # action even when no burst moves to another encounter.
-            # The edit row this request recorded, read in its transaction.
-            photo_edit = cast("Row", self.db.edit_history.action_and_new_value(self.photo_edit_id))
-            change = {
-                "before": before_cached["encounters"],
-                "after": cached["encounters"],
-                "photo_edit": dict(photo_edit),
+            return
+
+        cache_changed = before_cached["encounters"] != cached["encounters"]
+        multi_encounter = len(self.review_encounters) > 1
+        if not cache_changed and not (multi_encounter and self.photo_edit_id is not None):
+            return
+        change: JsonDict = {"before": before_cached["encounters"], "after": cached["encounters"]} if cache_changed else {
+            "photo_only": True,
+        }
+        if multi_encounter:
+            change["reviewed_selection"] = {
+                "photo_ids": self.photo_ids, "species": self.species, "provenance": self.provenance,
             }
+        if self.photo_edit_id is not None:
             from services.grouping_history import convert_to_grouping_edit
+            photo_edit = cast("Row", self.db.edit_history.action_and_new_value(self.photo_edit_id))
+            change["photo_edit"] = dict(photo_edit)
             convert_to_grouping_edit(self.db, self.photo_edit_id, change)
-        if (self.group_plan is None and self.preview_scope and self.photo_edit_id is None
-                and before_cached["encounters"] != cached["encounters"]):
+        elif self.preview_scope:
             from services.grouping_history import record_grouping_edit
-            self.undo_edit_id = record_grouping_edit(self.db, self.cache_description + f"{len(self.photo_ids)} photos", {
-                "before": before_cached["encounters"], "after": cached["encounters"],
-            })
+            self.undo_edit_id = record_grouping_edit(
+                self.db, self.cache_description + f"{len(self.photo_ids)} photos", change,
+            )
 
     def _loaded_cache(self) -> tuple[JsonDict, JsonDict, JsonDict]:
         """``(cached, before_cached, target_enc)`` for the cache-mutation helpers.
@@ -1405,6 +1466,9 @@ class _SpeciesConfirmation:
             # photo. The field stays for API clients that read it.
             "skipped_photo_ids": [],
         }
+        if self.preview_scope:
+            changed = set(self.newly_tagged) | self.had_old | set(self.attribution_only)
+            response["encounter_results"] = self.encounter_results(changed)
         if self.group_photo_states is not None:
             response["group_photos"] = self.group_photo_states
         response["response_mode"] = response_mode

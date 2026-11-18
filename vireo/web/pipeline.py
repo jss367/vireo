@@ -1887,6 +1887,7 @@ def _shrink_source_encounter(
     # drop it so the algorithm-trace panel renders an honest "needs
     # recompute" state instead of stale rows.
     enc.pop("trace", None)
+    enc.pop("visual_neighbor_photo_ids", None)
     # Recalculate remaining burst predictions too
     for b in bursts:
         b["species_predictions"] = rebuild_species_predictions(results, b["photo_ids"])

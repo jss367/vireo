@@ -54,8 +54,10 @@ def preview(db: Database, confirmation: object, body: JsonDict) -> JsonDict:
         rows.append(row)
     order = {pid: i for i, pid in enumerate(source_ids)}
     rows.sort(key=lambda row: order[row["id"]])
+    encounters = [enc for _, enc in edit.review_encounters]
+    refresh_ids = [pid for enc in encounters for pid in enc["photo_ids"]]
     state = {
-        "workspace": db.require_workspace_id(), "encounter": edit.target_enc,
+        "workspace": db.require_workspace_id(), "encounters": encounters,
         "burst_index": edit.burst_index, "rows": rows, "species": edit.species,
         "add": edit.add_mode, "remove": edit.remove_mode,
         "previous_species": edit.previous_species, "split": bool(body.get("split")),
@@ -67,8 +69,8 @@ def preview(db: Database, confirmation: object, body: JsonDict) -> JsonDict:
         # Bind their live species inputs without expanding the visible matrix
         # or invalidating on unrelated sibling flags/classifier measurements.
         "refresh_species": {
-            "keywords": db.photo_species.confirmation_species_evidence(edit.target_enc["photo_ids"]),
-            "identities": db.photo_species.get_species_for_photos(edit.target_enc["photo_ids"], include_identities=True),
+            "keywords": db.photo_species.confirmation_species_evidence(refresh_ids),
+            "identities": db.photo_species.get_species_for_photos(refresh_ids, include_identities=True),
         },
         "homonyms": db.photo_species.confirmation_homonym_evidence([
             name for name in (target["name"] if target else edit.species, edit.previous_species) if name
@@ -133,6 +135,9 @@ def _refresh_group(
     )
     if membership_changed:
         enc.pop("focus_cohorts", None)
+        if "visual_neighbor_photo_ids" in enc:
+            members = set(ids)
+            enc["visual_neighbor_photo_ids"] = [pid for pid in enc["visual_neighbor_photo_ids"] if pid in members]
     enc.pop("trace", None)
     for burst, previous_order in zip(bursts, previous_orders, strict=True):
         burst["species_override"] = override(burst["photo_ids"], previous_order)

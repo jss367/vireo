@@ -38,7 +38,7 @@ PIPELINE_PHOTO_COLS = """
     p.mask_path, p.subject_tenengrad, p.bg_tenengrad,
     p.crop_complete, p.bg_separation,
     p.subject_clip_high, p.subject_clip_low, p.subject_y_median,
-    p.phash_crop,
+    p.phash, p.phash_crop,
     p.dino_subject_embedding, p.dino_global_embedding,
     p.dino_embedding_variant,
     p.focal_length, p.burst_id, p.noise_estimate,

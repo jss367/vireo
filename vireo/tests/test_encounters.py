@@ -1482,3 +1482,35 @@ def test_cut_null_timestamps_missing_folder_id_still_cuts():
     ]
     segments = cut_microsegments(photos)
     assert len(segments) == 2
+
+
+def test_close_undetected_frame_joins_by_hash_and_records_its_id():
+    from encounters import segment_encounters
+    from pipeline import _serialize_encounter
+
+    photos = [
+        {'id': 1, 'timestamp': '2026-11-14T08:40:00', 'subject_present': True, 'phash_crop': 'abcd12345678abcd'},
+        {'id': 2, 'timestamp': '2026-11-14T08:40:01', 'subject_absent': True, 'phash_crop': 'abcd12345678abcc'},
+    ]
+    result = segment_encounters(photos, emit_trace=True)
+    assert len(result) == 1
+    assert result[0]['trace'][0]['decision'] == 'kept_visual_neighbor'
+    assert _serialize_encounter(result[0], set())['visual_neighbor_photo_ids'] == [2]
+    photos[1]['phash_crop'] = '5432edcba9875432'
+    assert all(not enc['visual_neighbor_photo_ids'] for enc in segment_encounters(photos))
+
+
+def test_visual_merge_requires_two_matches_across_the_boundary():
+    from encounters import merge_microsegments
+
+    def frame(pid, phash, absent):
+        return {'id': pid, 'timestamp': f'2026-11-14T08:40:00.{pid}', 'subject_absent': absent,
+                'subject_present': not absent, 'phash_crop': phash}
+
+    pattern = 'abcd12345678abcd'
+    other = '5432edcba9875432'
+    left = [frame(1, pattern, True), frame(2, pattern, True)]
+    right = [frame(3, other, False), frame(4, pattern, False), frame(5, pattern, False)]
+    assert merge_microsegments([left, right]) == [left + right]
+    right[2]['phash_crop'] = other
+    assert merge_microsegments([left, right]) == [left, right]
