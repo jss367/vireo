@@ -2101,7 +2101,7 @@ def test_running_job_has_history_row_and_checkpoint_records_work(tmp_path):
     row = _history_row(db, job_id)
     assert row["status"] == "completed"
     assert json.loads(row["result"]) == {"classified": 120}
-    assert row["progress"] is None, "final persist replaces the checkpoint row"
+    assert json.loads(row["progress"]) == runner.get(job_id)["progress"]
 
     # A late checkpoint racing the final write must not resurrect the row.
     snapshot = runner.get(job_id)

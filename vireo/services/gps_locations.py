@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 
 import places
 from db import Database
+from services.outing_places import Outing, outing_offers
 from services.visual_scope import VISUAL_COLLECTION_MSG, coerce_collection_id
 
 if TYPE_CHECKING:
@@ -300,6 +301,30 @@ def _preview_group(group: JsonDict) -> JsonDict:
     }
 
 
+def _group_resolved_places(
+    photos_map: Mapping[int, sqlite3.Row], resolved: Mapping[int, JsonDict],
+) -> dict[str, JsonDict]:
+    groups = {}
+    for pid, details in resolved.items():
+        photo = photos_map[pid]
+        place_id = details.get("place_id")
+        if place_id not in groups:
+            groups[place_id] = {
+                "place_id": place_id,
+                "summary": summarize_details(details),
+                "name": details.get("name") or "",
+                "details": details,
+                "photo_ids": [],
+                "sample_filenames": [],
+            }
+        group = groups[place_id]
+        group["photo_ids"].append(pid)
+        if len(group["sample_filenames"]) < 3:
+            group["sample_filenames"].append(photo["filename"])
+
+    return groups
+
+
 class BulkGpsLocations:
     """Bulk EXIF-GPS location flows that answer with error responses.
 
@@ -352,6 +377,25 @@ class BulkGpsLocations:
             return None, json_error(VISUAL_COLLECTION_MSG, 400)
         return db.collections.get_photo_ids(collection_id), None
 
+    def _apply_outing_choices(self, raw_choices: object, offers: list[Outing],
+                              resolved: dict[int, JsonDict]) -> ErrorResponse | None:
+        """Validate the requested overrides against freshly resolved evidence."""
+        eligible = {pid: offer.place for offer in offers for pid in offer.inferred}
+        if not isinstance(raw_choices, list):
+            return self._json_error("outing_choices must be a list", 400)
+        for choice in raw_choices:
+            if not isinstance(choice, dict):
+                return self._json_error("Invalid outing choice", 400)
+            ids, error = self.normalize_photo_id_list(choice.get("photo_ids"))
+            if error is not None:
+                return error
+            for pid in ids or []:
+                if pid not in eligible or eligible[pid]["place_id"] != choice.get("place_id"):
+                    return self._json_error("Outing choice no longer matches this preview", 409)
+                resolved[pid] = eligible[pid]
+
+        return None
+
     def payload(self, db: Database, body: JsonDict,
                 cancel_check: Callable[[], bool] | None = None) -> ValueOrError[JsonDict]:
         """Build preview/apply data for resolving locations from EXIF GPS."""
@@ -361,6 +405,7 @@ class BulkGpsLocations:
         if not photo_ids:
             return {
                 "total": 0,
+                "outings": [],
                 "resolvable": 0,
                 "updated": 0,
                 "groups": [],
@@ -381,11 +426,10 @@ class BulkGpsLocations:
         api_key = (maps_config.get("google_maps_api_key", "") or "").strip()
         language = places.result_language(maps_config)
 
+        resolved: dict[int, JsonDict] = {}
         grid_cache = {}
-        groups = {}
         unresolved = []
         skipped = []
-        ordered_group_keys = []
         cancelled = False
         for pid in photo_ids:
             if cancel_check is not None and cancel_check():
@@ -411,32 +455,30 @@ class BulkGpsLocations:
                 continue
             details = cast("JsonDict", details)  # a None reason means details were resolved
 
-            place_id = details.get("place_id")
-            if place_id not in groups:
-                groups[place_id] = {
-                    "place_id": place_id,
-                    "summary": summarize_details(details),
-                    "name": details.get("name") or "",
-                    "details": details,
-                    "photo_ids": [],
-                    "sample_filenames": [],
-                }
-                ordered_group_keys.append(place_id)
-            group = groups[place_id]
-            group["photo_ids"].append(pid)
-            if len(group["sample_filenames"]) < 3:
-                group["sample_filenames"].append(photo["filename"])
+            resolved[pid] = details
 
-        group_list = []
-        for place_id in ordered_group_keys:
-            group = groups[place_id]
-            group_list.append(_preview_group(group))
+        offers = outing_offers(
+            {"id": pid, "timestamp": photo["timestamp"], "latitude": photo["latitude"],
+             "longitude": photo["longitude"], "place": resolved.get(pid)}
+            for pid, photo in photos_map.items()
+        )
+        choice_error = self._apply_outing_choices(body.get("outing_choices", []), offers, resolved)
+        if choice_error is not None:
+            return None, choice_error
 
+        groups = _group_resolved_places(photos_map, resolved)
+        group_list = [_preview_group(group) for group in groups.values()]
         result = {
             "total": len(photo_ids),
             "resolvable": sum(group["count"] for group in group_list),
             "updated": 0,
             "groups": group_list,
+            "outings": [
+                {"place_id": offer.place["place_id"], "name": offer.place.get("name"),
+                 "source": "outing", "photo_ids": offer.members,
+                 "matched_photo_ids": offer.anchors, "inferred_photo_ids": offer.inferred}
+                for offer in offers
+            ],
             "unresolved": unresolved,
             "skipped": skipped,
             "_details_by_place_id": {k: v["details"] for k, v in groups.items()},

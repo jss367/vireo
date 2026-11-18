@@ -19,7 +19,7 @@ still matches it — stay in ``subjects``.
 
 import json
 import sqlite3
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from typing import Any
 
 from repositories.prediction_review import prediction_review_join, prediction_review_status
@@ -28,6 +28,71 @@ from repositories.prediction_review import prediction_review_join, prediction_re
 class SubjectsRepository:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
+
+    def focus_point(self, photo_id):
+        from focus_point import focus_point
+        row = self.conn.execute("SELECT exif_data FROM photos WHERE id=?", (photo_id,)).fetchone()
+        return focus_point(row[0]) if row else None
+
+    def capture_order(self, photo_ids):
+        from sql_chunks import chunked
+        captures = []
+        for chunk in chunked(list(photo_ids)):
+            placeholders = ",".join("?" * len(chunk))
+            captures.extend((r[0] or "", r[1]) for r in self.conn.execute(
+                f"SELECT timestamp, id FROM photos WHERE id IN ({placeholders})", chunk))
+        return [photo_id for _, photo_id in sorted(captures)]
+
+    def burst_neighbor(self, photo_id, *, following=False):
+        """Adjacent capture within half a second; ImageUniqueID can repeat for years."""
+        comparison, direction = (">", "ASC") if following else ("<", "DESC")
+        row = self.conn.execute(f"""SELECT adjacent.id FROM photos p JOIN photos adjacent ON adjacent.id=(
+            SELECT q.id FROM photos q WHERE q.folder_id=p.folder_id AND q.burst_id IS p.burst_id
+            AND (q.timestamp, q.id) {comparison} (p.timestamp, p.id)
+            ORDER BY q.timestamp {direction}, q.id {direction} LIMIT 1)
+            WHERE p.id=? AND ROUND(ABS(julianday(p.timestamp) - julianday(adjacent.timestamp))*86400000) <= 500""",
+            (photo_id,)).fetchone()
+        return row[0] if row else None
+
+    def following_burst_frames(self, photo_id: int) -> Iterator[int]:
+        """Walk ahead in capture order until the first gap in the burst."""
+        while (successor := self.burst_neighbor(photo_id, following=True)) is not None:
+            yield successor
+            photo_id = successor
+
+    def previous_burst_subject(self, photo_id):
+        previous = self.burst_neighbor(photo_id)
+        if previous is None:
+            return None
+        return self.conn.execute("""SELECT d.* FROM photo_subject_state st
+            JOIN detections d ON d.id=st.detection_id WHERE st.photo_id=?""", (previous,)).fetchone()
+
+    def focus_candidates(self, photo_id):
+        return self.conn.execute("""SELECT d.id, d.box_x, d.box_y, d.box_w, d.box_h, d.category,
+                json_extract(s.features, '$.subject_sharpness') AS sharpness
+            FROM detections d LEFT JOIN detection_subjects s ON s.detection_id=d.id
+            WHERE d.photo_id=? AND d.detector_model != 'full-image' AND d.subject_verdict IS NULL""",
+            (photo_id,)).fetchall()
+
+    def primary_reason(self, first, second):
+        from repositories.subject_order import primary_terms
+        terms = primary_terms()
+        columns = ", ".join(expr for _, expr, _ in terms)
+        rows = self.conn.execute(f"SELECT {columns} FROM detections WHERE id IN (?,?)",
+                                 (first, second)).fetchall()
+        if len(rows) != 2:
+            return "Only retained animal"
+        for index, (reason, _, _) in enumerate(terms):
+            if rows[0][index] != rows[1][index]:
+                return reason
+        return "Only retained animal"
+
+    def clear_focus_evidence(self, photo_id):
+        self.conn.execute("DELETE FROM subject_focus WHERE detection_id IN "
+                          "(SELECT id FROM detections WHERE photo_id=?)", (photo_id,))
+
+    def insert_focus_evidence(self, rows):
+        self.conn.executemany("INSERT INTO subject_focus(detection_id,af,sharp,continuity) VALUES (?,?,?,?)", rows)
 
     # -- analysis cache ---------------------------------------------------------
 
@@ -148,14 +213,20 @@ class SubjectsRepository:
     def primary_state(self, photo_id: int) -> sqlite3.Row | None:
         """``photo_id``'s projected primary (``detection_id``), or None."""
         return self.conn.execute(
-            "SELECT detection_id FROM photo_subject_state WHERE photo_id=?", (photo_id,)
+            "SELECT detection_id, min_conf, detector_model, refresh_pending FROM photo_subject_state WHERE photo_id=?", (photo_id,)
         ).fetchone()
 
-    def set_primary_state(self, photo_id: int, detection_id: int) -> None:
-        """Record ``detection_id`` as ``photo_id``'s projected primary."""
-        self.conn.execute("INSERT INTO photo_subject_state(photo_id,detection_id) VALUES (?,?) "
-                          "ON CONFLICT(photo_id) DO UPDATE SET detection_id=excluded.detection_id",
-                          (photo_id, detection_id))
+    def set_primary_state(
+        self, photo_id: int, detection_id: int, min_conf: float | None = None, detector_model: str | None = None,
+    ) -> None:
+        """Save the primary detection together with its confidence floor and model filter."""
+        self.conn.execute("""INSERT INTO photo_subject_state(photo_id, detection_id, min_conf, detector_model)
+            VALUES (?, ?, ?, ?) ON CONFLICT(photo_id) DO UPDATE SET detection_id=excluded.detection_id,
+            min_conf=excluded.min_conf, detector_model=excluded.detector_model, refresh_pending=0""",
+            (photo_id, detection_id, min_conf, detector_model))
+
+    def defer_primary_refresh(self, photo_id: int) -> None:
+        self.conn.execute("UPDATE photo_subject_state SET refresh_pending=1 WHERE photo_id=?", (photo_id,))
 
     def clear_primary_state(self, photo_id: int) -> None:
         """Forget ``photo_id``'s projected primary."""

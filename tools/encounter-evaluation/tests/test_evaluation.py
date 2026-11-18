@@ -743,24 +743,29 @@ def test_feature_reader_pipeline_repository_preserves_read_only_label_boundary()
 
 @pytest.mark.parametrize("has_provenance", [False, True])
 def test_readiness_provenance_overlays_preserve_current_evidence_and_read_only_source(library, tmp_path, has_provenance):
-    from computation_cache import source_input
+    from cache_identity import detector_input
     from pipeline import load_photo_features, run_triage
 
     mask = tmp_path / "existing-mask.png"
     mask.write_bytes(b"invented mask artifact")
-    input_fingerprint = source_input("a" * 64, "vireo-detector-source-v1")[1]
+    exif = {"MakerNotes": {"AFImageWidth": 100, "AFImageHeight": 100, "AFAreaXPosition": 25, "AFAreaYPosition": 50}}
+    focus = [.25, .5, 0., 0.]
+    input_fingerprint = detector_input("a" * 64, focus)[1]
     if has_provenance:
         with sqlite3.connect(library) as writer:
             writer.executescript("""
+                ALTER TABLE photos ADD COLUMN exif_data;
                 ALTER TABLE photos ADD COLUMN companion_path;
                 ALTER TABLE photos ADD COLUMN active_mask_variant;
                 ALTER TABLE photos ADD COLUMN quality_input_recipe;
                 ALTER TABLE detector_runs ADD COLUMN input_fingerprint;
+                CREATE TABLE subject_focus(detection_id, af, sharp, continuity);
+                INSERT INTO subject_focus VALUES(1, 4, 0, 0);
                 CREATE TABLE photo_masks(photo_id, variant, path, detector_model,
                     prompt_x, prompt_y, prompt_w, prompt_h);
             """)
-            writer.execute("UPDATE photos SET file_hash=?, mask_path=?, active_mask_variant='sam2-small' WHERE id=1",
-                           ("a" * 64, str(mask)))
+            writer.execute("UPDATE photos SET exif_data=?, file_hash=?, mask_path=?, active_mask_variant='sam2-small' "
+                           "WHERE id=1", (json.dumps(exif), "a" * 64, str(mask)))
             writer.execute("UPDATE detector_runs SET input_fingerprint=? WHERE photo_id=1", (input_fingerprint,))
             writer.execute("INSERT INTO photo_masks VALUES(1,'sam2-small',?,'megadetector-v6',.1,.1,.4,.4)",
                            (str(mask),))
@@ -772,9 +777,11 @@ def test_readiness_provenance_overlays_preserve_current_evidence_and_read_only_s
                         if row["id"] == 1)
         assert evidence["input_fingerprint"] == (input_fingerprint if has_provenance else None)
         assert evidence["stored_mask_path"] == (str(mask) if has_provenance else None)
+        assert (json.loads(evidence["focus_area"]) if evidence["focus_area"] else None) == (focus if has_provenance else None)
+        assert [row[0] for row in conn.execute("SELECT af FROM subject_focus")] == ([4] if has_provenance else [])
         if has_provenance:
             shadowed = {row[0] for row in conn.execute("SELECT name FROM sqlite_temp_master")}
-            assert not shadowed.intersection({"photos", "detector_runs", "photo_masks"})
+            assert not shadowed.intersection({"photos", "detector_runs", "photo_masks", "subject_focus"})
         photos = load_photo_features(reader, photo_ids=[1], effective_config={})
         if has_provenance:
             assert photos[0]["analysis_provenance"]["detection"]["current"] is True

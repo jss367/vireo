@@ -11,6 +11,7 @@ from import_job.file_selection import (
     _selection_summary,
 )
 from import_job.snapshots import _capture_photo_fingerprints
+from import_job.timing import timing_notice, timing_result
 from scanner.working_copies import import_working_copy_notice
 
 if TYPE_CHECKING:
@@ -26,7 +27,7 @@ def _finalize_import(job: JobDict, runner: JobRunner, db: Database, state: _Impo
                      discovered: int, include_paths: set[str] | None, source_snapshots: dict[str, SourceSnapshot],
                      deselected: int, vanished_paths: set[str], appeared: int,
                      remote_unverified: bool = False) -> JsonDict:
-    """Terminal status, safety verdicts, and the shared 19-key result dict.
+    """Terminal status, safety verdicts, and the shared result dict.
 
     ``remote_unverified`` is the one transport-required term: the remote
     path passes ``not params.verify_by_hash`` (see the honesty-gate
@@ -114,12 +115,28 @@ def _finalize_import(job: JobDict, runner: JobRunner, db: Database, state: _Impo
         and not _selection_blocks_format(
             deselected=deselected, vanished_paths=vanished_paths)
     )
-    return _import_result(
+    return _with_timing(_import_result(
         db, state, params, discovered=discovered,
         source_snapshots=source_snapshots, safe_to_format=safe_to_format,
         unverified_duplicates_only=unverified_duplicates_only,
         vanished_paths=vanished_paths, appeared=appeared,
-    )
+    ), state, verified=not remote_unverified)
+
+
+def _with_timing(result: JsonDict, state: _ImportRunState, *, verified: bool) -> JsonDict:
+    """Add where the run's time went: the numbers and the sentence that reads them.
+
+    ``timing`` holds seconds per phase and the bytes copied; ``timing_notice``
+    is the same thing in words, for the Jobs details and the Import page. It
+    is information about a run that is otherwise judged by its counts, so it
+    changes neither ``ok`` nor ``errors``. Absent from a run that stopped
+    before any phase began.
+    """
+    notice = timing_notice(state, verified=verified)
+    if notice:
+        result["timing"] = timing_result(state)
+        result["timing_notice"] = notice
+    return result
 
 
 def _working_copy_summary_suffix(state: _ImportRunState) -> str:

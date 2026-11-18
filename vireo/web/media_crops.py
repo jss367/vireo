@@ -142,6 +142,19 @@ def _focus_mask_bytes(db_path: str, db: Database, photo_id: int, boxes: Sequence
     return _read_mask_bytes(abs_mask) if inside else None
 
 
+
+def _focus_masked_crop(img: Image.Image, window: tuple[int, int, int, int], mask_bytes: bytes | None) -> Image.Image:
+    from focus_crop import shade_focus_mask
+    from PIL import Image
+
+    crop = img.crop(window).convert("RGB")
+    if mask_bytes is not None:
+        try:
+            crop = shade_focus_mask(crop, mask_bytes, img.size, window, Image)
+        except (OSError, ValueError, Image.DecompressionBombError) as exc:
+            raise ValueError("Subject mask is unavailable: unreadable or incompatible with the source raster") from exc
+    return crop
+
 def _needs_primary_focus_subject(args: Mapping[str, str], basis: str) -> bool:
     """Manual centers change the window, not the ownership of a requested mask."""
     return args.get("detection_id") is None and (
@@ -292,9 +305,7 @@ class CropRoutes:
             focus_window,
             original_scale,
             parse_center,
-            shade_focus_mask,
         )
-        from PIL import Image
         from scoring import _normalize_scoring_config
 
         db = self._get_db()
@@ -312,12 +323,10 @@ class CropRoutes:
         source_choice = (request.args.get("source") or "auto").strip().lower()
         if source_choice not in {"auto", "working", "original"}:
             return self._json_error("source must be auto, working or original")
-        point = None
-        if request.args.get("center") is not None:
-            try:
-                point = parse_center(request.args.get("center"))
-            except ValueError as exc:
-                return self._json_error(str(exc))
+        try:
+            point = parse_center(request.args["center"]) if "center" in request.args else None
+        except ValueError as exc:
+            return self._json_error(str(exc))
         effective = db.get_effective_config(cfg.load())
         eye_enabled = bool(_normalize_scoring_config(effective).get("eye_detect_enabled", False))
         boxes = []
@@ -356,9 +365,10 @@ class CropRoutes:
         if geometry_error:
             return self._json_error(geometry_error, 404)
         window, center = focus_window(img.size, center, size)
-        crop = img.crop(window).convert("RGB")
-        if mask_bytes is not None:
-            crop = shade_focus_mask(crop, mask_bytes, img.size, window, Image)
+        try:
+            crop = _focus_masked_crop(img, window, mask_bytes)
+        except ValueError as exc:
+            return self._json_error(str(exc), 404)
         buf = io.BytesIO()
         crop.save(buf, format="JPEG", quality=config_value(effective, "preview_quality"))
         response = Response(buf.getvalue(), mimetype="image/jpeg")

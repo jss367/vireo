@@ -286,7 +286,7 @@
    "table",
    "photo_subject_state",
    "photo_subject_state",
-   "CREATE TABLE photo_subject_state (\n                photo_id INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,\n                detection_id INTEGER NOT NULL\n            )"
+   "CREATE TABLE photo_subject_state (\n                photo_id INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,\n                detection_id INTEGER NOT NULL,\n                min_conf REAL,\n                detector_model TEXT,\n                refresh_pending INTEGER NOT NULL DEFAULT 0\n            )"
   ],
   [
    "table",
@@ -952,7 +952,7 @@
    "table",
    "job_history",
    "job_history",
-   "CREATE TABLE job_history (\n        id          TEXT PRIMARY KEY,\n        type        TEXT,\n        status      TEXT,\n        started_at  TEXT,\n        finished_at TEXT,\n        duration    REAL,\n        result      TEXT,\n        error_count INTEGER DEFAULT 0,\n        config      TEXT,\n        workspace_id INTEGER,\n        resource_wait_seconds REAL DEFAULT 0,\n        resource_wait_count INTEGER DEFAULT 0,\n        tree        TEXT,\n        summary     TEXT DEFAULT '',\n        progress    TEXT,\n        origin      TEXT NOT NULL DEFAULT 'user',\n        parent_job_id TEXT,\n        reason      TEXT,\n        repeat_count INTEGER NOT NULL DEFAULT 1,\n        repeat_since TEXT,\n        task_scope  TEXT\n    )"
+   "CREATE TABLE job_history (\n        id          TEXT PRIMARY KEY,\n        type        TEXT,\n        status      TEXT,\n        started_at  TEXT,\n        finished_at TEXT,\n        duration    REAL,\n        result      TEXT,\n        error_count INTEGER DEFAULT 0,\n        config      TEXT,\n        workspace_id INTEGER,\n        resource_wait_seconds REAL DEFAULT 0,\n        resource_wait_count INTEGER DEFAULT 0,\n        tree        TEXT,\n        summary     TEXT DEFAULT '',\n        progress    TEXT,\n        origin      TEXT NOT NULL DEFAULT 'user',\n        parent_job_id TEXT,\n        reason      TEXT,\n        repeat_count INTEGER NOT NULL DEFAULT 1,\n        repeat_since TEXT,\n        task_scope  TEXT,\n        errors      TEXT\n    )"
   ],
   [
    "index",
@@ -1169,6 +1169,18 @@
    "sqlite_autoindex_subject_candidates_1",
    "subject_candidates",
    null
+  ],
+  [
+   "index",
+   "idx_photos_burst_capture",
+   "photos",
+   "CREATE INDEX idx_photos_burst_capture ON photos(folder_id, burst_id, timestamp)"
+  ],
+  [
+   "table",
+   "subject_focus",
+   "subject_focus",
+   "CREATE TABLE subject_focus (\n        detection_id INTEGER PRIMARY KEY REFERENCES detections(id) ON DELETE CASCADE,\n        af INTEGER NOT NULL,\n        sharp INTEGER NOT NULL,\n        continuity INTEGER NOT NULL\n    )"
   ],
   [
    "table",

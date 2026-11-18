@@ -46,17 +46,16 @@ _COLUMNS = (
 
 # Shared by ``pending`` and ``count``: the strongest retained non-animal
 # MegaDetector region of each photo that has no retained animal region.
-# Mirrors the classify stage's "confident non-animal, no animal target" gate
-# (``ModelRunsRepository._db_unclassifiable``), so a candidate is exactly a
-# photo that gate would leave unclassified.
+# Also examine a non-animal region with stronger AF evidence than every
+# retained animal. An off-center bystander must not hide that candidate.
 _TOP_CANDIDATE_SQL = """
     SELECT d.id, d.photo_id, d.box_x, d.box_y, d.box_w, d.box_h,
            d.detector_confidence, d.category, d.detector_model,
            ROW_NUMBER() OVER (
                PARTITION BY d.photo_id
-               ORDER BY d.detector_confidence DESC, d.id ASC
+               ORDER BY COALESCE(f.af, 0) DESC, d.detector_confidence DESC, d.id ASC
            ) AS rn
-      FROM detections d
+      FROM detections d LEFT JOIN subject_focus f ON f.detection_id=d.id
      WHERE d.detector_model = 'megadetector-v6'
        AND d.category != 'animal'
        AND d.detector_confidence >= ? AND d.subject_verdict IS NULL
@@ -66,6 +65,8 @@ _TOP_CANDIDATE_SQL = """
               WHERE a.photo_id = d.photo_id
                 AND a.detector_model != 'full-image'
                 AND a.category = 'animal'
+                AND COALESCE((SELECT af FROM subject_focus WHERE detection_id=a.id), 0)
+                    >= COALESCE(f.af, 0)
                 AND a.detector_confidence >= ? AND a.subject_verdict IS NULL
            )
 """

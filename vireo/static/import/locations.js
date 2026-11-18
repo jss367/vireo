@@ -227,6 +227,7 @@ function importLocationSourceText(group) {
     }
     return 'No suggestion: you haven’t tagged photos here, and Google Maps has no name for it.';
   }
+  if (s.source === 'outing') return 'Inferred from a park or natural area matched by other photos on the same walk.';
   if (s.source === 'your_photos') {
     const n = Number(s.photo_count) || 0;
     return n.toLocaleString() + ' of your photo' + (n === 1 ? '' : 's')
@@ -357,6 +358,24 @@ function renderImportLocationNearby(group, onPick) {
   return box;
 }
 
+/** @param {HTMLElement} source @param {ImportLocationGroup} group */
+function appendOutingMembers(source, group) {
+  if (group.outing_paths?.length) {
+    const members = document.createElement('details');
+    const summary = document.createElement('summary');
+    summary.textContent = 'Show ' + group.outing_paths.length.toLocaleString() + ' photos grouped on this walk';
+    members.appendChild(summary);
+    members.addEventListener('toggle', () => {
+      if (members.open && !members.querySelector('pre')) {
+        const paths = document.createElement('pre');
+        paths.textContent = (group.outing_paths || []).join('\n');
+        members.appendChild(paths);
+      }
+    });
+    source.appendChild(members);
+  }
+}
+
 /** @param {ImportLocationGroup} group */
 function renderImportLocationGroup(group) {
   const row = document.createElement('div');
@@ -391,6 +410,7 @@ function renderImportLocationGroup(group) {
   const source = document.createElement('div');
   source.className = 'hint';
   source.textContent = importLocationSourceText(group) + (group.suggestion?.warning ? ' ' + group.suggestion.warning : '');
+  appendOutingMembers(source, group);
   const outcome = document.createElement('div');
   outcome.className = 'hint import-location-outcome';
   /** @type {string | undefined} */ let pick = state ? state.pick : undefined;

@@ -106,7 +106,7 @@ class ComputationCacheRepository:
     def portable_detector_runs(self) -> list[sqlite3.Row]:
         """Every detector run with its photo's hash, in photo then model order."""
         return self.conn.execute(
-            """SELECT p.id AS photo_id, p.file_hash, dr.detector_model,
+            """SELECT p.id AS photo_id, p.file_hash, vireo_focus_area(p.exif_data) AS focus_area, dr.detector_model,
                   dr.runtime_fingerprint, dr.input_fingerprint
            FROM detector_runs dr
            JOIN photos p ON p.id = dr.photo_id
@@ -287,7 +287,7 @@ class ComputationCacheRepository:
     def original_backed_photos(self, photo_sha256: str) -> list[sqlite3.Row]:
         """Non-rejected photos with this hash and no companion or working copy."""
         return self.conn.execute(
-            """SELECT id FROM photos
+            """SELECT id, vireo_focus_area(exif_data) AS focus_area FROM photos
                WHERE file_hash = ? AND companion_path IS NULL
                  AND working_copy_path IS NULL
                  AND (flag IS NULL OR flag != 'rejected')

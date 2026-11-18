@@ -768,3 +768,16 @@ def test_a_region_kept_by_a_later_model_is_noted_for_the_models_that_ran_first(d
         "[kept_regions] Model B kept 1 person/vehicle region as subjects after "
         "Model A had run. Run Process again to classify it with Model A."
     )
+
+
+def test_af_candidate_gets_checked_with_a_bystander_in_frame(db):
+    photo = _photo(db, "duck.NEF")
+    db.conn.execute("""UPDATE photos SET exif_data='{"MakerNotes":{"AFImageWidth":100,"AFImageHeight":100,
+        "AFAreaXPosition":50,"AFAreaYPosition":50}}' WHERE id=?""", (photo["id"],))
+    bystander, candidate = _detect(db, photo, [
+        _region("animal", .9, {"x": .1, "y": .1, "w": .2, "h": .2}),
+        _region("person", .5, {"x": .4, "y": .4, "w": .2, "h": .2}),
+    ])
+    rows = db.candidate_subjects.pending([photo["id"]], FLOOR, "BioCLIP", "fp1")
+    assert [row["id"] for row in rows] == [candidate]
+    assert db.detections.get(photo["id"], FLOOR)[0]["id"] == bystander

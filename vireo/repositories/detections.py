@@ -128,6 +128,8 @@ class DetectionsRepository:
             ):
                 unique[det_id] = (det, category, idx)
 
+        from repositories.subjects import SubjectsRepository
+        focus = SubjectsRepository(self.conn).focus_point(photo_id) if ordered_ids and detector_model != "full-image" else None
         ids = []
         for det_id in ordered_ids:
             det, category, _idx = unique[det_id]
@@ -165,6 +167,10 @@ class DetectionsRepository:
                  box["x"], box["y"], box["w"], box["h"],
                  det["confidence"], category),
             )
+            if focus:
+                self.conn.execute("""INSERT INTO subject_focus(detection_id, af, sharp, continuity)
+                    VALUES (?, ?, 0, 0) ON CONFLICT(detection_id) DO UPDATE SET af=excluded.af""",
+                    (det_id, focus.match(box)))
             ids.append(det_id)
 
         self._retire_unproduced_rows(photo_id, detector_model, runtime_fingerprint, ids)

@@ -5,14 +5,19 @@ percentile scores used by culling. Suggestions never modify an edit recipe.
 """
 import hashlib
 import json
+import logging
 import math
 import os
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 
 import numpy as np
+from focus_point import FocusMatch
 from services import detection_store
 
 ANALYSIS_VERSION = 1
 REVIEWER_MODEL = "reviewer-selected"
+_BURST_REFRESH = ThreadPoolExecutor(max_workers=1, thread_name_prefix="burst-subject-refresh")
 
 
 def retained(db, photo_id, min_conf=None, *, detector_model=None):
@@ -94,7 +99,7 @@ def analyze_photo(db, photo_id, image_path, *, min_conf=None, force=False, check
         # leaving stale mask/quality/DINO/eye state attached to a photo with
         # no detections. Check either signal.
         stale = db.subjects.has_stale_primary_state(photo_id)
-        if stale:
+        if stale or db.subjects.focus_point(photo_id):
             with acquire_photo_mask(photo_id):
                 if checkpoint:
                     checkpoint()
@@ -145,20 +150,136 @@ def _current_analysis_results(db, photo_id, pending, results, detection_id, min_
     return [r for r in results if r["detection_id"] in valid]
 
 
+def _box(detection):
+    return {k: detection["box_" + k] for k in "xywh"}
+
+
+def _burst_overlap(previous, detection):
+    from encounter_continuity import _overlap
+    return _overlap(_box(previous), _box(detection))
+
+
+BURST_SUBJECT_MIN_IOU = 0.35
+
+
+def _refresh_focus(db, photo_id):
+    """Refresh image evidence independently of the caller's model or confidence floor."""
+    # Take the writer lock before reading the predecessor. A worker that was
+    # already analyzing this frame must observe any committed refresh request.
+    db.subjects.clear_focus_evidence(photo_id)
+    candidates = db.subjects.focus_candidates(photo_id)
+    point = db.subjects.focus_point(photo_id)
+    previous = db.subjects.previous_burst_subject(photo_id)
+    sharp_id = None
+    if point is None:
+        measured = sorted((d["sharpness"], d["id"]) for d in candidates
+                          if d["category"] == "animal" and d["sharpness"] is not None)
+        if len(measured) >= 2 and measured[-1][0] > max(1, measured[-2][0] * 2):
+            sharp_id = measured[-1][1]
+    rows = []
+    for d in candidates:
+        af = point.match(_box(d)) if point else 0
+        continuity = bool(previous and _burst_overlap(previous, d) >= BURST_SUBJECT_MIN_IOU)
+        if af or sharp_id == d["id"] or continuity:
+            rows.append((d["id"], af, sharp_id == d["id"], continuity))
+    db.subjects.insert_focus_evidence(rows)
+
+
+def selection_evidence(db, photo_id, detections):
+    point = db.subjects.focus_point(photo_id)
+    missed = bool(point and not any(point.match(_box(d)) == FocusMatch.CENTER for d in detections))
+    previous = db.subjects.previous_burst_subject(photo_id)
+    switched = bool(previous and detections and _burst_overlap(previous, detections[0]) < BURST_SUBJECT_MIN_IOU)
+    reason = ""
+    if detections:
+        first = detections[0]["id"]
+        choice = db.subjects.choice(photo_id)
+        if choice and first == choice["detection_id"]:
+            reason = "Your choice"
+        elif len(detections) == 1:
+            reason = "Only retained animal"
+        else:
+            reason = db.subjects.primary_reason(first, detections[1]["id"])
+    explanation = ("Primary subject: " + reason + ".") if reason else ""
+    if missed:
+        explanation += " Possible missed subject: no retained animal contains the camera AF point."
+    if switched:
+        explanation += " Possible subject switch since the previous burst frame."
+    return {"primary_reason": reason, "possible_missed_subject": missed, "possible_subject_switch": switched,
+            "selection_explanation": explanation.strip()}
+
+
 def sync_primary(db, photo_id, *, min_conf=None, detector_model=None):
     """Project primary quality; clear stale subject-dependent outputs on a switch.
 
     Mask snapshots referenced by manual edits are immutable and untouched.
     Existing photo_masks remain cached, and prompt matching decides reuse.
     """
+    changed = _project_primary(db, photo_id, min_conf, detector_model)
+    if changed:
+        _refresh_successors(db, photo_id)
+
+
+def _refresh_successors(db, photo_id):
+    from pipeline_locks import acquire_photo_mask
+
+    for successor in db.subjects.following_burst_frames(photo_id):
+        state = db.subjects.primary_state(successor)
+        if state is None:
+            return
+        if state["min_conf"] is None:
+            # Older catalogs did not record whether this frame used weak rescue.
+            # Its own next analysis supplies the policy needed to rerank it.
+            db.subjects.defer_primary_refresh(successor)
+            return
+        lock = acquire_photo_mask(successor)
+        if not lock.acquire(blocking=False):
+            # The caller holds the SQLite writer lock. Publish the retry marker
+            # atomically with its edit; only the worker may wait for this frame.
+            db.subjects.defer_primary_refresh(successor)
+            if db._db_path != ":memory:":
+                job = _BURST_REFRESH.submit(_refresh_when_available, db._db_path, db.active_workspace_id, successor)
+                job.add_done_callback(partial(_log_refresh_failure, successor))
+            return
+        try:
+            changed = _project_primary(db, successor, state["min_conf"], state["detector_model"])
+        finally:
+            lock.release()
+        if not changed:
+            return
+
+
+def _refresh_when_available(db_path, workspace_id, photo_id):
+    from db import Database
+    from pipeline_locks import acquire_photo_mask
+
+    with acquire_photo_mask(photo_id), Database(db_path, initialize_schema=False) as db:
+        db.set_active_workspace(workspace_id)
+        with db.transaction(immediate=True):
+            # A rollback, deletion, or the lock holder's own sync may have
+            # superseded the request. Re-read the committed policy as well.
+            state = db.subjects.primary_state(photo_id)
+            if state and state["refresh_pending"]:
+                sync_primary(db, photo_id, min_conf=state["min_conf"], detector_model=state["detector_model"])
+
+
+def _log_refresh_failure(photo_id, job):
+    error = job.exception()
+    if error:
+        logging.getLogger(__name__).error("Failed to refresh burst subject for photo %s", photo_id, exc_info=error)
+
+
+def _project_primary(db, photo_id, min_conf, detector_model):
+    _refresh_focus(db, photo_id)
+    min_conf = detection_store.detector_floor(db, min_conf)
     detections = retained(db, photo_id, min_conf, detector_model=detector_model)
+    previous = db.subjects.primary_state(photo_id)
     if not detections:
         db.subjects.clear_primary_features(photo_id)
         db.subjects.clear_primary_state(photo_id)
-        return
+        return previous is not None
     primary = detections[0]
     analysis = db.subjects.analysis(primary["id"])
-    previous = db.subjects.primary_state(photo_id)
     active_mask = db.subjects.active_mask(photo_id)
     mask_matches = active_mask and active_mask["detector_model"] == primary["detector_model"] and all(
         active_mask["prompt_" + k] == primary["box_" + k] for k in "xywh")
@@ -170,7 +291,8 @@ def sync_primary(db, photo_id, *, min_conf=None, detector_model=None):
         db.subjects.set_primary_quality(photo_id, analysis["quality_score"], features["subject_sharpness"])
         if changed or not mask_matches:
             db.subjects.set_primary_box_features(photo_id, features)
-    db.subjects.set_primary_state(photo_id, primary["id"])
+    db.subjects.set_primary_state(photo_id, primary["id"], min_conf, detector_model)
+    return previous is None or changed
 
 
 def resync_after_classification(db, photo_ids, min_conf):
@@ -185,7 +307,8 @@ def resync_after_classification(db, photo_ids, min_conf):
     """
     from pipeline_locks import acquire_photo_mask
     by_photo = detection_store.get_detections_for_photos(db, photo_ids, min_conf=min_conf)
-    for photo_id, regions in by_photo.items():
+    for photo_id in db.subjects.capture_order(by_photo):
+        regions = by_photo[photo_id]
         if len([d for d in regions if d.get("detector_model") != "full-image"]) < 2:
             continue
         with acquire_photo_mask(photo_id):
@@ -244,6 +367,7 @@ def payload(db, photo_id):
     return {"photo_id": photo_id, "workspace_id": db.require_workspace_id(), "subjects": detections,
             "full_image_predictions": [p for did in full_image_ids for p in grouped.get(did, [])],
             "primary_detection_id": primary_id,
+            **selection_evidence(db, photo_id, detections),
             "selection": "manual" if choice else "automatic",
             "choice_unavailable": bool(choice and choice["detection_id"] != primary_id),
             # Regions the user rejected as background: not retained, shown

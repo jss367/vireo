@@ -1802,15 +1802,7 @@ def create_pipeline_blueprint(
         ]
         dets = [d for d in raw_dets if d["detector_confidence"] >= min_conf]
         result["detections"] = [dict(d) for d in dets]
-
-        # The shared reader orders the chosen primary first, above threshold.
-        if dets:
-            primary = dets[0]
-            result["detection_box"] = {
-                "x": primary["box_x"], "y": primary["box_y"],
-                "w": primary["box_w"], "h": primary["box_h"],
-            }
-            result["detection_conf"] = primary["detector_confidence"]
+        _attach_inspector_primary(db, photo_id, dets, result)
 
         # Get predictions for this photo (through detections JOIN).  Per-
         # workspace review state (status, group_id, individual, vote counts)
@@ -1988,6 +1980,21 @@ def _results_cache_info(db: Database, results: JsonDict, total_photos: int, effe
     }
 
 
+def _attach_inspector_primary(db: Database, photo_id: int, dets: list[Row], result: JsonDict) -> None:
+    from subjects import selection_evidence
+    animals = [d for d in dets if d["category"] == "animal"]
+    result.update(selection_evidence(db, photo_id, animals))
+
+    # The shared reader orders the chosen primary first, above threshold.
+    if animals:
+        primary = animals[0]
+        result["detection_box"] = {
+            "x": primary["box_x"], "y": primary["box_y"],
+            "w": primary["box_w"], "h": primary["box_h"],
+        }
+        result["detection_conf"] = primary["detector_confidence"]
+
+
 def _inspector_regions(db: Database, photo_id: int, dets: list[Row], predictions: list[JsonDict]) -> list[JsonDict]:
     """Every retained region of the photo, subject first, numbered as the
     inspector draws them, with its top prediction and what Highlights does
@@ -2020,7 +2027,7 @@ def _inspector_regions(db: Database, photo_id: int, dets: list[Row], predictions
             # The detector's own label for a person/vehicle region kept as
             # an animal subject; None for a region it labeled animal.
             "detector_category": check["detector_category"] if check and check["promoted"] else None,
-            "is_subject": number == 1,
+            "is_subject": number == 1 and det["category"] == "animal",
             "chosen": det["id"] == chosen_id,
             "spans_frame": subject_spans_frame({"box_w": det["box_w"], "box_h": det["box_h"]}),
             "top_species": best["species"] if best else None,
