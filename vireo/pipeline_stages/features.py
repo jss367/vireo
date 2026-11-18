@@ -262,6 +262,7 @@ class _MaskPhoto:
     # The photo's stored ``photo_masks`` row for this SAM variant, if any.
     existing: dict[str, Any] | None = None
     mask_file_stage: _MaskFileStage | None = None
+    detector_runtime: str | None = None
 
 
 class _MaskPass:
@@ -351,6 +352,7 @@ class _MaskPass:
             crop_subject,
             generate_mask,
             render_proxy,
+            require_aligned_detector_prompt,
             save_mask,
         )
         from quality import (
@@ -368,6 +370,7 @@ class _MaskPass:
         self.crop_subject = crop_subject
         self.generate_mask = generate_mask
         self.render_proxy = render_proxy
+        self.require_aligned_detector_prompt = require_aligned_detector_prompt
         self.save_mask = save_mask
         self.compute_all_quality_features = compute_all_quality_features
         self.measure_subject_detail = measure_subject_detail
@@ -1005,6 +1008,7 @@ class _MaskPass:
             self.skipped += 1
             return _NEXT_PHOTO
         selected = current[0]
+        item.detector_runtime = selected["runtime_fingerprint"]
         item.det_box = {k: selected["box_" + k] for k in "xywh"}
         item.entry["detector_model"] = selected["detector_model"]
         item.entry["prompt"] = tuple(selected["box_" + k] for k in "xywh")
@@ -1072,8 +1076,7 @@ class _MaskPass:
         # the semaphore here, through SAM weight load + image
         # preprocessing + prompt-coord math, would block other
         # pipelines' GPU work for CPU-only phases.
-        with self._timed("segment"):
-            mask = self.generate_mask(proxy, item.det_box, variant=self.sam2_variant)
+        mask = self._generate_aligned_mask(item, proxy)
         if mask is None:
             self.outcomes.record(item.photo_id, "sam_no_mask")
             self.skipped += 1
@@ -1208,6 +1211,11 @@ class _MaskPass:
             self.em_offline_reasons.append(reason)
         self.em_offline_folder_ids.add(item.photo["folder_id"])
         return True
+
+    def _generate_aligned_mask(self, item: _MaskPhoto, proxy: Image.Image) -> np.ndarray | None:
+        with self._timed("segment"):
+            self.require_aligned_detector_prompt(proxy, item.detector_runtime)
+            return self.generate_mask(proxy, item.det_box, variant=self.sam2_variant)
 
     def _analyze_and_embed(
         self, item: _MaskPhoto, proxy: Image.Image, mask: np.ndarray,

@@ -448,15 +448,16 @@ def load_detail_source(source_path, needed, frame_size=None):
 
     Camera-rendered reads use the embedded JPEG when it covers at least
     99% of each sensor dimension. Otherwise they request a full-resolution
-    demosaic before resizing, with the JPEG as fallback on decode failure.
+    demosaic before resizing. A rejected preview is never substituted on
+    decode failure, since that could change the coordinate frame.
     Read the whole rendering when frame dimensions are unknown or the
     requested edge approaches native size.
     """
-    from image_loader import NEAR_FULL_PREVIEW, RAW_DECODE_CAMERA_RENDERED, load_image
+    from image_loader import NEAR_FULL_PREVIEW, RAW_DECODE_ALIGNED, load_image
 
     native = max(frame_size) if frame_size else None
     whole = native is None or needed >= native * NEAR_FULL_PREVIEW
-    return load_image(source_path, max_size=None if whole else needed, raw_decode=RAW_DECODE_CAMERA_RENDERED)
+    return load_image(source_path, max_size=None if whole else needed, raw_decode=RAW_DECODE_ALIGNED)
 
 
 def measure_subject_detail(mask, *, source_path, frame_size=None):
@@ -484,12 +485,14 @@ def measure_subject_detail(mask, *, source_path, frame_size=None):
         image.close()
 
 
-def saved_mask_matches_frame(mask_size, mask_frame, image):
+def saved_mask_matches_frame(mask_size, mask_frame, image, *, prompt_frame=None):
     """Can the saved proxy mask be mapped to this rendering by resizing alone?"""
     w, h = mask_size
     iw, ih = image.size
     # Each thumbnail may round its short dimension by a pixel.
     if abs(w * ih - h * iw) > max(w, h) + max(iw, ih):
+        return False
+    if image.info.get("vireo_rejected_preview_edge") and prompt_frame != "camera_rendered":
         return False
     return mask_frame == "camera_rendered" or max(w, h) > image.info.get("vireo_rejected_preview_edge", 0)
 
@@ -506,6 +509,7 @@ def measure_cached_subject_detail(mask_path, source_path, frame_size=None):
     try:
         with Image.open(mask_path) as mask_image:
             mask_frame = mask_image.info.get("vireo_mask_frame")
+            prompt_frame = mask_image.info.get("vireo_prompt_frame")
             mask = np.asarray(mask_image.convert("L")) > 127
     except (OSError, SyntaxError, ValueError, Image.DecompressionBombError):
         # OSError covers the file missing or unreadable; the others cover
@@ -526,7 +530,7 @@ def measure_cached_subject_detail(mask_path, source_path, frame_size=None):
     if image is None:
         return None
     with image:
-        if not saved_mask_matches_frame(mask.shape[::-1], mask_frame, image):
+        if not saved_mask_matches_frame(mask.shape[::-1], mask_frame, image, prompt_frame=prompt_frame):
             return MASK_CACHE_INVALID
         return compute_subject_detail(image, mask, frame_size=frame_size)
 

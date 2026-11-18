@@ -129,7 +129,8 @@ def source_path(db, photo):
 # 3: reduced/cropped RAW previews demosaic at every subject size.
 # 4: always use a full-resolution demosaic before resizing.
 # 5: segment and measure the same camera-rendered frame.
-ANALYSIS_RECIPE_VERSION = 5
+# 6: detector boxes and SAM prompts share a verified camera-rendered frame.
+ANALYSIS_RECIPE_VERSION = 6
 
 
 def analysis_key(path, detection, effective_cfg):

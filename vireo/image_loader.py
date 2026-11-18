@@ -66,6 +66,7 @@ SUPPORTED_EXTENSIONS = IMAGE_EXTENSIONS | RAW_EXTENSIONS
 # the one mode that returns a FloatImage from the rest.
 RAW_DECODE_JPEG_FIRST: Final = "jpeg_first"
 RAW_DECODE_CAMERA_RENDERED: Final = "camera_rendered"
+RAW_DECODE_ALIGNED: Final = "aligned_camera_rendered"
 RAW_DECODE_PRESERVE_HIGHLIGHTS: Final = "preserve_highlights"
 RAW_DECODE_LINEAR: Final = "linear"
 
@@ -76,6 +77,7 @@ NEAR_FULL_PREVIEW: Final = 0.99
 _RAW_DECODE_MODES = {
     RAW_DECODE_JPEG_FIRST,
     RAW_DECODE_CAMERA_RENDERED,
+    RAW_DECODE_ALIGNED,
     RAW_DECODE_PRESERVE_HIGHLIGHTS,
     RAW_DECODE_LINEAR,
 }
@@ -660,7 +662,7 @@ def safe_scan_walk(top, onerror=None, cancel_check=None, on_scandir_batch=None,
 @overload
 def load_image(
     file_path: str | os.PathLike[str], max_size: int | None = ...,
-    raw_decode: Literal["jpeg_first", "camera_rendered", "preserve_highlights"] = ...,
+    raw_decode: Literal["jpeg_first", "camera_rendered", "aligned_camera_rendered", "preserve_highlights"] = ...,
 ) -> Image.Image | None: ...
 
 
@@ -689,7 +691,8 @@ def load_image(file_path, max_size: int | None = 1024, raw_decode=RAW_DECODE_JPE
         file_path: Path to the image file
         max_size: Maximum dimension (longest side). None or 0 for full resolution.
         raw_decode: RAW_DECODE_JPEG_FIRST (default),
-            RAW_DECODE_CAMERA_RENDERED, RAW_DECODE_PRESERVE_HIGHLIGHTS,
+            RAW_DECODE_CAMERA_RENDERED, RAW_DECODE_ALIGNED (analysis without
+            a rejected-preview fallback), RAW_DECODE_PRESERVE_HIGHLIGHTS,
             or RAW_DECODE_LINEAR (float32 scene-linear RGB for editing).
 
     Returns:
@@ -1145,7 +1148,7 @@ def _embedded_preview_suffices(raw, embedded, max_size, raw_decode):
         and (
             (raw_decode == RAW_DECODE_JPEG_FIRST and embedded_covers_request)
             or (
-                raw_decode == RAW_DECODE_CAMERA_RENDERED
+                raw_decode in (RAW_DECODE_CAMERA_RENDERED, RAW_DECODE_ALIGNED)
                 and embedded_is_near_full
             )
         )
@@ -1185,6 +1188,9 @@ def _load_raw(path, max_size, raw_decode=RAW_DECODE_JPEG_FIRST):
       1. Use a near-full embedded JPEG regardless of the requested size.
       2. Otherwise demosaic at full resolution before resizing, falling back to the JPEG only if decode fails.
 
+    Aligned camera-rendered analysis uses the same source selection, but
+    never falls back to a rejected preview when the demosaic fails.
+
     Preserve-highlights:
       1. Demosaic the RAW with auto-bright disabled and highlight blending on.
       2. Fall back to the embedded JPEG only if libraw cannot decode the RAW.
@@ -1209,14 +1215,19 @@ def _load_raw(path, max_size, raw_decode=RAW_DECODE_JPEG_FIRST):
                 return _postprocess_raw_linear(raw)
             image = _postprocess_raw(
                 raw,
-                None if raw_decode == RAW_DECODE_CAMERA_RENDERED else max_size,
+                None if raw_decode in (RAW_DECODE_CAMERA_RENDERED, RAW_DECODE_ALIGNED) else max_size,
                 preserve_highlights=raw_decode == RAW_DECODE_PRESERVE_HIGHLIGHTS,
             )
-            if raw_decode == RAW_DECODE_CAMERA_RENDERED and embedded is not None:
+            if raw_decode in (RAW_DECODE_CAMERA_RENDERED, RAW_DECODE_ALIGNED) and embedded is not None:
                 # Legacy JPEG-first masks at or below this size used the rejected preview.
                 image.info["vireo_rejected_preview_edge"] = max(embedded.size)
             return image
         except Exception as e:  # broad: libraw raises undocumented errors; the embedded JPEG is the fallback, else re-raise
+            if raw_decode == RAW_DECODE_ALIGNED:
+                # Analysis coordinates cannot fall back to a rejected preview crop.
+                if embedded is not None:
+                    embedded.close()
+                raise
             if raw_decode == RAW_DECODE_LINEAR:
                 # A failed unpack leaves this LibRaw handle refusing further
                 # calls (LibRawOutOfOrderCallError), so extract_thumb() on it

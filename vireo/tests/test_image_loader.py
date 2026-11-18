@@ -290,6 +290,21 @@ def test_raw_camera_rendered_mode_rejects_cropped_embedded_jpeg(
     assert fake.postprocess_calls == 1
 
 
+def test_aligned_analysis_does_not_fall_back_to_a_different_raw_frame(tmp_path, monkeypatch):
+    from image_loader import RAW_DECODE_ALIGNED, RAW_DECODE_CAMERA_RENDERED, load_image
+
+    source = tmp_path / "synthetic.nef"
+    source.write_bytes(b"synthetic RAW")
+    _install_fake_raw(monkeypatch, _FakeRaw(
+        embedded_jpeg=_jpeg_bytes((1600, 800)), sensor_size=(1600, 1000),
+        postprocess_error=RuntimeError("synthetic decode failure"),
+    ))
+    # Browsing may still display the rejected preview; coordinate-bearing analysis cannot.
+    with load_image(source, max_size=1024, raw_decode=RAW_DECODE_CAMERA_RENDERED) as browsing:
+        assert browsing.size == (1024, 512)
+    assert load_image(source, max_size=1024, raw_decode=RAW_DECODE_ALIGNED) is None
+
+
 def test_raw_preserve_highlights_mode_bypasses_embedded_jpeg(tmp_path, monkeypatch):
     """Edit-quality RAW loads demosaic instead of using camera-rendered JPEGs."""
     import rawpy

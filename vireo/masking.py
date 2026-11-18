@@ -50,6 +50,10 @@ _sam2_download_lock = threading.Lock()
 _sam2_session_lock = threading.Lock()
 
 
+class PromptFrameError(ValueError):
+    """The selected detector box has no proven mapping to the SAM frame."""
+
+
 def _sam2_model_dir(variant):
     return os.path.join(
         default_path("models"), variant
@@ -436,7 +440,25 @@ def write_mask_png(mask, destination):
 
     metadata = PngInfo()
     metadata.add_text("vireo_mask_frame", "camera_rendered")
+    metadata.add_text("vireo_prompt_frame", "camera_rendered")
     Image.fromarray(mask.astype(np.uint8) * 255).save(destination, format="PNG", pnginfo=metadata)
+
+
+def require_aligned_detector_prompt(image, detector_runtime):
+    """Refuse unproven old boxes when RAW preview and sensor frames differ.
+
+    The current detector runtime uses the same camera-rendered frame as SAM.
+    Historical runtimes can describe either the preview or the tiled sensor
+    pass; their boxes have no crop transform. Preserve those reviewed boxes
+    and require an explicit detector rerun instead of guessing a mapping.
+    """
+    if not getattr(image, "info", {}).get("vireo_rejected_preview_edge"):
+        return
+    from computation_cache import megadetector_runtime_fingerprint
+
+    current = megadetector_runtime_fingerprint()
+    if current is None or detector_runtime != current:
+        raise PromptFrameError("Detector coordinates use an unverified RAW frame; enable Re-classify to rerun detection before subject analysis")
 
 
 def load_mask(masks_dir, photo_id, variant):
@@ -565,6 +587,6 @@ def render_proxy(image_path, longest_edge=1536):
     Returns:
         PIL Image or None on failure
     """
-    from image_loader import RAW_DECODE_CAMERA_RENDERED, load_image
+    from image_loader import RAW_DECODE_ALIGNED, load_image
 
-    return load_image(image_path, max_size=longest_edge, raw_decode=RAW_DECODE_CAMERA_RENDERED)
+    return load_image(image_path, max_size=longest_edge, raw_decode=RAW_DECODE_ALIGNED)

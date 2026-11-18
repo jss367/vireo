@@ -44,7 +44,7 @@ def measure_eye(db, photo_id, detection, image, mask, effective_cfg):
 
 
 def analyze_detection(db, photo, detection, effective_cfg, checkpoint, *, force=False, existing_mask_path=None, defer_publication=False):
-    from masking import crop_completeness, generate_mask, render_proxy, write_mask_png
+    from masking import crop_completeness, generate_mask, render_proxy, require_aligned_detector_prompt, write_mask_png
     from quality import compute_all_quality_features, saved_mask_matches_frame
 
     path = source_path(db, photo)
@@ -56,9 +56,11 @@ def analyze_detection(db, photo, detection, effective_cfg, checkpoint, *, force=
     if image is None:
         raise ValueError("Could not decode original for subject analysis")
     try:
+        require_aligned_detector_prompt(image, dict(detection).get("runtime_fingerprint"))
         if existing_mask_path:
             with Image.open(existing_mask_path) as saved_mask:
-                if saved_mask_matches_frame(saved_mask.size, saved_mask.info.get("vireo_mask_frame"), image):
+                if saved_mask_matches_frame(saved_mask.size, saved_mask.info.get("vireo_mask_frame"), image,
+                                            prompt_frame=saved_mask.info.get("vireo_prompt_frame")):
                     mask = np.asarray(saved_mask.convert("L").resize(image.size, Image.Resampling.NEAREST)) > 0
                 else:
                     existing_mask_path = None

@@ -70,15 +70,26 @@ Nine of those bursts had frames on both sides of the 512 px line, so frames
 of one burst were being ranked on two renderings. A RAW without a full-size
 preview is demosaiced at full resolution before resizing, falling back to its embedded
 JPEG only if libraw cannot decode it.
-None of this catalog's cameras (D7200, D850, Z 8) is one. Migration 44
+None of this catalog's cameras (D7200, D850, Z 8) is one. Migration 45
 returns every nonempty historical detail measurement to "not measured".
 Preview dimensions were not recorded with the score: even a middle-band
 subject could have used a cropped or reduced JPEG that now demosaics, so
 subject size alone cannot certify its rendering. The mask stage remeasures aligned cached masks and regenerates masks
 whose preview framing cannot be verified. Fresh segmentation and detail
-measurement both use the camera-rendered frame. The comparison
+measurement both use the camera-rendered frame. Both detector passes now
+use that frame too, and the detector runtime identity includes this decode
+recipe. Historical boxes may instead belong to a cropped preview or a
+larger tiled sensor read; no crop transform was stored. On a RAW with a
+rejected preview, subject analysis therefore requires the current detector
+runtime. Older or reviewed boxes stay intact and require an explicit
+detector rerun rather than an assumed coordinate mapping. Mask PNGs also
+record prompt provenance so an earlier camera-rendered mask made from an
+unverified box cannot be reused. Coordinate-bearing analysis uses the strict
+`aligned_camera_rendered` mode: if a full-sensor demosaic fails, a rejected
+preview is not substituted. Browsing keeps its usual preview fallback;
+analysis stays pending instead of silently changing its frame. The comparison
 analyses (`subject_ranking_analysis`) store the detail too; their key carries
-`subject_ranking.ANALYSIS_RECIPE_VERSION` (5), raised with this change, so an
+`subject_ranking.ANALYSIS_RECIPE_VERSION` (6), raised with this change, so an
 analysis made before it no longer matches and the subject is analysed again.
 
 `photos.subject_detail_px` is the subject box's longer side in native pixels,

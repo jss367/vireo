@@ -559,7 +559,7 @@ def test_load_detail_source_asks_for_the_whole_camera_rendering_when_the_subject
         image_loader, "load_image",
         lambda path, max_size=1024, **kwargs: calls.append((max_size, kwargs)) or "image",
     )
-    camera = {"raw_decode": image_loader.RAW_DECODE_CAMERA_RENDERED}
+    camera = {"raw_decode": image_loader.RAW_DECODE_ALIGNED}
     # The subject fits the scale inside the frame: a sized read the preview covers.
     assert load_detail_source("a.nef", 2731, (5408, 3608)) == "image"
     # Under the scale the needed edge passes the frame (and a preview that
@@ -590,7 +590,7 @@ def test_measure_cached_subject_detail_reads_a_small_subject_from_the_whole_fram
 
     monkeypatch.setattr(image_loader, "load_image", recording_load)
     got = measure_cached_subject_detail(mask_path, str(source), (1600, 1200))
-    assert loads == [(None, image_loader.RAW_DECODE_CAMERA_RENDERED)]
+    assert loads == [(None, image_loader.RAW_DECODE_ALIGNED)]
     assert got["subject_detail"] > 0
     assert got["subject_detail_px"] == pytest.approx(160, abs=5)
 

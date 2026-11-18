@@ -92,6 +92,22 @@ def run(extraction):
     )
 
 
+def test_service_refuses_unverified_raw_prompt_before_segmentation(db, tmp_path, extraction, monkeypatch):
+    import computation_cache
+    from PIL import Image
+
+    pid = seed_photo(db, tmp_path, "unverified-frame")
+    proxy = Image.new("RGB", (512, 320))
+    proxy.info["vireo_rejected_preview_edge"] = 1600
+    extraction.deps.render_proxy = lambda *_args, **_kwargs: proxy
+    monkeypatch.setattr(computation_cache, "megadetector_runtime_fingerprint", lambda: "current-runtime")
+    result = run(extraction)
+    assert result["masked"] == 0 and result["failed"] == 1
+    assert extraction.generated == []
+    assert "unverified RAW frame" in str(extraction.job["errors"])
+    assert db.masks_features.get_mask(pid, extraction.options.sam2_variant) is None
+
+
 def assert_released(extraction, *photo_ids):
     assert extraction.opened and all(db.closed for db in extraction.opened)
     for pid in photo_ids:

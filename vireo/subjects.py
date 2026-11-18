@@ -15,7 +15,7 @@ import numpy as np
 from focus_point import FocusMatch
 from services import detection_store
 
-ANALYSIS_VERSION = 1
+ANALYSIS_VERSION = 2
 REVIEWER_MODEL = "reviewer-selected"
 _BURST_REFRESH = ThreadPoolExecutor(max_workers=1, thread_name_prefix="burst-subject-refresh")
 
@@ -84,7 +84,8 @@ def analyze_image(image, detections):
 def analyze_photo(db, photo_id, image_path, *, min_conf=None, force=False, checkpoint=None, detection_id=None,
                   validate_publication=None):
     """Backfill on cached detection runs too; failed/offline reads remain retryable."""
-    from image_loader import load_image
+    from image_loader import RAW_DECODE_ALIGNED, load_image
+    from masking import require_aligned_detector_prompt
     from pipeline_locks import acquire_photo_mask
 
     detections = retained(db, photo_id, min_conf)
@@ -117,10 +118,12 @@ def analyze_photo(db, photo_id, image_path, *, min_conf=None, force=False, check
             sync_primary(db, photo_id, min_conf=min_conf)
             db.commit_with_retry()
         return 0
-    image = load_image(image_path, max_size=1024)
+    image = load_image(image_path, max_size=1024, raw_decode=RAW_DECODE_ALIGNED)
     if image is None:
         raise ValueError("Could not load photo for subject analysis")
     try:
+        for detection in pending:
+            require_aligned_detector_prompt(image, detection.get("runtime_fingerprint"))
         results = analyze_image(image, pending)
     finally:
         image.close()

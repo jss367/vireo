@@ -63,10 +63,12 @@ def _import_mask_extraction_deps() -> SimpleNamespace:
     import numpy as np
     from dino_embed import embed, embed_batch, embedding_to_blob
     from masking import (
+        PromptFrameError,
         crop_completeness,
         crop_subject,
         generate_mask,
         render_proxy,
+        require_aligned_detector_prompt,
         save_mask,
     )
     from pipeline_job import (
@@ -85,6 +87,7 @@ def _import_mask_extraction_deps() -> SimpleNamespace:
     from subjects import sync_primary
 
     return SimpleNamespace(
+        PromptFrameError=PromptFrameError,
         np=np,
         embed=embed,
         embed_batch=embed_batch,
@@ -93,6 +96,7 @@ def _import_mask_extraction_deps() -> SimpleNamespace:
         crop_subject=crop_subject,
         generate_mask=generate_mask,
         render_proxy=render_proxy,
+        require_aligned_detector_prompt=require_aligned_detector_prompt,
         save_mask=save_mask,
         rollback_failed_mask_photo=_rollback_failed_mask_photo,
         StagedMaskFile=_StagedMaskFile,
@@ -237,13 +241,13 @@ class _MaskExtractionRun:
                     "extract-masks cancelled while waiting for inference resources",
                 )
                 break
-            except Exception:  # broad: per-photo boundary; the failure is counted and listed in the job errors
+            except Exception as error:  # broad: per-photo boundary; the failure is counted and listed in the job errors
                 self.failed += 1
                 log.warning(
                     "Mask extraction failed for photo %s", photo_id, exc_info=True
                 )
                 job["errors"].append(
-                    f"Photo {photo_id}: mask extraction failed"
+                    f"Photo {photo_id}: {error if isinstance(error, deps.PromptFrameError) else 'mask extraction failed'}"
                 )
                 try:
                     deps.rollback_failed_mask_photo(self.thread_db, photo_id)
@@ -352,6 +356,7 @@ class _MaskExtractionRun:
             det_box = json.loads(det_box)
 
         # Generate mask via SAM2
+        deps.require_aligned_detector_prompt(proxy, photo.get("detector_runtime"))
         mask = deps.generate_mask(proxy, det_box, variant=self.sam2_variant)
         if mask is None:
             self.skipped += 1
@@ -406,6 +411,7 @@ class _MaskExtractionRun:
         if not current:
             return False
         selected = current[0]
+        photo["detector_runtime"] = selected["runtime_fingerprint"]
         photo["detector_model"] = selected["detector_model"]
         photo["prompt"] = tuple(selected["box_" + k] for k in "xywh")
         photo["detection_box"] = {k: selected["box_" + k] for k in "xywh"}
