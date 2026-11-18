@@ -170,7 +170,7 @@ def create_jobs_blueprint(
         row["steps"] = row.pop("tree") or []
         return jsonify({
             **row, "errors": errors,
-            "historical": True, "pausable": False, "cancellable": False,
+            "historical": True, "_persisted": True, "pausable": False, "cancellable": False,
             "control_unavailable_reason": "This job is in history.",
         })
 

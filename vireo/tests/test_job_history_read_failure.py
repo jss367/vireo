@@ -169,6 +169,7 @@ def test_status_recovers_chained_jobs(app_and_db, restart, monkeypatch):
 
     parent = client.get(f"/api/jobs/{import_id}").get_json()
     assert parent["historical"] and parent["status"] == "completed"
+    assert parent["_persisted"] is True
     assert parent["result"] == imported["result"]
     url = f"/api/jobs/{parent['result']['process_job_id']}"
     child = client.get(url).get_json()
