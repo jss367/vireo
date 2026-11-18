@@ -79,7 +79,9 @@ class AuditRepository:
         (detection, classifier_model), matching the reads Highlights and
         product surfaces use. A legacy ``photos.quality_score`` without a
         ``photo_subject_state`` row is reported as stale too, so a migrated
-        catalog with no provenance for its scores cannot look clean.
+        catalog with no provenance for its scores cannot look clean. The saved
+        per-photo floor and model define the candidate set for projected
+        outputs, including weak rescues; legacy rows use the workspace floor.
         """
         ws = self.workspace_id_fn()
         rows = self.conn.execute(f"""
@@ -87,9 +89,12 @@ class AuditRepository:
                 SELECT p.id, p.filename, p.quality_score, p.active_mask_variant,
                        (SELECT d.id FROM detections d WHERE d.photo_id=p.id
                         AND d.category='animal' AND d.detector_model!='full-image'
-                        AND d.subject_verdict IS NULL AND d.detector_confidence >= ?
+                        AND d.subject_verdict IS NULL
+                        AND d.detector_confidence >= COALESCE(policy.min_conf, ?)
+                        AND (policy.detector_model IS NULL OR d.detector_model=policy.detector_model)
                         ORDER BY {primary_order_sql("d")} LIMIT 1) AS detection_id
                 FROM photo_workspace_visibility v JOIN photos p ON p.id=v.photo_id
+                LEFT JOIN photo_subject_state policy ON policy.photo_id=p.id
                 JOIN folders f ON f.id=p.folder_id
                 WHERE v.workspace_id=? AND f.status IN ('ok','partial')
             )
