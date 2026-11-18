@@ -857,3 +857,62 @@ def test_branch_catalog_gains_classifier_input_source(tmp_path, version):
         schema._apply_pending(conn)
         assert "input_source" in {row[1] for row in conn.execute("PRAGMA table_info(classifier_runs)")}
         assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+
+
+@pytest.mark.parametrize("layout", ["main", "gps_branch"])
+def test_version_43_layouts_preserve_reviewed_gps_and_classifier_source(tmp_path, layout):
+    path = str(tmp_path / "catalog.db")
+    schema.ensure_schema(path)
+    with sqlite3.connect(path) as conn:
+        folder = conn.execute("INSERT INTO folders(path, name) VALUES ('test', 'test')").lastrowid
+        photo = conn.execute("INSERT INTO photos(folder_id, filename) VALUES (?, 'bird.jpg')", (folder,)).lastrowid
+        if layout == "gps_branch":
+            conn.execute("ALTER TABLE classifier_runs DROP COLUMN input_source")
+            conn.execute("INSERT INTO reviewed_gps VALUES (?, 12, 34, 'nearby frames')", (photo,))
+        else:
+            conn.execute("DROP TABLE reviewed_gps")
+        conn.execute("PRAGMA user_version=43")
+
+    schema.ensure_schema(path)
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone() == (SCHEMA_VERSION,)
+        assert "input_source" in {row[1] for row in conn.execute("PRAGMA table_info(classifier_runs)")}
+        expected = [(photo, 12, 34, "nearby frames")] if layout == "gps_branch" else []
+        assert conn.execute("SELECT photo_id, latitude, longitude, evidence FROM reviewed_gps").fetchall() == expected
+
+
+@pytest.mark.parametrize("lineage", ["main", "detail_branch"])
+def test_both_version_44_lineages_converge(tmp_path, lineage):
+    """Main's 44 added reviewed_gps; this branch's 44 cleared subject detail instead."""
+    path = str(tmp_path / "catalog.db")
+    schema.ensure_schema(path)
+    with sqlite3.connect(path) as conn:
+        folder = conn.execute("INSERT INTO folders(path, name) VALUES ('test', 'test')").lastrowid
+        photo = conn.execute(
+            "INSERT INTO photos(folder_id, filename, subject_detail, subject_detail_px) "
+            "VALUES (?, 'bird.jpg', 0.5, 40000)", (folder,)).lastrowid
+        if lineage == "main":
+            conn.execute("INSERT INTO reviewed_gps VALUES (?, 12, 34, 'nearby frames')", (photo,))
+        else:
+            conn.execute("DROP TABLE reviewed_gps")
+        conn.execute("PRAGMA user_version=44")
+
+    schema.ensure_schema(path)
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone() == (SCHEMA_VERSION,)
+        assert conn.execute("SELECT subject_detail, subject_detail_px FROM photos").fetchone() == (None, None)
+        expected = [(photo, 12, 34, "nearby frames")] if lineage == "main" else []
+        assert conn.execute("SELECT photo_id, latitude, longitude, evidence FROM reviewed_gps").fetchall() == expected
+
+
+def test_branch_catalog_at_51_gains_reviewed_gps(tmp_path):
+    path = str(tmp_path / "catalog.db")
+    schema.ensure_schema(path)
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP TABLE reviewed_gps")
+        conn.execute("PRAGMA user_version=51")
+
+    schema.ensure_schema(path)
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone() == (SCHEMA_VERSION,)
+        assert conn.execute("SELECT name FROM sqlite_master WHERE name='reviewed_gps'").fetchone()

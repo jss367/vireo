@@ -31,6 +31,7 @@ from canonical_schema import (
     create_formerly_lazy_objects,
     create_identity_alternatives,
     create_photo_versions,
+    create_reviewed_gps,
     create_same_shot_reviews,
     create_species_choices,
     create_subject_candidates,
@@ -619,6 +620,14 @@ def _add_classifier_input_source(conn):
     _merge_species_highlights(conn)
 
 
+def _add_reviewed_gps(conn):
+    # Catalogs stamped 43 on the GPS branch already have reviewed locations
+    # but still need the classifier input source migration from main. Main's
+    # catalogs stamped 44 already ran this; branch catalogs at 44–51 did not.
+    _add_classifier_input_source(conn)
+    create_reviewed_gps(conn)
+
+
 MIGRATIONS = (
     Migration(
         13, "companion_identities_file_mtime",
@@ -681,6 +690,7 @@ MIGRATIONS = (
         _merge_species_highlights, _validate_merged_species_highlights,
     ),
     Migration(43, "classifier_input_source", _add_classifier_input_source),
+    # Main's catalogs at 44 ran reviewed_gps instead; 45 repeats this one for them.
     Migration(44, "subject_detail_full_resolution", _clear_subject_detail_from_other_read_paths),
     Migration(45, "subject_detail_mask_alignment", _clear_subject_detail_from_other_read_paths),
     Migration(46, "reconcile_highlights_and_detail", _reconcile_highlights_and_detail, _validate_merged_species_highlights),
@@ -690,6 +700,7 @@ MIGRATIONS = (
     # Alternate v47 catalogs used that slot for reviewer frames and can already be at v49.
     Migration(50, "reconcile_companion_box_frames", _invalidate_ambiguous_companion_boxes),
     Migration(51, "reviewer_history_mask_frames", _retire_reviewer_frame_caches),
+    Migration(52, "reviewed_gps", _add_reviewed_gps),
 )
 
 

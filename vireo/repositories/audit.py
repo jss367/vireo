@@ -174,7 +174,7 @@ class AuditRepository:
 
     # -- camera clocks ---------------------------------------------------------
 
-    def camera_clock_rows(self) -> list[sqlite3.Row]:
+    def camera_clock_rows(self, folder_id: int | None = None) -> list[sqlite3.Row]:
         """Each workspace photo's clock evidence, read from its stored metadata.
 
         One row per photo in a reachable folder whose metadata parses as JSON:
@@ -188,8 +188,11 @@ class AuditRepository:
         ``BodySerialNumber`` or ``CameraSerialNumber``.
         """
         workspace_id = self.workspace_id_fn()
+        folder_filter = " AND p.folder_id = ?" if folder_id is not None else ""
+        params = (workspace_id, folder_id) if folder_id is not None else (workspace_id,)
         return self.conn.execute(
             f"""SELECT p.id, p.filename, p.folder_id, f.path AS folder_path,
+                      (SELECT evidence FROM reviewed_gps WHERE photo_id=p.id) AS gps_review,
                       p.timestamp, p.file_mtime, p.file_hash,
                       {CAPTURE_TIME_STATE_SQL} AS clock_state,
                       json_extract(p.exif_data, '$.EXIF.DateTimeOriginal') AS date_time_original,
@@ -216,9 +219,31 @@ class AuditRepository:
                     AND wf.workspace_id = ?
                JOIN folders f ON f.id = p.folder_id
                     AND f.status IN ('ok', 'partial')
-               WHERE p.exif_data IS NOT NULL AND json_valid(p.exif_data)""",
-            (workspace_id,),
+               WHERE p.exif_data IS NOT NULL AND json_valid(p.exif_data)""" + folder_filter,
+            params,
         ).fetchall()
+
+    def saved_gps_reviews(self, folder_id=None):
+        folder_filter = " AND p.folder_id=?" if folder_id is not None else ""
+        params = (self.workspace_id_fn(),) if folder_id is None else (self.workspace_id_fn(), folder_id)
+        return self.conn.execute("""
+            SELECT g.*, p.filename, p.folder_id, f.path AS folder
+            FROM reviewed_gps g JOIN photos p ON p.id=g.photo_id
+            JOIN folders f ON f.id=p.folder_id
+            JOIN photo_workspace_visibility wf ON wf.photo_id=p.id AND wf.workspace_id=?
+            """ + folder_filter + " ORDER BY p.folder_id, g.evidence, p.filename", params).fetchall()
+
+    def apply_gps_review(self, photo_ids, evidence, latitude, longitude):
+        self.conn.executemany(
+            "INSERT INTO reviewed_gps(photo_id, evidence, latitude, longitude) VALUES (?, ?, ?, ?)",
+            ((pid, evidence, latitude, longitude) for pid in photo_ids),
+        )
+
+    def remove_gps_review(self, photo_ids, evidence):
+        self.conn.executemany(
+            "DELETE FROM reviewed_gps WHERE photo_id=? AND evidence=?",
+            ((pid, evidence) for pid in photo_ids),
+        )
 
     # -- repairs ---------------------------------------------------------------
 

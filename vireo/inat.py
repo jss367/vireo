@@ -165,9 +165,11 @@ def _public_page(path, params=None):
         raise InatApiError(f"Could not read observations from iNaturalist: {exc}") from exc
 
 
-def _read_species_counts(user_id):
+def _read_species_counts(user_id, area=None):
     params = {"user_id": user_id, "quality_grade": "casual,needs_id,research",
               "per_page": 500, "page": 1}
+    if area:
+        params.update(area)
     seen = set()
     covered = set()
     expected_total = None
@@ -190,16 +192,16 @@ def _read_species_counts(user_id):
         params["page"] += 1
 
 
-def account_species(login):
+def account_species(login, area=None):
     """Fetch a complete observer snapshot, including ancestors of finer identifications."""
     try:
         accounts = _public_page(f"users/{login}")["results"]
         account = next((u for u in accounts if u["login"].casefold() == login.casefold()), None)
         if account is None:
             raise InatApiError("iNaturalist could not find that account.")
-        observed, covered, paginated = _read_species_counts(account["id"])
+        observed, covered, paginated = _read_species_counts(account["id"], area)
         if paginated:
-            confirmed, confirmed_coverage, _ = _read_species_counts(account["id"])
+            confirmed, confirmed_coverage, _ = _read_species_counts(account["id"], area)
             if observed != confirmed or covered != confirmed_coverage:
                 raise InatApiError("The observation list changed during refresh. Try again.")
     except (KeyError, TypeError, AttributeError) as exc:

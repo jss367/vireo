@@ -112,7 +112,7 @@ def get_effective_photo_location(
         db: Database, photo_id: int, verify_workspace: bool = True) -> dict[str, Any] | None:
     """Return the coordinates Vireo should use for a single photo.
 
-    EXIF GPS is source metadata and wins when both axes are present. If
+    A reviewed GPS correction takes priority over a complete EXIF coordinate pair. If
     EXIF GPS is absent or partial, fall back as a pair to the linked
     ``type='location'`` keyword coordinates. Returns ``None`` when neither
     source has a complete coordinate pair.

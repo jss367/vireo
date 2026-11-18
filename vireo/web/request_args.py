@@ -73,13 +73,13 @@ def request_flag_filter() -> Literal["none", "flagged", "rejected"] | None:
 
 
 def request_location_status_filter() -> str | None:
-    """Parse the optional ``location_status`` query param (``exif``/``assigned``/``none``)."""
+    """Parse the optional ``location_status`` coordinate-source query parameter."""
     value = (request.args.get("location_status") or "").strip().lower()
     if not value:
         return None
-    if value not in {"exif", "assigned", "none"}:
+    if value not in {"reviewed_gps", "exif", "assigned", "none"}:
         raise ValueError(
-            "location_status must be 'exif', 'assigned', or 'none'"
+            "location_status must be 'reviewed_gps', 'exif', 'assigned', or 'none'"
         )
     return value
 
