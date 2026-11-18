@@ -297,7 +297,8 @@ def focus(photo=None, args=None, size=(3000, 2000), enabled=True, mask_path=None
     )
     ns["get_db"] = lambda: db
     nested("web/media_common.py", ns, {"_focus_source_image"})
-    nested("web/media_crops.py", ns, {"serve_focus_crop", "_focus_mask_bytes", "_validated_focus_source", "_focus_geometry_error"})
+    nested("web/media_crops.py", ns, {"serve_focus_crop", "_focus_mask_bytes", "_validated_focus_source", "_focus_geometry_error",
+                                          "_needs_primary_focus_subject", "_requested_focus_mask"})
     route = types.SimpleNamespace(_get_db=ns["get_db"], _config=ns["config"], _db_path=ns["db_path"], _json_error=ns["json_error"])
     return ns["serve_focus_crop"](route, 1), events
 
@@ -330,7 +331,8 @@ def focus_checks():
     assert ("point", "mask", 0, 255, 255) in events
     assert ("point", "image", 0, 44, 89) in events
     res, events = focus(args={"mask": "1"}, mask_path="/elsewhere/mask.png")
-    assert res.headers["X-Vireo-Focus-Mask"] == "0" and not any(e[0] == "mask-read" for e in events)
+    assert res[1] == 404 and "mask is unavailable" in res[0]
+    assert not any(e[0] == "mask-read" for e in events)
     for args in [{"size": "12"}, {"basis": "nose"}]:
         res, events = focus(args=args)
         assert res[1] == 400 and not any(e[0] == "loader" for e in events)
