@@ -752,21 +752,18 @@ def _withhold_unsafe_reset_fixes(clock: _CameraClock, fixes: list[ClockFix]) -> 
     for root in fixes:
         for step in [root, *root.dependent_fixes]:
             groups[root.group].update(frame.ref for frame in step.frames)
-    unmeasured = [
-        {frame.ref for frame in epoch}
-        for epoch, (_first, _last, error, _count) in zip(clock.epochs(), clock.epoch_errors, strict=True)
-        if error is None
-    ]
+    unmeasured_starts = {first.ref for first, _last, error, _count in clock.epoch_errors if error is None}
     reset_refs = {jump.after.ref for jump in clock.jumps if jump.kind == "reset"}
     withheld: set[Hashable] = set()
     for sequence in clock.sequences:
         refs = {frame.ref for frame in sequence}
-        if not refs & reset_refs:
+        if not refs & reset_refs or not refs & unmeasured_starts:
             continue
-        if not any(epoch <= refs and sum(bool(epoch & members) for members in groups.values()) > 1
-                   for epoch in unmeasured):
+        # Groups on opposite sides of a reset can be applied independently too.
+        sequence_groups = {group for group, members in groups.items() if members & refs}
+        if len(sequence_groups) < 2:
             continue
-        relevant = [root for root in fixes if groups[root.group] & refs]
+        relevant = [root for root in fixes if root.group in sequence_groups]
         if not _options_create_reset(sequence, relevant):
             continue
         withheld.update(refs)
