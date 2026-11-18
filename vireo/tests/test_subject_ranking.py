@@ -286,11 +286,14 @@ def test_eye_measurements_are_selected_and_mask_gated(comparison_library, monkey
     monkeypatch.setattr("subject_analysis.os.path.isfile", lambda *args: True)
     monkeypatch.setattr(kp, "detect_keypoints", lambda *args: [
         {"name": "left_eye", "x": 70, "y": 80, "conf": .9},
+        {"name": "bill", "x": 45, "y": 85, "conf": .9},
+        {"name": "crown", "x": 240, "y": 80, "conf": .99},
         {"name": "right_eye", "x": 240, "y": 80, "conf": .99}])
     image = Image.new("RGB", (320, 160), "white")
     mask = np.zeros((160, 320), bool)
     mask[:, :120] = True
     result = measure_eye(db, pids[0], detection, image, mask, {"pipeline": {"eye_detect_enabled": True}})
+    assert result["head_landmarks"] == {"bill": [45 / 320, 85 / 160]}
     assert result["eye_x"] == 70 / 320 and result["eye_conf"] == .9
 
 
@@ -736,3 +739,33 @@ def test_cached_subject_changed_during_readback_is_reported_failed(comparison_li
     assert result["photos"][0]["status"] == "failed"
     assert "changed" in result["errors"][0]["error"]
     assert _pack(app, [pid], **scope)["cards"][0]["evidence_status"] == "subject_analysis_missing"
+
+
+def test_head_inspection_uses_only_current_selected_subject_and_rendition(comparison_library, monkeypatch):
+    import config as cfg
+    import image_loader
+
+    app, db, pids, ids = comparison_library
+    pid = pids[0]
+    monkeypatch.setattr('subject_analysis.measure_eye', lambda *args: {
+        'eye_x': .2, 'eye_y': .5, 'eye_status': 'measured', 'eye_tenengrad': 22,
+        'head_landmarks': {'bill': [.1, .5]},
+    })
+    _analyze(db, [pid], SubjectComparison(TARGET), cfg.load())
+    client = app.test_client()
+    url = f'/photos/{pid}/focus-crop?basis=head&size=128&detection_id={ids[pid][0]}'
+    result = client.get(url)
+    assert result.status_code == 200, result.get_json()
+    assert result.headers['X-Vireo-Focus-Basis'] == 'head'
+    assert result.headers['X-Vireo-Focus-Center'] == '0.1500,0.5000'
+    assert result.headers['X-Vireo-Detection-Id'] == str(ids[pid][0])
+    assert Image.open(io.BytesIO(result.data)).size == (128, 128)
+    pinned = url.replace('basis=head&', '') + '&analysis_key=' + result.headers['X-Vireo-Analysis-Key']
+    assert client.get(pinned).headers['X-Vireo-Focus-Basis'] == 'head'
+    assert client.get(url + '&analysis_key=stale').status_code == 404
+    other = client.get(f'/photos/{pid}/focus-crop?basis=head&detection_id={ids[pid][1]}')
+    assert other.headers['X-Vireo-Focus-Basis'] == 'subject'
+    assert other.headers['X-Vireo-Focus-Eye-Status'] == 'unbound'
+    monkeypatch.setattr(image_loader, 'load_image', lambda *args, **kw: Image.new('RGB', (320, 160)))
+    mismatch = client.get(url)
+    assert mismatch.status_code == 404 and 'rendition' in mismatch.get_json()['error']
