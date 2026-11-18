@@ -25,6 +25,7 @@ from datetime import datetime
 from typing import Any
 
 from repositories.photo_row_deletion import photo_row_deletion
+from repositories.photo_sql import CAPTURE_TIME_STATE_SQL
 
 
 class AuditRepository:
@@ -188,10 +189,9 @@ class AuditRepository:
         """
         workspace_id = self.workspace_id_fn()
         return self.conn.execute(
-            """SELECT p.id, p.filename, p.folder_id, f.path AS folder_path,
+            f"""SELECT p.id, p.filename, p.folder_id, f.path AS folder_path,
                       p.timestamp, p.file_mtime, p.file_hash,
-                      json_extract(p.exif_data, '$.EXIF.DateTimeOriginal', '$.EXIF.SubSecTimeOriginal',
-                                   '$.EXIF.OffsetTimeOriginal', '$.EXIF.OffsetTime') AS clock_state,
+                      {CAPTURE_TIME_STATE_SQL} AS clock_state,
                       json_extract(p.exif_data, '$.EXIF.DateTimeOriginal') AS date_time_original,
                       json_extract(p.exif_data, '$.EXIF.SubSecTimeOriginal') AS subsec,
                       json_extract(p.exif_data, '$.EXIF.OffsetTimeOriginal') AS offset_original,

@@ -19,8 +19,8 @@ sorted by capture time. Independent records let Vireo notice:
 * **Location.** The local offset at a frame's GPS position on that date (from
   a ``zone_lookup``) is what the camera should have recorded.
 
-One clock error applies to a camera across a folder, so each group of frames
-that recorded the same offset gets one correction: set the offset to the local
+Within each stretch between resets, frames with the same recorded and local
+offsets share a clock correction: set the offset to the local
 zone and move the clock time by ``local - recorded - clock_error``. When the
 clock error cannot be measured, both readings are offered (the clock showed
 local time, or the moment of capture was right) instead of guessing.
@@ -41,6 +41,7 @@ from collections import Counter, defaultdict
 from collections.abc import Callable, Hashable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from itertools import pairwise
 from typing import Any
 
 # A backward step smaller than this is not reported: clock changes that move
@@ -138,6 +139,7 @@ class ClockFix:
     shift_minutes: int
     explanation: str
     recommended: bool = True
+    dependent_fixes: list[ClockFix] = field(default_factory=list)
 
     def label(self) -> str:
         target, recorded, shift = self.target_offset, self.recorded_offset, self.shift_minutes
@@ -163,6 +165,8 @@ class ClockFix:
             "explanation": self.explanation,
             "recommended": self.recommended,
         }
+        if self.dependent_fixes:
+            data["dependent_fixes"] = [f.to_json(include_refs) for f in self.dependent_fixes]
         if include_refs:
             data["refs"] = [f.ref for f in self.frames]
         return data
@@ -262,13 +266,17 @@ def _dcf_sequences(frames: list[tuple[int, ClockFrame]]) -> list[list[ClockFrame
     """
     frames.sort(key=lambda item: (item[0], item[1].filename))
     ordered = [frame for _, frame in frames]
-    for i in range(1, len(frames)):
-        if frames[i][0] - frames[i - 1][0] <= DCF_NUMBER_SPAN // 2:
-            continue
-        low, high = ordered[:i], ordered[i:]
-        if frames[0][0] == 1 and frames[-1][0] == DCF_NUMBER_SPAN:
-            return [high + low]
-        return [low, high]
+    gaps = [i for i in range(1, len(frames)) if frames[i][0] - frames[i - 1][0] > 1]
+    if gaps:
+        split = max(gaps, key=lambda i: frames[i][0] - frames[i - 1][0])
+        wraps = frames[0][0] == 1 and frames[-1][0] == DCF_NUMBER_SPAN
+        if frames[split][0] - frames[split - 1][0] > DCF_NUMBER_SPAN // 2:
+            low, high = ordered[:split], ordered[split:]
+            return [high + low] if wraps else [low, high]
+        if wraps:
+            # Only the consecutive endpoint runs have a proven relative order.
+            return [ordered[gaps[-1]:] + ordered[:gaps[0]],
+                    *(ordered[a:b] for a, b in pairwise(gaps))]
     return [ordered]
 
 
@@ -658,8 +666,7 @@ def _reset_fix(jump: ClockJump, frames: list[ClockFrame], other_shift: int, *, m
         f"is the smallest shift that puts them {'before' if move_before else 'after'} {anchor.filename}; "
         "the real gap between the two frames is unknown, so check the preview against what you remember."
     )
-    if not move_before:
-        explanation += " GPS time shows the clock was right before the reset, so these are the photos to move."
+
     if other_shift:
         explanation += (
             f" The fix for {anchor.filename} moves it {_direction(other_shift)} "
@@ -687,7 +694,7 @@ def _fixes_across_resets(clock: _CameraClock, nearby_error: tuple[int, str] | No
     shifts: dict[Hashable, int] = {}
     settled: set[Hashable] = set()
     stretch_of: dict[Hashable, list[ClockFrame]] = {}
-    unresolved: set[Hashable] = set()
+    choices: dict[Hashable, list[tuple[ClockFix, int]]] = defaultdict(list)
     for index, epoch in enumerate(clock.epochs()):
         part = clock.part(epoch, use_gps, zone_lookup)
         clock.epoch_errors.append((epoch[0], epoch[-1], part.clock_error, part.error_fixes))
@@ -696,7 +703,8 @@ def _fixes_across_resets(clock: _CameraClock, nearby_error: tuple[int, str] | No
         group_sizes = Counter(fix.group for fix in part_fixes)
         for fix in part_fixes:
             if group_sizes[fix.group] > 1:
-                unresolved.update(f.ref for f in fix.frames)
+                for frame in fix.frames:
+                    choices[frame.ref].append((fix, fix.shift_minutes))
             else:
                 shifts.update({f.ref: fix.shift_minutes for f in fix.frames})
             fix.group = f"epoch {index}: {fix.group}"
@@ -708,21 +716,34 @@ def _fixes_across_resets(clock: _CameraClock, nearby_error: tuple[int, str] | No
     # the remaining unanchored prefix, work backward from its final epoch.
     for jump in resets:
         after = [f for f in stretch_of[jump.after.ref] if f.ref not in settled]
-        if jump.before.ref in unresolved and after:
-            unresolved.update(f.ref for f in after)
+        if jump.before.ref in choices and after:
+            _pair_reset_choices(jump, after, choices, move_before=False)
             settled.update(f.ref for f in after)
         elif after and jump.before.ref in settled:
             _add_reset_fix(fixes, shifts, settled,
                            _reset_fix(jump, after, shifts.get(jump.before.ref, 0), move_before=False))
     for jump in reversed(resets):
         before = [f for f in stretch_of[jump.before.ref] if f.ref not in settled]
-        if jump.after.ref in unresolved:
-            unresolved.update(f.ref for f in before)
+        if jump.after.ref in choices and before:
+            _pair_reset_choices(jump, before, choices, move_before=True)
             settled.update(f.ref for f in before)
         elif before:
             _add_reset_fix(fixes, shifts, settled,
                            _reset_fix(jump, before, shifts.get(jump.after.ref, 0), move_before=True))
     return fixes
+
+
+def _pair_reset_choices(jump: ClockJump, frames: list[ClockFrame],
+                        choices: dict[Hashable, list[tuple[ClockFix, int]]], *, move_before: bool) -> None:
+    anchor = jump.after if move_before else jump.before
+    next_choices = []
+    for option, shift in choices[anchor.ref]:
+        dependent = _reset_fix(jump, frames, shift, move_before=move_before)
+        if dependent.shift_minutes:
+            option.dependent_fixes.append(dependent)
+        next_choices.append((option, dependent.shift_minutes))
+    for frame in frames:
+        choices[frame.ref] = next_choices
 
 
 def _add_reset_fix(fixes: list[ClockFix], shifts: dict[Hashable, int], settled: set[Hashable],

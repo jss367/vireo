@@ -25,7 +25,7 @@ import os
 from repositories.collections import CollectionRepository
 from repositories.folder_subtrees import folder_subtree_ids
 from repositories.photo_row_deletion import photo_row_deletion
-from repositories.photo_sql import location_keyword_exists_sql
+from repositories.photo_sql import CAPTURE_TIME_STATE_SQL, location_keyword_exists_sql
 from repositories.top_species import TOP_SPECIES_RANKING_SQL
 from sql_chunks import chunked
 
@@ -254,9 +254,7 @@ class PhotoRepository:
             placeholders = ",".join("?" for _ in chunk)
             rows = self.conn.execute(
                 "SELECT p.id, p.timestamp, p.file_mtime, p.file_hash, "
-                "CASE WHEN json_valid(p.exif_data) THEN json_extract(p.exif_data, "
-                "'$.EXIF.DateTimeOriginal', '$.EXIF.SubSecTimeOriginal', "
-                "'$.EXIF.OffsetTimeOriginal', '$.EXIF.OffsetTime') END FROM photos p "
+                f"CASE WHEN json_valid(p.exif_data) THEN {CAPTURE_TIME_STATE_SQL} END FROM photos p "
                 f"JOIN photo_workspace_visibility wf ON wf.photo_id=p.id "
                 f"WHERE wf.workspace_id=? AND p.id IN ({placeholders})",
                 [self.workspace_id, *chunk],

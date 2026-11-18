@@ -232,3 +232,28 @@ def test_set_offset_mode_requires_a_target():
     with pytest.raises(ValueError, match="shift_minutes"):
         capture_time._normalize_inputs("set_offset", "-08:00", True)
     assert capture_time._normalize_inputs("set_offset", "-08:00", -120) == (None, -120, "-08:00")
+
+
+def test_reset_folder_does_not_rank_next_days_zone_choices(clocks_db, monkeypatch):
+    from services import camera_clocks, photo_ingest, workspace_folders
+
+    db, folder_id, _ = clocks_db
+    # Both epochs now have the same offset, so the backward step is a reset.
+    db.conn.execute(
+        """UPDATE photos SET exif_data=json_set(exif_data, '$.EXIF.OffsetTimeOriginal', '-07:00')
+           WHERE folder_id=?""", (folder_id,),
+    )
+    next_folder = workspace_folders.add_folder(db, "/clocks/2026-01-26", name="2026-01-26")
+    captured = datetime(2026, 1, 26, 12)
+    pid = photo_ingest.add_photo(db, folder_id=next_folder, filename="DSC_0090.NEF",
+                                 extension=".nef", file_size=1, file_mtime=0, timestamp=captured.isoformat())
+    db.conn.execute("UPDATE photos SET exif_data=? WHERE id=?", (json.dumps(_exif(captured, "-07:00", 109000, 0)), pid))
+    db.commit()
+    monkeypatch.setattr(camera_clocks.time_zones, "available", lambda: True)
+    monkeypatch.setattr(camera_clocks.time_zones, "local_zone", lambda *_: ("America/Los_Angeles", -480))
+
+    findings = {f["folder_id"]: f for f in camera_clocks.check_camera_clocks(db)["findings"]}
+    assert findings[folder_id]["jump_count"] == 1
+    options = findings[next_folder]["fixes"]
+    assert {option["shift_minutes"] for option in options} == {-60, 0}
+    assert not any(option["recommended"] for option in options)

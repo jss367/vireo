@@ -224,7 +224,6 @@ def test_reset_with_a_right_clock_before_it_moves_the_frames_after_it():
     [fix] = problem.fixes
     assert [f.ref for f in fix.frames] == list(range(7, 13))
     assert fix.shift_minutes == 60
-    assert "right before the reset" in fix.explanation
 
 
 def test_reset_needs_no_fix_before_it_when_gps_fixes_the_rest_exactly():
@@ -316,7 +315,7 @@ def test_measured_reset_epochs_need_separate_fix_groups():
     assert len({f.group for f in problem.fixes}) == 2
 
 
-def test_reset_fix_waits_for_unmeasured_zone_choice():
+def test_reset_shift_depends_on_unmeasured_zone_choice():
     from dataclasses import replace
 
     frames = [replace(f, latitude=34., longitude=-118.) if f.ref <= 6 else f for f in _reset_frames()]
@@ -324,6 +323,16 @@ def test_reset_fix_waits_for_unmeasured_zone_choice():
     assert problem is not None
     assert {f.shift_minutes for f in problem.fixes} == {-60, 0}
     assert all(f.ref <= 6 for fix in problem.fixes for f in fix.frames)
+    options = {fix.shift_minutes: fix for fix in problem.fixes}
+    assert not options[-60].dependent_fixes
+    [later] = options[0].dependent_fixes
+    assert later.shift_minutes == 60
+    assert [f.ref for f in later.frames] == list(range(7, 13))
+    assert later.target_offset is None
+    for option in options.values():
+        shifts = {f.ref: step.shift_minutes for step in [option, *option.dependent_fixes] for f in step.frames}
+        corrected = [f.captured + timedelta(minutes=shifts.get(f.ref, 0)) for f in frames]
+        assert all(a < b for a, b in pairwise(corrected))
 
 
 def test_reset_epoch_uses_its_own_clock_error_at_dst_boundary():
@@ -340,3 +349,11 @@ def test_reset_epoch_uses_its_own_clock_error_at_dst_boundary():
     assert problem is not None
     [fix] = problem.fixes
     assert (fix.target_offset, fix.shift_minutes) == (-480, 60)
+
+
+def test_rollover_with_no_gap_larger_than_half_the_counter():
+    frames = [ClockFrame(ref=n, filename=f"DSC_{n:04d}.JPG", captured=datetime(2026, 4, 1, hour))
+              for n, hour in [(1, 12), (5000, 13), (9999, 14)]]
+    [problem] = find_clock_problems(frames, use_gps=False)
+    assert problem.jump_count == 1
+    assert any("DSC_9999.JPG" in line and "DSC_0001.JPG" in line for line in problem.evidence)

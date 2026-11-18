@@ -130,7 +130,8 @@ def check_camera_clocks(db: Database) -> JsonDict:
     measured_by_camera: dict[str | None, list[_FolderClock]] = defaultdict(list)
     for (folder_id, camera), frames in groups.items():
         estimate = camera_clock.estimate_clock_error(frames)
-        if estimate is None:
+        if estimate is None or any(jump.kind == "reset" for run in camera_clock.shot_sequences(frames)
+                                   for jump in camera_clock.find_jumps(run)):
             continue
         error = estimate[0] if abs(estimate[0]) >= CLOCK_ERROR_MIN_MINUTES else 0
         measured_by_camera[camera].append(
@@ -149,7 +150,8 @@ def check_camera_clocks(db: Database) -> JsonDict:
             continue
         payload = problem.to_json(include_refs=True)
         for fix in payload["fixes"]:
-            fix["expected_state"] = capture_time_token(states[pid] for pid in fix["refs"])
+            for step in [fix, *fix.get("dependent_fixes", [])]:
+                step["expected_state"] = capture_time_token(states[pid] for pid in step["refs"])
         findings.append({
             "folder_id": folder_id,
             "folder_path": folder_paths[folder_id],

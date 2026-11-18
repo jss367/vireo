@@ -37,6 +37,36 @@ def current_capture_time_token(db, ids):
     return capture_time_token(db.photos.capture_time_states(ids))
 
 
+def capture_time_plan(db, photo_ids, body):
+    """Validate each disjoint step against one snapshot and guard their union."""
+    dependents = body.get("dependent_shifts", [])
+    if not isinstance(dependents, list):
+        raise ValueError("dependent_shifts must be a list")
+    if (dependents or "expected_state" in body) and not isinstance(body.get("expected_state"), str):
+        raise ValueError("A reviewed capture-time correction requires an expected_state token")
+    shifts = {}
+    selected = set(photo_ids)
+    groups = [(photo_ids, body.get("expected_state"))]
+    for step in dependents:
+        if not isinstance(step, dict) or type(step.get("shift_minutes")) is not int:
+            raise ValueError("Each dependent shift needs an integer minute shift")
+        ids = step.get("photo_ids")
+        if not isinstance(ids, list) or not ids or any(type(pid) is not int for pid in ids):
+            raise ValueError("Each dependent shift needs photo IDs")
+        if len(selected) + len(ids) > 50000 or selected.intersection(ids) or len(set(ids)) != len(ids):
+            raise ValueError("Correction steps must contain at most 50000 distinct photos in total")
+        if not isinstance(step.get("expected_state"), str):
+            raise ValueError("Dependent shifts require reviewed capture-time evidence")
+        selected.update(ids)
+        shifts.update(dict.fromkeys(ids, step["shift_minutes"]))
+        groups.append((ids, step["expected_state"]))
+    states = {row[0]: row for row in db.photos.capture_time_states(list(selected))}
+    for ids, expected in groups:
+        if expected is not None and expected != capture_time_token(states[i] for i in ids if i in states):
+            raise RuntimeError("The capture-time evidence changed. Review the photos again.")
+    return [*photo_ids, *shifts], shifts, capture_time_token(states.values())
+
+
 @contextmanager
 def guard_capture_time(db, ids, expected):
     keys = set(ids)
@@ -421,6 +451,17 @@ def _capture_time_summary(
     }
 
 
+def _selected_photos(db, photo_ids):
+    photos = []
+    for pid in photo_ids:
+        row = db.photos.get(pid, verify_workspace=True)
+        if row:
+            photos.append(row)
+    if not photos:
+        raise ValueError("no photos found")
+    return photos
+
+
 def adjust_capture_time(
     db,
     photo_ids,
@@ -431,6 +472,7 @@ def adjust_capture_time(
     keep_backups=True,
     progress_callback=None,
     cancel_check=None,
+    dependent_shifts=None,
 ):
     """Apply a capture-time correction to selected photos via ExifTool."""
     from metadata import find_exiftool
@@ -443,18 +485,10 @@ def adjust_capture_time(
         mode, target_offset, shift_minutes
     )
 
-    photos = []
-    for pid in photo_ids:
-        row = db.photos.get(pid, verify_workspace=True)
-        if row:
-            photos.append(row)
-    if not photos:
-        raise ValueError("no photos found")
+    photos = _selected_photos(db, photo_ids)
 
     log.info("Starting capture-time adjustment for %d photo(s)", len(photos))
-    written = 0
-    skipped = 0
-    failed = 0
+    written = skipped = failed = 0
     failures = []
     total = len(photos)
     shifts_used = []
@@ -471,7 +505,13 @@ def adjust_capture_time(
             continue
 
         try:
-            photo_shift = _photo_shift_minutes(mode, target_minutes, manual_shift, photo)
+            dependent_shift = (dependent_shifts or {}).get(photo["id"])
+            if dependent_shift is None:
+                output_offset = target_offset_str
+                photo_shift = _photo_shift_minutes(mode, target_minutes, manual_shift, photo)
+            else:
+                output_offset = None
+                photo_shift = dependent_shift
         except ValueError as exc:
             failed += 1
             failures.append(
@@ -484,7 +524,7 @@ def adjust_capture_time(
         has_companion = _has_key(photo, "companion_path") and bool(photo["companion_path"])
         if (
             not has_companion
-            and _is_noop_adjustment(mode, target_offset_str, photo_shift, photo)
+            and _is_noop_adjustment(mode, output_offset, photo_shift, photo)
         ):
             skipped += 1
             shifts_used.append(photo_shift)
@@ -493,7 +533,7 @@ def adjust_capture_time(
             continue
 
         cmd = _capture_time_command(
-            exiftool, paths, photo_shift, target_offset_str, keep_backups,
+            exiftool, paths, photo_shift, output_offset, keep_backups,
         )
 
         try:
