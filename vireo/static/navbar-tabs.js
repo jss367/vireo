@@ -147,11 +147,23 @@ function applyActiveClass() {
   });
 }
 
-function renderStrip() {
+/** @type {string | null} */ let scrollKey = null;
+
+function saveStripScroll() {
+  const strip = STRIP();
+  if (scrollKey && strip?.childElementCount) sessionStorage.setItem(scrollKey, String(strip.scrollLeft));
+}
+
+/** @param {string | null} nextScrollKey */
+function renderStrip(nextScrollKey = scrollKey) {
   const strip = STRIP();
   if (!strip) return;
-  const scrollLeft = strip.childElementCount ? strip.scrollLeft
-    : Number(sessionStorage.getItem('vireo_nav_scroll')) || 0;
+  let scrollLeft = strip.scrollLeft;
+  if (nextScrollKey !== scrollKey) {
+    saveStripScroll();
+    scrollKey = nextScrollKey;
+    scrollLeft = scrollKey ? Number(sessionStorage.getItem(scrollKey)) || 0 : 0;
+  }
   strip.textContent = '';
   TABS.forEach(id => {
     const page = pageById[id];
@@ -267,7 +279,7 @@ function fetchAndRender() {
       ALL_PAGES = (state && state.all_pages) || [];
       pageById = {};
       ALL_PAGES.forEach(p => { pageById[p.id] = p; });
-      renderStrip();
+      renderStrip(state?.workspace_id == null ? null : 'vireo_nav_scroll_' + state.workspace_id);
       return state;
     })
     .catch(err => {
@@ -280,10 +292,7 @@ function fetchAndRender() {
     });
 }
 
-window.addEventListener('pagehide', () => {
-  const strip = STRIP();
-  if (strip?.childElementCount) sessionStorage.setItem('vireo_nav_scroll', String(strip.scrollLeft));
-});
+window.addEventListener('pagehide', saveStripScroll);
 
 // Expose for the palette + drag-reorder code in the next scripts
 /** @type {NavTabs} */

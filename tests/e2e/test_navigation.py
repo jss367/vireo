@@ -504,6 +504,26 @@ def test_pinned_navigation_stays_in_order_across_pages(live_server, page):
     expect(page.locator(".nav-tab.active")).to_have_attribute("data-nav-id", expected[-1])
 
 
+def test_tab_scroll_position_is_scoped_to_workspace(live_server, page):
+    page.set_viewport_size({"width": 900, "height": 800})
+    page.goto(f"{live_server['url']}/browse")
+    strip = page.locator("#navTabStrip")
+    for current, target, start, end in [
+        ("Default", "Field Work", 0, 120),
+        ("Field Work", "Default", 0, 60),
+        ("Default", "Field Work", 120, 100),
+    ]:
+        expect(page.locator("#wsCurrentName")).to_have_text(current)
+        expect(strip.locator(".nav-tab.active")).to_be_visible()
+        assert strip.evaluate("el => el.scrollLeft") == start
+        strip.evaluate("(el, offset) => { el.scrollLeft = offset; }", end)
+        page.click("[data-testid='workspace-dropdown']")
+        with page.expect_navigation():
+            page.locator(".ws-menu-item", has_text=target).click()
+    expect(strip.locator(".nav-tab.active")).to_be_visible()
+    assert strip.evaluate("el => el.scrollLeft") == 60
+
+
 def test_pages_menu_exposes_destinations(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/review")
