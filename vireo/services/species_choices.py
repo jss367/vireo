@@ -220,6 +220,8 @@ def add_highlight(
     """
     canonical = db.keyword_taxa.resolve_species_display(species)
     in_scope = _resolve_scope(db, scope)
+    if in_scope is not None and photo_id not in in_scope:
+        raise ValueError(f"photo {photo_id} is not in the supplied scope")
     result: JsonDict = {
         "species": canonical, "photo_id": photo_id,
         "added": False, "after": [], "superseded": [],

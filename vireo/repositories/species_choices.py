@@ -126,34 +126,29 @@ class SpeciesChoiceRepository:
     def forget_photo(self, species: str, photo_id: int) -> None:
         """Drop ``photo_id`` from the comparisons made for ``species``.
 
-        Every photo recorded ahead of it is first recorded ahead of the
-        photos it was itself ahead of, so removing the middle of a chain
-        (first over second over third) leaves first over third instead of an
-        unsettled pair. Then its own choices for the species, and the
-        comparisons other choices for the species made with it, are deleted,
+        Comparisons between this species' current highlights count whatever
+        species they were recorded for. Every photo recorded ahead of it is
+        first recorded ahead of the photos it was itself ahead of, so removing
+        the middle of a chain (first over second over third) leaves first over
+        third instead of an unsettled pair. Then its own choices for the species
+        and the comparisons other choices for the species made with it are deleted,
         so nothing revives if the photo is highlighted again.
         """
         ahead: set[int] = set()
         behind: set[int] = set()
-        for row in self.conn.execute(
-            """SELECT c.photo_id AS subject, l.photo_id AS other, 1 AS subject_wins
-               FROM species_choices c
-               JOIN species_choice_losers l ON l.choice_id = c.id
-               WHERE c.species = ? AND ? IN (c.photo_id, l.photo_id)
-               UNION ALL
-               SELECT c.photo_id, w.photo_id, 0
-               FROM species_choices c
-               JOIN species_choice_winners w ON w.choice_id = c.id
-               WHERE c.species = ? AND ? IN (c.photo_id, w.photo_id)""",
-            (species, photo_id, species, photo_id),
-        ).fetchall():
-            better, worse = (
-                (row["subject"], row["other"]) if row["subject_wins"]
-                else (row["other"], row["subject"])
+        highlights = {
+            row["photo_id"] for row in self.conn.execute(
+                "SELECT photo_id FROM species_representatives WHERE species = ?",
+                (species,),
             )
+        }
+        for comparison in self.comparisons():
+            better, worse = comparison.better, comparison.worse
+            if better not in highlights or worse not in highlights:
+                continue
             if worse == photo_id:
                 ahead.add(better)
-            else:
+            elif better == photo_id:
                 behind.add(worse)
         for better in sorted(ahead - behind):
             self.record(species, better, sorted(behind - ahead - {better}))

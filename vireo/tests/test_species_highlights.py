@@ -275,6 +275,79 @@ def test_neighbor_inside_requested_scope_can_change_order(scoped_highlights, dir
     assert _highlights(_row(db, folders["second"])) == [(photos["b1"], 1)]
 
 
+@pytest.mark.parametrize("already_highlighted", [False, True])
+def test_addition_outside_requested_scope_is_refused_without_changes(scoped_highlights, already_highlighted):
+    client, db, _folders, photos, scope = scoped_highlights
+    target = photos["b1"] if already_highlighted else photos["b2"]
+    before = list(db.conn.iterdump())
+
+    response = _add(client, target, **scope)
+
+    assert response.status_code == 400
+    assert list(db.conn.iterdump()) == before
+
+
+def test_addition_inside_requested_scope_takes_next_place(scoped_highlights):
+    client, db, folders, photos, scope = scoped_highlights
+    client.delete("/api/species-highlights", json={
+        "species": "Bald Eagle", "photo_id": photos["a2"],
+    })
+
+    response = _add(client, photos["a2"], **scope)
+
+    assert response.status_code == 200
+    assert response.get_json()["added"] is True
+    assert response.get_json()["after"] == [photos["a1"]]
+    assert _highlights(_row(db, folders["first"])) == [
+        (photos["a1"], 1), (photos["a2"], 2),
+    ]
+
+
+@pytest.mark.parametrize("edge_kind", ["losers", "winners"])
+def test_removal_bridges_other_species_choices_without_deleting_them(trips, edge_kind):
+    app, db, folders, photos = trips
+    first, middle, last = [photos[key] for key in ("a1", "a2", "a3")]
+    for pid in (first, middle, last):
+        db.set_species_representative("Bald Eagle", pid)
+        db.set_species_representative("Golden Eagle", pid)
+    owned = db.species_choices.record("Bald Eagle", middle)
+    if edge_kind == "losers":
+        db.species_choices.record("Golden Eagle", first, [middle])
+        db.species_choices.record("Golden Eagle", middle, [last])
+    else:
+        db.species_choices.record("Golden Eagle", middle, winner_ids=[first])
+        db.species_choices.record("Golden Eagle", last, winner_ids=[middle])
+    # This other-species edge is inapplicable to Bald Eagle's highlights.
+    db.set_species_representative("Golden Eagle", photos["b1"])
+    db.species_choices.record("Golden Eagle", middle, [photos["b1"]])
+    before = db.species_choices.comparisons()
+    foreign_choices = [tuple(row) for row in db.conn.execute(
+        "SELECT * FROM species_choices WHERE species = 'Golden Eagle' ORDER BY id",
+    )]
+    db.commit()
+    assert _highlights(_row(db, folders["first"])) == [(first, 1), (middle, 2), (last, 3)]
+
+    response = app.test_client().delete("/api/species-highlights", json={
+        "species": "Bald Eagle", "photo_id": middle,
+    })
+
+    assert response.status_code == 200
+    assert _highlights(_row(db, folders["first"])) == [(first, 1), (last, 2)]
+    assert _row(db, folders["first"])["best_decision"]["kind"] == "highlight"
+    assert set(before).issubset(db.species_choices.comparisons())
+    owned_ids = {row[0] for row in db.conn.execute(
+        "SELECT id FROM species_choices WHERE species = 'Bald Eagle'",
+    )}
+    assert all(
+        c.better in {first, last} and c.worse in {first, last}
+        for c in db.species_choices.comparisons() if c.choice_id in owned_ids
+    )
+    assert [tuple(row) for row in db.conn.execute(
+        "SELECT * FROM species_choices WHERE species = 'Golden Eagle' ORDER BY id",
+    )] == foreign_choices
+    assert db.conn.execute("SELECT id FROM species_choices WHERE id = ?", (owned,)).fetchone() is None
+
+
 def test_removing_the_middle_highlight_keeps_the_others_in_order(trips):
     app, db, folders, photos = trips
     client = app.test_client()
