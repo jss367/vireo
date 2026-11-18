@@ -280,6 +280,8 @@ class PipelineFeaturesRepository:
         scope_sql = _SCOPE_SQL if scoped else ""
         return self.conn.execute(
             f"""SELECT p.id, p.file_hash, p.companion_path, p.active_mask_variant,
+                       CASE WHEN dr.detector_model='megadetector-v6' AND dr.input_fingerprint IS NOT NULL
+                            THEN vireo_focus_area(p.exif_data) END AS focus_area,
                        p.quality_input_recipe,
                        dr.detector_model AS run_model, dr.input_fingerprint,
                        pm.path AS stored_mask_path, pm.detector_model AS mask_model,

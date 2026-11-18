@@ -266,8 +266,8 @@ def reverse_geocode(
             # the area fallback in its place.
             raise PlacesTransientError("Place Details failed for nearby park")
         area = _named_area(lat, lng, api_key, language)
-        point_country = _country_code(area)
-        park_country = _country_code(details)
+        point_country = place_country_code(area)
+        park_country = place_country_code(details)
         if point_country and park_country and point_country != park_country:
             return {
                 **area,
@@ -294,7 +294,7 @@ def reverse_geocode(
     return _named_area(lat, lng, api_key, language)
 
 
-def _country_code(details: dict | None) -> str | None:
+def place_country_code(details: dict | None) -> str | None:
     """Read the country identity from normalized Google components."""
     for component in (details or {}).get("address_components") or []:
         if "country" in (component.get("types") or []):

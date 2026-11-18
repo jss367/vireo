@@ -34,6 +34,7 @@ from canonical_schema import (
     create_same_shot_reviews,
     create_species_choices,
     create_subject_candidates,
+    create_subject_focus,
     create_subject_ranking_analysis,
     job_history_columns,
 )
@@ -383,6 +384,23 @@ def _validate_flag_attribution_keeper(conn):
         raise RuntimeError("current_flag_attribution is missing its keeper columns")
 
 
+def _add_job_history_errors(conn):
+    if "errors" not in job_history_columns(conn):
+        conn.execute("ALTER TABLE job_history ADD COLUMN errors TEXT")
+
+
+def _add_primary_projection_policy(conn):
+    # Catalogs that already have subject focus can carry version 39 or 40
+    # without the job-history column. Ensure both schemas converge at 41.
+    _add_job_history_errors(conn)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(photo_subject_state)")}
+    for name, definition in (
+        ("min_conf", "REAL"), ("detector_model", "TEXT"), ("refresh_pending", "INTEGER NOT NULL DEFAULT 0"),
+    ):
+        if name not in columns:
+            conn.execute(f"ALTER TABLE photo_subject_state ADD COLUMN {name} {definition}")
+
+
 def _add_classifier_input_source(conn):
     columns = {row[1] for row in conn.execute("PRAGMA table_info(classifier_runs)")}
     if "input_source" not in columns:
@@ -443,7 +461,10 @@ MIGRATIONS = (
     Migration(36, "species_choices", create_species_choices),
     Migration(37, "subject_candidates", create_subject_candidates),
     Migration(38, "assignment_reviews", create_assignment_reviews),
-    Migration(39, "classifier_input_source", _add_classifier_input_source),
+    Migration(39, "job_history_errors", _add_job_history_errors),
+    Migration(40, "subject_focus", create_subject_focus),
+    Migration(41, "primary_projection_policy", _add_primary_projection_policy),
+    Migration(42, "classifier_input_source", _add_classifier_input_source),
 )
 
 

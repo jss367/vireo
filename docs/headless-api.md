@@ -185,7 +185,7 @@ Current stable set:
 | GET  | `/api/v1/photos/<id>/burst-evidence` | The burst around a photo as an evidence pack: ranked frames, feature coverage, ambiguity reasons, 1:1 crop URLs. `margin`, `focus_size`, `gap_seconds`, `max_photos`. |
 | POST | `/api/v1/photos/burst-evidence` | The same pack for an explicit `{"photo_ids": [...]}` selection (2–500 ids). |
 | POST | `/api/v1/photos/species-evidence` | Read-only identification evidence for 1–100 exact unique `photo_ids`: subjects, model candidates, score meanings, uncertainty, list provenance and bound crop URLs. No automatic continuity or assignment claim. |
-| GET  | `/api/v1/photos/<id>/focus-crop` | Unresampled JPEG window around the scored focus point. `size` (128–1024, default 512); `basis` (`auto`, `eye`, `subject`, `frame`); `center=x,y` uses normalized coordinates in the unedited upright source raster, before any crop/rotation recipe; `source` (`auto` default, `working`, `original`): working requires a usable working copy and returns 404 without decoding an original when absent; auto serves the working copy unless it is downsized against the catalog dimensions and the original can be decoded; `mask=1` shades pixels outside the SAM mask. Headers: `X-Vireo-Focus-Basis` (`eye`, `subject`, `frame`, `point`), `X-Vireo-Focus-Center`, `X-Vireo-Focus-Window`, `X-Vireo-Focus-Source` (`working_copy`, `original`), `X-Vireo-Focus-Raster-Size`, `X-Vireo-Focus-Original-Scale` (decoded pixels per original pixel, `unknown` without catalog dimensions), `X-Vireo-Focus-Mask`. |
+| GET  | `/api/v1/photos/<id>/focus-crop` | Unresampled JPEG window around the scored focus point. `size` (128–1024, default 512); `basis` (`auto`, `eye`, `subject`, `frame`); `center=x,y` uses normalized coordinates in the unedited upright source raster, before any crop/rotation recipe; `source` (`auto` default, `working`, `original`): working requires a usable working copy and returns 404 without decoding an original when absent; auto serves the working copy unless it is downsized against the catalog dimensions and the original can be decoded; `mask=1` shades pixels outside the SAM mask at the default or manual center. An unavailable, stale, or geometry-incompatible mask returns a JSON error (404). An empty valid mask shades the entire window. Headers: `X-Vireo-Focus-Basis` (`eye`, `subject`, `frame`, `point`), `X-Vireo-Focus-Center`, `X-Vireo-Focus-Window`, `X-Vireo-Focus-Source` (`working_copy`, `original`), `X-Vireo-Focus-Raster-Size`, `X-Vireo-Focus-Original-Scale` (decoded pixels per original pixel, `unknown` without catalog dimensions), `X-Vireo-Focus-Mask`. |
 | GET  | `/api/v1/species-best` | The best photos of each species within a scope, each with the decision behind its first photo. See [the best photo of each species](#the-best-photo-of-each-species). |
 | POST | `/api/v1/species-best/choose` | Record that one photo is the best of a species among others: `{"species": str, "photo_id": int, "over"?: [int], "folder_id"?, "collection_id"?, "rules"?, "source"?: str, "reason"?: str}`. |
 | GET  | `/api/v1/folders/<id>/bursts` | Every burst in one folder with coverage, the scorer's pick and ambiguity; folder-level coverage too. `margin` (relative sharpness gap for a close call, default 0.10). Folders over 5000 photos answer 400. |
@@ -481,6 +481,21 @@ Focus responses include `X-Vireo-Detection-Id` and `X-Vireo-Analysis-Key`.
 Full-frame previews and subject crops support visual review of pose, eye
 visibility, and obstructions; this feature does not introduce aesthetic weights.
 
+
+## Looking up a finished job
+
+Save the ID returned when you start a job. `GET /api/jobs/<job_id>` first checks
+the live runner. After the runner releases a job or Vireo restarts, the same
+URL returns its retained terminal record with `historical: true`. Read
+`status`, `result`, `steps`, `progress`, `errors`, and `error_count` to
+reconcile the outcome. For a chained import, follow `result.process_job_id`
+to the processing job. Its `parent_job_id` identifies the import.
+
+Historical jobs are read-only. Older records can have null progress and only
+the error messages retained in the result. A 404 means there is no live job
+or retained terminal record visible for that ID. A 503 with code
+`job_history_unavailable` means the catalog read failed. Retry the lookup
+with the same ID.
 
 ## Exporting photos with metadata
 

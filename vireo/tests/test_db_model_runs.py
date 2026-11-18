@@ -228,6 +228,33 @@ def test_get_detector_run_photo_ids_runtime_filter(db):
     ) == {match, legacy, reviewed}
 
 
+def test_detector_input_checks_only_parse_cache_candidates_in_bounded_batches(db):
+    from cache_identity import catalog_detector_input
+
+    model = "megadetector-v6"
+    file_hash = "a" * 64
+    _, fingerprint = catalog_detector_input(file_hash, model, None)
+    candidate_ids = range(1, 1002)
+    stale = candidate_ids[-1]
+    other_runtime = stale + 1
+    parsed = []
+    db.conn.create_function("vireo_focus_area", 1, parsed.append)
+    for pid in range(1, other_runtime + 1):
+        db.conn.execute(
+            "INSERT INTO photos (id, file_hash, exif_data) VALUES (?, ?, ?)",
+            (pid, file_hash, str(pid)),
+        )
+        db.model_runs.record_detector_run(
+            pid, model, 0, runtime_fingerprint="old" if pid == other_runtime else "current",
+            input_fingerprint="b" * 64 if pid == stale else fingerprint,
+        )
+
+    db.commit()
+    db.conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+    assert db.model_runs.get_detector_run_photo_ids(model, "current") == set(candidate_ids) - {stale}
+    assert sorted(map(int, parsed)) == list(candidate_ids)
+
+
 # -- classifier runs ----------------------------------------------------------
 
 

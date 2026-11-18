@@ -36,7 +36,7 @@ CROSS_WORKSPACE_REVIEWS = {
 RAW_READS = {
     # Primary-region selection is shared with global processing stages. Its
     # raw-confidence tie-break must not vary with workspace species decisions.
-    'repositories/subject_order.py:primary_order_sql': 1,
+    'repositories/subject_order.py:primary_terms': 1,
     # Scope/id and latest-label lookups embedded in otherwise reviewed reads.
     'repositories/collections.py:_RuleQueryBuilder._prediction_exists': 1,
     'repositories/keyword_provenance.py:_reject_detection_alternatives': 1,

@@ -2,6 +2,7 @@
 
 import math
 
+from local_masks import ASPECT_TOLERANCE
 from services import detection_store
 
 
@@ -124,6 +125,9 @@ def shade_focus_mask(crop, mask_bytes, image_size, window, image_api):
     import io
 
     mask = image_api.open(io.BytesIO(mask_bytes)).convert("L")
+    mask_ratio = mask.size[0] / mask.size[1]
+    if abs(mask_ratio / (image_size[0] / image_size[1]) - 1) > ASPECT_TOLERANCE:
+        raise ValueError("Mask geometry differs from the upright source")
     mask = mask.resize(image_size, image_api.NEAREST).crop(window)
     mask = mask.point(lambda v: 255 if v > 127 else 0)
     shaded = crop.point(lambda v: int(v * 0.35))

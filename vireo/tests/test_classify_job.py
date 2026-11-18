@@ -1154,6 +1154,7 @@ def test_detect_batch_handles_same_batch_detection_id_collapse(tmp_path):
     ]
 
     mock_db = MagicMock()
+    mock_db.get_effective_config.return_value = {"detector_confidence": 0.2}
     mock_db.detections.write_batch.return_value = [101]
     mock_db.detections.get.return_value = [{
         "id": 101,
@@ -1191,7 +1192,8 @@ def test_detect_batch_handles_same_batch_detection_id_collapse(tmp_path):
         "category": "animal",
         "detector_model": "megadetector-v6",
     }]
-    mock_db.detections.get.assert_called_once_with(1, 0, "megadetector-v6", include_rejected=False)
+    mock_db.detections.get.assert_any_call(1, 0, "megadetector-v6", include_rejected=False)
+    mock_db.detections.get.assert_any_call(1, 0.2, None, include_rejected=False)
 
 
 def test_detect_batch_skips_empty_photo_on_rerun(tmp_path, monkeypatch):

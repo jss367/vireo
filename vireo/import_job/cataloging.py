@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from import_job.copy_verify import DestReadCancelled, _rehash_dest_or_none
 from import_job.progress import _make_working_copy_status
 from import_job.state import _reclassify_landed_failed
+from import_job.timing import WORKING_COPIES, timed
 from scanner import EMPTY_FILE_SHA256, ScanControl, ScanHooks, ScanOptions
 
 if TYPE_CHECKING:
@@ -600,14 +601,15 @@ def _extract_deferred_working_copies(
         # catalog entries the user never sees.
         state.wc_failed_paths = []
         try:
-            _extract_working_copies(
-                db, params.vireo_dir,
-                scope=[(d, "exact") for d in sorted(state.wc_dest_folders)],
-                source_paths=state.wc_source_paths,
-                status_callback=_make_working_copy_status(job, runner, state),
-                cancel_check=lambda: runner.is_cancelled(job["id"]),
-                failed_paths_sink=state.wc_failed_paths,
-            )
+            with timed(state, WORKING_COPIES):
+                _extract_working_copies(
+                    db, params.vireo_dir,
+                    scope=[(d, "exact") for d in sorted(state.wc_dest_folders)],
+                    source_paths=state.wc_source_paths,
+                    status_callback=_make_working_copy_status(job, runner, state),
+                    cancel_check=lambda: runner.is_cancelled(job["id"]),
+                    failed_paths_sink=state.wc_failed_paths,
+                )
         except Exception as exc:  # broad: working copies are derived and re-extracted later; the imported originals stand and the result's notice says what happened
             log.exception(
                 "Working-copy extraction failed for %s",

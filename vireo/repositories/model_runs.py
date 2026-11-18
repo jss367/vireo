@@ -34,6 +34,8 @@ import sqlite3
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from typing import Any
 
+from sql_chunks import chunked
+
 # Chunk to stay under SQLITE_MAX_VARIABLE_NUMBER (default 999).
 _UNCLASSIFIABLE_CHUNK = 500
 
@@ -208,6 +210,29 @@ class ModelRunsRepository:
         ).fetchone()
         return row is not None
 
+    def stale_detector_input_ids(self, photo_ids: Sequence[int]) -> set[int]:
+        """Find portable MegaDetector runs whose source or focus changed, except reviewed runs.
+
+        Pass one bounded batch of candidate photo IDs.
+        Legacy runs do not carry a portable input to compare.
+        """
+        from cache_identity import catalog_detector_input, is_sha256
+
+        placeholders = ",".join("?" for _ in photo_ids)
+        rows = self.conn.execute(f"""SELECT dr.photo_id, dr.input_fingerprint, p.file_hash,
+                vireo_focus_area(p.exif_data) AS focus_area
+            FROM detector_runs dr JOIN photos p ON p.id=dr.photo_id
+            WHERE dr.detector_model='megadetector-v6' AND length(dr.input_fingerprint)=64
+              AND length(p.file_hash)=64 AND dr.photo_id IN ({placeholders})""", photo_ids)
+        stale = set()
+        for row in rows:
+            if not (is_sha256(row["file_hash"]) and is_sha256(row["input_fingerprint"])):
+                continue
+            _, expected = catalog_detector_input(row["file_hash"], "megadetector-v6", row["focus_area"])
+            if expected != row["input_fingerprint"] and not self.detector_run_is_pinned(row["photo_id"], "megadetector-v6"):
+                stale.add(row["photo_id"])
+        return stale
+
     def get_detector_run_photo_ids(
         self, detector_model: str, runtime_fingerprint: str | None = None,
     ) -> set[int]:
@@ -255,8 +280,12 @@ class ModelRunsRepository:
                                  WHERE d.photo_id = dr.photo_id
                                    AND d.detector_model = dr.detector_model))""",
             params,
-        ).fetchall()
-        return {r["photo_id"] for r in rows}
+        )
+        ids = {r["photo_id"] for r in rows}
+        if detector_model == "megadetector-v6":
+            for candidates in chunked(list(ids)):
+                ids.difference_update(self.stale_detector_input_ids(candidates))
+        return ids
 
     def record_classifier_run(
         self,

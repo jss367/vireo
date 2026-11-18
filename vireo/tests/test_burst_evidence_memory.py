@@ -237,10 +237,11 @@ def focus(photo=None, args=None, size=(3000, 2000), enabled=True, mask_path=None
 
     pil = types.SimpleNamespace(
         NEAREST=0,
-        open=lambda buf: Image((100, 100), events, "mask"),
+        open=lambda buf: Image((150, 100), events, "mask"),
         composite=lambda crop, shaded, mask: events.append(("composite",)) or crop,
     )
     helpers = {
+        "ASPECT_TOLERANCE": 0.01,
         "math": math,
         "detection_store": types.SimpleNamespace(
             get_detections=lambda db, pid: db.get_detections(pid),
@@ -305,7 +306,7 @@ def focus(photo=None, args=None, size=(3000, 2000), enabled=True, mask_path=None
     ns["get_db"] = lambda: db
     nested("web/media_common.py", ns, {"_focus_source_image"})
     nested("web/media_crops.py", ns, {"serve_focus_crop", "_focus_mask_bytes", "_validated_focus_source", "_focus_geometry_error",
-                                          "_needs_primary_focus_subject", "_requested_focus_mask"})
+                                          "_needs_primary_focus_subject", "_requested_focus_mask", "_focus_masked_crop"})
     route = types.SimpleNamespace(_get_db=ns["get_db"], _config=ns["config"], _db_path=ns["db_path"], _json_error=ns["json_error"])
     return ns["serve_focus_crop"](route, 1), events
 
@@ -631,6 +632,7 @@ def test_active_prompt_requires_current_variant_path_model_and_geometry():
         assert repo.active_prompt_detection(1, include_mask_path=True)["active_mask_path"] == '/invented/mask'
         assert repo.active_prompt_detection(999) is None
         for sql in [
+            "UPDATE detections SET detector_model='megadetector-v6' WHERE id=8",
             "UPDATE photos SET active_mask_variant='old'",
             "UPDATE photos SET mask_path='/invented/other-mask'",
             "UPDATE photo_masks SET detector_model='missing-model'",
