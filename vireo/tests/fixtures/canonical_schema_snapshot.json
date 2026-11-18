@@ -1042,7 +1042,7 @@
    "table",
    "subject_mask_reviews",
    "subject_mask_reviews",
-   "CREATE TABLE subject_mask_reviews (\n        id INTEGER PRIMARY KEY,\n        photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,\n        detection_id INTEGER NOT NULL,\n        source_key TEXT NOT NULL,\n        mask_digest TEXT NOT NULL,\n        verdict TEXT NOT NULL CHECK(verdict IN ('valid', 'invalid')),\n        box TEXT NOT NULL,\n        mask_png BLOB NOT NULL,\n        UNIQUE(photo_id, detection_id, source_key, mask_digest)\n    )"
+   "CREATE TABLE subject_mask_reviews (\n        id INTEGER PRIMARY KEY,\n        photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,\n        detection_id INTEGER NOT NULL,\n        source_key TEXT NOT NULL,\n        mask_digest TEXT NOT NULL,\n        verdict TEXT NOT NULL CHECK(verdict IN ('valid', 'invalid')),\n        revision INTEGER NOT NULL DEFAULT 1,\n        box TEXT NOT NULL,\n        mask_png BLOB NOT NULL,\n        UNIQUE(photo_id, detection_id, source_key, mask_digest)\n    )"
   ],
   [
    "index",
