@@ -4572,7 +4572,7 @@ def test_extract_plan_counts_detail_measurements_as_work(tmp_path):
     assert extract["detail"]["pending"] == 2
     assert extract["detail"]["detail_pending"] == 1
 
-    db.masks_features.set_subject_detail(p_unmeasured, "sam2-small", 12000.0, 800.0)
+    db.masks_features.set_subject_detail(p_unmeasured, "sam2-small", 12000.0, 800.0, expected_path="/m/unmeasured.png")
     _mark_sam_done(db, p_missing, "/m/missing.png")
     extract = compute_plan(db, _params(), str(tmp_path / "test.db"))["stages"]["Extract"]
     assert extract["state"] == "done-prior"

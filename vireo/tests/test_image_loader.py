@@ -5,6 +5,8 @@ import os
 import sys
 from types import SimpleNamespace
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 
@@ -180,6 +182,90 @@ def test_raw_camera_rendered_mode_uses_near_full_embedded_jpeg(
     assert fake.postprocess_calls == 0
 
 
+def test_subject_detail_source_is_the_embedded_jpeg_whatever_the_subject_size(
+    tmp_path, monkeypatch,
+):
+    """The detail of a subject under the scale needs more than the frame
+    holds. Read JPEG-first, that request falls through to the demosaic, a
+    different rendering from the one larger subjects are measured on."""
+    from image_loader import load_image
+    from quality import load_detail_source
+
+    nef = tmp_path / "test.nef"
+    nef.write_bytes(b"fake NEF content")
+    fake = _install_fake_raw(monkeypatch, _FakeRaw(
+        embedded_jpeg=_jpeg_bytes((5392, 3592)),
+        sensor_size=(5408, 3608),
+        postprocess_size=(5408, 3608),
+    ))
+
+    small = load_detail_source(str(nef), 11284, (5408, 3608))
+    assert small.size == (5392, 3592)
+    large = load_detail_source(str(nef), 2731, (5408, 3608))
+    assert max(large.size) == 2731
+    assert fake.postprocess_calls == 0
+
+    assert load_image(str(nef), max_size=11284).size == (5408, 3608)
+    assert fake.postprocess_calls == 1
+
+
+@pytest.mark.parametrize("preview_size,uses_preview", [
+    ((2048, 1365), False),
+    ((6000, 3376), False),
+    ((5940, 3960), True),
+    ((6000, 4000), True),
+])
+@pytest.mark.parametrize("needed", [1920, 8000])
+def test_detail_source_preview_eligibility_is_independent_of_request_size(
+    tmp_path, monkeypatch, preview_size, uses_preview, needed,
+):
+    """Reduced and cropped previews cannot change the rendering by subject size."""
+    from quality import load_detail_source
+
+    source = tmp_path / "synthetic.nef"
+    source.write_bytes(b"fake RAW; imread is patched")
+    fake = _install_fake_raw(monkeypatch, _FakeRaw(
+        embedded_jpeg=_jpeg_bytes(preview_size, color="green"),
+        sensor_size=(6000, 4000),
+        postprocess_size=(6000, 4000),
+    ))
+
+    with load_detail_source(str(source), needed, (6000, 4000)) as image:
+        assert fake.postprocess_calls == (0 if uses_preview else 1)
+        if not uses_preview:
+            assert fake.postprocess_kwargs[0]["half_size"] is False
+        # The synthetic demosaic is black; the embedded JPEG is green.
+        assert (image.getpixel((0, 0))[1] > 100) == uses_preview
+        source_edge = preview_size[0] if uses_preview else 6000
+        assert max(image.size) == min(needed, source_edge)
+
+
+@pytest.mark.parametrize("preview_size", [(1200, 676), (900, 600)])
+def test_mask_proxy_and_detail_share_frame_after_preview_rejection(tmp_path, monkeypatch, preview_size):
+    import numpy as np
+    from image_loader import load_image
+    from masking import render_proxy, save_mask
+    from PIL import Image
+    from quality import MASK_CACHE_INVALID, measure_cached_subject_detail
+
+    source = tmp_path / "frame.nef"
+    source.write_bytes(b"synthetic RAW")
+    _install_fake_raw(monkeypatch, _FakeRaw(
+        embedded_jpeg=_jpeg_bytes(preview_size), sensor_size=(1200, 800), postprocess_size=(1200, 800),
+    ))
+    with load_image(source, max_size=600) as legacy:
+        stale = tmp_path / "legacy-mask.png"
+        Image.new("L", legacy.size, 255).save(stale)
+    assert measure_cached_subject_detail(stale, source) is MASK_CACHE_INVALID
+
+    with render_proxy(source, longest_edge=600) as aligned:
+        assert aligned.size == (600, 400)
+        assert aligned.getpixel((0, 0)) == (0, 0, 0)
+        mask = np.ones((aligned.height, aligned.width), dtype=bool)
+    saved = save_mask(mask, str(tmp_path), 1, "sam2-small")
+    assert measure_cached_subject_detail(saved, source, (1200, 800))["subject_detail_px"] == 1200
+
+
 def test_raw_camera_rendered_mode_rejects_cropped_embedded_jpeg(
     tmp_path, monkeypatch,
 ):
@@ -202,6 +288,21 @@ def test_raw_camera_rendered_mode_rejects_cropped_embedded_jpeg(
     assert result is not None
     assert result.size == (6000, 4000)
     assert fake.postprocess_calls == 1
+
+
+def test_aligned_analysis_does_not_fall_back_to_a_different_raw_frame(tmp_path, monkeypatch):
+    from image_loader import RAW_DECODE_ALIGNED, RAW_DECODE_CAMERA_RENDERED, load_image
+
+    source = tmp_path / "synthetic.nef"
+    source.write_bytes(b"synthetic RAW")
+    _install_fake_raw(monkeypatch, _FakeRaw(
+        embedded_jpeg=_jpeg_bytes((1600, 800)), sensor_size=(1600, 1000),
+        postprocess_error=RuntimeError("synthetic decode failure"),
+    ))
+    # Browsing may still display the rejected preview; coordinate-bearing analysis cannot.
+    with load_image(source, max_size=1024, raw_decode=RAW_DECODE_CAMERA_RENDERED) as browsing:
+        assert browsing.size == (1024, 512)
+    assert load_image(source, max_size=1024, raw_decode=RAW_DECODE_ALIGNED) is None
 
 
 def test_raw_preserve_highlights_mode_bypasses_embedded_jpeg(tmp_path, monkeypatch):

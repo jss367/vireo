@@ -13,6 +13,7 @@ import threading
 import numpy as np
 import onnx_runtime
 from app_paths import default_path
+from detection_id import PromptFrameError, require_original_box
 from PIL import Image, ImageFilter
 from resource_ledger import ResourceWaitCancelled
 from services.hf_cache_lock import cache_access
@@ -426,10 +427,63 @@ def save_mask(mask, masks_dir, photo_id, variant):
     """
     os.makedirs(masks_dir, exist_ok=True)
     path = os.path.join(masks_dir, f"{photo_id}.{variant}.png")
-    # Convert bool mask to uint8 (0 or 255)
-    mask_img = Image.fromarray((mask.astype(np.uint8) * 255), mode="L")
-    mask_img.save(path, format="PNG")
+    write_mask_png(mask, path)
     return path
+
+
+def write_mask_png(mask, destination):
+    """Encode the segmented frame provenance with the mask pixels."""
+    from PIL.PngImagePlugin import PngInfo
+
+    metadata = PngInfo()
+    metadata.add_text("vireo_mask_frame", "camera_rendered")
+    metadata.add_text("vireo_prompt_frame", "camera_rendered")
+    Image.fromarray(mask.astype(np.uint8) * 255).save(destination, format="PNG", pnginfo=metadata)
+
+
+def require_aligned_detector_prompt(image, detector_runtime, *, detector_model=None):
+    """Refuse unproven old boxes when RAW preview and sensor frames differ.
+
+    The current detector runtime uses the same camera-rendered frame as SAM.
+    Historical runtimes can describe either the preview or the tiled sensor
+    pass; their boxes have no crop transform. Preserve those reviewed boxes
+    and require an explicit detector rerun instead of guessing a mapping.
+    """
+    require_original_box(detector_runtime)
+    from computation_cache import megadetector_runtime_fingerprint
+    from detection_id import ALIGNED_REVIEWER_RUNTIME, prompt_frame_id
+
+    frame_id = prompt_frame_id(detector_runtime)
+    if frame_id is not None:
+        if frame_id == getattr(image, "info", {}).get("vireo_subject_frame_id"):
+            return
+        raise PromptFrameError("Original reviewer/detector frame changed or is unavailable; re-detect or confirm the reviewer box on the original.")
+    if detector_model == "full-image":
+        return  # Whole-frame regions are invariant to the normalized coordinate frame.
+    if detector_model == "megadetector-v6":
+        raise PromptFrameError("Detector coordinates lack original-frame proof; enable Re-classify to rerun detection on the original")
+    if detector_runtime in ("reviewer-v1", ALIGNED_REVIEWER_RUNTIME):
+        raise PromptFrameError("This reviewer box uses an unverified original frame. Open Subjects and draw the box again on the original.")
+    if not getattr(image, "info", {}).get("vireo_rejected_preview_edge"):
+        return
+    current = megadetector_runtime_fingerprint()
+    if current is None or detector_runtime != current:
+        raise PromptFrameError("Detector coordinates use an unverified RAW frame; enable Re-classify to rerun detection before subject analysis")
+
+
+def require_original_reviewer_frame(image_path, runtime, *, detector_model=None):
+    """Cached measurements cannot bypass a prompt's original-frame proof."""
+    from detection_id import prompt_frame_id
+
+    if prompt_frame_id(runtime) is None and detector_model != "megadetector-v6" and (not isinstance(runtime, str) or not runtime.startswith("reviewer")):
+        return
+    from image_loader import RAW_DECODE_ALIGNED, load_image
+
+    image = load_image(image_path, max_size=1024, raw_decode=RAW_DECODE_ALIGNED)
+    if image is None:
+        raise PromptFrameError("Original prompt frame unavailable; reconnect the original before analysis")
+    with image:
+        require_aligned_detector_prompt(image, runtime, detector_model=detector_model)
 
 
 def load_mask(masks_dir, photo_id, variant):
@@ -558,6 +612,6 @@ def render_proxy(image_path, longest_edge=1536):
     Returns:
         PIL Image or None on failure
     """
-    from image_loader import load_image
+    from image_loader import RAW_DECODE_ALIGNED, load_image
 
-    return load_image(image_path, max_size=longest_edge)
+    return load_image(image_path, max_size=longest_edge, raw_decode=RAW_DECODE_ALIGNED)

@@ -502,7 +502,7 @@ def test_subject_detail_empty_mask():
     }
 
 
-def test_measure_subject_detail_rereads_the_source_only_when_the_proxy_is_too_small(tmp_path, monkeypatch):
+def test_measure_subject_detail_reads_the_source_at_the_edge_the_scale_needs(tmp_path, monkeypatch):
     import image_loader
     from quality import DETAIL_SCALE_PX, compute_subject_detail, measure_subject_detail
 
@@ -517,19 +517,82 @@ def test_measure_subject_detail_rereads_the_source_only_when_the_proxy_is_too_sm
         return real(path, max_size=max_size, **kwargs)
 
     monkeypatch.setattr(image_loader, "load_image", recording_load)
-    # The subject spans 640 px of this proxy: enough, no reload.
-    direct = measure_subject_detail(frame, mask, source_path=str(source), frame_size=(1600, 1200))
-    assert loads == []
-    assert direct == compute_subject_detail(frame, mask, frame_size=(1600, 1200))
-    # A 400 px proxy holds the subject at 160 px: the source is read at the edge the scale needs.
-    proxy = frame.resize((400, 300), Image.LANCZOS)
-    proxy_mask = np.array(Image.fromarray(mask.astype(np.uint8) * 255).resize((400, 300), Image.NEAREST)) > 127
-    reloaded = measure_subject_detail(proxy, proxy_mask, source_path=str(source), frame_size=(1600, 1200))
+    got = measure_subject_detail(mask, source_path=str(source), frame_size=(1600, 1200))
     assert loads == [int(np.ceil(DETAIL_SCALE_PX / 0.4))]
-    assert reloaded["subject_detail"] == pytest.approx(direct["subject_detail"], rel=0.15)
-    assert reloaded["subject_detail_px"] == pytest.approx(640, abs=10)
+    assert got["subject_detail"] == pytest.approx(compute_subject_detail(frame, mask)["subject_detail"], rel=0.05)
+    assert got["subject_detail_px"] == pytest.approx(640, abs=10)
+    # A mask at another resolution (the stage's proxy, a saved PNG) names the
+    # same subject and reads the source the same way.
+    proxy_mask = np.array(Image.fromarray(mask.astype(np.uint8) * 255).resize((400, 300), Image.NEAREST)) > 127
+    from_proxy_mask = measure_subject_detail(proxy_mask, source_path=str(source), frame_size=(1600, 1200))
+    assert loads == [int(np.ceil(DETAIL_SCALE_PX / 0.4))] * 2
+    assert from_proxy_mask["subject_detail"] == pytest.approx(got["subject_detail"], rel=0.05)
     # An unreadable source leaves the measurement unmade rather than interpolated.
-    assert measure_subject_detail(proxy, proxy_mask, source_path=str(tmp_path / "gone.png")) == {}
+    assert measure_subject_detail(mask, source_path=str(tmp_path / "gone.png")) == {}
+
+
+def test_a_mask_measures_the_same_when_made_and_when_read_back_from_the_cache(tmp_path):
+    """The stage measures a fresh mask in memory and a cached one from its
+    PNG; both read the source the same way, so the stored value does not
+    depend on which run measured it."""
+    from masking import save_mask
+    from quality import measure_cached_subject_detail, measure_subject_detail
+
+    for subject_frac in (0.1, 0.4, 0.8):  # under the scale, above it, and large in a 1536 px proxy
+        frame, mask = _band_limited_scene(1600, subject_frac)
+        source = tmp_path / f"scene-{subject_frac}.png"
+        frame.save(source)
+        mask_path = save_mask(mask, str(tmp_path / "masks"), int(subject_frac * 10), "sam2-small")
+        fresh = measure_subject_detail(mask, source_path=str(source), frame_size=(1600, 1200))
+        assert measure_cached_subject_detail(mask_path, str(source), (1600, 1200)) == fresh
+        assert fresh["subject_detail"] > 0
+
+
+def test_load_detail_source_asks_for_the_whole_camera_rendering_when_the_subject_is_under_the_scale(monkeypatch):
+    """A request the frame cannot fill is made for the whole camera rendering,
+    so a small subject is never read from a different rendering than a large one."""
+    import image_loader
+    from quality import load_detail_source
+
+    calls = []
+    monkeypatch.setattr(
+        image_loader, "load_image",
+        lambda path, max_size=1024, **kwargs: calls.append((max_size, kwargs)) or "image",
+    )
+    camera = {"raw_decode": image_loader.RAW_DECODE_ALIGNED}
+    # The subject fits the scale inside the frame: a sized read the preview covers.
+    assert load_detail_source("a.nef", 2731, (5408, 3608)) == "image"
+    # Under the scale the needed edge passes the frame (and a preview that
+    # omits a border): the whole rendering, never a size no preview covers.
+    load_detail_source("a.nef", 11284, (5408, 3608))
+    load_detail_source("a.nef", 5354, (5408, 3608))
+    # The same for a portrait frame, and when the frame size is unrecorded.
+    load_detail_source("a.nef", 6000, (3608, 5408))
+    load_detail_source("a.nef", 900)
+    assert calls == [(2731, camera), (None, camera), (None, camera), (None, camera), (None, camera)]
+
+
+def test_measure_cached_subject_detail_reads_a_small_subject_from_the_whole_frame(tmp_path, monkeypatch):
+    import image_loader
+    from masking import save_mask
+    from quality import measure_cached_subject_detail
+
+    frame, mask = _band_limited_scene(1600, 0.1)  # 160 px subject: under the scale
+    source = tmp_path / "scene.png"
+    frame.save(source)
+    mask_path = save_mask(mask, str(tmp_path / "masks"), 7, "sam2-small")
+    loads = []
+    real = image_loader.load_image
+
+    def recording_load(path, max_size=1024, **kwargs):
+        loads.append((max_size, kwargs.get("raw_decode")))
+        return real(path, max_size=max_size, **kwargs)
+
+    monkeypatch.setattr(image_loader, "load_image", recording_load)
+    got = measure_cached_subject_detail(mask_path, str(source), (1600, 1200))
+    assert loads == [(None, image_loader.RAW_DECODE_ALIGNED)]
+    assert got["subject_detail"] > 0
+    assert got["subject_detail_px"] == pytest.approx(160, abs=5)
 
 
 def test_measure_cached_subject_detail_reads_the_saved_mask_and_source(tmp_path):

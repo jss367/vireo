@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 import config as cfg
 from config import config_value
+from detection_id import PromptFrameError, detection_prompt_runtime
 from services import stage_counts
 
 if TYPE_CHECKING:
@@ -25,6 +26,17 @@ if TYPE_CHECKING:
 
     from db import Database
     from services.service_types import JsonDict
+
+
+def require_current_prompt(
+    db: Database, detection_id: int, runtime: str | None, prompt: Sequence[float],
+) -> None:
+    """Check the segmented box after the first mask write holds SQLite's writer lock."""
+    row = db.detections.row(detection_id)
+    if (row is None or row["subject_verdict"] is not None
+            or detection_prompt_runtime(dict(row)) != runtime
+            or tuple(row["box_" + key] for key in "xywh") != tuple(prompt)):
+        raise PromptFrameError("Subject detection changed during mask extraction; retry on the current frame")
 
 
 def set_active_mask_variant(

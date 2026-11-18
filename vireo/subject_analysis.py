@@ -5,6 +5,7 @@ import os
 
 import numpy as np
 from config import config_value
+from detection_id import detection_prompt_runtime, require_original_box
 from PIL import Image
 from subject_ranking import analysis_key, resolve_subject, source_path
 
@@ -44,23 +45,36 @@ def measure_eye(db, photo_id, detection, image, mask, effective_cfg):
 
 
 def analyze_detection(db, photo, detection, effective_cfg, checkpoint, *, force=False, existing_mask_path=None, defer_publication=False):
-    from image_loader import load_image
-    from masking import crop_completeness, generate_mask
-    from quality import compute_all_quality_features
+    from masking import (
+        crop_completeness,
+        generate_mask,
+        render_proxy,
+        require_aligned_detector_prompt,
+        require_original_reviewer_frame,
+        write_mask_png,
+    )
+    from quality import compute_all_quality_features, saved_mask_matches_frame
 
     path = source_path(db, photo)
+    require_original_box(dict(detection).get("runtime_fingerprint"))
     key = analysis_key(path, detection, effective_cfg)
     if not force and _usable_analysis(_existing_analysis(db, detection["id"], key)):
+        require_original_reviewer_frame(path, detection_prompt_runtime(detection), detector_model=detection["detector_model"])
         return False
     checkpoint()
-    image = load_image(path, max_size=1024)
+    image = render_proxy(path, longest_edge=1024)
     if image is None:
         raise ValueError("Could not decode original for subject analysis")
     try:
+        require_aligned_detector_prompt(image, detection_prompt_runtime(detection), detector_model=detection["detector_model"])
         if existing_mask_path:
             with Image.open(existing_mask_path) as saved_mask:
-                mask = np.asarray(saved_mask.convert("L").resize(image.size, Image.Resampling.NEAREST)) > 0
-        else:
+                if saved_mask_matches_frame(saved_mask.size, saved_mask.info.get("vireo_mask_frame"), image,
+                                            prompt_frame=saved_mask.info.get("vireo_prompt_frame")):
+                    mask = np.asarray(saved_mask.convert("L").resize(image.size, Image.Resampling.NEAREST)) > 0
+                else:
+                    existing_mask_path = None
+        if not existing_mask_path:
             mask = generate_mask(image, {k: detection["box_" + k] for k in "xywh"},
                                  variant=effective_cfg.get("pipeline", {}).get("sam2_variant") or "sam2-small")
         if mask is None or not np.any(mask):
@@ -68,17 +82,18 @@ def analyze_detection(db, photo, detection, effective_cfg, checkpoint, *, force=
         checkpoint()
         features = compute_all_quality_features(image, mask)
         features.update(subject_size=float(mask.mean()), crop_complete=crop_completeness(mask))
-        features.update(_measure_detail(path, image, mask, photo))
+        features.update(_measure_detail(path, mask, photo, image.info.get("vireo_subject_frame_id")))
         features.update(measure_eye(db, photo["id"], detection, image, mask, effective_cfg))
         features["analysis"] = {"source": "original", "width": image.width, "height": image.height,
                                 "longest_edge_limit": 1024, "measurement_basis": "subject_mask"}
         buffer = io.BytesIO()
-        Image.fromarray(np.asarray(mask, dtype=np.uint8) * 255).save(buffer, format="PNG")
+        write_mask_png(mask, buffer)
         checkpoint()
         analysis = {"source_key": key, "features": features, "mask_png": buffer.getvalue()}
         if not _usable_analysis(analysis):
             raise ValueError("Required subject measurements are still incomplete")
         if defer_publication:
+            analysis["existing_mask_path"] = existing_mask_path
             return analysis
         with db.transaction(immediate=True):
             publish_analysis(db, photo, detection, analysis, effective_cfg)
@@ -87,7 +102,7 @@ def analyze_detection(db, photo, detection, effective_cfg, checkpoint, *, force=
     return True
 
 
-def _measure_detail(path, image, mask, photo):
+def _measure_detail(path, mask, photo, frame_id=None):
     """Subject detail beside the 1024 px analysis (``quality.measure_subject_detail``).
 
     A source that cannot be re-read for it leaves the measurement out, so
@@ -95,7 +110,8 @@ def _measure_detail(path, image, mask, photo):
     """
     from quality import frame_size, measure_subject_detail
 
-    return measure_subject_detail(image, mask, source_path=path, frame_size=frame_size(photo))
+    proof = {"expected_frame_id": frame_id} if frame_id is not None else {}
+    return measure_subject_detail(mask, source_path=path, frame_size=frame_size(photo), **proof)
 
 
 def _existing_analysis(db, detection_id, key):

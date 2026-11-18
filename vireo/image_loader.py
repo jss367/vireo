@@ -32,7 +32,9 @@ RAW strategy:
 """
 
 import contextlib
+import hashlib
 import io
+import json
 import logging
 import os
 import sys
@@ -66,11 +68,18 @@ SUPPORTED_EXTENSIONS = IMAGE_EXTENSIONS | RAW_EXTENSIONS
 # the one mode that returns a FloatImage from the rest.
 RAW_DECODE_JPEG_FIRST: Final = "jpeg_first"
 RAW_DECODE_CAMERA_RENDERED: Final = "camera_rendered"
+RAW_DECODE_ALIGNED: Final = "aligned_camera_rendered"
 RAW_DECODE_PRESERVE_HIGHLIGHTS: Final = "preserve_highlights"
 RAW_DECODE_LINEAR: Final = "linear"
+
+# An embedded JPEG whose two axes both reach this share of the sensor's
+# active area is the camera's full output: many cameras omit a narrow border
+# (8256x5504 against 8288x5520), so an exact match would reject them.
+NEAR_FULL_PREVIEW: Final = 0.99
 _RAW_DECODE_MODES = {
     RAW_DECODE_JPEG_FIRST,
     RAW_DECODE_CAMERA_RENDERED,
+    RAW_DECODE_ALIGNED,
     RAW_DECODE_PRESERVE_HIGHLIGHTS,
     RAW_DECODE_LINEAR,
 }
@@ -655,7 +664,7 @@ def safe_scan_walk(top, onerror=None, cancel_check=None, on_scandir_batch=None,
 @overload
 def load_image(
     file_path: str | os.PathLike[str], max_size: int | None = ...,
-    raw_decode: Literal["jpeg_first", "camera_rendered", "preserve_highlights"] = ...,
+    raw_decode: Literal["jpeg_first", "camera_rendered", "aligned_camera_rendered", "preserve_highlights"] = ...,
 ) -> Image.Image | None: ...
 
 
@@ -684,7 +693,8 @@ def load_image(file_path, max_size: int | None = 1024, raw_decode=RAW_DECODE_JPE
         file_path: Path to the image file
         max_size: Maximum dimension (longest side). None or 0 for full resolution.
         raw_decode: RAW_DECODE_JPEG_FIRST (default),
-            RAW_DECODE_CAMERA_RENDERED, RAW_DECODE_PRESERVE_HIGHLIGHTS,
+            RAW_DECODE_CAMERA_RENDERED, RAW_DECODE_ALIGNED (analysis without
+            a rejected-preview fallback), RAW_DECODE_PRESERVE_HIGHLIGHTS,
             or RAW_DECODE_LINEAR (float32 scene-linear RGB for editing).
 
     Returns:
@@ -699,6 +709,7 @@ def load_image(file_path, max_size: int | None = 1024, raw_decode=RAW_DECODE_JPE
         raise ValueError(f"raw_decode must be one of: {', '.join(sorted(_RAW_DECODE_MODES))}")
 
     try:
+        aligned_state = aligned_source_state(path) if raw_decode == RAW_DECODE_ALIGNED else None
         if ext in RAW_EXTENSIONS:
             img = (
                 _load_linear_cached(path, max_size)
@@ -729,6 +740,8 @@ def load_image(file_path, max_size: int | None = 1024, raw_decode=RAW_DECODE_JPE
         if img is None:
             return None
 
+        if aligned_state is not None:
+            img.info["vireo_subject_frame_id"] = aligned_frame_identity(path, img, aligned_state)
         if max_size and max_size > 0 and max(img.size) > max_size:
             img.thumbnail((max_size, max_size), Image.LANCZOS)
 
@@ -736,6 +749,20 @@ def load_image(file_path, max_size: int | None = 1024, raw_decode=RAW_DECODE_JPE
     except Exception as e:  # broad: decoders raise a wide set on bad files; callers treat None as unreadable
         log.warning("Failed to load image: %s — %s", file_path, e, exc_info=True)
         return None
+
+
+def aligned_source_state(path):
+    """Bind a frame to the original file generation, without exposing its path."""
+    stat = os.stat(path)
+    return (os.path.realpath(path), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+
+
+def aligned_frame_identity(path, image, before):
+    """Identify the unscaled actual rendition, independent of preview size."""
+    if aligned_source_state(path) != before:
+        raise OSError("Original changed while its subject frame was decoded")
+    basis = image.info.get("vireo_aligned_rendition", "image")
+    return hashlib.sha256(json.dumps([1, RAW_DECODE_ALIGNED, before, basis, image.size]).encode()).hexdigest()
 
 
 def _load_raw_with_retry(path, max_size, raw_decode=RAW_DECODE_JPEG_FIRST):
@@ -794,6 +821,11 @@ def _photo_field(photo, key):
         return photo[key]
     except (KeyError, IndexError):
         return None
+
+
+def subject_box_image_path(photo, vireo_dir, folders):
+    """Coordinate analysis uses the original; browsing may still use working copies."""
+    return os.path.join(folders.get(photo["folder_id"], ""), photo["filename"])
 
 
 def get_canonical_image_path(photo, vireo_dir, folders):
@@ -1114,19 +1146,20 @@ def extract_working_copy(
 def _embedded_preview_suffices(raw, embedded, max_size, raw_decode):
     """Whether the camera's embedded JPEG can stand in for a demosaic."""
     # JPEG-first browsing uses the embedded preview when it covers the
-    # requested size. Full-resolution camera-rendered browsing also accepts
-    # a preview whose two axes are within 1% of the active sensor area; many
+    # requested size. Camera-rendered reads require a preview whose two axes
+    # are within 1% of the active sensor area, at every requested size; many
     # cameras omit a narrow border (for example 8256x5504 vs 8288x5520).
     # That JPEG is the rendition used by thumbnails and fit-to-window views,
-    # so retaining it at 1:1 prevents a visible tone jump.
+    # so retaining it at 1:1 prevents a visible tone jump. A reduced preview
+    # must not switch detail measurements from JPEG to demosaic by size.
     sensor_dims = sorted((raw.sizes.width, raw.sizes.height), reverse=True)
     embedded_dims = sorted(embedded.size, reverse=True) if embedded else None
     embedded_is_near_full = bool(
         embedded_dims
         and sensor_dims[0]
         and sensor_dims[1]
-        and embedded_dims[0] >= sensor_dims[0] * 0.99
-        and embedded_dims[1] >= sensor_dims[1] * 0.99
+        and embedded_dims[0] >= sensor_dims[0] * NEAR_FULL_PREVIEW
+        and embedded_dims[1] >= sensor_dims[1] * NEAR_FULL_PREVIEW
     )
     embedded_covers_request = bool(
         embedded is not None
@@ -1135,13 +1168,11 @@ def _embedded_preview_suffices(raw, embedded, max_size, raw_decode):
         and max(embedded.size) >= max_size
     )
     return bool(
-        raw_decode in (RAW_DECODE_JPEG_FIRST, RAW_DECODE_CAMERA_RENDERED)
-        and embedded is not None
+        embedded is not None
         and (
-            embedded_covers_request
+            (raw_decode == RAW_DECODE_JPEG_FIRST and embedded_covers_request)
             or (
-                raw_decode == RAW_DECODE_CAMERA_RENDERED
-                and not max_size
+                raw_decode in (RAW_DECODE_CAMERA_RENDERED, RAW_DECODE_ALIGNED)
                 and embedded_is_near_full
             )
         )
@@ -1178,8 +1209,11 @@ def _load_raw(path, max_size, raw_decode=RAW_DECODE_JPEG_FIRST):
          fall back to the embedded JPEG even if smaller than max_size.
 
     Camera-rendered:
-      1. Use a near-full embedded JPEG for full-resolution display requests.
-      2. Otherwise follow the JPEG-first demosaic/fallback behavior.
+      1. Use a near-full embedded JPEG regardless of the requested size.
+      2. Otherwise demosaic at full resolution before resizing, falling back to the JPEG only if decode fails.
+
+    Aligned camera-rendered analysis uses the same source selection, but
+    never falls back to a rejected preview when the demosaic fails.
 
     Preserve-highlights:
       1. Demosaic the RAW with auto-bright disabled and highlight blending on.
@@ -1196,6 +1230,7 @@ def _load_raw(path, max_size, raw_decode=RAW_DECODE_JPEG_FIRST):
         )
 
         if _embedded_preview_suffices(raw, embedded, max_size, raw_decode):
+            embedded.info["vireo_aligned_rendition"] = "embedded-preview"
             return embedded
 
         # Otherwise demosaic the sensor data, falling back to the embedded
@@ -1203,12 +1238,22 @@ def _load_raw(path, max_size, raw_decode=RAW_DECODE_JPEG_FIRST):
         try:
             if raw_decode == RAW_DECODE_LINEAR:
                 return _postprocess_raw_linear(raw)
-            return _postprocess_raw(
+            image = _postprocess_raw(
                 raw,
-                max_size,
+                None if raw_decode in (RAW_DECODE_CAMERA_RENDERED, RAW_DECODE_ALIGNED) else max_size,
                 preserve_highlights=raw_decode == RAW_DECODE_PRESERVE_HIGHLIGHTS,
             )
+            image.info["vireo_aligned_rendition"] = "sensor"
+            if raw_decode in (RAW_DECODE_CAMERA_RENDERED, RAW_DECODE_ALIGNED) and embedded is not None:
+                # Legacy JPEG-first masks at or below this size used the rejected preview.
+                image.info["vireo_rejected_preview_edge"] = max(embedded.size)
+            return image
         except Exception as e:  # broad: libraw raises undocumented errors; the embedded JPEG is the fallback, else re-raise
+            if raw_decode == RAW_DECODE_ALIGNED:
+                # Analysis coordinates cannot fall back to a rejected preview crop.
+                if embedded is not None:
+                    embedded.close()
+                raise
             if raw_decode == RAW_DECODE_LINEAR:
                 # A failed unpack leaves this LibRaw handle refusing further
                 # calls (LibRawOutOfOrderCallError), so extract_thumb() on it

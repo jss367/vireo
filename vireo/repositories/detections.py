@@ -129,11 +129,17 @@ class DetectionsRepository:
                 unique[det_id] = (det, category, idx)
 
         from repositories.subjects import SubjectsRepository
+        if detector_model == "megadetector-v6" and any(d.get("frame_id") for d in detections):
+            # A fresh pass can replace rows before this UPSERT. Equal prompts
+            # alone cannot bind an older cached PNG to this pass's rendition.
+            self.conn.execute("DELETE FROM photo_masks WHERE photo_id=? AND detector_model=?", (photo_id, detector_model))
+            SubjectsRepository(self.conn).clear_primary_features(photo_id)
         focus = SubjectsRepository(self.conn).focus_point(photo_id) if ordered_ids and detector_model != "full-image" else None
         ids = []
         for det_id in ordered_ids:
             det, category, _idx = unique[det_id]
             box = det["box"]
+            frame_id = self._frame_identity(photo_id, detector_model, det_id, runtime_fingerprint, det.get("frame_id"))
             # A person/vehicle region the classifier recognized as an animal
             # (``subject_candidates.promoted``) keeps its ``animal`` category
             # when the detector writes the same region again: the id is
@@ -146,13 +152,14 @@ class DetectionsRepository:
             # pipeline has already written for this detection.
             self.conn.execute(
                 """INSERT INTO detections
-                     (id, photo_id, detector_model, runtime_fingerprint,
+                     (id, photo_id, detector_model, runtime_fingerprint, frame_id,
                       box_x, box_y, box_w, box_h, detector_confidence, category)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(id) DO UPDATE SET
                      photo_id = excluded.photo_id,
                      detector_model = excluded.detector_model,
                      runtime_fingerprint = excluded.runtime_fingerprint,
+                     frame_id = excluded.frame_id,
                      box_x = excluded.box_x,
                      box_y = excluded.box_y,
                      box_w = excluded.box_w,
@@ -163,7 +170,7 @@ class DetectionsRepository:
                           WHERE sc.detection_id = detections.id
                             AND sc.promoted = 1
                      ) THEN detections.category ELSE excluded.category END""",
-                (det_id, photo_id, detector_model, runtime_fingerprint,
+                (det_id, photo_id, detector_model, runtime_fingerprint, frame_id,
                  box["x"], box["y"], box["w"], box["h"],
                  det["confidence"], category),
             )
@@ -176,6 +183,20 @@ class DetectionsRepository:
         self._retire_unproduced_rows(photo_id, detector_model, runtime_fingerprint, ids)
         return ids
 
+    def _frame_identity(
+        self, photo_id: int, model: str, det_id: int, runtime: str, frame_id: object,
+    ) -> str | None:
+        from repositories.subjects import SubjectsRepository
+
+        identity = frame_id if isinstance(frame_id, str) and len(frame_id) == 64 else None
+        previous = self.conn.execute("SELECT runtime_fingerprint, frame_id FROM detections WHERE id=?", (det_id,)).fetchone()
+        if previous is not None and tuple(previous) != (runtime, identity):
+            self.conn.execute("DELETE FROM photo_masks WHERE photo_id=? AND detector_model=?", (photo_id, model))
+            subjects = SubjectsRepository(self.conn)
+            subjects.clear_primary_features(photo_id)
+            subjects.clear_analysis(det_id)
+        return identity
+
     def _retire_unproduced_rows(
         self, photo_id: int, detector_model: str, runtime_fingerprint: str,
         ids: Sequence[int],
@@ -187,9 +208,7 @@ class DetectionsRepository:
         # `new_ids` set, so neither deletes the other's rows.
         new_ids = set(ids)
         existing = [r["id"] for r in self.conn.execute(
-            """SELECT id FROM detections
-               WHERE photo_id = ? AND detector_model = ?
-                 AND runtime_fingerprint = ?""",
+            "SELECT id FROM detections WHERE photo_id=? AND detector_model=? AND runtime_fingerprint=?",
             (photo_id, detector_model, runtime_fingerprint),
         ).fetchall()]
         stale = [eid for eid in existing if eid not in new_ids]

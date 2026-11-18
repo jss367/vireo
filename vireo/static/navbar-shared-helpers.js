@@ -62,6 +62,13 @@ export async function safeFetch(url, opts, options) {
   return api.json(url, opts, options);
 }
 
+/** @param {RequestInfo | URL} url @param {RequestInit} [opts] @returns {Promise<Response>} */
+export function fetchResponse(url, opts) {
+  const api = window.Vireo && window.Vireo.api;
+  if (!api) throw new Error('Browser transport is unavailable');
+  return api.fetch(url, opts);
+}
+
 /* ---------- Native Menu Commands ----------
  * The Tauri menu bar dispatches command IDs here. Keep this layer thin:
  * call the same page helpers, modals, and API endpoints used by visible UI.

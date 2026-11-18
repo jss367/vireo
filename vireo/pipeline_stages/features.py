@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Protocol, TypedDict
 
 import numpy as np
 from config import config_value
+from detection_id import detection_prompt_runtime, require_original_box
 from pipeline_locks import (
     acquire_photo_mask,
 )
@@ -187,9 +188,9 @@ def _unmeasured_detail(count: int) -> str:
 
 
 def _invalidated_cache(count: int) -> str:
-    """'N cached mask PNG(s) could not be decoded', singular aware."""
+    """Describe masks that cannot be reused for source detail."""
     noun, verb = ("mask PNG", "was") if count == 1 else ("mask PNGs", "were")
-    return f"{count} cached {noun} {verb} unreadable"
+    return f"{count} cached {noun} {verb} unreadable or could not be aligned to the source"
 
 
 class _MaskFileStage(Protocol):
@@ -262,6 +263,8 @@ class _MaskPhoto:
     # The photo's stored ``photo_masks`` row for this SAM variant, if any.
     existing: dict[str, Any] | None = None
     mask_file_stage: _MaskFileStage | None = None
+    detector_runtime: str | None = None
+    frame_id: str | None = None
 
 
 class _MaskPass:
@@ -351,6 +354,8 @@ class _MaskPass:
             crop_subject,
             generate_mask,
             render_proxy,
+            require_aligned_detector_prompt,
+            require_original_reviewer_frame,
             save_mask,
         )
         from quality import (
@@ -368,6 +373,8 @@ class _MaskPass:
         self.crop_subject = crop_subject
         self.generate_mask = generate_mask
         self.render_proxy = render_proxy
+        self.require_aligned_detector_prompt = require_aligned_detector_prompt
+        self.require_original_reviewer_frame = require_original_reviewer_frame
         self.save_mask = save_mask
         self.compute_all_quality_features = compute_all_quality_features
         self.measure_subject_detail = measure_subject_detail
@@ -1005,9 +1012,12 @@ class _MaskPass:
             self.skipped += 1
             return _NEXT_PHOTO
         selected = current[0]
+        item.entry["detection_id"] = selected["id"]
+        item.detector_runtime = detection_prompt_runtime(selected)
         item.det_box = {k: selected["box_" + k] for k in "xywh"}
         item.entry["detector_model"] = selected["detector_model"]
         item.entry["prompt"] = tuple(selected["box_" + k] for k in "xywh")
+        require_original_box(item.detector_runtime)
         if self._reuse_cached_mask(item):
             invalidated = False
             if item.existing is not None and item.existing["subject_detail"] is None:
@@ -1021,17 +1031,8 @@ class _MaskPass:
             self.processed = i + 1
             return _NEXT_PHOTO
 
-        # Past the cache check, so this photo genuinely
-        # needs a source read. If its folder was already
-        # proven unreachable, account for it without
-        # paying for a read we know will fail — but only
-        # here, after the cache branch: a cached mask
-        # only stats the local mask file, so it succeeds
-        # even when the source volume is gone and must
-        # still count as masked. Progress
-        # is pushed too, otherwise the bar freezes on the
-        # photo the outage started on while the stage
-        # walks the rest of the worklist.
+        # Check the offline latch after the local mask cache so an unreachable
+        # source still counts as masked when its cached result is usable.
         if item.photo["folder_id"] in self.em_offline_folder_ids:
             self.outcomes.record(item.photo_id, "source_offline")
             self.em_unreadable += 1
@@ -1072,8 +1073,7 @@ class _MaskPass:
         # the semaphore here, through SAM weight load + image
         # preprocessing + prompt-coord math, would block other
         # pipelines' GPU work for CPU-only phases.
-        with self._timed("segment"):
-            mask = self.generate_mask(proxy, item.det_box, variant=self.sam2_variant)
+        mask = self._generate_aligned_mask(item, proxy)
         if mask is None:
             self.outcomes.record(item.photo_id, "sam_no_mask")
             self.skipped += 1
@@ -1128,6 +1128,7 @@ class _MaskPass:
         )
         if existing is None:
             return False
+        self.require_original_reviewer_frame(item.image_path, item.detector_runtime, detector_model=item.entry.get("detector_model"))
         cached_prompt = (
             existing["prompt_x"], existing["prompt_y"],
             existing["prompt_w"], existing["prompt_h"],
@@ -1209,6 +1210,12 @@ class _MaskPass:
         self.em_offline_folder_ids.add(item.photo["folder_id"])
         return True
 
+    def _generate_aligned_mask(self, item: _MaskPhoto, proxy: Image.Image) -> np.ndarray | None:
+        with self._timed("segment"):
+            item.frame_id = getattr(proxy, "info", {}).get("vireo_subject_frame_id")
+            self.require_aligned_detector_prompt(proxy, item.detector_runtime, detector_model=item.entry.get("detector_model"))
+            return self.generate_mask(proxy, item.det_box, variant=self.sam2_variant)
+
     def _analyze_and_embed(
         self, item: _MaskPhoto, proxy: Image.Image, mask: np.ndarray,
     ) -> tuple[float, dict[str, Any], dict[str, Any] | None, tuple[bytes | None, bytes]]:
@@ -1270,23 +1277,23 @@ class _MaskPass:
                 analysis_report.update(self.raw_session.source_metadata())
                 features = scoring_features(analysis_report)
                 features["quality_input_recipe"] = RECIPE
-        features.update(self._measure_detail(item, proxy, mask))
+        features.update(self._measure_detail(item, mask))
         return completeness, features, analysis_report
 
-    def _measure_detail(
-        self, item: _MaskPhoto, proxy: Image.Image, mask: np.ndarray,
-    ) -> dict[str, Any]:
+    def _measure_detail(self, item: _MaskPhoto, mask: np.ndarray) -> dict[str, Any]:
         """Subject detail for a freshly made mask (``quality.measure_subject_detail``).
 
         A source that cannot be re-read for it leaves the measurement
         unmade, which the next run treats as pending work. Empty results
-        (the source went unreachable between the proxy decode and this
-        larger-edge re-read) also credit ``detail_unreadable`` so finalize
+        (the source went unreachable between the proxy decode and the
+        measurement's own read of it) also credit ``detail_unreadable`` so finalize
         does not report "completed" with planned work left behind.
         """
         with self._timed("detail"):
+            proof = {"expected_frame_id": item.frame_id} if item.frame_id is not None else {}
             measured = self.measure_subject_detail(
-                proxy, mask, source_path=item.image_path, frame_size=self.frame_size(item.photo),
+                mask, source_path=item.image_path, frame_size=self.frame_size(item.photo),
+                **proof,
             )
         if not measured:
             self.detail_unreadable += 1
@@ -1317,8 +1324,13 @@ class _MaskPass:
             self.detail_unreadable += 1
             return False
         with self._timed("detail"):
+            from detection_id import prompt_frame_id
+
+            frame_id = prompt_frame_id(item.detector_runtime)
+            proof = {"expected_frame_id": frame_id} if frame_id is not None else {}
             measured = self.measure_cached_subject_detail(
                 existing["path"], item.image_path, self.frame_size(item.photo),
+                **proof,
             )
         if measured is self.mask_cache_invalid:
             dropped = self.thread_db.masks_features.drop_cache_entry(
@@ -1336,6 +1348,10 @@ class _MaskPass:
             return False
         self.thread_db.masks_features.set_subject_detail(
             item.photo_id, self.sam2_variant, measured["subject_detail"], measured["subject_detail_px"],
+            expected_path=existing["path"],
+        )
+        subject_masks.require_current_prompt(
+            self.thread_db, item.entry["detection_id"], item.detector_runtime, item.entry["prompt"],
         )
         self.thread_db.commit_with_retry()
         self.detail_measured += 1
@@ -1392,6 +1408,9 @@ class _MaskPass:
                 subject_detail=features.pop("subject_detail", None),
                 subject_detail_px=features.pop("subject_detail_px", None),
             ),
+        )
+        subject_masks.require_current_prompt(
+            thread_db, entry["detection_id"], item.detector_runtime, entry["prompt"],
         )
         subject_masks.set_active_mask_variant(
             thread_db, photo_id, self.sam2_variant,

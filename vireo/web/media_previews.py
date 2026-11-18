@@ -229,6 +229,24 @@ class _PreviewServer:
             return fixed  # 0 = "full" — handled by /original path
         return fixed | {int(pm)}
 
+    def _serve_subject_frame(self, photo_id: int, size: int) -> ResponseReturnValue:
+        """Serve the original in the coordinate system used for subject analysis."""
+        import io
+
+        from services.subject_frames import issue_frame_token, render_subject_frame
+
+        db = self._get_db()
+        try:
+            image, identity = render_subject_frame(db, photo_id, size)
+        except ValueError as error:
+            return str(error), 404
+        with image, io.BytesIO() as data:
+            image.save(data, format="JPEG", quality=90)
+            response = Response(data.getvalue(), mimetype="image/jpeg")
+        response.cache_control.no_store = True
+        response.headers["X-Vireo-Subject-Frame"] = issue_frame_token(db, photo_id, identity)
+        return response
+
     def _serve_source_frame(self, photo_id: int, size: int) -> ResponseReturnValue:
         """Serve the cached upright, unedited frame used for manual placement."""
         import config as cfg
@@ -555,6 +573,8 @@ class _PreviewServer:
             return "Invalid size", 400
         if size not in self.allowed_preview_sizes():
             return "Unsupported size", 400
+        if request.args.get("view") == "subject":
+            return self._serve_subject_frame(photo_id, size)
         if request.args.get("view") == "source":
             return self._serve_source_frame(photo_id, size)
         return self._serve_preview(photo_id, size, _prepare_source=_prepare_source)

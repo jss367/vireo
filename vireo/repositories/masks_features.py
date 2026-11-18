@@ -183,6 +183,11 @@ class MasksFeaturesRepository:
         """Delete a mask file, only inside the masks directory."""
         safe_remove_mask_file(self.masks_dir, path)
 
+    def retire_prompt_masks(self, photo_id: int, detector_model: str) -> None:
+        """Retire derived cache rows while preserving immutable mask files/history."""
+        self.conn.execute("DELETE FROM photo_masks WHERE photo_id=? AND detector_model=?",
+                          (photo_id, detector_model))
+
     def drop_cache_entry(
         self, photo_id: int, variant: str, path: str | None,
     ) -> bool:
@@ -392,18 +397,22 @@ class MasksFeaturesRepository:
 
     def set_subject_detail(
         self, photo_id: int, variant: str, subject_detail: float, subject_detail_px: float | None,
+        *, expected_path: str,
     ) -> None:
         """Record a later detail measurement on an existing mask row.
 
         The mask stage measures cached masks that predate the measurement
         without rerunning SAM. The photos row follows only while the
         variant is the photo's active one, so the denormalized columns
-        never describe another variant's mask. Does not commit.
+        never describe another variant's mask. Match the measured file so a
+        concurrent eviction or replacement leaves the new state untouched. Does not commit.
         """
-        self.conn.execute(
-            "UPDATE photo_masks SET subject_detail=?, subject_detail_px=? WHERE photo_id=? AND variant=?",
-            (subject_detail, subject_detail_px, photo_id, variant),
+        updated = self.conn.execute(
+            "UPDATE photo_masks SET subject_detail=?, subject_detail_px=? WHERE photo_id=? AND variant=? AND path=?",
+            (subject_detail, subject_detail_px, photo_id, variant, expected_path),
         )
+        if updated.rowcount == 0:
+            raise ValueError("Cached mask changed during detail measurement; retry mask extraction")
         self.conn.execute(
             "UPDATE photos SET subject_detail=?, subject_detail_px=? "
             "WHERE id=? AND active_mask_variant=?",

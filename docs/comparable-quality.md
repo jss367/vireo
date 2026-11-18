@@ -20,12 +20,81 @@ edge reads real pixels, the image is resampled with LANCZOS and the mask with
 NEAREST, and the mean squared gradient is taken over the resampled mask.
 
 The frame is decoded at whatever size puts the subject at that scale
-(`quality.detail_decode_edge`, capped at the native size). The 1536 px proxy
-the mask stage already holds serves when the subject spans 512 px in it; in
-this catalog the median subject covers 1.25% of the frame, about 170 px in
-the proxy, so most photos are read again from the working copy or original.
+(`quality.detail_decode_edge`; `quality.load_detail_source` reads the whole
+frame once that size reaches the native one). The source is always read
+again for it, even when the 1536 px proxy the mask stage holds would be
+large enough: in this catalog the median subject covers 1.25% of the frame,
+about 170 px in the proxy, so most photos needed the second read anyway,
+and one read path is what makes a mask measured when it is made and the
+same mask measured later from the cache store the same value. Resampled
+down from the proxy, 20 of 55 large subjects of this catalog read more than
+1% (at most 8.6%) off what the cached path stores for the same mask, while
+all 127 subjects too small for any proxy matched it exactly; and a proxy is
+a demosaic for a RAW whose embedded preview is smaller than it.
 A subject smaller than 512 px even at native resolution is upsampled and
 reads low, which is the honest answer: that frame holds little detail.
+
+### One rendering per file
+
+A RAW file holds two renderings of the frame: the JPEG the camera embedded,
+with its sharpening and tone curve, and whatever libraw demosaics from the
+sensor data, which is auto-brightened and unsharpened. Their gradients differ
+by a factor that changes from file to file. On 976 RAW files of this catalog
+the demosaic measured between 0.41 and 1.06 times the embedded JPEG on a Z 8
+(10th to 90th percentile, median 0.67) and between 0.59 and 1.16 times on a
+D850, so no constant converts one into the other and the detail compares only
+between photos read from the same rendering.
+
+The loader's default (`RAW_DECODE_JPEG_FIRST`) returns the embedded JPEG only
+when it covers the size asked for. A subject under 512 px asks for more than
+the frame holds, which no preview covers, so that default demosaiced every
+small subject and read every larger one from the JPEG; and where libraw
+could not decode the file (Nikon HE* on a published rawpy wheel) the small
+subject came from the JPEG after all. One 259 px subject measured 19,413
+from the JPEG and 9,773 from the demosaic.
+
+`load_detail_source` therefore asks for the camera's rendering
+(`RAW_DECODE_ALIGNED`), sized while the request stays inside the
+frame and whole (`max_size=None`) once it reaches `NEAR_FULL_PREVIEW` of the
+native edge, which is the one request a full-size preview answers at any
+subject size. Scored against 59 bursts holding both a flagged and a rejected
+frame (285 pairs) and 250 flagged against 250 rejected photos across the
+catalog:
+
+| Rendering read | Within-burst AUC | Top frame is a pick | Catalog AUC |
+| --- | --- | --- | --- |
+| JPEG for large subjects, demosaic for small | 0.877 | 52 of 59 | 0.821 |
+| Camera JPEG for every subject | 0.905 | 54 of 59 | 0.846 |
+
+Nine of those bursts had frames on both sides of the 512 px line, so frames
+of one burst were being ranked on two renderings. A RAW without a full-size
+preview is demosaiced at full resolution before resizing. If that decode fails,
+the detail measurement stays pending. Browsing can still use the embedded JPEG.
+None of this catalog's cameras (D7200, D850, Z 8) is one. Migration 46
+returns every nonempty historical detail measurement to "not measured".
+Preview dimensions were not recorded with the score: even a middle-band
+subject could have used a cropped or reduced JPEG that now demosaics, so
+subject size alone cannot certify its rendering. The mask stage remeasures aligned cached masks and regenerates masks
+whose preview framing cannot be verified. Fresh segmentation and detail
+measurement both use the camera-rendered frame. Both detector passes now
+use that frame too, and the detector runtime identity includes this decode
+recipe. Historical boxes may instead belong to a cropped preview or a
+larger tiled sensor read; no crop transform was stored. On a RAW with a
+rejected preview, subject analysis therefore requires the current detector
+runtime. Older or reviewed boxes stay intact and require an explicit
+detector rerun or a redraw on the original. A JPEG companion can have a
+different crop even when the RAW has a full-size embedded preview. Pairing
+preserves the JPEG box and its species predictions but marks its coordinates
+as unverified for the RAW. Migration 47 applies the same rule to legacy
+boxes of unknown origin on paired photos. Mask PNGs also
+record prompt provenance so an earlier camera-rendered mask made from an
+unverified box cannot be reused. Coordinate-bearing analysis uses the strict
+`aligned_camera_rendered` mode: if a full-sensor demosaic fails, a rejected
+preview is not substituted. Browsing keeps its usual preview fallback;
+analysis stays pending instead of silently changing its frame. The comparison
+analyses (`subject_ranking_analysis`) store the detail too; their key carries
+`subject_ranking.ANALYSIS_RECIPE_VERSION` (9), raised with this change, so an
+analysis made before it no longer matches and the subject is analysed again.
 
 `photos.subject_detail_px` is the subject box's longer side in native pixels,
 kept so a reader can see what the value came from ("measured at 512 px from
@@ -69,6 +138,16 @@ calibrated sharpness scale.
   divided by the subject's luminance variance plus a floor) was tried and
   separated picks from rejects less well (see below), so the plain
   measurement ships.
+* Not free of the subject's outline. The mask edge is part of the region,
+  so a dark bird against bright sky gains from the contrast of its
+  silhouette: across the catalog a median 41% of the full-scale gradient
+  energy lies within 8 px of the mask edge, and 61% for one small backlit
+  flycatcher. Leaving the edge out was tried (the mask eroded by 2 to 24 px
+  at the detail scale, or by 1 to 4 px at each pyramid level) and did not
+  separate picks from rejects better: within bursts 0.905 fell to 0.902 at
+  2 px per level and 0.891 at 8 px, across the catalog 0.846 to 0.835 and
+  0.827. The outline of a sharp subject is itself sharp, so the edge carries
+  focus evidence along with the contrast, and the whole mask ships.
 * Not a defocus classifier. `docs/relative-focus-evidence.md` still holds:
   no validated absolute focus threshold exists, and no automatic rejection
   reads this value.
@@ -146,3 +225,37 @@ stored.
   another encounter.
 * Best Batch and Compare cards carry it as `comparable_quality` and show
   "Subject detail N at 512 px, quality P/100 across encounters".
+
+Reviewer confirmation uses a server-issued token for the original frame actually
+shown by the subject editor. Its persisted identity includes source file identity,
+rendering choice and upright frame dimensions, and is checked during analysis and
+cache reuse. Legacy reviewer markers cannot establish this proof: the user must
+open the original and confirm/redraw the box. Undo/redo preserves the proof and
+revalidates it rather than upgrading old coordinates implicitly. Migration 49
+retires derived box scores and reviewer detail caches while retaining boxes,
+choices, predictions, ratings, history and mask files. All coordinate analysis
+resolves the catalog original, including JPEG originals, rather than a working-copy
+alias. Offline browsing still uses existing previews; analysis waits for the
+original. General working-copy provenance recovery remains outside this change.
+
+Undo/redo also retires reviewer mask cache rows when restoring a different
+reviewer state. An identical numeric box can belong to another rendering; its
+PNG cannot prove that it matches the restored frame. Migration 51 retires
+reviewer mask/analysis caches that older history replay may have mixed, while
+keeping immutable PNGs and human decisions. Recipe 8 prevents reuse of old
+comparison generations. Migration 50 separately repairs companion provenance
+for alternate-version catalogs already upgraded through versions 48 or 49.
+
+Detector rows now retain a separate `frame_id` for the rendition actually used
+by the final detector pass, including a tiled reload. Prompt validation and
+cached-mask use compare that proof with a fresh aligned original read; a
+transient thumbnail failure cannot silently switch preview boxes to sensor
+coordinates. Detail reloads must match that same frame identity. Fresh bound
+detection writes retire prior detector mask rows, including when a runtime
+replacement deleted the old detection first. Migration 54 retires unproven
+detector measurements and adds the nullable frame field without fabricating
+proof for historical boxes. Those boxes/predictions remain browsable and require
+Re-classify on the original before coordinate analysis. Portable detector
+imports without original-frame proof follow the same rule. Recipe 9 includes
+the detector frame in comparison keys. Migration 52 preserves main's reviewed
+GPS migration across branch catalogs whose version 44 had another meaning.

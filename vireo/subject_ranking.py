@@ -122,6 +122,20 @@ def source_path(db, photo):
     return os.path.join(folder["path"], photo["filename"])
 
 
+# The generation of the analysis recipe itself, part of every analysis key.
+# Raise it when a stored feature starts being measured another way, so the
+# generations made before stop matching and the subject is analysed again.
+# 2: subject detail is read from the camera's rendering at every subject size.
+# 3: reduced/cropped RAW previews demosaic at every subject size.
+# 4: always use a full-resolution demosaic before resizing.
+# 5: segment and measure the same camera-rendered frame.
+# 6: detector boxes and SAM prompts share a verified camera-rendered frame.
+# 7: reviewer coordinates are bound to the actual original frame generation.
+# 8: retire analyses that may have reused masks across reviewer history frames.
+# 9: detector prompts are bound to their actual decoded rendition.
+ANALYSIS_RECIPE_VERSION = 9
+
+
 def analysis_key(path, detection, effective_cfg):
     """Bind a generation to exact source, box, model settings, and pixel scale."""
     import keypoints as kp
@@ -146,8 +160,8 @@ def analysis_key(path, detection, effective_cfg):
             weights.append((weight, info.st_size, info.st_mtime_ns))
         except FileNotFoundError:
             weights.append((weight, None))
-    inputs = [1, EYE_KP_FINGERPRINT_VERSION, detection.get("prediction_fingerprint"), os.path.realpath(path), stat.st_size, stat.st_mtime_ns, detection["id"],
-              detection["detector_model"], [detection["box_" + k] for k in "xywh"], 1024,
+    inputs = [ANALYSIS_RECIPE_VERSION, EYE_KP_FINGERPRINT_VERSION, detection.get("prediction_fingerprint"), os.path.realpath(path), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_ino, detection["id"],
+              detection["detector_model"], dict(detection).get("runtime_fingerprint"), dict(detection).get("frame_id"), [detection["box_" + k] for k in "xywh"], 1024,
               {k: pipeline.get(k, default) for k, default in (
                   ("sam2_variant", "sam2-small"), ("eye_detect_enabled", False),
                   ("eye_classifier_conf_gate", .5), ("eye_detection_conf_gate", .5), ("eye_window_k", .08))}, weights]

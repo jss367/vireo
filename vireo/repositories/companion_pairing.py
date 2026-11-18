@@ -29,6 +29,7 @@ import sqlite3
 from contextlib import contextmanager
 
 from canonical_schema import EXIF_SUMMARY_COLUMNS
+from detection_id import COMPANION_FRAME_RUNTIME
 from repositories.candidate_subjects import (
     DETECTOR_CATEGORY_SQL,
     CandidateSubjectRepository,
@@ -142,8 +143,8 @@ class CompanionPairingRepository:
 
     def move_detection(self, detection_id: int, photo_id: int) -> None:
         self.conn.execute(
-            "UPDATE detections SET photo_id = ? WHERE id = ?",
-            (photo_id, detection_id),
+            "UPDATE detections SET photo_id = ?, runtime_fingerprint = ?, frame_id = NULL WHERE id = ?",
+            (photo_id, COMPANION_FRAME_RUNTIME, detection_id),
         )
 
     def insert_rekeyed_detection(
@@ -153,12 +154,13 @@ class CompanionPairingRepository:
         self.conn.execute(
             "INSERT INTO detections"
             " (id, photo_id, detector_model, box_x, box_y, box_w, box_h,"
-            "  detector_confidence, category)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            "  detector_confidence, category, runtime_fingerprint)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
             " ON CONFLICT(id) DO NOTHING",
             (new_id, photo_id, det["detector_model"],
              det["box_x"], det["box_y"], det["box_w"], det["box_h"],
-             det["detector_confidence"], det["category"]),
+             det["detector_confidence"], det["category"],
+             "legacy" if det["detector_model"] == "full-image" else COMPANION_FRAME_RUNTIME),
         )
 
     def redirect_predictions(self, old_id: int, new_id: int) -> None:

@@ -123,7 +123,8 @@ def megadetector_runtime_fingerprint(weights_path=None):
         "weights_sha256": sha256_file(weights_path),
         "input_recipes": ["vireo-detector-source-v1", "vireo-detector-focus-v2"],
         "preprocess": {
-            "version": 9,
+            "version": 11,
+            "raw_decode": "aligned-camera-rendered-bound-frame-v2",
             "input_size": INPUT_SIZE,
             "resize": "Pillow.BILINEAR-letterbox",
             "padding": 114,

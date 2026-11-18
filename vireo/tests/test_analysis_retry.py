@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from PIL import Image
+from reviewer_helpers import confirmed_reviewer_box, original_frame_detections
 from services import photo_ingest, review_decisions, workspace_folders
 from services.analysis_retry import explain_selected, run_retry
 from testing.waits import synchronization_timeout
@@ -25,7 +26,7 @@ def retry_library(app_and_db, tmp_path, monkeypatch):
 
     def detect(path):
         calls["detection"].append(Path(path).name)
-        return [{"box": {"x": .1, "y": .1, "w": .7, "h": .7}, "confidence": .9, "category": "animal"}]
+        return original_frame_detections(path, [{"box": {"x": .1, "y": .1, "w": .7, "h": .7}, "confidence": .9, "category": "animal"}])
 
     def mask(image, box, variant):
         calls["segmentation"].append(variant)
@@ -276,8 +277,8 @@ def test_weak_context_anchors_are_read_without_becoming_retry_targets(retry_libr
     _, db, ids, calls = retry_library
     for index, pid in enumerate(ids):
         db.conn.execute("UPDATE photos SET timestamp=? WHERE id=?", (f"2026-10-21T10:00:0{index}", pid))
-        did = detection_store.write_detection_batch(db, pid, "megadetector-v6", [
-            {"box": {"x": .1, "y": .1, "w": .7, "h": .7}, "confidence": .15 if index == 1 else .9, "category": "animal"}])[0]
+        did = detection_store.write_detection_batch(db, pid, "megadetector-v6", original_frame_detections(tmp_path / db.photos.get(pid)["filename"], [
+            {"box": {"x": .1, "y": .1, "w": .7, "h": .7}, "confidence": .15 if index == 1 else .9, "category": "animal"}]))[0]
         if index != 1:
             db.predictions.add(did, "Mandarin Duck", .95, "inat21", category="match")
     db.commit()
@@ -291,7 +292,7 @@ def test_weak_context_anchors_are_read_without_becoming_retry_targets(retry_libr
 
     # The same burst still qualifies for contextual rescue after the reviewer
     # replaces the weak box. Activate the mask against the new manual primary.
-    from subjects import select_reviewer_box
+    from reviewer_helpers import confirmed_reviewer_box as select_reviewer_box
     pid = ids[1]
     box = {"x": .482, "y": .07, "w": .083, "h": .433}
     select_reviewer_box(db, pid, box)
@@ -319,8 +320,8 @@ def test_readiness_is_the_same_alone_and_within_its_encounter(retry_library, tmp
     box = {"x": .1, "y": .1, "w": .7, "h": .7}
     for index, pid in enumerate(ids):
         db.conn.execute("UPDATE photos SET timestamp=? WHERE id=?", (f"2026-10-21T10:00:0{index}", pid))
-        did = detection_store.write_detection_batch(db, pid, "megadetector-v6", [
-            {"box": box, "confidence": .05 if index == 1 else .9, "category": "animal"}])[0]
+        did = detection_store.write_detection_batch(db, pid, "megadetector-v6", original_frame_detections(tmp_path / db.photos.get(pid)["filename"], [
+            {"box": box, "confidence": .05 if index == 1 else .9, "category": "animal"}]))[0]
         if index == 1:
             did = db.detections.save(pid, [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.0,
                                             "category": "animal"}], "full-image")[0]
@@ -629,8 +630,8 @@ def test_eye_fingerprint_records_model_attempts_without_stamping_skips(retry_lib
     from services.detection_store import write_detection_batch
     _, db, ids, _ = retry_library
     pid = ids[0]
-    did = write_detection_batch(db, pid, "megadetector-v6", [
-        {"box": {"x": .1, "y": .1, "w": .7, "h": .7}, "confidence": .9, "category": "animal"}], "legacy")[0]
+    did = write_detection_batch(db, pid, "megadetector-v6", original_frame_detections(tmp_path / db.photos.get(pid)["filename"], [
+        {"box": {"x": .1, "y": .1, "w": .7, "h": .7}, "confidence": .9, "category": "animal"}]), "legacy")[0]
     db.predictions.add(did, "Mandarin Duck", .95, "inat21", category="match", taxonomy={"class": "Aves"})
     db.commit()
     eye = {"eye_status": eye_status, "eye_x": None, "eye_y": None, "eye_conf": None, "eye_tenengrad": None}
@@ -906,10 +907,10 @@ def test_wrong_trunk_correction_reanalyzes_only_corrected_animal_and_is_undoable
     pid, sibling = ids[:2]
     trunk_box = dict(x=.00049, y=.35610, w=.36484, h=.64185)
     bird_box = dict(x=.43, y=.34, w=.09, h=.12)
-    trunk, weak_bird = detection_store.write_detection_batch(db, pid, "megadetector-v6", [
+    trunk, weak_bird = detection_store.write_detection_batch(db, pid, "megadetector-v6", original_frame_detections(tmp_path / db.photos.get(pid)["filename"], [
         {"box": trunk_box, "confidence": .2207, "category": "animal"},
         {"box": bird_box, "confidence": .05, "category": "animal"},
-    ])
+    ]))
     assert payload(db, pid)["primary_detection_id"] == trunk
     execute(db, [pid], tmp_path)
     original = dict(db.conn.execute('SELECT * FROM photos WHERE id=?', (pid,)).fetchone())
@@ -922,8 +923,10 @@ def test_wrong_trunk_correction_reanalyzes_only_corrected_animal_and_is_undoable
                                       'species_confirmed': True}], 'summary': {}},
                      results_dir, db.require_workspace_id())
     client = app.test_client()
+    frame_token = client.get(f'/photos/{pid}/preview?view=subject&size=1920').headers['X-Vireo-Subject-Frame']
     response = client.put(f'/api/photos/{pid}/subjects/reviewer-box', json={
         "box": bird_box, "source": "gpt-6.1-sol", "reason": "The retained trunk does not contain the bird",
+        "frame_token": frame_token,
     })
     assert response.status_code == 200
     saved = load_results_raw(results_dir, db.require_workspace_id())
@@ -971,8 +974,8 @@ def test_wrong_trunk_correction_reanalyzes_only_corrected_animal_and_is_undoable
 def test_selected_retry_checks_click_identity_after_lock(retry_library, tmp_path, monkeypatch, changed):
     from contextlib import contextmanager
 
+    from reviewer_helpers import confirmed_reviewer_box as select_reviewer_box
     from services import analysis_retry
-    from subjects import select_reviewer_box
 
     _, db, ids, calls = retry_library
     pid = ids[0]
@@ -1007,8 +1010,8 @@ def test_selected_retry_checks_click_identity_after_lock(retry_library, tmp_path
 
 
 def test_selected_retry_rejects_complete_replacement(retry_library, tmp_path):
+    from reviewer_helpers import confirmed_reviewer_box as select_reviewer_box
     from services.analysis_retry import _selected_detection
-    from subjects import select_reviewer_box
 
     _, db, ids, calls = retry_library
     pid = ids[0]
@@ -1086,7 +1089,7 @@ def test_box_refresh_rechecks_pinned_subject_and_visibility_at_publication(retry
     def measure_then_change(image, detections):
         results = original(image, detections)
         if change == "primary":
-            subjects.select_reviewer_box(db, pid, {"x": .6, "y": .1, "w": .2, "h": .2})
+            confirmed_reviewer_box(db, pid, {"x": .6, "y": .1, "w": .2, "h": .2})
             db.commit()
         else:
             folder_id = db.photos.get(pid)["folder_id"]
@@ -1130,3 +1133,22 @@ def test_quality_only_work_rechecks_mask_owner(retry_library, tmp_path):
     after = db.masks_features.get_mask(pid, "sam2-small")
     assert calls["segmentation"] == ["sam2-small"]
     assert after["path"] != before["path"] and after["detector_model"] == before["detector_model"]
+
+
+def test_quality_retry_replaces_a_mask_with_different_framing(retry_library, tmp_path):
+    from services.analysis_retry import retry_features
+
+    _, db, ids, calls = retry_library
+    pid = ids[0]
+    execute(db, [pid], tmp_path)
+    previous = db.masks_features.get_mask(pid, "sam2-small")["path"]
+    Image.new("L", (100, 56), 255).save(previous)
+    calls["segmentation"].clear()
+
+    retry_features(db, pid, db.get_effective_config({}), str(tmp_path), lambda: None, quality_only=True)
+    current = db.masks_features.get_mask(pid, "sam2-small")["path"]
+    assert current != previous
+    assert calls["segmentation"] == ["sam2-small"]
+    with Image.open(current) as mask:
+        assert mask.size == (100, 80)
+        assert mask.info["vireo_mask_frame"] == "camera_rendered"

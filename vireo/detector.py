@@ -605,7 +605,7 @@ def detect_animals(image_path, *, focus=None):
 
     Returns:
         list of detections, each with:
-            box: {x, y, w, h} normalized 0-1
+            box: {x, y, w, h} normalized 0-1 in the aligned camera-rendered frame
             confidence: float 0-1
             category: str ('animal', 'person', 'vehicle')
 
@@ -619,12 +619,13 @@ def detect_animals(image_path, *, focus=None):
     try:
         # Load image ourselves using image_loader which supports RAW formats
         # (NEF, CR2, ARW, etc.).
-        from image_loader import load_image
+        from image_loader import RAW_DECODE_ALIGNED, load_image
 
-        img = load_image(str(image_path), max_size=1280)
+        img = load_image(str(image_path), max_size=1280, raw_decode=RAW_DECODE_ALIGNED)
         if img is None:
             log.warning("Could not load image for detection: %s", image_path)
             return None
+        frame_id = img.info.get("vireo_subject_frame_id")
         img_array = np.array(img.convert("RGB"))
 
         input_name = session.get_inputs()[0].name
@@ -650,8 +651,10 @@ def detect_animals(image_path, *, focus=None):
             # already-downsampled 1280px fast-path image merely enlarges the
             # same pixels and does not recover fine bird detail.
             tiled_img = load_image(
-                str(image_path), max_size=TILED_SOURCE_MAX_SIZE,
+                str(image_path), max_size=TILED_SOURCE_MAX_SIZE, raw_decode=RAW_DECODE_ALIGNED,
             )
+            if tiled_img is not None:
+                frame_id = tiled_img.info.get("vireo_subject_frame_id")
             tiled_array = (
                 np.array(tiled_img.convert("RGB"))
                 if tiled_img is not None else img_array
@@ -674,6 +677,8 @@ def detect_animals(image_path, *, focus=None):
                                              lift_shadows=True))
             if tiled:
                 detections = _merge_detections(detections, tiled)
+        for detection in detections:
+            detection["frame_id"] = frame_id
         return detections
     except ResourceWaitCancelled:
         raise

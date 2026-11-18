@@ -4,6 +4,7 @@ import io
 import numpy as np
 import pytest
 from PIL import Image
+from reviewer_helpers import original_frame_detections
 from services import detection_store, keyword_tagging, photo_ingest, review_decisions, workspace_folders
 from subject_analysis import analyze_detection
 from subject_ranking import SubjectComparison, parse_comparison, resolve_subject
@@ -28,10 +29,10 @@ def comparison_library(app_and_db, tmp_path, monkeypatch):
         Image.fromarray(pixels).save(path)
         photo_id = photo_ingest.add_photo(db, folder_id=folder, filename=path.name, extension=".png",
                                          file_size=path.stat().st_size, file_mtime=path.stat().st_mtime)
-        ids = detection_store.write_detection_batch(db, photo_id, "megadetector-v6", [
+        ids = detection_store.write_detection_batch(db, photo_id, "megadetector-v6", original_frame_detections(path, [
             {"box": {"x": .06, "y": .12, "w": .32, "h": .76}, "confidence": .9, "category": "animal"},
             {"box": {"x": .62, "y": .12, "w": .32, "h": .76}, "confidence": .95, "category": "animal"},
-        ])
+        ]))
         for did, species in zip(ids, (TARGET, OTHER), strict=True):
             db.predictions.add(did, species, .95, "test", status="accepted")
             db.commit()
@@ -248,6 +249,31 @@ def test_source_and_configuration_changes_invalidate_analysis(comparison_library
     effective = db.get_effective_config(cfg.load())
     changed = {**effective, "pipeline": {**effective.get("pipeline", {}), "eye_detect_enabled": True}}
     assert cached_analysis(db, photo, detection, changed)[1] is None
+
+
+def test_an_analysis_made_under_an_earlier_recipe_is_analysed_again(comparison_library, monkeypatch):
+    """A stored feature that is now measured another way (the rendering the
+    subject detail is read from) must not keep ranking a comparison: the
+    recipe version is part of every analysis key."""
+    import config as cfg
+    import subject_ranking
+
+    app, db, pids, _ = comparison_library
+    current = subject_ranking.ANALYSIS_RECIPE_VERSION
+    monkeypatch.setattr(subject_ranking, "ANALYSIS_RECIPE_VERSION", current - 1)
+    _analyze(db, pids, SubjectComparison(TARGET), cfg.load())
+    earlier = {c["id"]: c for c in _pack(app, pids, requested_species=TARGET)["cards"]}
+    assert earlier[pids[0]]["evidence_status"] == "ready"
+
+    monkeypatch.setattr(subject_ranking, "ANALYSIS_RECIPE_VERSION", current)
+    stale = {c["id"]: c for c in _pack(app, pids, requested_species=TARGET)["cards"]}
+    assert {c["evidence_status"] for c in stale.values()} == {"subject_analysis_missing"}
+    assert app.test_client().get(earlier[pids[0]]["mask_url"]).status_code == 404
+
+    _analyze(db, pids, SubjectComparison(TARGET), cfg.load())
+    fresh = {c["id"]: c for c in _pack(app, pids, requested_species=TARGET)["cards"]}
+    assert fresh[pids[0]]["evidence_status"] == "ready"
+    assert fresh[pids[0]]["subject"]["analysis_key"] != earlier[pids[0]]["subject"]["analysis_key"]
 
 
 def test_eye_measurements_are_selected_and_mask_gated(comparison_library, monkeypatch):

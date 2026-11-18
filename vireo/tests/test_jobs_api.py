@@ -2699,7 +2699,7 @@ def _patch_extract_masks_deps(monkeypatch, generate_mask_calls):
     # array proxy and placeholder mask bytes here do not provide.
     monkeypatch.setattr(
         quality, "measure_subject_detail",
-        lambda proxy, mask, *, source_path, frame_size=None: {"subject_detail": 100.0, "subject_detail_px": 40.0},
+        lambda mask, *, source_path, frame_size=None: {"subject_detail": 100.0, "subject_detail_px": 40.0},
     )
     monkeypatch.setattr(
         quality, "measure_cached_subject_detail",

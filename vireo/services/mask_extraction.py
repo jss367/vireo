@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
+from detection_id import detection_prompt_runtime, require_original_box
 from repositories.masks_features import MaskQuality, PipelineFeatures
 from services import detection_store, subject_masks
 
@@ -63,10 +64,13 @@ def _import_mask_extraction_deps() -> SimpleNamespace:
     import numpy as np
     from dino_embed import embed, embed_batch, embedding_to_blob
     from masking import (
+        PromptFrameError,
         crop_completeness,
         crop_subject,
         generate_mask,
         render_proxy,
+        require_aligned_detector_prompt,
+        require_original_reviewer_frame,
         save_mask,
     )
     from pipeline_job import (
@@ -85,6 +89,7 @@ def _import_mask_extraction_deps() -> SimpleNamespace:
     from subjects import sync_primary
 
     return SimpleNamespace(
+        PromptFrameError=PromptFrameError,
         np=np,
         embed=embed,
         embed_batch=embed_batch,
@@ -93,6 +98,8 @@ def _import_mask_extraction_deps() -> SimpleNamespace:
         crop_subject=crop_subject,
         generate_mask=generate_mask,
         render_proxy=render_proxy,
+        require_aligned_detector_prompt=require_aligned_detector_prompt,
+        require_original_reviewer_frame=require_original_reviewer_frame,
         save_mask=save_mask,
         rollback_failed_mask_photo=_rollback_failed_mask_photo,
         StagedMaskFile=_StagedMaskFile,
@@ -237,13 +244,13 @@ class _MaskExtractionRun:
                     "extract-masks cancelled while waiting for inference resources",
                 )
                 break
-            except Exception:  # broad: per-photo boundary; the failure is counted and listed in the job errors
+            except Exception as error:  # broad: per-photo boundary; the failure is counted and listed in the job errors
                 self.failed += 1
                 log.warning(
                     "Mask extraction failed for photo %s", photo_id, exc_info=True
                 )
                 job["errors"].append(
-                    f"Photo {photo_id}: mask extraction failed"
+                    f"Photo {photo_id}: {error if isinstance(error, deps.PromptFrameError) else 'mask extraction failed'}"
                 )
                 try:
                     deps.rollback_failed_mask_photo(self.thread_db, photo_id)
@@ -335,6 +342,7 @@ class _MaskExtractionRun:
         if not self._refresh_primary(item):
             self.skipped += 1
             return False
+        require_original_box(photo.get("detector_runtime"))
         if self._reuse_cached_mask(item):
             return False
 
@@ -352,6 +360,7 @@ class _MaskExtractionRun:
             det_box = json.loads(det_box)
 
         # Generate mask via SAM2
+        deps.require_aligned_detector_prompt(proxy, photo.get("detector_runtime"), detector_model=photo.get("detector_model"))
         mask = deps.generate_mask(proxy, det_box, variant=self.sam2_variant)
         if mask is None:
             self.skipped += 1
@@ -361,14 +370,17 @@ class _MaskExtractionRun:
         # fixed-scale subject detail (comparable across encounters)
         completeness = deps.crop_completeness(mask)
         features = deps.compute_all_quality_features(proxy, mask)
+        frame_id = getattr(proxy, "info", {}).get("vireo_subject_frame_id")
+        proof = {"expected_frame_id": frame_id} if frame_id is not None else {}
         detail = deps.measure_subject_detail(
-            proxy, mask, source_path=item.image_path, frame_size=deps.frame_size(photo),
+            mask, source_path=item.image_path, frame_size=deps.frame_size(photo),
+            **proof,
         )
         if detail:
             features.update(detail)
         else:
-            # Source went unreadable between the proxy decode and this
-            # larger-edge re-read: the mask is stored but its detail
+            # Source went unreadable between the proxy decode and the
+            # measurement's own read of it: the mask is stored but its detail
             # measurement stays pending, counted so the final job status
             # does not claim completion with planned work left behind.
             self.detail_unreadable += 1
@@ -406,6 +418,8 @@ class _MaskExtractionRun:
         if not current:
             return False
         selected = current[0]
+        photo["detection_id"] = selected["id"]
+        photo["detector_runtime"] = detection_prompt_runtime(dict(selected))
         photo["detector_model"] = selected["detector_model"]
         photo["prompt"] = tuple(selected["box_" + k] for k in "xywh")
         photo["detection_box"] = {k: selected["box_" + k] for k in "xywh"}
@@ -435,6 +449,7 @@ class _MaskExtractionRun:
         )
         if existing is None:
             return False
+        self.deps.require_original_reviewer_frame(item.image_path, photo.get("detector_runtime"), detector_model=photo.get("detector_model"))
         cached_prompt = (
             existing["prompt_x"], existing["prompt_y"],
             existing["prompt_w"], existing["prompt_h"],
@@ -489,8 +504,13 @@ class _MaskExtractionRun:
         existing = item.existing
         if existing is None:
             return False
+        from detection_id import prompt_frame_id
+
+        frame_id = prompt_frame_id(item.photo.get("detector_runtime"))
+        proof = {"expected_frame_id": frame_id} if frame_id is not None else {}
         measured = self.deps.measure_cached_subject_detail(
             existing["path"], item.image_path, self.deps.frame_size(item.photo),
+            **proof,
         )
         if measured is self.deps.mask_cache_invalid:
             dropped = self.thread_db.masks_features.drop_cache_entry(
@@ -507,6 +527,10 @@ class _MaskExtractionRun:
             return False
         self.thread_db.masks_features.set_subject_detail(
             item.photo_id, self.sam2_variant, measured["subject_detail"], measured["subject_detail_px"],
+            expected_path=existing["path"],
+        )
+        subject_masks.require_current_prompt(
+            self.thread_db, item.photo["detection_id"], item.photo["detector_runtime"], item.photo["prompt"],
         )
         self.thread_db.commit_with_retry()
         self.detail_measured += 1
@@ -598,6 +622,9 @@ class _MaskExtractionRun:
                 subject_detail_px=features.pop("subject_detail_px", None),
             ),
         )
+        subject_masks.require_current_prompt(
+            thread_db, photo["detection_id"], photo["detector_runtime"], photo["prompt"],
+        )
         subject_masks.set_active_mask_variant(
             thread_db, photo_id, self.sam2_variant,
         )
@@ -670,7 +697,7 @@ class _MaskExtractionRun:
                           else ("mask PNGs", "were"))
             job_errors.append(
                 f"{self.mask_cache_invalidated} cached {noun} {verb} "
-                f"unreadable and will be rebuilt on the next Extract run."
+                f"unreadable or could not be aligned to the source and will be rebuilt on the next Extract run."
             )
         return {"masked": self.masked, "skipped": self.skipped,
                 "failed": failed, "unreadable": unreadable, "total": total,

@@ -47,9 +47,9 @@ def extraction(db, tmp_path, monkeypatch):
     deps.generate_mask = generate
     deps.crop_completeness = lambda mask: 0.9
     deps.compute_all_quality_features = lambda proxy, mask: {"subject_tenengrad": 1.5}
-    deps.measure_subject_detail = lambda proxy, mask, *, source_path, frame_size=None: {
+    deps.measure_subject_detail = lambda mask, *, source_path, frame_size=None, **kwargs: {
         "subject_detail": 100.0, "subject_detail_px": 40.0}
-    deps.measure_cached_subject_detail = lambda mask_path, source_path, frame_size=None: {
+    deps.measure_cached_subject_detail = lambda mask_path, source_path, frame_size=None, **kwargs: {
         "subject_detail": 100.0, "subject_detail_px": 40.0}
     deps.crop_subject = lambda proxy, mask, margin: None
     deps.embed = lambda proxy, variant: np.zeros(384, dtype=np.float32)
@@ -90,6 +90,22 @@ def run(extraction):
         extraction.job, extraction.db_path, runner=extraction.runner,
         open_db=extraction.open_db, options=extraction.options,
     )
+
+
+def test_service_refuses_unverified_raw_prompt_before_segmentation(db, tmp_path, extraction, monkeypatch):
+    import computation_cache
+    from PIL import Image
+
+    pid = seed_photo(db, tmp_path, "unverified-frame")
+    proxy = Image.new("RGB", (512, 320))
+    proxy.info["vireo_rejected_preview_edge"] = 1600
+    extraction.deps.render_proxy = lambda *_args, **_kwargs: proxy
+    monkeypatch.setattr(computation_cache, "megadetector_runtime_fingerprint", lambda: "current-runtime")
+    result = run(extraction)
+    assert result["masked"] == 0 and result["failed"] == 1
+    assert extraction.generated == []
+    assert "unverified RAW frame" in str(extraction.job["errors"])
+    assert db.masks_features.get_mask(pid, extraction.options.sam2_variant) is None
 
 
 def assert_released(extraction, *photo_ids):
@@ -209,7 +225,7 @@ def test_fresh_mask_whose_detail_reread_fails_credits_detail_unreadable(db, tmp_
     # with planned work left behind.
     first = seed_photo(db, tmp_path, "source-lost-midrun")
     extraction.deps.measure_subject_detail = (
-        lambda proxy, mask, *, source_path, frame_size=None: {}
+        lambda mask, *, source_path, frame_size=None, **kwargs: {}
     )
 
     result = run(extraction)
@@ -243,7 +259,7 @@ def test_cached_mask_whose_png_will_not_decode_is_dropped_so_extract_rebuilds_it
     )
     db.commit()
     extraction.deps.measure_cached_subject_detail = (
-        lambda mask_path, source_path, frame_size=None: quality.MASK_CACHE_INVALID
+        lambda mask_path, source_path, frame_size=None, **kwargs: quality.MASK_CACHE_INVALID
     )
 
     result = run(extraction)
@@ -282,7 +298,7 @@ def test_cache_invalidation_drops_the_row_when_the_unlink_is_refused(
     )
     db.commit()
     extraction.deps.measure_cached_subject_detail = (
-        lambda mask_path, source_path, frame_size=None: quality.MASK_CACHE_INVALID
+        lambda mask_path, source_path, frame_size=None, **kwargs: quality.MASK_CACHE_INVALID
     )
     monkeypatch.setattr(
         masks_features, "safe_remove_mask_file",
@@ -296,3 +312,63 @@ def test_cache_invalidation_drops_the_row_when_the_unlink_is_refused(
     assert db.masks_features.get_mask(first, "sam2-base") is None
     assert mask_path.is_file()
     assert_released(extraction, first)
+
+
+@pytest.mark.parametrize("legacy_version", [None, 46, 47, 48, 49, 52])
+def test_companion_box_cannot_prompt_raw_even_without_a_rejected_preview(
+    db, tmp_path, extraction, legacy_version,
+):
+    import schema
+    from detection_id import COMPANION_FRAME_RUNTIME
+    from PIL import Image
+    from scanner.companions import _pair_raw_jpeg_companions
+
+    folder = workspace_folders.add_folder(db, str(tmp_path))
+    jpeg = photo_ingest.add_photo(db, folder, "frame.jpg", ".jpg", 100, 1)
+    raw = photo_ingest.add_photo(db, folder, "frame.nef", ".nef", 200, 1)
+    preview = Image.new("RGB", (120, 68))
+    preview.save(tmp_path / "frame.jpg")
+    source = Image.new("RGB", (120, 80))
+    source.info["vireo_subject_frame_id"] = "a" * 64
+    extraction.deps.render_proxy = lambda *args, **kwargs: source
+    box = {"x": .1, "y": .6, "w": .2, "h": .15}
+    did, = db.detections.upsert_rows(jpeg, "megadetector-v6", [{"box": box, "confidence": .95}], "current")
+    db.predictions.add(did, "Mallard", .9, "bioclip")
+    db.commit()
+    _pair_raw_jpeg_companions(db)
+    if legacy_version is not None:
+        db.conn.execute("UPDATE detections SET runtime_fingerprint='legacy' WHERE photo_id=?", (raw,))
+        legacy_id = db.detections.get(raw, 0)[0]["id"]
+        if legacy_version == 46:
+            db.subjects.set_primary_state(raw, legacy_id)
+        else:
+            db.subjects.clear_primary_state(raw)
+        db.conn.execute("UPDATE photos SET subject_detail=123, mask_path='old.png' WHERE id=?", (raw,))
+        db.conn.execute("INSERT INTO photo_masks (photo_id, variant, path, created_at, detector_model, "
+                        "prompt_x, prompt_y, prompt_w, prompt_h, subject_detail) VALUES "
+                        "(?, 'sam2-base', 'old.png', 0, 'megadetector-v6', .1, .6, .2, .15, 123)", (raw,))
+        if legacy_version == 52:
+            db.conn.execute("UPDATE detections SET runtime_fingerprint=? WHERE id=?",
+                            (COMPANION_FRAME_RUNTIME, legacy_id))
+            db.conn.execute("DELETE FROM photo_masks WHERE photo_id=?", (raw,))
+        db.conn.execute(f"PRAGMA user_version={legacy_version}")
+        db.commit()
+        schema._apply_pending(db.conn)
+        projection = db.conn.execute("SELECT subject_detail, mask_path FROM photos WHERE id=?", (raw,)).fetchone()
+        assert tuple(projection) == (None, None)
+        assert db.masks_features.get_mask(raw, "sam2-base") is None
+    row, = db.detections.get(raw, 0)
+    assert row["runtime_fingerprint"] == COMPANION_FRAME_RUNTIME
+    assert db.conn.execute("SELECT species FROM predictions WHERE detection_id=?", (row["id"],)).fetchone()[0] == "Mallard"
+    db.commit()
+    result = run(extraction)
+    assert result["failed"] == 1
+    assert "JPEG companion" in str(extraction.job["errors"])
+    assert not extraction.generated
+    # A detector pass on the original can verify the same region without
+    # discarding the content-addressed row or the prediction it carries.
+    verified, = db.detections.upsert_rows(raw, "megadetector-v6", [{"box": box, "confidence": .95, "frame_id": "a" * 64}], "current")
+    assert verified == row["id"]
+    db.commit()
+    assert run(extraction)["masked"] == 1
+    assert len(extraction.generated) == 1

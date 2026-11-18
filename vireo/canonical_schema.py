@@ -20,7 +20,7 @@ This module must not import ``db``: ``schema.py`` imports ``db``, and
 # database it creates from nothing. It is the newest registry migration in
 # ``schema.MIGRATIONS``: ``create_tables`` builds every migration's end state,
 # so a fresh database has nothing to migrate.
-SCHEMA_VERSION = 44
+SCHEMA_VERSION = 54
 
 # Promoted EXIF summary columns in the ``photos`` table — the canonical
 # list the scanner uses to clear absent fields on rescan (a metadata write
@@ -710,6 +710,7 @@ class CanonicalSchema:
                 photo_id            INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
                 detector_model      TEXT NOT NULL DEFAULT 'megadetector-v6',
                 runtime_fingerprint TEXT NOT NULL DEFAULT 'legacy',
+                frame_id            TEXT,
                 box_x               REAL,
                 box_y               REAL,
                 box_w               REAL,

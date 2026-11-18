@@ -420,6 +420,16 @@ class _DetectBatchRun:
             with db.transaction():
                 db.photos.update_quality(photo["id"])
             return
+        from detection_id import detection_prompt_runtime
+        from image_loader import subject_box_image_path
+        from masking import require_original_reviewer_frame
+
+        folder = db.folders.get(photo["folder_id"])
+        if folder is None:
+            raise ValueError("Original subject frame unavailable")
+        image_path = subject_box_image_path(photo, None, {photo["folder_id"]: folder["path"]})
+        require_original_reviewer_frame(image_path, detection_prompt_runtime(regions[0]),
+                                        detector_model=regions[0].get("detector_model"))
         det_box = {k: regions[0]["box_" + k] for k in "xywh"}
         subject_size = det_box["w"] * det_box["h"]
 
@@ -496,13 +506,7 @@ def _detect_batch(
             entries are used instead of detection_store.get_detections() so that
             model 2+ binds to the exact detection rows from this run,
             not stale rows from a previous pipeline pass.
-        vireo_dir: optional path to ~/.vireo/; when set, the subject
-            analysis loop resolves each photo through the working-copy
-            JPEG when its source folder is offline, matching the
-            on-demand ``/api/photos/<id>/subjects/analyze`` route.
-            Without this, an offline NAS would leave cached-detection
-            photos permanently missing their subject quality, crop and
-            exposure data.
+        vireo_dir: optional Vireo data directory. Subject boxes use the original image.
 
     Returns:
         (detection_map, detected_count, processed_ids) where detection_map
@@ -585,14 +589,8 @@ def _analyze_subjects(
     """Subject-analysis pass of ``_detect_batch`` (see its comments)."""
     from subjects import analyze_photo
 
-    # Resolve the working-copy JPEG first when the caller supplied a
-    # ``vireo_dir``: cached-detection photos on an offline NAS still
-    # have a usable local preview, and the on-demand Analyze route
-    # already reads from it. Building only the source folder path
-    # would fail ``os.stat`` inside ``analyze_photo`` and leave those
-    # photos permanently without subject quality/crop/exposure data.
     if vireo_dir:
-        from image_loader import get_canonical_image_path
+        from image_loader import subject_box_image_path
 
     # Project the preceding frame before its burst neighbor reads that box.
     def capture_order(photo: sqlite3.Row) -> tuple[str, int]:
@@ -620,7 +618,7 @@ def _analyze_subjects(
             continue
         checkpoint()
         if vireo_dir:
-            image_path = get_canonical_image_path(photo, vireo_dir, folders)
+            image_path = subject_box_image_path(photo, vireo_dir, folders)
         else:
             image_path = os.path.join(folders.get(photo["folder_id"], ""), photo["filename"])
         try:

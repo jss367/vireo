@@ -372,9 +372,10 @@ def detail_decode_edge(mask):
 
     A frame decoded smaller than this is upsampled to the detail scale, so
     the measurement would read interpolated pixels rather than the detail
-    the source holds. Callers cap it at the source's native size: a subject
-    too small for the scale even at native resolution is measured upsampled,
-    and the low value honestly reports how little detail the frame has.
+    the source holds. It exceeds the native size for a subject too small for
+    the scale even at native resolution; ``load_detail_source`` reads the
+    whole frame for those, the subject is measured upsampled, and the low
+    value honestly reports how little detail the frame has.
     Returns None for an empty mask.
     """
     bbox = mask_bbox_fractions(mask)
@@ -437,44 +438,80 @@ def compute_subject_detail(image, mask, frame_size=None):
     }
 
 
-def measure_subject_detail(proxy, mask, *, source_path, frame_size=None):
-    """Subject detail from the proxy, or from a larger decode of the source.
+def load_detail_source(source_path, needed, frame_size=None):
+    """The frame the detail is measured on: the camera's own rendering, at ``needed`` or whole.
 
-    The proxy serves when the subject already spans DETAIL_SCALE_PX in it;
-    a smaller subject reads ``source_path`` again at the edge the scale
-    needs (the loader caps it at the native size). Returns the
+    A RAW holds two renderings, the camera's embedded JPEG and a libraw
+    demosaic, and their gradients differ by a factor that varies from file
+    to file (the demosaic is auto-brightened and unsharpened), so values
+    read from one cannot be compared with values read from the other.
+
+    Camera-rendered reads use the embedded JPEG when it covers at least
+    99% of each sensor dimension. Otherwise they request a full-resolution
+    demosaic before resizing. A rejected preview is never substituted on
+    decode failure, since that could change the coordinate frame.
+    Read the whole rendering when frame dimensions are unknown or the
+    requested edge approaches native size.
+    """
+    from image_loader import NEAR_FULL_PREVIEW, RAW_DECODE_ALIGNED, load_image
+
+    native = max(frame_size) if frame_size else None
+    whole = native is None or needed >= native * NEAR_FULL_PREVIEW
+    return load_image(source_path, max_size=None if whole else needed, raw_decode=RAW_DECODE_ALIGNED)
+
+
+def measure_subject_detail(mask, *, source_path, frame_size=None, expected_frame_id=None):
+    """Subject detail for ``mask``, read from ``source_path`` through ``load_detail_source``.
+
+    The source is always read again, even when the caller already holds a
+    proxy large enough for the scale: a proxy is whatever rendering the
+    loader chose for its own size (a demosaic when the embedded preview is
+    smaller than the proxy), and resampling the subject down from it gives
+    a slightly different value than decoding at the needed edge. One read
+    path is what makes a mask measured when it is made and the same mask
+    measured later from the cache store the same value. Returns the
     ``compute_subject_detail`` dict, or {} when the source cannot be read,
     so the measurement stays unmade rather than interpolated.
     """
-    from image_loader import load_image
-
     needed = detail_decode_edge(mask)
     if needed is None:
         return {"subject_detail": 0.0, "subject_detail_px": None}
-    if needed <= max(proxy.size):
-        return compute_subject_detail(proxy, mask, frame_size=frame_size)
-    image = load_image(source_path, max_size=needed)
+    image = load_detail_source(source_path, needed, frame_size)
     if image is None:
         return {}
     try:
+        if expected_frame_id is not None and image.info.get("vireo_subject_frame_id") != expected_frame_id:
+            return {}
         return compute_subject_detail(image, mask, frame_size=frame_size)
     finally:
         image.close()
 
 
-def measure_cached_subject_detail(mask_path, source_path, frame_size=None):
+def saved_mask_matches_frame(mask_size, mask_frame, image, *, prompt_frame=None):
+    """Can the saved proxy mask be mapped to this rendering by resizing alone?"""
+    w, h = mask_size
+    iw, ih = image.size
+    # Each thumbnail may round its short dimension by a pixel.
+    if abs(w * ih - h * iw) > max(w, h) + max(iw, ih):
+        return False
+    if image.info.get("vireo_rejected_preview_edge") and prompt_frame != "camera_rendered":
+        return False
+    return mask_frame == "camera_rendered" or max(w, h) > image.info.get("vireo_rejected_preview_edge", 0)
+
+
+def measure_cached_subject_detail(mask_path, source_path, frame_size=None, *, expected_frame_id=None):
     """Subject detail for a saved mask PNG whose row predates the measurement.
 
-    Reads the mask from disk and the source at the edge the detail scale
-    needs; SAM does not run. Returns the ``compute_subject_detail`` dict on
+    Reads the mask from disk and measures it as ``measure_subject_detail``
+    does; SAM does not run. Returns the ``compute_subject_detail`` dict on
     success, ``MASK_CACHE_INVALID`` when the mask PNG cannot be decoded (the
     cached mask is lost; the caller should drop it so the next run
     regenerates), or None when the source cannot be read.
     """
-    from image_loader import load_image
-
     try:
         with Image.open(mask_path) as mask_image:
+            mask_frame = mask_image.info.get("vireo_mask_frame")
+            prompt_frame = mask_image.info.get("vireo_prompt_frame")
             mask = np.asarray(mask_image.convert("L")) > 127
     except (OSError, SyntaxError, ValueError, Image.DecompressionBombError):
         # OSError covers the file missing or unreadable; the others cover
@@ -485,20 +522,21 @@ def measure_cached_subject_detail(mask_path, source_path, frame_size=None):
         # DecompressionBombError. The cache file is lost either way, so
         # the caller drops the row and the next run regenerates. Scoped
         # to the open+convert read so unrelated processing failures in
-        # detail_decode_edge / load_image / compute_subject_detail below
-        # still propagate.
+        # the measurement below still propagate.
         log.warning("Could not read mask %s for the subject detail measurement", mask_path, exc_info=True)
         return MASK_CACHE_INVALID
     needed = detail_decode_edge(mask)
     if needed is None:
         return {"subject_detail": 0.0, "subject_detail_px": None}
-    image = load_image(source_path, max_size=needed)
+    image = load_detail_source(source_path, needed, frame_size)
     if image is None:
         return None
-    try:
+    with image:
+        if expected_frame_id is not None and image.info.get("vireo_subject_frame_id") != expected_frame_id:
+            return None
+        if not saved_mask_matches_frame(mask.shape[::-1], mask_frame, image, prompt_frame=prompt_frame):
+            return MASK_CACHE_INVALID
         return compute_subject_detail(image, mask, frame_size=frame_size)
-    finally:
-        image.close()
 
 
 def compute_all_quality_features(image, mask):

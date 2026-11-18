@@ -11,6 +11,49 @@ a JavaScript Number (``Number.MAX_SAFE_INTEGER == 2**53 - 1``), avoiding
 silent precision loss when ids ride through JSON to the frontend.
 """
 import hashlib
+from collections.abc import Mapping
+from typing import Any
+
+ALIGNED_REVIEWER_RUNTIME = "reviewer-aligned-v1"
+REVIEWER_FRAME_PREFIX = "reviewer-frame-v2:"
+COMPANION_FRAME_RUNTIME = "unverified-companion-frame"
+
+DETECTOR_FRAME_PREFIX = "detector-frame-v1:"
+
+
+def bind_detector_frame(runtime: str, frame_id: object) -> str:
+    if isinstance(frame_id, str) and len(frame_id) == 64:
+        return DETECTOR_FRAME_PREFIX + frame_id + ":" + runtime
+    return runtime
+
+
+def detection_prompt_runtime(detection: Mapping[str, Any]) -> str:
+    row = dict(detection)
+    runtime = row.get("runtime_fingerprint") or "legacy"
+    if runtime == COMPANION_FRAME_RUNTIME:
+        return runtime
+    return bind_detector_frame(runtime, row.get("frame_id"))
+
+
+def prompt_frame_id(runtime: str | None) -> str | None:
+    if isinstance(runtime, str):
+        if runtime.startswith(REVIEWER_FRAME_PREFIX):
+            return runtime[len(REVIEWER_FRAME_PREFIX):]
+        if runtime.startswith(DETECTOR_FRAME_PREFIX):
+            return runtime[len(DETECTOR_FRAME_PREFIX):].split(":", 1)[0]
+    return None
+
+
+class PromptFrameError(ValueError):
+    """The selected box has no proven mapping to the analysis frame."""
+
+
+def require_original_box(runtime):
+    if runtime == COMPANION_FRAME_RUNTIME:
+        raise PromptFrameError(
+            "The box may come from a differently cropped JPEG companion. "
+            "Re-classify the RAW or draw the subject on the original."
+        )
 
 
 def positive_int_hash(*parts: str) -> int:

@@ -214,12 +214,22 @@ concrete examples.
 `PUT /api/photos/<id>/primary-subject` accepts `detection_id` (a retained
 animal from this photo, or null for automatic selection).
 `PUT /api/photos/<id>/subjects/reviewer-box` accepts `box: {x,y,w,h}` in
-normalized upright source coordinates. Draw a reviewer box when the detector
+normalized upright source coordinates. To record verified analysis-frame coordinates,
+fetch `GET /photos/<id>/preview?view=subject&size=1920`, draw on its returned
+image, and include its `X-Vireo-Subject-Frame` response header as `frame_token`
+with the box. The signed token is bound to the photo, workspace and actual
+original frame, expires after 30 minutes, and is invalidated by a server restart.
+The server checks the original again when saving and before analysis/cache reuse.
+Reload the frame if confirmation expires or the original changes. A static
+`frame` marker cannot certify coordinates. Draw a reviewer box when the detector
 missed the animal or its usable box falls below the detector threshold.
 Both accept optional `source` and `reason`, save one Undo step per changed
 selection, and return the subject panel with `workspace_id`, `changed` and
 `edit_id` when changed. Undo restores the previous choice and reviewer box;
-replaced measurements are derived data and may need reanalysis.
+replaced measurements are derived data and may need reanalysis. History preserves
+the frame proof; restoring an old or unverified box requires confirmation/redraw
+on the original before analysis. Original-backed coordinate analysis is unavailable
+while originals are offline; ordinary cached/working-copy browsing remains available.
 
 A correction clears incompatible photo-level mask, eye and quality evidence
 and refreshes affected saved review suggestions without changing flags, ratings,

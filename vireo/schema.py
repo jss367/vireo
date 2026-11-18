@@ -314,6 +314,86 @@ def _validate_subject_detail(conn):
             raise RuntimeError(f"{table} is missing {', '.join(missing)}")
 
 
+def _unmeasure_unverified_reviewer_detail(conn):
+    """Retire coordinate-analysis caches while preserving human decisions/files."""
+    affected = "SELECT d.photo_id FROM detection_subjects s JOIN detections d ON d.id=s.detection_id"
+    conn.execute("UPDATE photos SET quality_score=NULL, subject_sharpness=NULL "
+                 f"WHERE id IN ({affected})")
+    conn.execute("UPDATE photos SET subject_size=NULL, subject_clip_high=NULL, "
+                 "subject_clip_low=NULL, subject_y_median=NULL "
+                 f"WHERE mask_path IS NULL AND id IN ({affected})")
+    conn.execute("DELETE FROM detection_subjects")
+    conn.execute("UPDATE photo_masks SET subject_detail=NULL, subject_detail_px=NULL "
+                 "WHERE detector_model='reviewer-selected' AND "
+                 "(subject_detail_px IS NOT NULL OR subject_detail != 0)")
+    conn.execute("UPDATE photos SET subject_detail=NULL, subject_detail_px=NULL "
+                 "WHERE EXISTS (SELECT 1 FROM detections d WHERE d.photo_id=photos.id "
+                 "AND d.detector_model='reviewer-selected')")
+
+
+def _retire_reviewer_frame_caches(conn):
+    """Old history replay could retain a mask from a different reviewer frame."""
+    from repositories.subjects import SubjectsRepository
+
+    reviewer = "SELECT id FROM detections WHERE detector_model='reviewer-selected'"
+    projected = conn.execute(
+        f"SELECT photo_id FROM photo_subject_state WHERE detection_id IN ({reviewer}) "
+        "UNION SELECT p.id FROM photos p JOIN photo_masks m ON m.photo_id=p.id AND p.mask_path=m.path "
+        "WHERE m.detector_model='reviewer-selected'"
+    ).fetchall()
+    subjects = SubjectsRepository(conn)
+    for photo_id, in projected:
+        subjects.clear_primary_features(photo_id)
+    for table in ("detection_subjects", "subject_ranking_analysis", "subject_raw_analysis"):
+        conn.execute(f"DELETE FROM {table} WHERE detection_id IN ({reviewer})")
+    conn.execute("DELETE FROM photo_masks WHERE detector_model='reviewer-selected'")
+
+
+def _retire_unbound_detector_caches(conn):
+    """Keep historical detector decisions but retire measurements without frame proof."""
+    from repositories.subjects import SubjectsRepository
+
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(detections)")}
+    if "frame_id" not in columns:
+        conn.execute("ALTER TABLE detections ADD COLUMN frame_id TEXT")
+    detector = "SELECT id FROM detections WHERE detector_model='megadetector-v6'"
+    projected = conn.execute(
+        f"SELECT photo_id FROM photo_subject_state WHERE detection_id IN ({detector}) "
+        "UNION SELECT p.id FROM photos p JOIN photo_masks m ON m.photo_id=p.id AND p.mask_path=m.path "
+        "WHERE m.detector_model='megadetector-v6'"
+    ).fetchall()
+    for photo_id, in projected:
+        SubjectsRepository(conn).clear_primary_features(photo_id)
+    for table in ("detection_subjects", "subject_ranking_analysis", "subject_raw_analysis"):
+        conn.execute(f"DELETE FROM {table} WHERE detection_id IN ({detector})")
+    conn.execute("DELETE FROM photo_masks WHERE detector_model='megadetector-v6'")
+
+
+def _repair_alternate_branch_schemas(conn):
+    """Repair main migrations skipped by branch catalogs stamped 39–47."""
+    _add_classifier_input_source(conn)
+    _add_job_history_errors(conn)
+    create_subject_focus(conn)
+
+
+def _clear_subject_detail_from_other_read_paths(conn):
+    """Unmeasure detail whose source rendering was not recorded.
+
+    Subject size cannot identify the rendering: even middle-band subjects
+    could have used reduced or cropped embedded JPEGs that the current
+    camera-rendered path demosaics. Preview dimensions were not persisted,
+    so no nonempty historical measurement can be certified. Preserve mask
+    files and other features; NULL makes Process remeasure cached masks
+    without rerunning SAM. Empty masks (zero detail, no subject size) and
+    measurements already pending remain unchanged.
+    """
+    for table in ("photo_masks", "photos"):
+        conn.execute(
+            f"UPDATE {table} SET subject_detail=NULL, subject_detail_px=NULL "
+            "WHERE subject_detail_px IS NOT NULL OR subject_detail != 0"
+        )
+
+
 # Job types only Vireo itself started before ``origin`` was recorded: the
 # hourly storage maintenance and the two recurring discovery checks.
 _HISTORICAL_SYSTEM_JOB_TYPES = (
@@ -469,6 +549,58 @@ def _merge_species_highlights(conn):
     conn.execute("DROP TABLE species_highlights")
 
 
+def _invalidate_ambiguous_companion_boxes(conn):
+    """Paired legacy boxes have no record of which photo supplied their coordinates."""
+    from detection_id import COMPANION_FRAME_RUNTIME
+    from repositories.subjects import SubjectsRepository
+
+    conn.execute(
+        "UPDATE detections SET runtime_fingerprint=? WHERE runtime_fingerprint='legacy' "
+        "AND detector_model!='full-image' AND photo_id IN "
+        "(SELECT id FROM photos WHERE companion_path IS NOT NULL UNION SELECT photo_id FROM companion_identities)",
+        (COMPANION_FRAME_RUNTIME,),
+    )
+    ambiguous = "SELECT id FROM detections WHERE runtime_fingerprint=?"
+    for table in ("detection_subjects", "subject_ranking_analysis", "subject_raw_analysis"):
+        conn.execute(f"DELETE FROM {table} WHERE detection_id IN ({ambiguous})", (COMPANION_FRAME_RUNTIME,))
+    affected_mask = (
+        "EXISTS (SELECT 1 FROM detections d WHERE d.photo_id=m.photo_id "
+        "AND d.runtime_fingerprint=? AND d.detector_model=m.detector_model AND "
+        "(d.box_x,d.box_y,d.box_w,d.box_h)=(m.prompt_x,m.prompt_y,m.prompt_w,m.prompt_h))"
+    )
+    projected = conn.execute(
+        f"SELECT photo_id FROM photo_subject_state WHERE detection_id IN ({ambiguous}) "
+        "UNION SELECT p.id FROM photos p JOIN photo_masks m ON m.photo_id=p.id AND m.path=p.mask_path "
+        f"WHERE {affected_mask}", (COMPANION_FRAME_RUNTIME, COMPANION_FRAME_RUNTIME),
+    ).fetchall()
+    subjects = SubjectsRepository(conn)
+    for photo_id, in projected:
+        subjects.clear_primary_features(photo_id)
+    conn.execute(f"DELETE FROM photo_masks AS m WHERE {affected_mask}", (COMPANION_FRAME_RUNTIME,))
+
+
+def _clear_orphaned_companion_mask_projections(conn):
+    """Repair active projections left behind when a companion mask row was retired."""
+    from detection_id import COMPANION_FRAME_RUNTIME
+    from repositories.subjects import SubjectsRepository
+
+    subjects = SubjectsRepository(conn)
+    for photo_id, in conn.execute(
+        "SELECT p.id FROM photos p WHERE p.mask_path IS NOT NULL AND EXISTS "
+        "(SELECT 1 FROM detections d WHERE d.photo_id=p.id AND d.runtime_fingerprint=?) "
+        "AND NOT EXISTS (SELECT 1 FROM photo_masks m WHERE m.photo_id=p.id AND m.path=p.mask_path) "
+        "AND NOT EXISTS (SELECT 1 FROM photo_subject_state s WHERE s.photo_id=p.id)",
+        (COMPANION_FRAME_RUNTIME,),
+    ).fetchall():
+        subjects.clear_primary_features(photo_id)
+
+
+def _reconcile_highlights_and_detail(conn):
+    # Branch catalogs stamped 42 through 45 can still hold per-workspace highlights.
+    _merge_species_highlights(conn)
+    _clear_subject_detail_from_other_read_paths(conn)
+
+
 def _discard_migrated_highlight_contradictions(conn, curated_through):
     """Resolve synthesized edges below existing choices without rewriting them."""
     comparisons = [Comparison(*row) for row in conn.execute(
@@ -528,7 +660,8 @@ def _add_classifier_input_source(conn):
 
 def _add_reviewed_gps(conn):
     # Catalogs stamped 43 on the GPS branch already have reviewed locations
-    # but still need the classifier input source migration from main.
+    # but still need the classifier input source migration from main. Main's
+    # catalogs stamped 44 already ran this; branch catalogs at 44–51 did not.
     _add_classifier_input_source(conn)
     create_reviewed_gps(conn)
 
@@ -595,7 +728,19 @@ MIGRATIONS = (
         _merge_species_highlights, _validate_merged_species_highlights,
     ),
     Migration(43, "classifier_input_source", _add_classifier_input_source),
-    Migration(44, "reviewed_gps", _add_reviewed_gps),
+    # Main's catalogs at 44 ran reviewed_gps instead; 45 repeats this one for them.
+    Migration(44, "subject_detail_full_resolution", _clear_subject_detail_from_other_read_paths),
+    Migration(45, "subject_detail_mask_alignment", _clear_subject_detail_from_other_read_paths),
+    Migration(46, "reconcile_highlights_and_detail", _reconcile_highlights_and_detail, _validate_merged_species_highlights),
+    Migration(47, "companion_box_frames", _invalidate_ambiguous_companion_boxes),
+    Migration(48, "repair_alternate_branch_schemas", _repair_alternate_branch_schemas),
+    Migration(49, "verified_reviewer_frame", _unmeasure_unverified_reviewer_detail),
+    # Alternate v47 catalogs used that slot for reviewer frames and can already be at v49.
+    Migration(50, "reconcile_companion_box_frames", _invalidate_ambiguous_companion_boxes),
+    Migration(51, "reviewer_history_mask_frames", _retire_reviewer_frame_caches),
+    Migration(52, "reviewed_gps", _add_reviewed_gps),
+    Migration(53, "orphaned_companion_masks", _clear_orphaned_companion_mask_projections),
+    Migration(54, "detector_decoded_frames", _retire_unbound_detector_caches),
 )
 
 
