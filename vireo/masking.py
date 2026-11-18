@@ -6,6 +6,8 @@ ONNX models, then provides utilities for subject cropping and background blurrin
 Masks are saved as single-channel PNGs in ~/.vireo/masks/{photo_id}.png.
 """
 
+import hashlib
+import json
 import logging
 import os
 import threading
@@ -55,6 +57,19 @@ def _sam2_model_dir(variant):
     return os.path.join(
         default_path("models"), variant
     )
+
+
+def sam_generation(variant):
+    """Identify the pair of local weight files that back SAM sessions."""
+    files = []
+    for name in ("image_encoder.onnx", "mask_decoder.onnx"):
+        path = os.path.join(_sam2_model_dir(variant), name)
+        try:
+            st = os.stat(path)
+        except FileNotFoundError:
+            return None
+        files.append((path, st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns))
+    return hashlib.sha256(json.dumps(files).encode()).hexdigest()
 
 
 def sam2_status(variant):
@@ -182,7 +197,7 @@ def _get_sam2_sessions(variant="sam2-small"):
         variant: one of sam2-tiny, sam2-small, sam2-base-plus, sam2-large
 
     Returns:
-        (image_encoder_session, mask_decoder_session) tuple
+        (image_encoder_session, mask_decoder_session, weight_generation) tuple
     """
     global _encoder_session, _decoder_session, _sam2_variant_loaded
 
@@ -195,12 +210,13 @@ def _get_sam2_sessions(variant="sam2-small"):
         _sam2_session_lock,
         label="SAM2 session cache",
     ):
+        generation = sam_generation(variant)
         if (
             _encoder_session is not None
             and _decoder_session is not None
-            and _sam2_variant_loaded == variant
+            and _sam2_variant_loaded == (variant, generation)
         ):
-            return _encoder_session, _decoder_session
+            return _encoder_session, _decoder_session, generation
 
         if variant not in SAM2_VARIANTS:
             raise ValueError(
@@ -208,9 +224,7 @@ def _get_sam2_sessions(variant="sam2-small"):
                 f"Choose from: {list(SAM2_VARIANTS.keys())}"
             )
 
-        model_dir = os.path.join(
-            default_path("models"), variant
-        )
+        model_dir = _sam2_model_dir(variant)
         encoder_path = os.path.join(model_dir, "image_encoder.onnx")
         decoder_path = os.path.join(model_dir, "mask_decoder.onnx")
 
@@ -259,11 +273,13 @@ def _get_sam2_sessions(variant="sam2-small"):
             decoder_path, providers=providers_no_coreml, cancel_check=pure_probe,
         )
 
+        if generation is None or sam_generation(variant) != generation:
+            raise RuntimeError("SAM2 weights changed while loading sessions. Retry segmentation.")
         _encoder_session = enc_sess
         _decoder_session = dec_sess
-        _sam2_variant_loaded = variant
+        _sam2_variant_loaded = (variant, generation)
         log.info("SAM2 ONNX loaded (%s)", variant)
-        return enc_sess, dec_sess
+        return enc_sess, dec_sess, generation
 
 
 def _sam2_box_prompt(bx, by, bw, bh, orig_w, orig_h):
@@ -356,7 +372,8 @@ def generate_mask(image, detection_box, variant="sam2-small"):
     Returns:
         numpy boolean array (H, W) — True where subject is, or None on failure
     """
-    encoder_session, decoder_session = _get_sam2_sessions(variant)
+    encoder_session, decoder_session, generation = _get_sam2_sessions(variant)
+    image.info["vireo_sam_generation"] = generation
     img_array = np.array(image.convert("RGB"))
     orig_h, orig_w = img_array.shape[:2]
 
@@ -410,7 +427,7 @@ def generate_mask(image, detection_box, variant="sam2-small"):
         return None
 
 
-def save_mask(mask, masks_dir, photo_id, variant):
+def save_mask(mask, masks_dir, photo_id, variant, *, frame_id=None):
     """Save a boolean mask as a single-channel PNG.
 
     Filename: ``{photo_id}.{variant}.png`` so multiple SAM variants per
@@ -427,15 +444,17 @@ def save_mask(mask, masks_dir, photo_id, variant):
     """
     os.makedirs(masks_dir, exist_ok=True)
     path = os.path.join(masks_dir, f"{photo_id}.{variant}.png")
-    write_mask_png(mask, path)
+    write_mask_png(mask, path, frame_id=frame_id)
     return path
 
 
-def write_mask_png(mask, destination):
+def write_mask_png(mask, destination, *, frame_id=None):
     """Encode the segmented frame provenance with the mask pixels."""
     from PIL.PngImagePlugin import PngInfo
 
     metadata = PngInfo()
+    if frame_id is not None:
+        metadata.add_text("vireo_subject_frame_id", frame_id)
     metadata.add_text("vireo_mask_frame", "camera_rendered")
     metadata.add_text("vireo_prompt_frame", "camera_rendered")
     Image.fromarray(mask.astype(np.uint8) * 255).save(destination, format="PNG", pnginfo=metadata)
@@ -471,11 +490,17 @@ def require_aligned_detector_prompt(image, detector_runtime, *, detector_model=N
         raise PromptFrameError("Detector coordinates use an unverified RAW frame; enable Re-classify to rerun detection before subject analysis")
 
 
-def require_original_reviewer_frame(image_path, runtime, *, detector_model=None):
-    """Cached measurements cannot bypass a prompt's original-frame proof."""
+def require_original_reviewer_frame(image_path, runtime, *, detector_model=None, verify_mask_frame=False):
+    """Validate the prompt and return the decoded identity for cached-mask checks."""
     from detection_id import prompt_frame_id
+    from image_loader import RAW_EXTENSIONS
 
-    if prompt_frame_id(runtime) is None and detector_model != "megadetector-v6" and (not isinstance(runtime, str) or not runtime.startswith("reviewer")):
+    needs_proof = (
+        (verify_mask_frame and os.path.splitext(image_path)[1].lower() in RAW_EXTENSIONS)
+        or prompt_frame_id(runtime) is not None or detector_model == "megadetector-v6"
+        or (isinstance(runtime, str) and runtime.startswith("reviewer"))
+    )
+    if not needs_proof:
         return
     from image_loader import RAW_DECODE_ALIGNED, load_image
 
@@ -484,6 +509,18 @@ def require_original_reviewer_frame(image_path, runtime, *, detector_model=None)
         raise PromptFrameError("Original prompt frame unavailable; reconnect the original before analysis")
     with image:
         require_aligned_detector_prompt(image, runtime, detector_model=detector_model)
+        return image.info.get("vireo_subject_frame_id")
+
+
+def cached_mask_frame_matches(path, frame_id):
+    """A validated prompt may still have an older mask at the same box."""
+    if frame_id is None:
+        return True
+    try:
+        with Image.open(path) as mask:
+            return mask.info.get("vireo_subject_frame_id") == frame_id
+    except (OSError, ValueError, Image.DecompressionBombError):
+        return False
 
 
 def load_mask(masks_dir, photo_id, variant):

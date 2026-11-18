@@ -22,6 +22,12 @@ function rqWrite(key, value) {
   }
 }
 
+/** @param {unknown} center @returns {center is [number,number]} */
+function rqValidCenter(center) {
+  return Array.isArray(center) && center.length === 2 &&
+    center.every(v => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1);
+}
+
 /** @param {unknown} value @returns {ReviewQueueSession} */
 function rqSession(value) {
   var session = /** @type {Partial<ReviewQueueSession>|null} */ (value);
@@ -33,10 +39,22 @@ function rqSession(value) {
       /** @type {ReviewQueueItemState} */
       var restored = {inspected: item.inspected === true, unresolved: item.unresolved === true,
         subject: Number.isSafeInteger(item.subject) ? item.subject : null,
-        center: Array.isArray(item.center) && item.center.length === 2 &&
-          item.center.every(function(v) { return typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1; }) ? item.center : null};
+        center: rqValidCenter(item.center) ? item.center : null};
       if (item.pendingFlag === 'flagged' || item.pendingFlag === 'rejected' || item.pendingFlag === 'none') {
         restored.pendingFlag = item.pendingFlag;
+      }
+      if (typeof item.generation === 'string' && item.coverage && typeof item.coverage === 'object') {
+        restored.coverage = {};
+        for (var [key, record] of Object.entries(item.coverage)) {
+          if (/^[a-f0-9]{64}$/.test(key) && record && typeof record.confirmed === 'boolean' && Array.isArray(record.notes) &&
+              record.notes.every(n => n && typeof n.label === 'string' && typeof n.evidence === 'string' &&
+                (n.center == null || rqValidCenter(n.center)) && (n.region === null || Number.isSafeInteger(n.region)) && rqAnimalStates.includes(n.state))) {
+            restored.coverage[key] = record;
+          }
+        }
+        restored.generation = item.generation;
+        if (item.entry !== undefined && Number.isSafeInteger(item.entry) &&
+            restored.coverage[item.generation]?.notes[item.entry]) restored.entry = item.entry;
       }
       items[entry[0]] = restored;
     });
@@ -109,6 +127,10 @@ function rqItem(id) {
 }
 
 function rqPhotos() {
+  if (reviewQueue.linkedPhoto && currentPhotoIdFilter === reviewQueue.linkedPhoto.photo_id &&
+      currentCollection === 'all' && currentModel === 'all' && currentTab === 'all' &&
+      minConfidence === 0 && reviewEvidenceFilter === 'all' && !currentLabelsFingerprint &&
+      !VireoFilter.hasFilters() && !VireoFilter.getVisual()) return [reviewQueue.linkedPhoto];
   var seen = new Set();
   return getVisibleItems(true).filter(function(p) {
     if (seen.has(p.photo_id)) return false;
@@ -127,6 +149,9 @@ function rqProgress() {
 // Clear visible inspection snapshots as soon as a filter/catalog refresh starts.
 function rqBeginReload() {
   _predictionsReloading = true;
+  reviewQueue.linkedPhoto = null;
+  rqElement('rqComparison').textContent = '';
+  rqElement('rqCoverage').hidden = true;
   ++reviewQueue.sequence;
   reviewQueue.current = null;
   rqClearCrop();

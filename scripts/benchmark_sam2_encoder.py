@@ -144,7 +144,7 @@ def main():
 
     results = []
     with (
-        patch.object(masking, "_get_sam2_sessions", return_value=(encoder, decoder)),
+        patch.object(masking, "_get_sam2_sessions", return_value=(encoder, decoder, None)),
         ThreadPoolExecutor(max_workers=1) as pool,
     ):
         for row in rows:

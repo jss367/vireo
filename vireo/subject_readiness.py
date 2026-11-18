@@ -129,3 +129,29 @@ def mark_analysis_readiness(photo: dict[str, Any]) -> bool:
         photo["reject_reasons"] = []
         photo["label"] = explicit_decision(photo) or "REVIEW"
     return readiness["eligible"]
+
+
+def usable_selected_analysis(analysis):
+    import io
+
+    import numpy as np
+    from PIL import Image
+    if not isinstance(analysis, dict) or not isinstance(analysis.get("features"), dict):
+        return False
+    ready = subject_analysis_readiness({**analysis["features"], "subject_present": True,
+                                       "subject_mask_available": bool(analysis.get("mask_png"))})
+    if not ready["eligible"]:
+        return False
+    try:
+        basis = analysis["features"].get("analysis")
+        if not isinstance(basis, dict) or basis.get("source") != "original" or basis.get("measurement_basis") != "subject_mask":
+            return False
+        with Image.open(io.BytesIO(analysis["mask_png"])) as image:
+            if image.info.get("vireo_subject_frame_id") != basis.get("frame_id"):
+                return False
+            if image.size != (basis.get("width"), basis.get("height")):
+                return False
+            pixels = np.asarray(image)
+            return pixels.ndim == 2 and bool(np.any(pixels))
+    except (OSError, ValueError, TypeError, SyntaxError, Image.DecompressionBombError):
+        return False

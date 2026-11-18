@@ -297,7 +297,8 @@ def test_manual_choice_and_history_refresh_an_already_projected_burst(db):
     assert [db.subjects.primary_state(p)["detection_id"] for p, _, _ in frames] == [
         frames[0][2], frames[1][2], frames[2][2], frames[3][1]]
     with db.transaction():
-        replay_history(db, [{"photo_id": pid, "old_value": json.dumps({"choice": None, "boxes": []})}], undo=True)
+        replay_history(db, [{"photo_id": pid, "new_value": json.dumps({"choice": right, "boxes": []}),
+                             "old_value": json.dumps({"choice": None, "boxes": []})}], undo=True)
     assert all(db.subjects.primary_state(p)["detection_id"] == left for p, left, _ in frames)
 
 

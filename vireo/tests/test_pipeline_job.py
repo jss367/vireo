@@ -4467,7 +4467,7 @@ def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch, 
         writer = Database(db_path)
         writer.set_active_workspace(ws_id)
         replacement.append(confirmed_reviewer_box(
-            writer, photo_id, dict(x=redraw[1], y=.2, w=.2, h=.2)))
+            writer, photo_id, dict(x=redraw[1], y=.2, w=.2, h=.2), edit=chosen))
         writer.close()
 
     class RedrawingClassifier(_RobinClassifier):
@@ -4539,7 +4539,7 @@ def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch, 
     if redraw:
         assert replacement
         current = replacement[0]
-        assert (current == chosen) == (redraw[1] == .20001)
+        assert current == chosen
         assert verify_db.subjects.choice(photo_id)['detection_id'] == current
         predictions = detection_store.get_predictions_for_detection(
             verify_db, current, classifier_model='BioCLIP')
@@ -9007,14 +9007,6 @@ def _stub_extract_masks_heavy_ops(monkeypatch, *, original_proxy=False):
         masking, "generate_mask",
         lambda *a, **k: np.ones((16, 16), dtype=np.uint8),
     )
-    def fake_save_mask(mask, dir_, pid_, variant):
-        path = os.path.join(dir_, f"{pid_}.{variant}.png")
-        os.makedirs(dir_, exist_ok=True)
-        with open(path, "wb") as handle:
-            handle.write(b"mask")
-        return path
-
-    monkeypatch.setattr(masking, "save_mask", fake_save_mask)
     monkeypatch.setattr(masking, "crop_completeness", lambda m: 1.0)
     monkeypatch.setattr(masking, "crop_subject", lambda p, m, margin=0.15: None)
     monkeypatch.setattr(masking, "ensure_sam2_weights", lambda **k: None)
@@ -9244,10 +9236,10 @@ def test_mask_publication_refuses_reclassification(tmp_path, monkeypatch, caplog
     monkeypatch.setattr(masking, "render_proxy", lambda *args, **kwargs: proxy)
     save_mask = masking.save_mask
 
-    def reclassify_after_segmentation(*args):
+    def reclassify_after_segmentation(*args, **kwargs):
         with closing(Database(db_path)) as writer:
             assert write_frame(writer, "b" * 64) == ids
-        return save_mask(*args)
+        return save_mask(*args, **kwargs)
 
     def run_masks():
         if entry_point == "process":

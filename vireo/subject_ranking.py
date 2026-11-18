@@ -133,7 +133,14 @@ def source_path(db, photo):
 # 7: reviewer coordinates are bound to the actual original frame generation.
 # 8: retire analyses that may have reused masks across reviewer history frames.
 # 9: detector prompts are bound to their actual decoded rendition.
-ANALYSIS_RECIPE_VERSION = 9
+# 10: bind saved mask pixels to the actual decoded source frame.
+ANALYSIS_RECIPE_VERSION = 10
+
+
+def _measurement_settings(pipeline):
+    return {k: pipeline.get(k, default) for k, default in (
+        ("sam2_variant", "sam2-small"), ("eye_detect_enabled", False),
+        ("eye_classifier_conf_gate", .5), ("eye_detection_conf_gate", .5), ("eye_window_k", .08))}
 
 
 def analysis_key(path, detection, effective_cfg):
@@ -162,9 +169,7 @@ def analysis_key(path, detection, effective_cfg):
             weights.append((weight, None))
     inputs = [ANALYSIS_RECIPE_VERSION, EYE_KP_FINGERPRINT_VERSION, detection.get("prediction_fingerprint"), os.path.realpath(path), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_ino, detection["id"],
               detection["detector_model"], dict(detection).get("runtime_fingerprint"), dict(detection).get("frame_id"), [detection["box_" + k] for k in "xywh"], 1024,
-              {k: pipeline.get(k, default) for k, default in (
-                  ("sam2_variant", "sam2-small"), ("eye_detect_enabled", False),
-                  ("eye_classifier_conf_gate", .5), ("eye_detection_conf_gate", .5), ("eye_window_k", .08))}, weights]
+              _measurement_settings(pipeline), weights]
     return hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
 
 
@@ -173,7 +178,37 @@ def cached_analysis(db, photo, detection, effective_cfg):
         key = analysis_key(source_path(db, photo), detection, effective_cfg)
     except OSError:
         return None, None
-    return key, db.subjects.ranking_analysis(detection["id"], key)
+    from subject_readiness import usable_selected_analysis
+    analysis = db.subjects.ranking_analysis(detection["id"], key)
+    return key, analysis if usable_selected_analysis(analysis) else None
+
+
+def comparison_analysis(db, photo, detection, effective_cfg):
+    from detection_id import detection_prompt_runtime, prompt_frame_id
+    from primary_comparison import compatible_primary, digest, primary_owner
+
+    key, analysis = cached_analysis(db, photo, detection, effective_cfg)
+    if analysis:
+        pipeline = effective_cfg.get("pipeline", {})
+        owner = {"kind": "selected", "generation": key, "detection_id": detection["id"],
+                 "region": {k: detection["box_" + k] for k in "xywh"}, "detector_model": detection["detector_model"],
+                 "raster": {"frame_id": prompt_frame_id(detection_prompt_runtime(detection)),
+                            **analysis["features"]["analysis"]},
+                 "sam_variant": pipeline.get("sam2_variant") or "sam2-small",
+                 "recipe": ANALYSIS_RECIPE_VERSION, "settings": _measurement_settings(pipeline)}
+        return key, {**analysis, "owner": owner}, {"status": "selected_current", "reason": "Current selected-subject measurements."}
+    if key is None:
+        return None, None, {"status": "source_unavailable", "reason": "Reconnect the original to check the selected measurements."}
+    row = db.masks_features.active_measurements([photo["id"]]).get(photo["id"])
+    owner = primary_owner(row, dict(photo).get("subjects", []))
+    primary, status, reason = compatible_primary(row, owner, detection, source_path(db, photo),
+                                                 effective_cfg, db.masks_features.masks_dir)
+    evidence = {"status": status, "reason": reason, "primary_owner": owner}
+    if primary:
+        return digest([key, primary["owner"]["generation"]]), primary, evidence
+    if db.subjects.has_ranking_analysis(detection["id"]):
+        evidence.update(selected_cache="stale", reason="The stored selected analysis is stale. " + reason)
+    return None, None, evidence
 
 
 def subject_urls(photo_id, selection, size=512):
@@ -185,10 +220,45 @@ def subject_urls(photo_id, selection, size=512):
         urls["crop_url"] = f"/photos/{photo_id}/crop?detection_id={detection_id}"
     if key:
         query = f"detection_id={detection_id}&analysis_key={key}"
+        if selection.get("mask_digest"):
+            query += f"&mask_digest={selection['mask_digest']}"
         focus = f"/photos/{photo_id}/focus-crop?size={size}&source=original&{query}"
         urls.update(focus_crop_url=focus, focus_crop_mask_url=focus + "&mask=1",
                     mask_url=f"/api/masks/{photo_id}/subject.png?{query}")
     return urls
+
+
+def mask_review_state(db, photo_id, selection, analysis):
+    digest = hashlib.sha256(analysis["mask_png"]).hexdigest() if analysis else None
+    verdict, revision = "unreviewed", 0
+    history = []
+    for row in db.subjects.mask_reviews(photo_id):
+        if (row["detection_id"] == selection["detection_id"] and row["source_key"] == selection["analysis_key"]
+                and row["mask_digest"] == digest):
+            verdict, revision = row["verdict"], row["revision"]
+        else:
+            history.append({"analysis_key": row["source_key"], "mask_digest": row["mask_digest"],
+                            "detection_id": row["detection_id"], "box": json.loads(row["box"]),
+                            "verdict": row["verdict"], "url": f"/api/photos/{photo_id}/mask-reviews/{row['id']}.png"})
+    return {"verdict": verdict, "revision": revision, "mask_digest": digest, "history": history}
+
+
+def mask_review_hint(detection, features, candidates):
+    box_area = detection["box_w"] * detection["box_h"]
+    size = features.get("subject_size")
+    if size is not None and size < box_area / 3:
+        return "Mask covers little of the selected region. Check for a reed or other obstruction."
+    if size is not None and size > 1.2 * box_area:
+        return "Mask extends beyond the selected region. Check for background or another animal."
+    for candidate in candidates:
+        if candidate["detection_id"] == detection["id"]:
+            continue
+        box = candidate["box"]
+        cx, cy = box["x"] + box["w"] / 2, box["y"] + box["h"] / 2
+        if (detection["box_x"] <= cx <= detection["box_x"] + detection["box_w"]
+                and detection["box_y"] <= cy <= detection["box_y"] + detection["box_h"]):
+            return "Another subject center falls inside this region. Check for a merged mask."
+    return None
 
 
 def comparison_frames(db, photos, comparison, effective_cfg):
@@ -198,21 +268,30 @@ def comparison_frames(db, photos, comparison, effective_cfg):
     frames, eligible = [], []
     for photo in photos:
         detection, selection = resolve_subject(db, photo["id"], comparison)
-        analysis, key = None, None
+        analysis, key, evidence = None, None, {}
         if detection:
-            key, analysis = cached_analysis(db, photo, detection, effective_cfg)
+            key, analysis, evidence = comparison_analysis(db, photo, detection, effective_cfg)
+        reason = evidence.get("reason")
         selection["analysis_key"] = key if analysis else None
         state = selection["selection"] if not detection else ("ready" if analysis else "subject_analysis_missing")
+        review = mask_review_state(db, photo["id"], selection, analysis)
+        selection["mask_digest"] = review["mask_digest"]
         card = {"id": photo["id"], "filename": photo["filename"], "rank": None, "role": "review", "label": "REVIEW",
                 "quality": None, "quality_pct": None, "focus": None, "focus_basis": None,
                 "sharpness": None, "subject_detail": None, "eye_x": None, "eye_y": None, "eye_conf": None, "eye_tenengrad": None,
                 "flag": photo.get("flag") or "none", "rating": photo.get("rating"), "reject_reasons": [],
                 "flag_confirmation_status": photo.get("flag_confirmation_status", "unverified"),
-                "subject": selection, "evidence_status": state, "detection_count": len(selection["candidates"]),
+                "subject": selection, "evidence_status": state, "comparison_evidence": evidence, "evidence_reason": reason,
+                "evidence_owner": analysis["owner"] if analysis else None, "detection_count": len(selection["candidates"]),
                 "has_mask": bool(analysis), "has_quality": bool(analysis), "has_eye": False,
-                "reasons": [] if state == "ready" else [state.replace("_", " ")],
+                "reasons": [] if state == "ready" else [reason or state.replace("_", " ")],
                 **subject_urls(photo["id"], selection)}
+        card["mask_review"] = review
         if analysis:
+            review["hint"] = mask_review_hint(detection, analysis["features"], selection["candidates"])
+        if review["verdict"] == "invalid":
+            card.update(analysis=analysis["features"].get("analysis"), reasons=["Reviewer excluded this mask from comparison"])
+        elif analysis:
             features = analysis["features"]
             # No photo-level subject measurement, embedding, or species vote may leak into this scorer.
             frame = {k: photo.get(k) for k in (
@@ -238,10 +317,14 @@ def _mark_unavailable_comparison_cards(cards, photos):
         if photo.get("selection_eligible"):
             continue
         reasons = photo.get("analysis_reasons", [])
-        by_id[photo["id"]].update(
+        card = by_id[photo["id"]]
+        reason = "Selected measurements are incomplete: " + ", ".join(reasons)
+        card["comparison_evidence"].update(status="selected_incomplete", reason=reason)
+        card.update(
             label=photo["label"], has_quality=False, has_eye=False,
             evidence_status="subject_analysis_missing",
             analysis_status=photo["analysis_status"], analysis_reasons=reasons,
+            evidence_reason=reason,
             reasons=["Subject analysis needs review: " + reason.replace("_", " ") for reason in reasons],
         )
 
@@ -278,4 +361,4 @@ def build_subject_comparison(db, seed_photo_id, photos, comparison, effective_cf
             "suggested_reject_ids": [c["id"] for c in cards if c["role"] == "reject" and c["flag"] == "none"],
             "focus_cohorts": encounter.get("focus_cohorts", {}),
             "comparison": {"requested_species": comparison.requested_species, "subject_overrides": comparison.subject_overrides},
-            "scored": bool(eligible), "unscored_reason": None if eligible else "At least two selected subjects need current quality analysis"}
+            "scored": bool(eligible), "unscored_reason": None if eligible else "At least two selected subjects need eligible quality analysis"}

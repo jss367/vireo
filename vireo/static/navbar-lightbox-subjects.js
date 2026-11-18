@@ -36,7 +36,7 @@ import { safeFetch, showToast } from './navbar-shared-helpers.js';
   /** @param {NavSubject} subject @param {boolean} correction */
   function previewUrl(subject, correction) {
     return '/photos/' + data?.photo_id + '/crop?detection_id=' + subject.id
-      + (correction ? '&suggested=1' : '') + '&v=' + encodeURIComponent(subject.analysis?.source_key || 'pending');
+      + (correction ? '&suggested=1' : '') + '&v=' + encodeURIComponent((subject.revision || '') + (subject.analysis?.source_key || 'pending'));
   }
   /** @param {NavSubject} subject @param {number} index @param {boolean} readOnly @param {string | null} readOnlyTitle */
   function subjectCard(subject, index, readOnly, readOnlyTitle) {
@@ -66,7 +66,19 @@ import { safeFetch, showToast } from './navbar-shared-helpers.js';
     reject.disabled = busy || readOnly;
     reject.onclick = () => setVerdict(subject.id, 'not_animal');
     item.append(button, reject);
+    appendEditButton(item, subject, readOnly);
     return item;
+  }
+  /** @param {HTMLElement} item @param {NavSubject} subject @param {boolean} readOnly */
+  function appendEditButton(item, subject, readOnly) {
+    if (subject.revision) {
+      const edit = document.createElement('button');
+      edit.type = 'button';
+      edit.textContent = 'Edit box';
+      edit.disabled = busy || readOnly;
+      edit.onclick = () => draw(subject);
+      item.append(edit);
+    }
   }
   /** @param {NavSubject} region @param {number} index @param {boolean} readOnly @param {string | null} readOnlyTitle */
   function rejectedCard(region, index, readOnly, readOnlyTitle) {
@@ -85,6 +97,7 @@ import { safeFetch, showToast } from './navbar-shared-helpers.js';
     restore.disabled = busy || readOnly;
     restore.onclick = () => setVerdict(region.id, null);
     item.append(img, caption, restore);
+    appendEditButton(item, region, readOnly);
     return item;
   }
   /** Disable every primary-subject control while the photo has no retained subject. */
@@ -227,7 +240,8 @@ import { safeFetch, showToast } from './navbar-shared-helpers.js';
     render();
     try {
       /** @type {NavSubjectData} */ const result = await safeFetch('/api/photos/' + photoId + '/primary-subject', {
-        method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({detection_id: detectionId})
+        method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({detection_id: detectionId,
+          expected_primary_detection_id: data.primary_detection_id})
       }, {toast: false});
       if (seq !== generation || vireoLightboxSession.requestedPhotoId() !== photoId) return;
       if (data?.primary_detection_id !== result.primary_detection_id) {
@@ -354,7 +368,8 @@ import { safeFetch, showToast } from './navbar-shared-helpers.js';
     try {
       const route = detectionId ? '/api/photos/analysis-retry' : '/api/photos/' + photoId + '/subjects/analyze';
       const body = detectionId
-        ? {photo_ids: [photoId], expected_workspace_id: data.workspace_id, expected_primary_detection_id: detectionId}
+        ? {photo_ids: [photoId], expected_workspace_id: data.workspace_id, expected_primary_detection_id: detectionId,
+          expected_reviewer_revision: data.subjects.find(s => s.id === detectionId)?.revision}
         : {detection_id: null};
       /** @type {{job_id: string}} */ const job = await safeFetch(route, {
         method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
@@ -386,23 +401,29 @@ import { safeFetch, showToast } from './navbar-shared-helpers.js';
   };
   analyzeButton.onclick = () => analyze();
   retryButton.onclick = () => { const subject = primary(); if (subject) analyze(subject.id); };
-  drawButton.onclick = () => {
+  drawButton.onclick = () => draw();
+  /** @param {NavSubject} [subject] */
+  function draw(subject) {
     if (!data || busy || _lbGuardReadOnly()) return;
     const photoId = data.photo_id, seq = generation;
     openSubjectBox(photoId, result => {
       if (generation !== seq || vireoLightboxSession.requestedPhotoId() !== photoId) return;
+      const newPrimary = result.subjects.find(s => s.is_primary);
+      const refreshPrimary = data?.primary_detection_id !== result.primary_detection_id
+        || primary()?.revision !== newPrimary?.revision;
       data = result;
       if (result.warning) showToast(result.warning, 'warning');
       const photo = _lbPhotoDataByPhoto[photoId];
-      if (photo) {
+      if (refreshPrimary && photo) {
         /** @type {const} */ (['eye_x', 'eye_y', 'eye_conf', 'eye_tenengrad']).forEach(key => { photo[key] = null; });
         _lbRenderEyeCrosshair(photo);
       }
-      _lbResetMaskOverlay(); _lbLoadDetections(photoId); _lbLoadMaskVariants(photoId);
+      if (refreshPrimary) _lbResetMaskOverlay();
+      _lbLoadDetections(photoId); _lbLoadMaskVariants(photoId);
       document.dispatchEvent(new CustomEvent('vireo:primary-subject-changed', {detail: {photoId}}));
       render();
-    });
-  };
+    }, subject);
+  }
   automatic.onclick = () => choose(null);
   corrected.onchange = render;
   cropButton.onclick = () => useSuggestion('crop');

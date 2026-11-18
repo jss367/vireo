@@ -120,11 +120,14 @@ def focus_window(image_size, center, size):
     return (x1, y1, min(iw, x1 + size), min(ih, y1 + size)), (cx, cy)
 
 
-def shade_focus_mask(crop, mask_bytes, image_size, window, image_api):
+def shade_focus_mask(crop, mask_bytes, image_size, window, image_api, *, frame_id=None, require_frame_id=False):
     """Use the same raster coordinates for the pipeline mask and focus window."""
     import io
 
     mask = image_api.open(io.BytesIO(mask_bytes)).convert("L")
+    mask_id = mask.info.get("vireo_subject_frame_id")
+    if (require_frame_id or mask_id is not None) and (not mask_id or mask_id != frame_id):
+        raise ValueError("Mask and source do not share a verified frame")
     mask_ratio = mask.size[0] / mask.size[1]
     if abs(mask_ratio / (image_size[0] / image_size[1]) - 1) > ASPECT_TOLERANCE:
         raise ValueError("Mask geometry differs from the upright source")
@@ -180,7 +183,12 @@ def focus_headers(basis, center, window, image_size, source, mask_applied, scale
     part of that animal lies outside the window.
     """
     clipped = window_clips_subject(window, image_size, subject) if subject is not None else None
+    iw, ih = image_size
+    x1, y1, x2, y2 = window
+    edges = [edge for edge, touches in (("left", x1 == 0), ("top", y1 == 0),
+                                        ("right", x2 == iw), ("bottom", y2 == ih)) if touches]
     return {
+        "X-Vireo-Focus-Source-Edges": ",".join(edges) or "none",
         "X-Vireo-Focus-Subject-Clipped": "unknown" if clipped is None else ("1" if clipped else "0"),
         "X-Vireo-Focus-Basis": basis,
         "X-Vireo-Focus-Center": f"{center[0]:.4f},{center[1]:.4f}",
@@ -213,3 +221,40 @@ def focus_evidence_headers(photo, boxes, *, bound=False):
         else:
             headers["X-Vireo-Focus-Eye-Status"] = "located"
     return headers
+
+
+def head_focus_point(features, box, raster, size):
+    """Fit the measured head landmarks when possible, retaining the eye as anchor."""
+    def location(pair):
+        if (isinstance(pair, (list, tuple)) and len(pair) == 2
+                and all(type(v) in (int, float) and math.isfinite(v) for v in pair)
+                and point_in_subject(pair, box)):
+            return tuple(pair)
+        return None
+
+    eye = location((features.get("eye_x"), features.get("eye_y"))) if features.get("eye_status") == "measured" else None
+    verified = {}
+    landmarks = features.get("head_landmarks")
+    if isinstance(landmarks, dict):
+        for name in ("bill", "crown", "forehead", "nape"):
+            point = location(landmarks.get(name))
+            if point is not None:
+                verified[name] = point
+    # When the eye is hidden, require evidence spanning the bill to the back of
+    # the head. Closely clustered front-of-head points can fire on foliage.
+    spans_head = "bill" in verified and "nape" in verified and len(verified) >= 3
+    if not verified or (eye is None and not spans_head):
+        return (eye, "eye") if eye else (None, "subject")
+    points = list(verified.values())
+    if eye:
+        points.append(eye)
+    center = []
+    for axis, length in enumerate(raster):
+        low, high = min(p[axis] for p in points), max(p[axis] for p in points)
+        middle = (low + high) / 2
+        if eye:
+            # When the landmarks span more than a window, keep the eye inside it.
+            radius = (size / 2 - 1) / length
+            middle = max(eye[axis] - radius, min(eye[axis] + radius, middle))
+        center.append(middle)
+    return tuple(center), "head"

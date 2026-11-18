@@ -20,7 +20,7 @@ This module must not import ``db``: ``schema.py`` imports ``db``, and
 # database it creates from nothing. It is the newest registry migration in
 # ``schema.MIGRATIONS``: ``create_tables`` builds every migration's end state,
 # so a fresh database has nothing to migrate.
-SCHEMA_VERSION = 54
+SCHEMA_VERSION = 57
 
 # Promoted EXIF summary columns in the ``photos`` table — the canonical
 # list the scanner uses to clear absent fields on rescan (a metadata write
@@ -244,6 +244,22 @@ def create_identity_alternatives(conn):
                  "ON photo_identity_alternatives(group_id)")
 
 
+def create_subject_mask_reviews(conn):
+    # Reviewer boxes can be replaced. Keep reviewed evidence with the photo.
+    conn.execute("""CREATE TABLE IF NOT EXISTS subject_mask_reviews (
+        id INTEGER PRIMARY KEY,
+        photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+        detection_id INTEGER NOT NULL,
+        source_key TEXT NOT NULL,
+        mask_digest TEXT NOT NULL,
+        verdict TEXT NOT NULL CHECK(verdict IN ('valid', 'invalid')),
+        revision INTEGER NOT NULL DEFAULT 1,
+        box TEXT NOT NULL,
+        mask_png BLOB NOT NULL,
+        UNIQUE(photo_id, detection_id, source_key, mask_digest)
+    )""")
+
+
 def create_subject_ranking_analysis(conn):
     """Independent comparison evidence never changes a photo's primary subject."""
     conn.execute("""CREATE TABLE IF NOT EXISTS subject_ranking_analysis (
@@ -362,6 +378,7 @@ def create_auxiliary_schema_objects(conn):
     create_formerly_lazy_objects(conn)
     create_current_flag_attribution(conn)
     create_subject_ranking_analysis(conn)
+    create_subject_mask_reviews(conn)
     create_identity_alternatives(conn)
     create_assignment_reviews(conn)
     create_detection_evidence_reviews(conn)
@@ -773,6 +790,7 @@ class CanonicalSchema:
                 -- stage measures them for cached masks too.
                 subject_detail REAL,
                 subject_detail_px REAL,
+                comparison_inputs TEXT,
                 PRIMARY KEY (photo_id, variant)
             );
 

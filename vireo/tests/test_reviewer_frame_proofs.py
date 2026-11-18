@@ -26,9 +26,16 @@ def _token(client, pid):
     return response.headers["X-Vireo-Subject-Frame"]
 
 
-def _save(client, pid, token):
+def _edit(client, pid, region_id):
+    subjects = client.get(f"/api/photos/{pid}/subjects").json["subjects"]
+    row = next(row for row in subjects if row["id"] == region_id)
+    return {"operation": "edit", "detection_id": region_id, "revision": row["revision"]}
+
+
+def _save(client, pid, token, *, edit=None):
     return client.put(f"/api/photos/{pid}/subjects/reviewer-box", json={
         "box": {"x": .2, "y": .2, "w": .4, "h": .4}, "frame_token": token,
+        **(_edit(client, pid, edit) if edit is not None else {}),
     })
 
 
@@ -67,7 +74,7 @@ def test_source_change_while_drawing_preserves_the_previous_choice(original_phot
     response = _save(client, pid, stale)
     assert response.status_code == 400 and "changed while drawing" in response.get_json()["error"]
     assert dict(db.subjects.choice(pid)) == before
-    assert _save(client, pid, _token(client, pid)).get_json()["primary_detection_id"] == first
+    assert _save(client, pid, _token(client, pid), edit=first).get_json()["primary_detection_id"] == first
 
 
 def test_redrawing_on_a_changed_frame_replaces_the_previous_box(original_photo):
@@ -78,10 +85,10 @@ def test_redrawing_on_a_changed_frame_replaces_the_previous_box(original_photo):
     old = _save(client, pid, _token(client, pid)).get_json()["primary_detection_id"]
     Image.new("RGB", (320, 200), "blue").save(source)
     response = client.put(f"/api/photos/{pid}/subjects/reviewer-box", json={
-        "box": {"x": .3, "y": .1, "w": .2, "h": .5}, "frame_token": _token(client, pid),
+        **_edit(client, pid, old), "box": {"x": .3, "y": .1, "w": .2, "h": .5}, "frame_token": _token(client, pid),
     })
     new = response.get_json()["primary_detection_id"]
-    assert new != old
+    assert new == old
     assert [row["id"] for row in retained(db, pid)] == [new]
     assert analyze_photo(db, pid, str(source)) == 1
     assert client.post("/api/undo").status_code == 200
@@ -228,7 +235,7 @@ def test_confirmation_retires_cache_rows_without_deleting_masks_or_predictions(o
     db.conn.execute("UPDATE photos SET rating=5 WHERE id=?", (pid,))
     db.commit()
     predictions = [dict(row) for row in db.subjects.visible_predictions(db.require_workspace_id(), pid, 0)]
-    assert _save(client, pid, _token(client, pid)).get_json()["primary_detection_id"] == did
+    assert _save(client, pid, _token(client, pid), edit=did).get_json()["primary_detection_id"] == did
     assert db.masks_features.get_mask(pid, "sam2-small") is None
     assert immutable.read_bytes() == before
     assert [dict(row) for row in db.subjects.visible_predictions(db.require_workspace_id(), pid, 0)] == predictions
@@ -346,7 +353,7 @@ def test_history_retires_masks_from_a_different_verified_rendition(original_phot
     first = _save(client, pid, _token(client, pid)).get_json()["primary_detection_id"]
     before = db.conn.execute("SELECT runtime_fingerprint FROM detections WHERE id=?", (first,)).fetchone()[0]
     rendition[0] = "sensor"
-    assert _save(client, pid, _token(client, pid)).status_code == 200
+    assert _save(client, pid, _token(client, pid), edit=first).status_code == 200
     mask = tmp_path / "sensor-mask.png"
     Image.new("L", (320, 200), 255).save(mask)
     db.masks_features.upsert_mask(pid, "sam2-small", str(mask), "reviewer-selected", (.2, .2, .4, .4),

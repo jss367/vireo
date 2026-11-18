@@ -29,6 +29,11 @@ export function vireoThumbnailUrl(photoOrId) {
     : '/thumbnails/' + photoId + '.jpg';
 }
 
+/** @param {number} id @param {(result: {primary_detection_id?: number | null}) => void} saved */
+export function openSubjectBox(id, saved) {
+  window.openVireoSubjectBox(id, saved);
+}
+
 export function hasLightbox() {
   return typeof window.openLightbox === 'function';
 }

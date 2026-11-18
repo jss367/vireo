@@ -187,7 +187,14 @@ class Image:
     NEAREST = 0
 
     def __init__(self, size=(3000, 2000), events=None, kind="image"):
+        self.info = {}
         self.size, self.mode, self.events, self.kind = size, "RGB", events if events is not None else [], kind
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
 
     def crop(self, box):
         self.events.append(("crop", self.kind, box))
@@ -258,9 +265,20 @@ def focus(photo=None, args=None, size=(3000, 2000), enabled=True, mask_path=None
             MAX_FOCUS_CROP_SIZE=1024,
             numeric_query_arg=pure["numeric_query_arg"],
         ),
+        "subject_ranking": types.SimpleNamespace(
+            SubjectComparison=lambda **kwargs: kwargs,
+            resolve_subject=lambda db, pid, choice: (
+                next(row for row in (db.get_detections(pid) or [active_prompt])
+                     if row["id"] == choice["subject_overrides"][pid]), {}),
+            cached_analysis=lambda *args: (None, None),
+            comparison_analysis=lambda *args: (None, None, {}),
+            source_path=forbidden,
+        ),
+        "detection_id": types.SimpleNamespace(detection_prompt_runtime=lambda row: None, prompt_frame_id=lambda runtime: None),
         "image_loader": types.SimpleNamespace(
+            RAW_EXTENSIONS={".nef"}, RAW_DECODE_ALIGNED="aligned_camera_rendered",
             load_working_image=loader,
-            load_image=lambda path, max_size=None: events.append(("original", path)) or Image(original_size or size, events, "original"),
+            load_image=lambda path, max_size=None, raw_decode=None: events.append(("original", path)) or Image(original_size or size, events, "original"),
         ),
         "PIL": types.SimpleNamespace(Image=pil),
         "io": io,
@@ -276,7 +294,7 @@ def focus(photo=None, args=None, size=(3000, 2000), enabled=True, mask_path=None
         },
         "os": types.SimpleNamespace(
             path=types.SimpleNamespace(
-                dirname=posixpath.dirname, join=posixpath.join, realpath=posixpath.normpath,
+                dirname=posixpath.dirname, join=posixpath.join, splitext=posixpath.splitext, realpath=posixpath.normpath,
                 isfile=lambda path: original_size is not None,
             ),
             sep="/",
@@ -306,7 +324,8 @@ def focus(photo=None, args=None, size=(3000, 2000), enabled=True, mask_path=None
     ns["get_db"] = lambda: db
     nested("web/media_common.py", ns, {"_focus_source_image"})
     nested("web/media_crops.py", ns, {"serve_focus_crop", "_focus_mask_bytes", "_validated_focus_source", "_focus_geometry_error",
-                                          "_needs_primary_focus_subject", "_requested_focus_mask", "_focus_masked_crop"})
+                                          "_needs_primary_focus_subject", "_requested_focus_mask", "_focus_masked_crop",
+                                          "_focus_response", "_head_response", "_head_selection"})
     route = types.SimpleNamespace(_get_db=ns["get_db"], _config=ns["config"], _db_path=ns["db_path"], _json_error=ns["json_error"])
     return ns["serve_focus_crop"](route, 1), events
 
@@ -741,7 +760,7 @@ def test_forced_working_source_cannot_decode_original():
     helper_ns = {"os": types.SimpleNamespace(path=posixpath), "config": {"THUMB_CACHE_DIR": "/invented/thumbs"},
                  "media_root": posixpath.dirname}
     modules = {"focus_crop": types.SimpleNamespace(prefer_original=forbidden),
-               "image_loader": types.SimpleNamespace(load_image=forbidden,
+               "image_loader": types.SimpleNamespace(RAW_EXTENSIONS={".nef"}, RAW_DECODE_ALIGNED="aligned_camera_rendered", load_image=forbidden,
                    load_working_image=lambda *a, **kw: events.append(kw) or (None, "original"))}
     helper_ns["__builtins__"] = {**vars(builtins), "__import__": lambda name, *a, **kw: modules[name]}
     nested("web/media_common.py", helper_ns, {"_focus_source_image"})

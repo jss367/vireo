@@ -1348,6 +1348,7 @@ _V1_ALIASES = [
      "photos.api_selected_photos_burst_evidence", ["POST"]),
     ("/api/v1/photos/species-evidence",
      "photos.api_species_review_evidence", ["POST"]),
+    ("/api/v1/photos/<int:photo_id>/mask-review", "photos.api_review_subject_mask", ["PUT"]),
     ("/api/v1/photos/<int:photo_id>/focus-crop", "media.serve_focus_crop", ["GET"]),
     ("/api/v1/folders/<int:folder_id>/bursts", "folders.api_folder_bursts", ["GET"]),
     # Preview or confirm species keyword changes on an encounter transition.
