@@ -284,6 +284,7 @@ def _confident_species_prediction(photo, config=None):
         return None
 
     return {
+        "photo_id": photo.get("id"),
         "species": display_names[winner],
         "key": winner,
         "confidence": winner_support,
@@ -751,6 +752,9 @@ def _cut_trace_entry(i, photo_a, photo_b, score, dt, decision, species_conflict,
         "decision": decision,
         "species_conflict": (
             {
+                # The species evidence can span missed frames within the scored timeline.
+                "photo_a_id": species_conflict[0]["photo_id"],
+                "photo_b_id": species_conflict[1]["photo_id"],
                 "photo_a_species": species_conflict[0]["species"],
                 "photo_a_confidence": species_conflict[0]["confidence"],
                 "photo_a_margin": species_conflict[0]["margin"],

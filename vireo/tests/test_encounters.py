@@ -264,6 +264,7 @@ def test_confident_species_change_is_hard_encounter_boundary():
     assert [len(segment) for segment in microsegments] == [1, 1]
     assert trace[0]["decision"] == "cut_species"
     conflict = trace[0]["species_conflict"]
+    assert (conflict["photo_a_id"], conflict["photo_b_id"]) == (1, 2)
     assert conflict["photo_a_species"] == "Verdin"
     assert conflict["photo_b_species"] == "Costa's Hummingbird"
     for field in (
@@ -1602,3 +1603,19 @@ def test_visual_join_preserves_species_boundaries_across_missed_runs():
             expected = [frames] if following == 'Robin' else [frames[:-2], frames[-2:]]
             assert [g['photos'] for g in groups] == expected
             assert groups[0]['visual_neighbor_photo_ids'] == list(range(2, 2 + missed))
+
+
+def test_cut_trace_distinguishes_scored_pair_from_species_evidence():
+    from encounters import cut_microsegments
+
+    species = ['Robin', None, None, 'Mallard']
+    frames = [dict(id=i, timestamp=f'2026-11-14T08:40:00.{i}', subject_absent=name is None,
+                   subject_present=name is not None, species_top5=[(name, .99)] if name else [],
+                   phash_crop='abcd12345678abcd') for i, name in enumerate(species, start=1)]
+    _, trace = cut_microsegments(frames, emit_trace=True)
+    boundary = trace[-1]
+    assert boundary['decision'] == 'cut_species'
+    assert (boundary['photo_a_id'], boundary['photo_b_id']) == (3, 4)
+    conflict = boundary['species_conflict']
+    assert (conflict['photo_a_id'], conflict['photo_a_species']) == (1, 'Robin')
+    assert (conflict['photo_b_id'], conflict['photo_b_species']) == (4, 'Mallard')
