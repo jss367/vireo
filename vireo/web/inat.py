@@ -773,7 +773,7 @@ def create_inat_blueprint(
             )
             if (
                 os.path.exists(wc_path)
-                and _path_satisfies_recipe_render(wc_path, photo, recipe, 0)
+                and (not recipe or _path_satisfies_recipe_render(wc_path, photo, recipe, 0))
             ):
                 return wc_path, True
 
@@ -785,7 +785,7 @@ def create_inat_blueprint(
             companion = os.path.join(photo["folder_path"], companion_path)
             if (
                 os.path.exists(companion)
-                and _path_satisfies_recipe_render(companion, photo, recipe, 0)
+                and (not recipe or _path_satisfies_recipe_render(companion, photo, recipe, 0))
             ):
                 return companion, False
         return fallback_path, False

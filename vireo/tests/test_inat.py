@@ -1644,6 +1644,6 @@ def test_multiple_views_render_an_unedited_offline_raw_as_jpeg(app_and_db):
         "inat.upload_photo",
     ) as attach:
         response = app.test_client().post("/api/inat/submit", json={"photo_id": primary, "additional_photo_ids": [other]})
-    assert response.status_code == 200
+    assert response.status_code == 200, response.get_json()
     with Image.open(attach.call_args.args[2]) as image:
         assert image.format == "JPEG"
