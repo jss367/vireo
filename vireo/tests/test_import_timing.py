@@ -378,3 +378,54 @@ def test_a_renamed_files_own_rsync_counts_it_only_when_it_exits_cleanly():
     sent.single(900)
     sent.settle(completed=True)
     assert state.transferred_bytes == 700
+
+
+def test_live_copy_rate_includes_current_batch_and_excludes_pauses(monkeypatch):
+    from import_job import timing
+
+    state = _state(copy=5.0)
+    state.transferred_bytes = 10 * 1024 ** 2
+    state.copy_clock = (20.0, 100.0)
+    state.paused_seconds = lambda: 110.0
+    monkeypatch.setattr(timing.time, "monotonic", lambda: 35.0)
+
+    assert timing.live_copy_rate(state) == {"copy_mib_per_second": 1.0}
+
+
+def test_verified_import_skips_the_scanners_full_file_hash(tmp_path, monkeypatch):
+    from import_job import ImportParams
+    from scanner import hashing
+    from test_import_job import FakeRunner
+
+    def unexpected_read(path):
+        pytest.fail(f"scanner rehashed {path}")
+
+    monkeypatch.setattr(hashing, "compute_file_hash", unexpected_read)
+    runner = FakeRunner()
+    _, _, result = _run_import(tmp_path, ImportParams(
+        sources=[str(_card(tmp_path))], destination=str(tmp_path / "archive"),
+    ), runner=runner)
+
+    assert result["verified"] == 3
+    assert result["ok"]
+    assert any(data.get("copy_mib_per_second", 0) > 0 for _, _, data in runner.events)
+
+
+@pytest.mark.parametrize("changed", ["size", "mtime"])
+def test_scan_rehashes_when_either_verified_stat_changes(tmp_path, changed):
+    import hashlib
+    import os
+
+    from scanner.hashing import _compute_file_features
+
+    photo = tmp_path / "photo.nef"
+    photo.write_bytes(b"original")
+    verified = photo.stat()
+    digest = hashlib.sha256(photo.read_bytes()).hexdigest()
+    replacement = b"new" if changed == "size" else b"replaced"
+    photo.write_bytes(replacement)
+    mtime = verified.st_mtime_ns + (1_000_000_000 if changed == "mtime" else 0)
+    os.utime(photo, ns=(mtime, mtime))
+
+    _, catalog_hash = _compute_file_features(str(photo), (digest, verified.st_size, verified.st_mtime_ns))
+    assert catalog_hash == hashlib.sha256(replacement).hexdigest()

@@ -103,7 +103,7 @@ def compute_fd_hash(fd: int, chunk_size: int = 65536) -> str:
     return h.hexdigest()
 
 
-def _compute_file_features(path_str: str) -> FileFeatures:
+def _compute_file_features(path_str: str, verified: tuple[str, int, int] | None = None) -> FileFeatures:
     """Compute (phash, file_hash) for one image.
 
     Module-level so ProcessPoolExecutor can pickle it. Best-effort: any
@@ -120,11 +120,16 @@ def _compute_file_features(path_str: str) -> FileFeatures:
     # Unreadable file: the caller logs the ``None`` hash and leaves the stored
     # mtime stale so the next scan retries the file.
     with contextlib.suppress(OSError):
+        if verified is not None:
+            digest, size, mtime_ns = verified
+            current = os.stat(path_str)
+            if (current.st_size, current.st_mtime_ns) == (size, mtime_ns):
+                return phash, digest
         file_hash = compute_file_hash(path_str)
     return phash, file_hash
 
 
-def _resolve_worker_count(files_to_process: Sized) -> int:
+def _resolve_worker_count(files_to_process: Sized, min_parallel_files: int = 8) -> int:
     """Decide how many workers to use for feature computation.
 
     Returns 1 (sequential) when the batch is tiny or config disables
@@ -132,7 +137,7 @@ def _resolve_worker_count(files_to_process: Sized) -> int:
     cpu_count and batch size).
     """
     n = len(files_to_process)
-    if n < 8:
+    if n < min_parallel_files:
         return 1
     try:
         import config as cfg
@@ -153,9 +158,14 @@ def _resolve_worker_count(files_to_process: Sized) -> int:
 
 
 @contextlib.contextmanager
-def _claim_worker_count(files_to_process: Sized, cancel_check: Callable[[], object] | None = None) -> Iterator[int]:
+def _claim_worker_count(
+    files_to_process: Sized, cancel_check: Callable[[], object] | None = None, *,
+    limit: int | None = None, label: str = "scanner hashing", min_parallel_files: int = 8,
+) -> Iterator[int]:
     """Yield the scanner worker grant from the process-wide CPU budget."""
-    desired = _resolve_worker_count(files_to_process)
+    desired = _resolve_worker_count(files_to_process, min_parallel_files)
+    if limit is not None:
+        desired = min(desired, limit)
     ledger = get_resource_ledger()
     inference_threads = cpu_inference_request(ledger.cpu_capacity).preferred
     spare_after_inference = ledger.cpu_capacity - inference_threads
@@ -171,7 +181,7 @@ def _claim_worker_count(files_to_process: Sized, cancel_check: Callable[[], obje
         # concurrent flexible scans cannot each consume the same nominal
         # spare capacity and collectively block an exact inference claim.
         cpu_reserve=cpu_reserve,
-        label="scanner hashing",
+        label=label,
     )
     with ledger.acquire(request, cancel_check=cancel_check) as lease:
         yield lease.cpu_permits

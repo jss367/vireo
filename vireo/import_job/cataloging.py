@@ -192,6 +192,7 @@ def _run_preservation_scan(
             options=ScanOptions(
                 restrict_dirs=[batch_st.dest_folder],
                 restrict_files=landed_paths,
+                verified_destinations=batch_st.verified_destinations,
                 vireo_dir=params.vireo_dir,
                 thumb_cache_dir=params.thumb_cache_dir,
                 skip_working_copies=True,

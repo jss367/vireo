@@ -180,6 +180,9 @@ function watchJob(jobId) {
 function renderProgress(data) {
   let phaseText =
     (data.phase || '') + (data.current_file ? ' · ' + data.current_file : '');
+  if (typeof data.copy_mib_per_second === 'number') {
+    phaseText += ' · Copy rate: ' + data.copy_mib_per_second.toFixed(1) + ' MiB/s';
+  }
   // Remote imports report the current batch's actual network transfer as
   // sub-phase progress. Show it next to the prepared-files counter — the
   // main bar advances while files are merely inspected and queued, so

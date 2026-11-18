@@ -95,6 +95,9 @@ class ScanOptions:
     has an edit recipe. Passing ``vireo_dir=None`` to suppress extraction
     would also silently drop those masks. See PR #1107 review."""
 
+    verified_destinations: dict[str, tuple[str, int, int]] | None = None
+    """Read-back digest, size, and nanosecond mtime from this import batch."""
+
 
 @dataclass(frozen=True)
 class ScanHooks:

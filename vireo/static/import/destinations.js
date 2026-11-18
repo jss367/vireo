@@ -243,7 +243,7 @@ function updateDestinationModeHint() {
   const target = importRemoteTarget();
   if (target) {
     hint.textContent = 'Direct SSH transfer to ' + target.remote_path +
-      '. The folder inside that root is required below.';
+      '. Your connection to the NAS sets the transfer pace. Enter the destination folder below.';
     return;
   }
   const destination =
@@ -256,8 +256,8 @@ function updateDestinationModeHint() {
   });
   hint.textContent = mountedTarget
     ? 'Using ' + mountedTarget.name + ' through its Finder-mounted path ' +
-      mountedTarget.mount_path + '. Files are copied through the mounted volume.'
-    : 'Use this for folders on this Mac and NAS volumes mounted in Finder.';
+      mountedTarget.mount_path + '. Your connection to the NAS sets the copy and verification pace.'
+    : 'Use this for folders on this Mac and NAS volumes mounted in Finder. For a NAS, your connection sets the copy and verification pace.';
 }
 
 function onImportDestModeChange() {

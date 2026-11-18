@@ -173,6 +173,7 @@ class _ImportRunState:
     # which is what the copy phase's rate measures. A file rsync skipped
     # because it already existed at the destination, or was interrupted
     # while sending, was not, and is not counted.
+    copy_clock: tuple[float, float] | None = None
     phase_seconds: dict[str, float] = field(default_factory=dict)
     transferred_bytes: int = 0
     # The runner's cumulative paused seconds for this job; a phase's time
@@ -208,6 +209,8 @@ class _ImportBatchState:
     # against the bytes we confirmed. Populated starting from the
     # per-file loop because the adoption branch inside it appends here.
     landed: list[_LandedFile] = field(default_factory=list)
+    # Hash and stat of the verified temporary file, captured before publication.
+    verified_destinations: dict[str, tuple[str, int, int]] = field(default_factory=dict)
     # Twin folders (under destination) whose bytes we RE-HASHED this run
     # and confirmed against source hashes — safe to scan/link into the
     # active workspace after this batch's fresh-scan runs.

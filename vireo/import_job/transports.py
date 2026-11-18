@@ -13,6 +13,7 @@ from import_job.adoption import _WALK_CANCELLED, _WALK_HANDLED, _CardFile, _reso
 from import_job.copy_verify import DestReadCancelled, copy_and_hash_verify
 from import_job.progress import _IMPORT_ETA_PROGRESS_KEYS
 from import_job.state import _counts, _fail, _LandedFile, _record_checker
+from import_job.timing import live_copy_rate
 from job_contract import progress_event
 from scanner import EMPTY_FILE_SHA256
 
@@ -246,8 +247,12 @@ class _LocalTransport:
                 checker.content_hash(source_file)
                 if checker is not None else None
             )
+            def record_verified(digest: str, size: int, mtime_ns: int) -> None:
+                batch_st.verified_destinations[dest_file] = (digest, size, mtime_ns)
+
             ok, file_hash = copy_and_hash_verify(
                 str(source_file), dest_file, src_hash=src_hash, raise_on_io_error=True,
+                on_verified=record_verified,
             )
         except DestReadCancelled:
             # Stop arrived mid-read against the destination (adopt/
@@ -419,12 +424,11 @@ class _RsyncTransport:
             "phase_current": transfer_current,
             "phase_total": transfer_total,
             "phase_label": "Transferring batch",
+            **live_copy_rate(state),
             **{k: job["progress"][k] for k in _IMPORT_ETA_PROGRESS_KEYS
                if k in job["progress"]},
         }
-        job["progress"]["phase_current"] = transfer_current
-        job["progress"]["phase_total"] = transfer_total
-        job["progress"]["phase_label"] = "Transferring batch"
+        job["progress"].update(extra)
         job["progress"]["current_file"] = current_file
         runner.update_step(
             job["id"], "import",

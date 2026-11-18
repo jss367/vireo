@@ -45,7 +45,9 @@ class _FeatureHasher:
     def __init__(
         self, *, signals: _ScanSignals, pause_check: CheckCallback | None,
         cancel_only_check: CheckCallback | None,
+        verified_destinations: dict[str, tuple[str, int, int]] | None = None,
     ) -> None:
+        self.verified_destinations = verified_destinations or {}
         self.signals = signals
         self.pause_check = pause_check
         self.cancel_only_check = cancel_only_check
@@ -166,7 +168,7 @@ class _FeatureHasher:
                 image_path, path_str = remaining[0]
                 pending.append((
                     image_path, path_str,
-                    pool.submit(_compute_file_features, path_str),
+                    pool.submit(_compute_file_features, path_str, self.verified_destinations.get(path_str)),
                 ))
                 remaining.popleft()
                 if len(pending) >= max_in_flight:
@@ -267,7 +269,7 @@ class _FeatureHasher:
                 paused = True
                 break
             image_path, path_str = remaining[0]
-            result = _compute_file_features(path_str)
+            result = _compute_file_features(path_str, self.verified_destinations.get(path_str))
             if self._pause_pending():
                 paused = True
                 break

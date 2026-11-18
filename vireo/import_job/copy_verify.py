@@ -28,6 +28,8 @@ if sys.platform != "win32":
     import fcntl
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from import_job.import_types import StopCheck
 
 log = logging.getLogger(__name__)
@@ -44,6 +46,7 @@ _HARDLINK_UNSUPPORTED_ERRNOS = frozenset(
 
 def copy_and_hash_verify(
     src: str, dst: str, *, src_hash: str | None = None, raise_on_io_error: bool = False,
+    on_verified: Callable[[str, int, int], None] | None = None,
 ) -> tuple[bool, str | None]:
     """Stage, verify and publish a sibling copy without overwriting a destination.
 
@@ -62,6 +65,7 @@ def copy_and_hash_verify(
         if dst_dir:
             os.makedirs(dst_dir, exist_ok=True)
         shutil.copy2(src, tmp)
+        snapshot = os.stat(tmp) if on_verified else None
         copied_hash = compute_file_hash(tmp)
         expected = src_hash if src_hash is not None else compute_file_hash(src)
         if copied_hash is None or expected is None or copied_hash != expected:
@@ -77,6 +81,8 @@ def copy_and_hash_verify(
                 raise
             _publish_without_links(tmp, dst, dst_dir)
             tmp = None
+        if on_verified and snapshot:
+            on_verified(copied_hash, snapshot.st_size, snapshot.st_mtime_ns)
         return True, copied_hash
     except OSError as exc:
         if raise_on_io_error:

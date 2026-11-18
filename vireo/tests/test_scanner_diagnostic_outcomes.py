@@ -77,7 +77,7 @@ def _worker_case(mode, logging_fails, terminate_fails=True):
         log=SimpleNamespace(debug=debug),
     )
     owner = SimpleNamespace(
-        _check_cancelled_no_park=check, _feature_result=lambda future: ("p", "h"),
+        verified_destinations={}, _check_cancelled_no_park=check, _feature_result=lambda future: ("p", "h"),
         _pause_pending=lambda: mode == "pause",
     )
     remaining = deque([("invented-photo", "invented-path")])
