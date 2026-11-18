@@ -80,15 +80,13 @@ export function bucketDecision(bucket) {
   if (!decision || !first || first.id !== decision.photo_id) return '';
   var kind = decision.kind;
   var text = '';
-  if (kind === 'chosen') {
-    text = 'First photo: chosen as representative'
-      + (decision.source ? ' by ' + decision.source : '')
+  if (kind === 'highlight') {
+    text = 'First photo: the top highlight here'
+      + (decision.source ? ', chosen by ' + decision.source : '')
       + (decision.reason ? ' (' + decision.reason + ')' : '');
   } else if (kind === 'tie') {
     text = 'First photo: the newest of ' + decision.tied_photo_ids.length
-      + ' representatives here that were never compared. Set the better one as Representative to settle it.';
-  } else if (kind === 'highlight') {
-    text = 'First photo: your top-ranked highlight';
+      + ' highlights here that were never compared. Press Up on the better one to settle it.';
   } else if (kind === 'in_frame') {
     text = 'First photo: ' + bucket.species + ' is not the subject of any photo here; '
       + 'ordered by how much of the frame it fills where Vireo found it';
@@ -98,10 +96,10 @@ export function bucketDecision(bucket) {
     text = 'First photo: a pick, ranked by Vireo\'s score among picks';
   } else if (kind === 'score') {
     // "here" because apply_highlight_preferences emits `score` when no
-    // chosen photo is visible in this bucket's scope; the species may still
-    // have a representative outside the selected folder or the current
-    // filters (see `has_species_representative`).
-    text = 'First photo: ranked by Vireo\'s score; nobody has chosen one here';
+    // highlight is visible in this bucket's scope; the species may still
+    // have one outside the selected folder or the current filters (see
+    // `has_highlight_selection`).
+    text = 'First photo: ranked by Vireo\'s score; nothing is highlighted here';
   } else if (kind === 'unanalyzed') {
     text = 'First photo: not analyzed yet, so in capture order';
   }
@@ -227,15 +225,12 @@ export function highlightsMetaText(bucketCount) {
   var speciesSearch = /** @type {HTMLInputElement} */ (document.getElementById('speciesSearch')).value.trim();
   var confirmation = /** @type {HTMLSelectElement} */ (document.getElementById('confirmationFilter')).value;
   var highlightSelection = /** @type {HTMLSelectElement} */ (document.getElementById('highlightSelectionFilter')).value;
-  var representative = /** @type {HTMLSelectElement} */ (document.getElementById('representativeFilter')).value;
   var filterLabel = (search || speciesSearch) ? ' matching species' : ' species';
   if (confirmation === 'all') filterLabel += ' from tags or AI predictions';
   if (confirmation === 'confirmed') filterLabel += ' with confirmed keywords';
   if (confirmation === 'unconfirmed') filterLabel += ' without confirmed keywords';
   if (highlightSelection === 'yes') filterLabel += ' with highlights chosen';
   if (highlightSelection === 'no') filterLabel += ' without highlights chosen';
-  if (representative === 'yes') filterLabel += ' with representatives set';
-  if (representative === 'no') filterLabel += ' without representatives set';
   var data = /** @type {HighlightsData} */ (state.currentData);
   return bucketCount + filterLabel + ' · '
     + data.meta.eligible + ' of '

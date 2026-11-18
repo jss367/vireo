@@ -68,7 +68,7 @@ test('non-tie decisions aren\'t cleared by a prune, so unaffected rows keep thei
         photos: [{id: 1}, {id: 2}],
         photo_count: 2,
         best_decision: {
-          kind: 'chosen',
+          kind: 'highlight',
           photo_id: 1,
           contender_ids: [1],
           tied_photo_ids: [],
@@ -79,5 +79,5 @@ test('non-tie decisions aren\'t cleared by a prune, so unaffected rows keep thei
   };
   const ctx = run(state);
   assert.equal(ctx.removeRejectedPhotoFromModel(2), true);
-  assert.equal(state.currentData.buckets[0].best_decision.kind, 'chosen');
+  assert.equal(state.currentData.buckets[0].best_decision.kind, 'highlight');
 });

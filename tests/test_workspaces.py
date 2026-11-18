@@ -1323,12 +1323,12 @@ def test_merge_duplicate_keywords_normalizes_stray_edge_quotes(db):
 
 def test_merge_duplicate_keywords_retargets_species_curation_for_survivor_rename(db):
     """When cleanup canonicalizes the surviving keyword row from a legacy
-    spelling to a clean one, ``species_highlights``, ``photo_preferences``,
-    and ``species_representatives`` rows keyed on the legacy string must
-    follow. Otherwise a highlighted or life-list representative photo under
-    the kept spelling silently drops out of the eligible/highlight queries
-    (which compare ``sh.species``/``sr.species`` exact against ``k.name``)
-    even though the tag itself was retained.
+    spelling to a clean one, ``photo_preferences`` and
+    ``species_representatives`` (the highlights) rows keyed on the legacy
+    string must follow. Otherwise a highlighted photo under the kept
+    spelling silently drops out of the eligible/highlight queries (which
+    compare ``sh.species``/``sr.species`` exact against ``k.name``) even
+    though the tag itself was retained.
     """
     ws = db.create_workspace("A")
     db.commit()
@@ -1355,17 +1355,9 @@ def test_merge_duplicate_keywords_retargets_species_curation_for_survivor_rename
     keyword_tagging.tag_photo(db, pid_b, ascii_variant)
     db.commit()
 
-    # Seed curation under the legacy spelling on both variants: a
-    # highlight rank, a life-list preference, and a global representative
-    # pick. The keep_id will end up being one of these rows and must
-    # carry its curation with it when the name is canonicalized.
-    db.conn.execute(
-        """INSERT INTO species_highlights
-              (workspace_id, species, photo_id, rank,
-               created_at, updated_at)
-           VALUES (?, ?, ?, 1, datetime('now'), datetime('now'))""",
-        (ws, "‘apapane", pid_a),
-    )
+    # Seed curation under the legacy spelling: a life-list preference and
+    # the highlight itself. The keep_id will end up being one of these rows
+    # and must carry its curation with it when the name is canonicalized.
     db.conn.execute(
         """INSERT INTO photo_preferences
               (workspace_id, purpose, species, photo_id,
@@ -1392,15 +1384,9 @@ def test_merge_duplicate_keywords_retargets_species_curation_for_survivor_rename
     ).fetchall()
     assert [row["name"] for row in remaining] == ["apapane"]
 
-    # All three curation tables must now key the row on the clean
+    # Both curation tables must now key the row on the clean
     # spelling — no rows left under the legacy spelling, and each
     # migrated entry preserved its photo association.
-    hl = db.conn.execute(
-        "SELECT species, photo_id FROM species_highlights"
-    ).fetchall()
-    assert [(row["species"], row["photo_id"]) for row in hl] == [
-        ("apapane", pid_a),
-    ]
     pref = db.conn.execute(
         "SELECT species, purpose, photo_id FROM photo_preferences"
     ).fetchall()
@@ -1418,8 +1404,8 @@ def test_merge_duplicate_keywords_retargets_species_curation_for_survivor_rename
 def test_merge_duplicate_keywords_retargets_species_curation_when_source_merges_into_clean_survivor(db):
     """When the SURVIVOR is already clean (so ``_normalize_keyword_row_name``
     no-ops) and a legacy source with its own species curation gets merged
-    into it, ``_merge_keyword_into`` must retarget ``species_highlights``,
-    ``photo_preferences``, and ``species_representatives`` from the source
+    into it, ``_merge_keyword_into`` must retarget ``photo_preferences``
+    and ``species_representatives`` (the highlights) from the source
     spelling onto the survivor's spelling. Without this the tag itself
     moves to the surviving row but the curation rows stay keyed to a
     keyword name the DB no longer has -- the eligible highlight/life-list
@@ -1465,13 +1451,6 @@ def test_merge_duplicate_keywords_retargets_species_curation_when_source_merges_
     # species text equals the surviving ``keywords.name`` -- so without the
     # retarget these rows silently drop out of the UI.
     db.conn.execute(
-        """INSERT INTO species_highlights
-              (workspace_id, species, photo_id, rank,
-               created_at, updated_at)
-           VALUES (?, ?, ?, 1, datetime('now'), datetime('now'))""",
-        (ws, "‘apapane", pid_legacy),
-    )
-    db.conn.execute(
         """INSERT INTO photo_preferences
               (workspace_id, purpose, species, photo_id,
                created_at, updated_at)
@@ -1509,14 +1488,8 @@ def test_merge_duplicate_keywords_retargets_species_curation_when_source_merges_
     assert survivor_id in tag_ids
     assert legacy_id not in tag_ids
 
-    # All three curation tables are now keyed on the surviving clean
+    # Both curation tables are now keyed on the surviving clean
     # spelling. Nothing left under the legacy source spelling.
-    hl = db.conn.execute(
-        "SELECT species, photo_id FROM species_highlights"
-    ).fetchall()
-    assert [(row["species"], row["photo_id"]) for row in hl] == [
-        ("apapane", pid_legacy),
-    ]
     pref = db.conn.execute(
         "SELECT species, purpose, photo_id FROM photo_preferences"
     ).fetchall()
@@ -1591,18 +1564,14 @@ def test_merge_duplicate_keywords_scopes_curation_to_tagged_pairs(db):
     # Seed curation in BOTH workspaces under the legacy spelling and a
     # pending keyword_add in each workspace.
     db.conn.execute(
-        """INSERT INTO species_highlights
-              (workspace_id, species, photo_id, rank,
-               created_at, updated_at)
-           VALUES (?, ?, ?, 1, datetime('now'), datetime('now'))""",
-        (ws_a, "‘apapane", pid_a),
+        """INSERT INTO species_representatives (species, photo_id, selected_order)
+           VALUES (?, ?, 1)""",
+        ("‘apapane", pid_a),
     )
     db.conn.execute(
-        """INSERT INTO species_highlights
-              (workspace_id, species, photo_id, rank,
-               created_at, updated_at)
-           VALUES (?, ?, ?, 1, datetime('now'), datetime('now'))""",
-        (ws_b, "‘apapane", pid_b),
+        """INSERT INTO species_representatives (species, photo_id, selected_order)
+           VALUES (?, ?, 2)""",
+        ("‘apapane", pid_b),
     )
     db.conn.execute(
         """INSERT INTO photo_preferences
@@ -1634,8 +1603,8 @@ def test_merge_duplicate_keywords_scopes_curation_to_tagged_pairs(db):
 
     # Workspace A's curation and pending change should be canonicalized.
     a_hl = db.conn.execute(
-        "SELECT species FROM species_highlights WHERE workspace_id = ?",
-        (ws_a,),
+        "SELECT species FROM species_representatives WHERE photo_id = ?",
+        (pid_a,),
     ).fetchone()
     assert a_hl["species"] == "apapane"
     a_pending = db.conn.execute(
@@ -1650,8 +1619,8 @@ def test_merge_duplicate_keywords_scopes_curation_to_tagged_pairs(db):
     # eligible-highlight/preferences queries join by species text to that
     # row's stored name.
     b_hl = db.conn.execute(
-        "SELECT species FROM species_highlights WHERE workspace_id = ?",
-        (ws_b,),
+        "SELECT species FROM species_representatives WHERE photo_id = ?",
+        (pid_b,),
     ).fetchone()
     assert b_hl["species"] == "‘apapane"
     b_pref = db.conn.execute(
@@ -2223,61 +2192,28 @@ def test_move_folders_bumps_source_pending_changes_version(db_with_workspace):
 
 
 def test_move_folders_moves_photo_preferences(db_with_workspace):
-    """Representative choices and ordered highlights follow moved photos."""
+    """Preference rows follow moved photos; a highlight is catalog-wide, so
+    it shows in whichever workspace shows its photo without being moved."""
     db, ws1, folder_id, photo_id = db_with_workspace
     db.species_curation.set_photo_preference("life_list", "Robin", photo_id)
     db.species_curation.set_photo_preference("highlights", "Robin", photo_id)
-    db.species_curation.add_highlight("Robin", photo_id)
+    assert db.species_curation.get_highlights() == {"Robin": [photo_id]}
 
     ws2 = db.create_workspace("Target")
     db.commit()
     result = workspace_folders.move_folders_to_workspace(db, ws1, ws2, [folder_id])
 
     assert result["photo_preferences_moved"] == 2
-    assert result["species_highlights_moved"] == 1
+    assert "species_highlights_moved" not in result
     db.set_active_workspace(ws2)
     assert db.species_curation.get_photo_preferences("life_list") == {"Robin": photo_id}
     assert db.species_curation.get_photo_preferences("highlights") == {"Robin": photo_id}
-    assert db.species_curation.get_highlights() == {"Robin": {photo_id: 1}}
+    assert db.species_curation.get_highlights() == {"Robin": [photo_id]}
 
     db.set_active_workspace(ws1)
     assert db.species_curation.get_photo_preferences("life_list") == {}
     assert db.species_curation.get_photo_preferences("highlights") == {}
     assert db.species_curation.get_highlights() == {}
-
-
-def test_move_folders_reranks_species_highlights_on_collision(db):
-    """Moving highlights into a target that already has ranks for the same
-    species must append after the target's max rank so `ORDER BY rank`
-    keeps the target's curated order first."""
-    ws1 = db.create_workspace("Source")
-    ws2 = db.create_workspace("Target")
-    db.commit()
-
-    src_folder = workspace_folders.add_folder(db, "/src", name="src")
-    tgt_folder = workspace_folders.add_folder(db, "/tgt", name="tgt")
-    workspace_folders.add_workspace_folder(db, ws1, src_folder)
-    workspace_folders.add_workspace_folder(db, ws2, tgt_folder)
-
-    src_photo = photo_ingest.add_photo(db, folder_id=src_folder, filename="src.jpg",
-                             extension=".jpg", file_size=100, file_mtime=1.0)
-    tgt_photo = photo_ingest.add_photo(db, folder_id=tgt_folder, filename="tgt.jpg",
-                             extension=".jpg", file_size=100, file_mtime=2.0)
-
-    db.set_active_workspace(ws1)
-    db.species_curation.add_highlight("Robin", src_photo)
-    db.set_active_workspace(ws2)
-    db.species_curation.add_highlight("Robin", tgt_photo)
-
-    result = workspace_folders.move_folders_to_workspace(db, ws1, ws2, [src_folder])
-    assert result["species_highlights_moved"] == 1
-
-    db.set_active_workspace(ws2)
-    # Both photos are in the Robin bucket, with distinct ranks; the target's
-    # original rank-1 stays first because moved rows append after it.
-    assert db.species_curation.get_highlights("Robin") == {
-        "Robin": {tgt_photo: 1, src_photo: 2},
-    }
 
 
 def test_move_folders_collections_stay_behind(db_with_workspace):

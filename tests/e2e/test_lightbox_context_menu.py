@@ -218,8 +218,8 @@ def test_lightbox_color_description_opens_editor(live_server, page):
     assert stacking["modal"] > stacking["lightbox"], stacking
 
 
-def test_lightbox_menu_sets_species_representative(live_server, page):
-    """The shared lightbox menu can set the current photo as representative."""
+def test_lightbox_menu_makes_top_highlight(live_server, page):
+    """The shared lightbox menu can make the current photo the top highlight."""
     url = live_server["url"]
     hawk = live_server["data"]["photos"][0]
     _open_lightbox(page, url)
@@ -235,7 +235,7 @@ def test_lightbox_menu_sets_species_representative(live_server, page):
     _fire_contextmenu_on_lightbox(page)
     item = page.locator(
         ".vireo-ctx-item",
-        has_text="Set Representative — Red-tailed Hawk",
+        has_text="Make Top Highlight — Red-tailed Hawk",
     )
     expect(item).to_be_visible()
     with page.expect_response(

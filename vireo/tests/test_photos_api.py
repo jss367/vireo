@@ -1191,7 +1191,7 @@ def test_photo_detail_life_list_current_false_when_other_photo_is_rep(app_and_db
 
 def test_photo_detail_life_list_marks_only_primary_of_multiple_reps(app_and_db):
     """Secondary reps report is_current_photo=False so the lightbox lifelist
-    panel renders "Set Representative" (re-selecting promotes them) and the
+    panel renders "Make Top Highlight" (re-selecting promotes them) and the
     shared context menu doesn't disable the item for a secondary rep."""
     app, db = app_and_db
     client = app.test_client()

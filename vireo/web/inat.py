@@ -533,6 +533,18 @@ def create_inat_blueprint(
     blueprint = Blueprint("inat", __name__)
     background_job = make_background_job(get_runner, get_db, db_path, Database)
 
+    @blueprint.get("/api/inat/account-species")
+    def api_inat_account_species() -> ResponseReturnValue:
+        import inat
+
+        login = request.args.get("login", "").strip()
+        if not login or len(login) > 100 or not all(c.isalnum() or c in "_-" for c in login):
+            return json_error("Enter an iNaturalist username.")
+        try:
+            return jsonify(inat.account_species(login))
+        except inat.InatApiError as exc:
+            return json_error(str(exc), 502)
+
     @blueprint.route("/api/inat/prepare/<int:photo_id>")
     def api_inat_prepare(photo_id: int) -> ResponseReturnValue:
         """Prepare iNaturalist submission data for a photo."""
@@ -888,6 +900,14 @@ def create_inat_blueprint(
             return json_error("iNaturalist token not configured. Add it in Settings.")
 
         data = request.json or {}
+        expected_login = data.get("expected_login")
+        if expected_login:
+            try:
+                user = inat.validate_token(token)
+            except inat.InatApiError as exc:
+                return json_error(str(exc), 502)
+            if not user or user.get("login") != expected_login:
+                return json_error("Use a token for the selected iNaturalist account.", 403)
         photo_id = data.get("photo_id")
         if not photo_id:
             return json_error("photo_id is required")
@@ -941,6 +961,7 @@ def create_inat_blueprint(
         try:
             obs_id, obs_url = inat.submit_observation(
                 token=token,
+                taxon_id=data.get("taxon_id"),
                 photo_path=upload_path,
                 taxon_name=taxon,
                 observed_on=observed_on,

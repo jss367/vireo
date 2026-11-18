@@ -1,5 +1,7 @@
 """iNaturalist API client for Vireo."""
 
+from datetime import UTC, datetime
+
 import requests
 
 INAT_API = "https://api.inaturalist.org/v1"
@@ -62,11 +64,13 @@ def validate_token(token):
 
 def create_observation(token, taxon_name=None, observed_on=None,
                        latitude=None, longitude=None,
-                       description=None, geoprivacy="open"):
+                       description=None, geoprivacy="open", taxon_id=None):
     """Create an iNaturalist observation. Returns observation dict."""
     obs = {}
     if taxon_name:
         obs["species_guess"] = taxon_name
+    if taxon_id is not None:
+        obs["taxon_id"] = taxon_id
     if observed_on:
         obs["observed_on_string"] = observed_on
     if latitude is not None and longitude is not None:
@@ -113,7 +117,7 @@ def upload_photo(token, observation_id, photo_path):
 
 def submit_observation(token, photo_path, taxon_name=None, observed_on=None,
                        latitude=None, longitude=None,
-                       description=None, geoprivacy="open"):
+                       description=None, geoprivacy="open", taxon_id=None):
     """Create observation + upload photo. Returns (observation_id, observation_url).
 
     Note: If create_observation succeeds but upload_photo fails, the observation
@@ -121,6 +125,7 @@ def submit_observation(token, photo_path, taxon_name=None, observed_on=None,
     """
     obs = create_observation(
         token, taxon_name=taxon_name, observed_on=observed_on,
+        taxon_id=taxon_id,
         latitude=latitude, longitude=longitude,
         description=description, geoprivacy=geoprivacy,
     )
@@ -147,3 +152,57 @@ def submit_observation(token, photo_path, taxon_name=None, observed_on=None,
             observation_url=obs_url,
         ) from e
     return obs_id, obs_url
+
+
+def _public_page(path, params=None):
+    try:
+        response = requests.get(f"{INAT_API}/{path}", params=params, timeout=INAT_TIMEOUT)
+        if response.status_code == 404:
+            raise InatApiError("iNaturalist could not find that account.")
+        response.raise_for_status()
+        return response.json()
+    except (requests.RequestException, ValueError) as exc:
+        raise InatApiError(f"Could not read observations from iNaturalist: {exc}") from exc
+
+
+def _read_species_counts(user_id):
+    params = {"user_id": user_id, "quality_grade": "casual,needs_id,research",
+              "per_page": 500, "page": 1}
+    seen = set()
+    covered = set()
+    expected_total = None
+    while True:
+        data = _public_page("observations/species_counts", params)
+        total = data["total_results"]
+        if expected_total is None:
+            expected_total = total
+        elif total != expected_total:
+            raise InatApiError("The observation list changed during refresh. Try again.")
+        for row in data["results"]:
+            taxon = row["taxon"]
+            seen.add(taxon["id"])
+            covered.add(taxon["id"])
+            covered.update(taxon["ancestor_ids"])
+        if len(seen) == total:
+            return seen, covered, params["page"] > 1
+        if not data["results"] or params["page"] * data["per_page"] >= total:
+            raise InatApiError("The observation list changed during refresh. Try again.")
+        params["page"] += 1
+
+
+def account_species(login):
+    """Fetch a complete observer snapshot, including ancestors of finer identifications."""
+    try:
+        accounts = _public_page(f"users/{login}")["results"]
+        account = next((u for u in accounts if u["login"].casefold() == login.casefold()), None)
+        if account is None:
+            raise InatApiError("iNaturalist could not find that account.")
+        observed, covered, paginated = _read_species_counts(account["id"])
+        if paginated:
+            confirmed, confirmed_coverage, _ = _read_species_counts(account["id"])
+            if observed != confirmed or covered != confirmed_coverage:
+                raise InatApiError("The observation list changed during refresh. Try again.")
+    except (KeyError, TypeError, AttributeError) as exc:
+        raise InatApiError("iNaturalist returned incomplete observation data.") from exc
+    return {"login": account["login"], "taxon_ids": sorted(covered),
+            "refreshed_at": datetime.now(UTC).isoformat()}

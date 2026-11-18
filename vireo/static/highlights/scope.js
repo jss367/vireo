@@ -23,11 +23,29 @@ export function selectedScope() {
   return { folder_id: Number(value) };
 }
 
+// "folder" or "collection" when the page shows one, '' for the whole workspace.
+export function selectedScopeName() {
+  var scope = selectedScope();
+  return scope.collection_id ? 'collection' : scope.folder_id ? 'folder' : '';
+}
+
+// What a "make top highlight" click just claimed: how many other highlights
+// of the species the photo was placed ahead of, and within what.
 /** @param {number} overCount @param {string} scopeName */
-export function representativeToast(overCount, scopeName) {
-  if (!overCount) return 'Representative set' + (scopeName ? ' for this ' + scopeName : '');
-  return 'Representative set, chosen over ' + overCount + ' other representative'
+export function topHighlightToast(overCount, scopeName) {
+  if (!overCount) return 'Top highlight set' + (scopeName ? ' for this ' + scopeName : '');
+  return 'Top highlight set, ahead of ' + overCount + ' other highlight'
     + (overCount === 1 ? '' : 's') + (scopeName ? ' in this ' + scopeName : '');
+}
+
+// What adding a highlight just claimed: it goes after the highlights the
+// page was showing, and says nothing about the ones outside that scope.
+/** @param {{added?: boolean, after?: number[]} | null | undefined} result @param {string} scopeName */
+export function addedHighlightToast(result, scopeName) {
+  if (result && result.added === false) return 'Already a highlight';
+  var afterCount = result && result.after ? result.after.length : 0;
+  if (!afterCount) return 'Added to Highlights';
+  return 'Added to Highlights, after the other highlights' + (scopeName ? ' in this ' + scopeName : '');
 }
 
 export function requestScopeParams() {
@@ -40,7 +58,6 @@ export function requestScopeParams() {
   params.set('confidence_threshold', (parseInt(/** @type {HTMLInputElement} */ (document.getElementById('confidenceSlider')).value) / 100).toFixed(2));
   params.set('confirmation', /** @type {HTMLSelectElement} */ (document.getElementById('confirmationFilter')).value || 'all');
   params.set('highlight_selection', /** @type {HTMLSelectElement} */ (document.getElementById('highlightSelectionFilter')).value || 'all');
-  params.set('species_representative', /** @type {HTMLSelectElement} */ (document.getElementById('representativeFilter')).value || 'all');
   return params;
 }
 

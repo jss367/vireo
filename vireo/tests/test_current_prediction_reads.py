@@ -79,8 +79,8 @@ def test_threshold_changes_and_full_image_anchors(db, catalog):
     assert _ranked(db, pid) == (None,) * 3
     _prediction(db, pid, "Full image", 0.5, floor=0, detector="full-image")
     assert _ranked(db, pid) == ("Full image",) * 3
-    db.species_curation.add_highlight("Full image", pid)
-    assert db.species_curation.get_highlights(eligible_only=True) == {"Full image": {pid: 1}}
+    db.set_species_representative("Full image", pid)
+    assert db.species_curation.get_highlights(eligible_only=True) == {"Full image": [pid]}
     # A fresh workspace with no override uses the documented default 0.2.
     import config as cfg
     cfg.save({})
@@ -94,9 +94,9 @@ def test_highlight_eligibility_tracks_ranking_but_keeps_saved_choices_and_keywor
     detection, _ = _prediction(db, pid, "Old", 0.99, fingerprint="old")
     _, current = _prediction(db, pid, "Current", 0.6, detection=detection)
     _prediction(db, pid, "Hidden", 1.0, floor=0.1)
-    db.species_curation.add_highlight("Current", pid)
-    assert db.species_curation.get_highlights(eligible_only=True) == {"Current": {pid: 1}}
-    assert db.species_curation.get_highlights("Current", eligible_only=True) == {"Current": {pid: 1}}
+    db.set_species_representative("Current", pid)
+    assert db.species_curation.get_highlights(eligible_only=True) == {"Current": [pid]}
+    assert db.species_curation.get_highlights("Current", eligible_only=True) == {"Current": [pid]}
     # A rejection in another workspace cannot change this workspace's ranking.
     other = db.create_workspace("Other", config_overrides={"detector_confidence": 0.9})
     db.commit()
@@ -105,12 +105,12 @@ def test_highlight_eligibility_tracks_ranking_but_keeps_saved_choices_and_keywor
     db.workspaces.update(db.active_workspace_id, config_overrides={"detector_confidence": 0.9})
     db.commit()
     assert db.species_curation.get_highlights(eligible_only=True) == {}
-    assert db.species_curation.get_highlights() == {"Current": {pid: 1}}
+    assert db.species_curation.get_highlights() == {"Current": [pid]}
     # A user's accepted keyword remains eligible even when all detector evidence is hidden.
     keyword = db.keywords.add("Current", is_species=True)
     keyword_tagging.tag_photo(db, pid, keyword, source="manual")
     db.commit()
-    assert db.species_curation.get_highlights(eligible_only=True) == {"Current": {pid: 1}}
+    assert db.species_curation.get_highlights(eligible_only=True) == {"Current": [pid]}
 
 
 def test_misses_override_uses_current_fingerprints_but_preserves_weak_context(db, catalog):

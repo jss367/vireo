@@ -148,7 +148,7 @@ function renderGroupModal() {
     var kwHtml = grmKeywordBadgeHtml(p, keywordStats);
     var subjectHtml = grmSubjectBadgeHtml(p);
     var repHtml = dbSt.is_species_representative
-      ? '<span class="grm-card-representative">Representative</span>'
+      ? '<span class="grm-card-representative">Top highlight</span>'
       : '';
 
     var nat = grmNaturalDims(p);

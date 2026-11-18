@@ -48,9 +48,9 @@ export function _lbRenderLifeListPanel(/** @type {number} */ photoId) {
     btn.type = 'button';
     if (entry.is_current_photo) {
       btn.className = 'primary';
-      btn.textContent = 'Representative';
+      btn.textContent = 'Top Highlight';
     } else {
-      btn.textContent = 'Set Representative';
+      btn.textContent = 'Make Top Highlight';
     }
     btn.disabled = lbState.readOnly;
     if (lbState.readOnly) btn.title = lbState.readOnlyMessage;
@@ -86,7 +86,7 @@ async function setLifeListPhoto(/** @type {string} */ species, /** @type {number
       detail: { species: species, photoId: photoId },
     }));
     if (typeof showToast === 'function') {
-      showToast('Species representative set for ' + species, 'success');
+      showToast('Top highlight set for ' + species, 'success');
     }
   } finally {
     if (button) button.disabled = false;
@@ -142,7 +142,7 @@ async function chooseSpeciesRepresentativeForPhoto(/** @type {number} */ photoId
   var entry = entries[0]; if (!entry) return;
   if (entries.length > 1) {
     var names = entries.map(function(e) { return e.species; });
-    var choice = window.prompt('Set as representative for which species?\n' + names.join('\n'), names[0]);
+    var choice = window.prompt('Make this the top highlight of which species?\n' + names.join('\n'), names[0]);
     if (!choice) return;
     entry = entries.find(function(e) { return e.species === choice; }) || { species: choice };
   }
@@ -159,7 +159,7 @@ async function chooseSpeciesRepresentativeForPhoto(/** @type {number} */ photoId
     });
     if (!anyEligible && !opts.showFetchFallback) return [];
     return [{
-      label: 'Set Representative',
+      label: 'Make Top Highlight',
       disabled: true,
       disabledHint: 'Select a single photo',
     }];
@@ -170,16 +170,16 @@ async function chooseSpeciesRepresentativeForPhoto(/** @type {number} */ photoId
     return entries.map(function(entry) {
       var isCurrent = !!entry.is_current_photo;
       return {
-        label: 'Set Representative \u2014 ' + entry.species,
+        label: 'Make Top Highlight \u2014 ' + entry.species,
         disabled: isCurrent,
-        disabledHint: isCurrent ? 'Already representative' : null,
+        disabledHint: isCurrent ? 'Already the top highlight' : null,
         onClick: function() { setLifeListPhoto(entry.species, photoId); },
       };
     });
   }
   if (!opts.showFetchFallback) return [];
   return [{
-    label: 'Set Representative\u2026',
+    label: 'Make Top Highlight\u2026',
     onClick: function() { chooseSpeciesRepresentativeForPhoto(photoId); },
   }];
 }
