@@ -1258,7 +1258,9 @@ def _load_raw(path, max_size, raw_decode=RAW_DECODE_JPEG_FIRST):
                 None if raw_decode in (RAW_DECODE_CAMERA_RENDERED, RAW_DECODE_ALIGNED) else max_size,
                 preserve_highlights=raw_decode == RAW_DECODE_PRESERVE_HIGHLIGHTS,
             )
-            image.info["vireo_aligned_rendition"] = "sensor"
+            image.info["vireo_aligned_rendition"] = (
+                "sensor-preserve-highlights" if raw_decode == RAW_DECODE_PRESERVE_HIGHLIGHTS else "sensor"
+            )
             if raw_decode in (RAW_DECODE_CAMERA_RENDERED, RAW_DECODE_ALIGNED) and embedded is not None:
                 # Legacy JPEG-first masks at or below this size used the rejected preview.
                 image.info["vireo_rejected_preview_edge"] = max(embedded.size)

@@ -2174,3 +2174,29 @@ def test_focus_masks_follow_the_camera_frame_at_both_scales(tmp_path, monkeypatc
     image, _ = _focus_source_image(config, photo, folder, "working", True)
     with image, pytest.raises(ValueError, match="incompatible"):
         _focus_masked_crop(image, (0, 0, 128, 128), mask_bytes[0], True)
+
+
+def test_tracked_sensor_frames_distinguish_highlight_decode_strategy(tmp_path, monkeypatch):
+    import numpy as np
+    from image_loader import RAW_DECODE_ALIGNED, RAW_DECODE_PRESERVE_HIGHLIGHTS, extract_working_copy, load_image
+    from masking import write_mask_png
+    from web.media_common import _focus_source_image
+    from web.media_crops import _focus_masked_crop
+
+    _install_fake_raw(monkeypatch, _FakeRaw(postprocess_size=(120, 80), sensor_size=(120, 80)))
+    source = tmp_path / "synthetic.nef"
+    source.touch()
+    with load_image(source, max_size=None, raw_decode=RAW_DECODE_ALIGNED) as aligned:
+        aligned_id = aligned.info["vireo_subject_frame_id"]
+    with load_image(source, max_size=None, raw_decode=RAW_DECODE_PRESERVE_HIGHLIGHTS, track_frame=True) as working:
+        assert working.size == (120, 80)
+        assert working.info["vireo_subject_frame_id"] != aligned_id
+    copy = tmp_path / "working" / "synthetic.jpg"
+    assert extract_working_copy(source, copy, max_size=120)
+    photo = dict(filename=source.name, folder_id=1, working_copy_path="working/synthetic.jpg")
+    image, _ = _focus_source_image({"THUMB_CACHE_DIR": str(tmp_path / "thumbs")}, photo,
+                                   {"path": str(tmp_path)}, "working", True)
+    mask = io.BytesIO()
+    write_mask_png(np.ones((80, 120), dtype=bool), mask, frame_id=aligned_id)
+    with image, pytest.raises(ValueError, match="incompatible"):
+        _focus_masked_crop(image, (0, 0, 40, 40), mask.getvalue(), True)
