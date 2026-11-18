@@ -31,6 +31,7 @@ eligibility, refreshes when the tab regains focus, and is checked again on click
 | `results.js` | Result presentation and the card-cleanup handoff |
 | `new-images.js` | Captured new-image lists and their import deep links |
 | `locations.js` | GPS location suggestions and the choices sent as `location_choices` |
+| `clock-check.js` | The camera-clock warning from the duplicate-check stream's `clock_problems` frame |
 | `loading.js` | Initial configuration, form wiring, workspace defaults, and deep links |
 | `boot.js` | Folder-browser construction, return/mode listeners, and page startup |
 

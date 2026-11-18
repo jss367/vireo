@@ -2,6 +2,7 @@ import json
 import os
 from types import SimpleNamespace
 
+import pytest
 from services import photo_ingest
 from wait import wait_for_job_via_client
 
@@ -200,11 +201,11 @@ def test_capture_time_job_skips_already_correct_offset(client_with_photo, monkey
     )
     db.conn.commit()
 
-    def fail_run(*_args, **_kwargs):
+    def unexpected_write(*_args):
         raise AssertionError("ExifTool should not run for a no-op capture-time adjustment")
 
     monkeypatch.setattr(capture_time.shutil, "which", lambda name: "/usr/bin/exiftool")
-    monkeypatch.setattr(capture_time.subprocess, "run", fail_run)
+    monkeypatch.setattr(capture_time, "_write_capture_time", unexpected_write)
 
     client = app.test_client()
     resp = client.post(
@@ -571,21 +572,11 @@ def test_capture_time_job_accepts_large_select_all_payload(client_with_photo, mo
     import capture_time
 
     app, db, photo_id = client_with_photo
-    photo = db.photos.get(photo_id)
-    folder = db.conn.execute(
-        "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
-    ).fetchone()
-    path = os.path.join(folder["path"], photo["filename"])
-
-    commands = []
-
-    def fake_run(cmd, **_kwargs):
-        commands.append(cmd)
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
+    def unexpected_write(*args):
+        raise AssertionError("A zero-minute shift must skip the ExifTool write")
 
     monkeypatch.setattr(capture_time.shutil, "which", lambda name: "/usr/bin/exiftool")
-    monkeypatch.setattr(capture_time.subprocess, "run", fake_run)
-    monkeypatch.setattr(capture_time, "extract_metadata", lambda paths: {paths[0]: {"EXIF": {}}})
+    monkeypatch.setattr(capture_time, "_write_capture_time", unexpected_write)
 
     client = app.test_client()
     resp = client.post(
@@ -606,7 +597,7 @@ def test_capture_time_job_accepts_large_select_all_payload(client_with_photo, mo
     assert job["config"]["photo_count"] == 1
     assert job["config"]["photo_ids_sample"] == [photo_id]
     assert "photo_ids" not in job["config"]
-    assert commands == []
+    assert job["result"]["failed"] == 0
 
 
 def test_capture_time_job_applies_per_photo_shifts(client_with_photo, monkeypatch):
@@ -832,3 +823,82 @@ def test_capture_time_primary_only_preserves_companion_identity(client_with_phot
     assert identity is not None
     assert identity["file_hash"] == companion_hash
     assert DuplicateChecker(CatalogIndex.from_db(db), verify_by_hash=True).match(source)
+
+
+def test_capture_time_rejects_a_stale_preview(app_and_db):
+    app, db = app_and_db
+    pid = db.photos.list_page()[0]["id"]
+    client = app.test_client()
+    body = {"photo_ids": [pid], "mode": "manual", "shift_minutes": 15}
+    token = client.post("/api/capture-time/preview", json=body).get_json()["expected_state"]
+    db.conn.execute("UPDATE photos SET timestamp='2026-03-18T01:23:45' WHERE id=?", (pid,))
+    db.commit()
+    result = client.post("/api/jobs/capture-time", json={**body, "expected_state": token})
+    assert result.status_code == 409
+
+
+def test_capture_time_overlap_is_rejected_before_writing(app_and_db):
+    from capture_time import current_capture_time_token, guard_capture_time
+
+    _, db = app_and_db
+    pid = db.photos.list_page()[0]["id"]
+    token = current_capture_time_token(db, [pid])
+    with guard_capture_time(db, [pid], token), pytest.raises(ValueError, match="already running"):
+        with guard_capture_time(db, [pid], token):
+            pytest.fail("overlapping correction acquired the same photo")
+    with guard_capture_time(db, [pid], token):
+        pass
+
+
+def test_capture_time_fallback_changes_invalidate_preview(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    pid = db.photos.list_page()[0]["id"]
+    body = {"photo_ids": [pid], "mode": "preserve_instant", "target_offset": "-08:00"}
+    exif = {"CreateDate": "2026:05:22 20:07:23", "SubSecTime": "56", "OffsetTimeDigitized": "-07:00"}
+    for tag, value in [("CreateDate", "2026:05:22 20:08:00"), ("SubSecTime", "12"), ("OffsetTimeDigitized", "-06:00")]:
+        db.conn.execute("UPDATE photos SET exif_data=? WHERE id=?", (json.dumps({"EXIF": exif}), pid))
+        db.commit()
+        preview = client.post("/api/capture-time/preview", json=body).get_json()
+        exif[tag] = value
+        db.conn.execute("UPDATE photos SET exif_data=? WHERE id=?", (json.dumps({"EXIF": exif}), pid))
+        db.commit()
+        result = client.post("/api/jobs/capture-time", json={**body, "expected_state": preview["expected_state"]})
+        assert result.status_code == 409, tag
+
+
+@pytest.mark.parametrize("shift,offset", [(60, None), (60, "-06:00"), (0, "-06:00")])
+def test_dependent_reset_write_matches_reviewed_shift_and_offset(client_with_photo, monkeypatch, tmp_path, shift, offset):
+    import capture_time
+    import metadata
+
+    app, db, first = client_with_photo
+    second = photo_ingest.add_photo(db, folder_id=db.photos.get(first)["folder_id"], filename="later.jpg",
+                                    extension=".jpg", file_size=1, file_mtime=0, timestamp="2026-01-25T13:06:00")
+    (tmp_path / "photos" / "later.jpg").touch()
+    db.commit()
+    client = app.test_client()
+    body = {"photo_ids": [first], "mode": "set_offset", "target_offset": "-08:00", "shift_minutes": 0}
+    body["expected_state"] = client.post("/api/capture-time/preview", json=body).get_json()["expected_state"]
+    step = {"photo_ids": [second], "mode": "set_offset" if offset else "manual",
+            "target_offset": offset, "shift_minutes": shift}
+    step["expected_state"] = client.post("/api/capture-time/preview", json=step).get_json()["expected_state"]
+    body["dependent_shifts"] = [step]
+    db.conn.execute("UPDATE photos SET timestamp='2026-01-25T13:07:00' WHERE id=?", (second,))
+    db.commit()
+    assert client.post("/api/jobs/capture-time", json=body).status_code == 409
+    step["expected_state"] = client.post("/api/capture-time/preview", json=step).get_json()["expected_state"]
+    commands = {}
+    monkeypatch.setattr(metadata, "find_exiftool", lambda: "exiftool")
+    monkeypatch.setattr(capture_time, "_write_capture_time",
+                        lambda db, cmd, photo, paths, catalog_paths: commands.update({photo["id"]: cmd}))
+    result = client.post("/api/jobs/capture-time", json=body)
+    job = wait_for_job_via_client(client, result.get_json()["job_id"])
+    assert job["result"]["updated"] == 2
+    assert "-OffsetTimeOriginal=-08:00" in commands[first]
+    assert not any(arg.startswith("-AllDates") for arg in commands[first])
+    shifts = [arg for arg in commands[second] if arg.startswith("-AllDates")]
+    assert shifts == (["-AllDates+=0:0:0 1:0:0"] if shift else [])
+    offsets = [arg for arg in commands[second] if arg.startswith("-OffsetTime")]
+    assert offsets == ([f"-OffsetTime={offset}", f"-OffsetTimeOriginal={offset}", f"-OffsetTimeDigitized={offset}"]
+                       if offset else [])

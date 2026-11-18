@@ -11,6 +11,7 @@ function clearImportPreviewGrid() {
   importDayGroups = new Map();
   /** @type {HTMLElement} */ (document.getElementById('importDaySummary')).style.display = 'none';
   /** @type {HTMLElement} */ (document.getElementById('importDayRows')).replaceChildren();
+  renderImportClockProblems([]);
   updateHideDuplicatesControl(0);
   const grid = /** @type {HTMLElement} */ (document.getElementById('importPreviewGrid'));
   if (!grid) return;
