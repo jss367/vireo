@@ -2,7 +2,7 @@
 
 import pytest
 from subjects import retained, sync_primary
-from test_one_primary_subject import _folder
+from test_one_primary_subject import _analysis, _folder
 
 
 def _photo(db, *, floor=.05, model='megadetector-v6', confidence=.1):
@@ -14,6 +14,7 @@ def _photo(db, *, floor=.05, model='megadetector-v6', confidence=.1):
     det = db.detections.save(pid, [dict(
         box=dict(x=.1, y=.1, w=.3, h=.3), confidence=confidence, category='animal',
     )], detector_model='megadetector-v6')[0]
+    _analysis(db, det, .8)
     sync_primary(db, pid, min_conf=floor, detector_model=model)
     db.conn.execute("""INSERT INTO photo_masks(photo_id,variant,path,created_at,detector_model,
         prompt_x,prompt_y,prompt_w,prompt_h) SELECT photo_id,'test','synthetic-mask',1,

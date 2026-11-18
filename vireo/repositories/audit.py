@@ -82,6 +82,8 @@ class AuditRepository:
         catalog with no provenance for its scores cannot look clean. The saved
         per-photo floor and model define the candidate set for projected
         outputs, including weak rescues; legacy rows use the workspace floor.
+        A score is proven only by the selected region's matching measurement;
+        selecting a primary alone does not measure a legacy score.
         """
         ws = self.workspace_id_fn()
         rows = self.conn.execute(f"""
@@ -135,7 +137,11 @@ class AuditRepository:
                        AND pm.prompt_y IS d.box_y AND pm.prompt_w IS d.box_w
                        AND pm.prompt_h IS d.box_h)) AS stale_mask,
                    e.quality_score IS NOT NULL AND
-                       (st.photo_id IS NULL OR st.detection_id IS NOT d.id) AS stale_score
+                       (st.photo_id IS NULL OR st.detection_id IS NOT d.id OR NOT EXISTS (
+                           SELECT 1 FROM detection_subjects measured
+                           WHERE measured.detection_id=d.id
+                             AND measured.quality_score=e.quality_score
+                       )) AS stale_score
             FROM evidence e LEFT JOIN detections d ON d.id=e.detection_id
             LEFT JOIN photo_subject_state st ON st.photo_id=e.id
             LEFT JOIN photo_masks pm ON pm.photo_id=e.id AND pm.variant=e.active_mask_variant
