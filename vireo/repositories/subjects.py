@@ -164,6 +164,26 @@ class SubjectsRepository:
             "SELECT s.* FROM detection_subjects s JOIN detections d ON d.id=s.detection_id WHERE d.photo_id=?",
             (photo_id,))}
 
+    def mask_reviews(self, photo_id: int) -> list[dict[str, Any]]:
+        return [dict(row) for row in self.conn.execute(
+            "SELECT id, detection_id, source_key, mask_digest, verdict, box FROM subject_mask_reviews "
+            "WHERE photo_id=? ORDER BY id DESC", (photo_id,),
+        )]
+
+    def reviewed_mask(self, photo_id: int, review_id: int) -> bytes | None:
+        row = self.conn.execute("SELECT mask_png FROM subject_mask_reviews WHERE photo_id=? AND id=?",
+                                (photo_id, review_id)).fetchone()
+        return row[0] if row else None
+
+    def save_mask_review(self, photo_id: int, detection_id: int, key: str, digest: str,
+                         verdict: str, box: dict, mask_png: bytes) -> None:
+        self.conn.execute(
+            "INSERT INTO subject_mask_reviews(photo_id,detection_id,source_key,mask_digest,verdict,box,mask_png) "
+            "VALUES (?,?,?,?,?,?,?) ON CONFLICT(photo_id,detection_id,source_key,mask_digest) "
+            "DO UPDATE SET verdict=excluded.verdict",
+            (photo_id, detection_id, key, digest, verdict, json.dumps(box), mask_png),
+        )
+
     def ranking_analysis(self, detection_id: int, source_key: str) -> dict[str, Any] | None:
         """One immutable analysis generation, including its exact mask bytes."""
         row = self.conn.execute(

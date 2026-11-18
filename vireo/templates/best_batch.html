@@ -367,6 +367,15 @@ body {
         <section id="subjectPanel" hidden>
           <label>Subject for this comparison <select id="subjectChoices"></select></label>
           <img id="chosenSubjectImg" alt="Selected subject detail" style="max-width:100%;max-height:400px;object-fit:contain;">
+          <div id="maskReview" hidden>
+            <p id="maskVerdict" role="status"></p>
+            <a id="inspectMask" target="_blank">Inspect masked crop</a>
+            <a id="inspectFullMask" target="_blank">Full mask</a>
+            <button id="validMask" type="button">Confirm animal mask</button>
+            <button id="invalidMask" type="button">Exclude incorrect mask</button>
+            <button id="refineMask" type="button">Refine region and analyze</button>
+          </div>
+          <div id="maskHistory"></div>
           <p id="subjectEvidenceStatus" class="section-note"></p>
         </section>
         <div class="section-head">

@@ -254,6 +254,11 @@ def _comparison_media_subject(
     requested_key = args.get("analysis_key")
     if not requested_key or analysis is None or key != requested_key:
         raise ValueError("Selected subject analysis is unavailable or stale; refresh the comparison")
+    digest = args.get("mask_digest")
+    if digest is not None:
+        import hashlib
+        if digest != hashlib.sha256(analysis["mask_png"]).hexdigest():
+            raise ValueError("Selected subject mask changed; refresh the comparison")
     return detection, analysis
 
 

@@ -67,3 +67,37 @@ def test_failed_flag_preserves_the_review_status(live_server, page):
     expect(page.locator("#inspectRole")).to_have_text("#1 Needs review")
     expect(page.locator("#rankList .role").first).to_have_text("#1 Needs review")
     assert live_server["db"].photos.get(ids[0])["flag"] == "none"
+
+
+def test_mask_review_targets_inspected_generation_and_opens_region_editor(live_server, page):
+    ids = _open_provisional_batch(live_server, page)
+    pid = ids[1]
+    verdict = "unreviewed"
+
+    def comparison(route):
+        cards = [{"id": photo_id, "filename": f"frame{index}.jpg", "rank": None,
+                  "evidence_status": "ready", "subject": {"detection_id": index, "analysis_key": "analysis",
+                  "selection": "selected", "candidates": []}, "mask_review": {"mask_digest": "pixels",
+                  "verdict": verdict if photo_id == pid else "unreviewed", "history": []}}
+                 for index, photo_id in enumerate(ids, 1)]
+        route.fulfill(json={"cards": cards, "count": len(ids), "photo_ids": ids,
+                            "comparison": {"requested_species": None, "subject_overrides": {}}})
+
+    def review(route):
+        nonlocal verdict
+        assert route.request.post_data_json == {"detection_id": 2, "analysis_key": "analysis",
+                                                "mask_digest": "pixels", "verdict": "invalid"}
+        verdict = "invalid"
+        route.fulfill(json={"verdict": verdict})
+
+    page.route("**/api/photos/burst-evidence", comparison)
+    page.route(f"**/api/photos/{pid}/mask-review", review)
+    page.locator("#compareSubjectsBtn").click()
+    expect(page.locator("#maskVerdict")).to_contain_text("has not been reviewed")
+    page.locator(f'#rankList [data-photo-id="{pid}"]').click()
+    page.get_by_role("button", name="Exclude incorrect mask").click()
+    expect(page.locator("#maskVerdict")).to_contain_text("excluded")
+    expect(page.locator("#inspectName")).to_have_text("frame2.jpg")
+    page.get_by_role("button", name="Refine region and analyze").click()
+    expect(page.get_by_role("dialog", name="Select animal region")).to_be_visible()
+    expect(page.get_by_role("button", name="Save subject box")).to_be_disabled()

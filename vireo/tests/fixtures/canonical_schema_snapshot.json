@@ -1040,6 +1040,18 @@
   ],
   [
    "table",
+   "subject_mask_reviews",
+   "subject_mask_reviews",
+   "CREATE TABLE subject_mask_reviews (\n        id INTEGER PRIMARY KEY,\n        photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,\n        detection_id INTEGER NOT NULL,\n        source_key TEXT NOT NULL,\n        mask_digest TEXT NOT NULL,\n        verdict TEXT NOT NULL CHECK(verdict IN ('valid', 'invalid')),\n        box TEXT NOT NULL,\n        mask_png BLOB NOT NULL,\n        UNIQUE(photo_id, detection_id, source_key, mask_digest)\n    )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_subject_mask_reviews_1",
+   "subject_mask_reviews",
+   null
+  ],
+  [
+   "table",
    "photo_identity_alternatives",
    "photo_identity_alternatives",
    "CREATE TABLE photo_identity_alternatives (\n        photo_id INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,\n        group_id TEXT NOT NULL,\n        candidates TEXT NOT NULL,\n        reason TEXT NOT NULL,\n        missing_evidence TEXT NOT NULL DEFAULT '',\n        status TEXT NOT NULL DEFAULT 'unresolved' CHECK (status IN ('unresolved', 'resolved'))\n    )"

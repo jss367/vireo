@@ -36,6 +36,7 @@ from canonical_schema import (
     create_species_choices,
     create_subject_candidates,
     create_subject_focus,
+    create_subject_mask_reviews,
     create_subject_ranking_analysis,
     job_history_columns,
 )
@@ -741,6 +742,7 @@ MIGRATIONS = (
     Migration(52, "reviewed_gps", _add_reviewed_gps),
     Migration(53, "orphaned_companion_masks", _clear_orphaned_companion_mask_projections),
     Migration(54, "detector_decoded_frames", _retire_unbound_detector_caches),
+    Migration(55, "subject_mask_reviews", create_subject_mask_reviews),
 )
 
 

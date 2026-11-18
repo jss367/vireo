@@ -457,6 +457,16 @@ subjects do not enter score percentiles or rejection suggestions. At least two
 analyzed subjects are required for a relative comparison, and an all-rejected
 comparison has no suggested best frame.
 
+A ready card can still segment a reed or another animal. Inspect its
+`focus_crop_mask_url` and `mask_url`. To record the result, PUT
+`detection_id`, `analysis_key`, `mask_digest` (from `card.mask_review`), and
+`verdict` (`valid` or `invalid`) to `/api/v1/photos/<id>/mask-review`.
+A stale generation returns HTTP 409. Invalid masks remain inspectable and
+count toward analysis coverage but are excluded from selected-subject scoring.
+Unreviewed masks retain provisional scoring. Best Batch lets you draw a tighter
+reviewer box on the original and analyze that region. Earlier reviewed mask
+PNGs and boxes are available in `mask_review.history` for that photo.
+
 To compute missing evidence, POST the same comparison to
 `/api/v1/photos/burst-evidence` with `"analyze": true`. It returns `job_id`;
 poll `/api/jobs/<job_id>`, then fetch the comparison again. A selection with
