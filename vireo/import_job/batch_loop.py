@@ -22,6 +22,7 @@ from import_job.preflight import (
 from import_job.resume import _publish_resume_scope, _record_landed_files
 from import_job.siblings import _companion_siblings
 from import_job.state import _fail, _ImportBatchState, _reclassify_landed_failed
+from import_job.timing import CATALOG, COPY, timed
 from import_job.transports import _ENQ_CANCELLED
 from import_job.twins import _link_twins_and_emit
 
@@ -196,27 +197,32 @@ class _ImportBatchLoop:
             companion_siblings=_companion_siblings(batch),
         )
 
-        for source_file in batch:
-            if not self._feed_file(batch_st, rel, dest_folder, source_file):
-                break
+        # The copy phase is everything that moves or checks bytes for this
+        # batch: the duplicate gate, the copies (with their read-back on
+        # the local transport) and the queued rsync transfer.
+        with timed(state, COPY):
+            for source_file in batch:
+                if not self._feed_file(batch_st, rel, dest_folder, source_file):
+                    break
 
-        self._recheck_mount_and_roll_back(batch_st, rel)
+            self._recheck_mount_and_roll_back(batch_st, rel)
 
-        # Transfer the queued batch — the transport owns the whole
-        # phase, including the ``to_transfer``/``cancelled`` guard.
-        # Called unconditionally: a no-op on the local transport (copies
-        # land inside ``enqueue``; ``to_transfer`` is always empty) and
-        # whenever nothing was queued or Stop was observed.
-        self._transport.flush_batch(
-            state, batch_st, rel=rel, checker=self._checker)
+            # Transfer the queued batch — the transport owns the whole
+            # phase, including the ``to_transfer``/``cancelled`` guard.
+            # Called unconditionally: a no-op on the local transport (copies
+            # land inside ``enqueue``; ``to_transfer`` is always empty) and
+            # whenever nothing was queued or Stop was observed.
+            self._transport.flush_batch(
+                state, batch_st, rel=rel, checker=self._checker)
 
-        self._catalog_batch(batch_st, rel)
+        with timed(state, CATALOG):
+            self._catalog_batch(batch_st, rel)
 
-        _link_twins_and_emit(
-            state, batch_st, self._db, self._workspace_id, self._emit, rel,
-            self._queued,
-        )
-        self._publish_batch_scope(batch_st)
+            _link_twins_and_emit(
+                state, batch_st, self._db, self._workspace_id, self._emit, rel,
+                self._queued,
+            )
+            self._publish_batch_scope(batch_st)
         return state.cancelled
 
     def _feed_file(self, batch_st: _ImportBatchState, rel: str, dest_folder: str, source_file: Path) -> bool:
