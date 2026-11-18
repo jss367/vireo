@@ -2,12 +2,12 @@
 // ES module.
 
 import { safeFetch } from './shared.js';
-import { sortedBuckets } from './loading.js';
+import { loadHighlights, sortedBuckets } from './loading.js';
 import { state } from './state.js';
 
 // Save modal
 export async function showSaveModal() {
-  /** @type {HTMLInputElement} */ (document.getElementById('saveNameInput')).value = 'Highlights - ' + state.currentFolderName;
+  /** @type {HTMLInputElement} */ (document.getElementById('saveNameInput')).value = 'Highlights - ' + state.currentScopeName;
   /** @type {HTMLElement} */ (document.getElementById('saveDuplicateWarning')).style.display = 'none';
   /** @type {HTMLButtonElement} */ (document.getElementById('replaceBtn')).style.display = 'none';
   state.existingCollections = await safeFetch('/api/collections');
@@ -51,12 +51,9 @@ export async function doSave(mode) {
   if (!name) return;
   var photoIds = collectVisiblePhotoIds();
 
-  if (mode === 'replace') {
-    var existing = state.existingCollections.find(function(c) { return c.name === name; });
-    if (existing) {
-      await safeFetch('/api/collections/' + existing.id, { method: 'DELETE' });
-    }
-  } else if (mode === 'new') {
+  if (!photoIds.length) return;
+  var existing = state.existingCollections.find(function(c) { return c.name === name; });
+  if (mode === 'new') {
     var baseName = name;
     var counter = 2;
     var names = state.existingCollections.map(function(c) { return c.name; });
@@ -66,10 +63,20 @@ export async function doSave(mode) {
     }
   }
 
-  await safeFetch('/api/highlights/save', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ photo_ids: photoIds, name: name }),
-  });
+  if (mode === 'replace' && existing) {
+    // Keep the scope's collection ID when replacing its photos.
+    await safeFetch('/api/collections/' + existing.id, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rules: [{ field: 'photo_ids', value: Array.from(new Set(photoIds)) }], visual: null }),
+    });
+  } else {
+    await safeFetch('/api/highlights/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ photo_ids: photoIds, name: name }),
+    });
+  }
   closeSaveModal();
+  await loadHighlights(true);
 }

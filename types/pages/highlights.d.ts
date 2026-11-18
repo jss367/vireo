@@ -41,6 +41,7 @@ interface HighlightsBestDecision {
 interface HighlightsBucketPage extends HighlightsSection {loaded_count: number; has_more: boolean; best_decision?: HighlightsBestDecision | null}
 interface HighlightsData {
   buckets?: HighlightsBucket[]; unidentified?: HighlightsSection | null;
+  collections?: {id: number; name: string; degraded: boolean}[];
   folders: {id: number; name: string; path?: string; photo_count?: number}[];
   meta: {eligible: number; total_in_scope: number; [key: string]: unknown};
   [key: string]: unknown;

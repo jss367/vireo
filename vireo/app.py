@@ -977,7 +977,7 @@ def _register_core_blueprints(app, w):
     """
     _get_db, db_path, missing_originals = w.get_db, w.db_path, w.missing_originals
     app.register_blueprint(create_pages_blueprint(_get_db))
-    app.register_blueprint(create_highlights_blueprint(_get_db, json_error))
+    app.register_blueprint(create_highlights_blueprint(_get_db, json_error, w.visual_scope))
     app.register_blueprint(create_species_best_blueprint(_get_db, json_error))
     app.register_blueprint(
         create_local_workspace_blueprint(

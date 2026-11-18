@@ -1,4 +1,4 @@
-// Score formatting and the request parameters: scope (folder or workspace)
+// Score formatting and the request parameters: scope (workspace, folder or collection)
 // and the filter controls.
 // ES module.
 
@@ -15,33 +15,27 @@ export function formatPercent(v) {
   return v == null ? '' : Math.round(Number(v) * 100) + '%';
 }
 
-// The folder the page is scoped to, null when it shows every folder.
-export function selectedFolderId() {
+/** @returns {{folder_id?: number, collection_id?: number}} */
+export function selectedScope() {
   var value = /** @type {HTMLSelectElement} */ (document.getElementById('folderSelect')).value;
-  if (!value || value === WORKSPACE_SCOPE) return null;
-  var id = parseInt(value, 10);
-  return isNaN(id) ? null : id;
+  if (!value || value === WORKSPACE_SCOPE) return {};
+  if (value.startsWith('collection:')) return { collection_id: Number(value.slice('collection:'.length)) };
+  return { folder_id: Number(value) };
 }
 
-// What a representative click just claimed: how many other representatives
-// of the species the photo was chosen over, and within what.
-/** @param {number} overCount @param {boolean} inFolder */
-export function representativeToast(overCount, inFolder) {
-  var where = inFolder ? ' in this folder' : '';
-  if (!overCount) return 'Representative set' + (inFolder ? ' for this folder' : '');
+/** @param {number} overCount @param {string} scopeName */
+export function representativeToast(overCount, scopeName) {
+  if (!overCount) return 'Representative set' + (scopeName ? ' for this ' + scopeName : '');
   return 'Representative set, chosen over ' + overCount + ' other representative'
-    + (overCount === 1 ? '' : 's') + where;
+    + (overCount === 1 ? '' : 's') + (scopeName ? ' in this ' + scopeName : '');
 }
 
 export function requestScopeParams() {
   var params = new URLSearchParams();
-  var folderSelect = /** @type {HTMLSelectElement} */ (document.getElementById('folderSelect'));
-  var firstLoad = folderSelect.options.length === 0;
-  if (folderSelect.value === WORKSPACE_SCOPE || firstLoad) {
-    params.set('scope', 'workspace');
-  } else if (folderSelect.value) {
-    params.set('folder_id', folderSelect.value);
-  }
+  var scope = selectedScope();
+  if (scope.collection_id != null) params.set('collection_id', String(scope.collection_id));
+  else if (scope.folder_id != null) params.set('folder_id', String(scope.folder_id));
+  else params.set('scope', 'workspace');
   params.set('min_quality', (parseInt(/** @type {HTMLInputElement} */ (document.getElementById('qualitySlider')).value) / 100).toFixed(2));
   params.set('confidence_threshold', (parseInt(/** @type {HTMLInputElement} */ (document.getElementById('confidenceSlider')).value) / 100).toFixed(2));
   params.set('confirmation', /** @type {HTMLSelectElement} */ (document.getElementById('confirmationFilter')).value || 'all');

@@ -37,7 +37,7 @@ export function onHighlightFlagChanged(e) {
     // then be false even though another bucket's state goes stale.
     var filterAffected = findAllHighlightPhotoContainers(detail.photoId)
       .some(function(h) { return curationFilterAffectedByReject(h.photo); });
-    if (filterAffected) {
+    if (filterAffected || state.currentData?.scope === 'collection') {
       removeRejectedPhotoFromModel(detail.photoId);
       loadHighlights();
     } else if (removeRejectedPhotoFromModel(detail.photoId)) {
@@ -50,6 +50,9 @@ export function onHighlightFlagChanged(e) {
     // reappearances, not every Pick/Unflag on a photo still in the grid.
     state.rejectedFromGrid.delete(detail.photoId);
     delete state.rejectedAtLoadSeq[detail.photoId];
+    loadHighlights();
+  } else if (state.currentData?.scope === 'collection') {
+    // A flag can change smart collection membership, including its last species row.
     loadHighlights();
   } else {
     handleHighlightPickChange(detail);
