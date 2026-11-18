@@ -317,11 +317,13 @@ def _validate_subject_detail(conn):
 # does not cover such a request, so 512 / 0.99 rounded up bounds the rows.
 SUBJECT_DETAIL_MIXED_RENDERING_PX = 518
 
-# A subject spanning at least this share of the frame's long edge reached the
-# 512 px detail scale inside the 1536 px analysis proxy, so a mask measured as
-# it was made was resampled down from that proxy instead of read from the
-# source at the needed edge.
-SUBJECT_DETAIL_PROXY_SHARE = 512 / 1536
+# The largest analysis proxy a workspace can be set to
+# (``pipeline.proxy_longest_edge`` in ``config_schema``). A subject spanning
+# at least 512 px of it reached the detail scale inside the proxy, so a mask
+# measured as it was made was resampled down from that proxy instead of read
+# from the source at the needed edge. No smaller subject fit any proxy.
+SUBJECT_DETAIL_LARGEST_PROXY = 2048
+SUBJECT_DETAIL_PROXY_SHARE = 512 / SUBJECT_DETAIL_LARGEST_PROXY
 
 
 def _clear_subject_detail_from_other_read_paths(conn):

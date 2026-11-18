@@ -618,7 +618,7 @@ def test_subject_comparison_cache_migrates_without_changing_photographer_choices
 
 def test_version_37_catalog_unmeasures_the_detail_read_another_way(tmp_path):
     """Subjects under 512 px came from a rendering the larger ones never use,
-    and subjects that fit the analysis proxy were measured on it when fresh;
+    and subjects that fit an analysis proxy were measured on it when fresh;
     both return to "not measured" and the subjects in between are kept."""
     path = str(tmp_path / "vireo.db")
     schema.ensure_schema(path)
@@ -629,9 +629,10 @@ def test_version_37_catalog_unmeasures_the_detail_read_another_way(tmp_path):
         3: (9026.48, 518.0, 5408, 3608),     # read from the source at the needed edge: kept
         4: (24410.87, 1015.7, 5408, 3608),   # kept
         5: (0.0, None, 5408, 3608),          # empty mask, nothing was read: kept
-        6: (5462.9, 2137.0, 5408, 3608),     # at least a third of the frame: fit the proxy
-        7: (4000.0, 1802.6, 5408, 3608),     # just under a third: kept
-        8: (4000.0, 1900.0, 3608, 5408),     # portrait frame, the long edge decides
+        6: (5462.9, 2137.0, 5408, 3608),     # fit the default 1536 px proxy
+        7: (4000.0, 1351.0, 5408, 3608),     # just under a quarter, too small for any proxy: kept
+        8: (4000.0, 1400.0, 3608, 5408),     # portrait frame, the long edge decides
+        10: (4000.0, 1352.0, 5408, 3608),    # a quarter of the frame: fit a 2048 px proxy
         9: (4000.0, 900.0, None, None),      # frame size unrecorded
     }
     with sqlite3.connect(path) as conn:
@@ -652,7 +653,7 @@ def test_version_37_catalog_unmeasures_the_detail_read_another_way(tmp_path):
     schema.ensure_schema(path)
     schema.ensure_schema(path)
     kept = {photo_id: rows[photo_id][:2] for photo_id in (3, 4, 5, 7)}
-    cleared = dict.fromkeys((1, 2, 6, 8, 9), (None, None))
+    cleared = dict.fromkeys((1, 2, 6, 8, 9, 10), (None, None))
     with sqlite3.connect(path) as conn:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         got = {row[0]: (row[1], row[2]) for row in conn.execute("SELECT id, subject_detail, subject_detail_px FROM photos")}
@@ -662,7 +663,15 @@ def test_version_37_catalog_unmeasures_the_detail_read_another_way(tmp_path):
                 "SELECT photo_id, subject_detail, subject_detail_px FROM photo_masks WHERE variant=?", (variant,))}
             assert got == {**cleared, **kept}, variant
         # The masks themselves stay: only the measurement is pending again.
-        assert conn.execute("SELECT COUNT(*) FROM photo_masks WHERE path IS NOT NULL").fetchone()[0] == 18
+        assert conn.execute("SELECT COUNT(*) FROM photo_masks WHERE path IS NOT NULL").fetchone()[0] == 20
+
+
+def test_the_cleared_proxy_band_covers_the_largest_proxy_a_workspace_can_set():
+    """A larger permitted proxy would hold smaller subjects at the detail
+    scale, and their fresh measurements would be ones the migration keeps."""
+    import config_schema
+
+    assert config_schema.SCHEMA["pipeline.proxy_longest_edge"]["max"] == schema.SUBJECT_DETAIL_LARGEST_PROXY
 
 
 def test_version_34_catalog_gains_subject_detail_columns(tmp_path):

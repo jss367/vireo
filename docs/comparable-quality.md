@@ -27,9 +27,10 @@ large enough: in this catalog the median subject covers 1.25% of the frame,
 about 170 px in the proxy, so most photos needed the second read anyway,
 and one read path is what makes a mask measured when it is made and the
 same mask measured later from the cache store the same value. Resampled
-down from the proxy, 29 large subjects of this catalog read a median 0.6%
-and at most 6% off what the cached path stores for the same mask; and a
-proxy is a demosaic for a RAW whose embedded preview is smaller than it.
+down from the proxy, 20 of 55 large subjects of this catalog read more than
+1% (at most 8.6%) off what the cached path stores for the same mask, while
+all 127 subjects too small for any proxy matched it exactly; and a proxy is
+a demosaic for a RAW whose embedded preview is smaller than it.
 A subject smaller than 512 px even at native resolution is upsampled and
 reads low, which is the honest answer: that frame holds little detail.
 
@@ -71,7 +72,8 @@ preview is still demosaiced when its preview is smaller than the request;
 none of this catalog's cameras (D7200, D850, Z 8) is one. Migration 38
 returns to "not measured" every stored value that came another way (a
 subject under 518 px, read from either rendering, and a subject spanning a
-third of the frame or more, measured on the proxy when its mask was fresh),
+quarter of the frame or more, which fit the largest proxy a workspace can
+set, 2048 px, and was measured on it when its mask was fresh),
 and the mask stage measures those cached masks again. The comparison
 analyses (`subject_ranking_analysis`) store the detail too; their key carries
 `subject_ranking.ANALYSIS_RECIPE_VERSION`, raised with this change, so an
