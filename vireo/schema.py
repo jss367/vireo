@@ -341,7 +341,17 @@ def _clear_subject_detail_from_other_read_paths(conn):
     the next Process run measures them without rerunning SAM. The subjects
     in between keep their values, always read from the source at the needed
     edge.
+
+    A dev catalog stamped ``user_version=39`` by this branch before the
+    merge with main has the subject-detail rewrite applied but lacks the
+    ``job_history.errors`` column that migration 39 (``job_history_errors``)
+    adds on main, and would skip that migration here because
+    ``_apply_pending`` runs only migrations newer than ``user_version``.
+    Idempotently add the column so either alternate v39 layout converges on
+    the canonical v40 schema; otherwise every completed job's
+    ``persist_job`` insert would fail against the missing column.
     """
+    _add_job_history_errors(conn)
     stale = (
         "{px} < ? OR p.width IS NULL OR p.height IS NULL "
         "OR {px} >= MAX(p.width, p.height) * ?"

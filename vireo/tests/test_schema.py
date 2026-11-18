@@ -710,3 +710,28 @@ def test_version_38_catalog_preserves_historical_job_on_upgrade(tmp_path):
             "SELECT status, result, error_count, errors FROM job_history WHERE id='old-job'"
         ).fetchone()
         assert row == ("failed", '{"error":"old failure"}', 1, None)
+
+
+def test_alternate_version_39_catalog_gains_job_history_errors(tmp_path):
+    """A catalog stamped v39 by this branch before merging main lacks the
+    ``errors`` column that main's v39 adds. Migration 40 must repair it so
+    ``persist_job`` can still write history after the upgrade."""
+    path = str(tmp_path / "vireo.db")
+    schema.ensure_schema(path)
+    with sqlite3.connect(path) as conn:
+        conn.execute("ALTER TABLE job_history DROP COLUMN errors")
+        conn.execute("PRAGMA user_version=39")
+    schema.ensure_schema(path)
+    schema.ensure_schema(path)
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(job_history)")}
+        assert "errors" in columns
+        conn.execute(
+            "INSERT INTO job_history (id, type, status, result, error_count, errors) "
+            """VALUES ('new-job', 'scan', 'completed', '{}', 0, '[]')"""
+        )
+        row = conn.execute(
+            "SELECT status, errors FROM job_history WHERE id='new-job'"
+        ).fetchone()
+        assert row == ("completed", "[]")
