@@ -837,6 +837,7 @@ def test_inspection_neighbor_respects_photo_only_workspace_grants(db, subject_ph
     result = visible_payload(db, current, coverage=True)
     inspection = result["inspection"]
     assert inspection["previous_photo_id"] is None
+    assert inspection["previous_generation"] is None
     assert inspection["previous_primary"] is None
     assert inspection["previous_regions"] == []
     assert not result["possible_subject_switch"]
@@ -849,3 +850,12 @@ def test_inspection_neighbor_respects_photo_only_workspace_grants(db, subject_ph
     assert inspection["previous_primary"] == ids[1]
     assert {r["id"] for r in inspection["previous_regions"]} == set(ids)
     assert result["possible_subject_switch"]
+    reviewed = visible_payload(db, previous, coverage=True)["inspection"]["generation"]
+    assert inspection["previous_generation"] == reviewed
+    db.conn.execute("UPDATE detections SET subject_verdict='not_animal' WHERE id=?", (ids[1],))
+    db.commit()
+    updated = visible_payload(db, current, coverage=True)["inspection"]
+    assert ids[1] in {r["id"] for r in updated["previous_regions"]}
+    assert updated["previous_primary"] != ids[1]
+    assert updated["previous_generation"] != reviewed
+    assert updated["previous_generation"] == visible_payload(db, previous, coverage=True)["inspection"]["generation"]

@@ -356,7 +356,7 @@ def select_primary(db, photo_id, detection_id):
     db.commit_with_retry()
 
 
-def inspection_candidates(db, photo, regions, retained_ids):
+def _region_inventory(photo, regions, retained_ids):
     """Bind browser-local observations to the source and exact region inventory."""
     extra = []
     evidence = []
@@ -377,15 +377,23 @@ def inspection_candidates(db, photo, regions, retained_ids):
                          region["created_at"], _box(region), region["detector_confidence"], reason))
     source = [photo[key] for key in ("file_hash", "file_size", "file_mtime", "width", "height")]
     generation = hashlib.sha256(json.dumps([source, sorted(evidence)]).encode()).hexdigest()
-    previous_id = db.subjects.visible_burst_neighbor(photo["id"], db.require_workspace_id())
+    return generation, extra
+
+
+def inspection_candidates(db, photo, regions, retained_ids):
+    generation, extra = _region_inventory(photo, regions, retained_ids)
+    previous_source = db.subjects.visible_burst_source(photo["id"], db.require_workspace_id())
+    previous_id = previous_source["id"] if previous_source is not None else None
+    previous_generation = None
     previous = []
     primary_id = None
     if previous_id:
         previous = detection_store.get_detections(db, previous_id, min_conf=0, include_rejected=True)
         previous_retained = retained(db, previous_id)
         primary_id = previous_retained[0]["id"] if previous_retained else None
+        previous_generation, _ = _region_inventory(previous_source, previous, {d["id"] for d in previous_retained})
     return {"generation": generation, "additional": extra, "previous_photo_id": previous_id,
-            "previous_primary": primary_id, "min_overlap": BURST_SUBJECT_MIN_IOU,
+            "previous_generation": previous_generation, "previous_primary": primary_id, "min_overlap": BURST_SUBJECT_MIN_IOU,
             "previous_regions": [{"id": r["id"], **_box(r)} for r in previous if r["detector_model"] != "full-image"]}
 
 

@@ -31,7 +31,7 @@ declare function checkPendingSync():void;
 
 interface ReviewAnimalNote {center?:[number,number]|null;state:string; evidence:string; label:string; region:number|null}
 interface ReviewAnimalCoverage {confirmed:boolean; notes:ReviewAnimalNote[]}
-interface ReviewInspection {generation:string; additional:ReviewQueueSubject[]; previous_photo_id:number|null; previous_primary:number|null; min_overlap:number; previous_regions:{id:number;x:number;y:number;w:number;h:number}[]}
+interface ReviewInspection {generation:string; additional:ReviewQueueSubject[]; previous_photo_id:number|null; previous_generation:string|null; previous_primary:number|null; min_overlap:number; previous_regions:{id:number;x:number;y:number;w:number;h:number}[]}
 interface ReviewQueueItemState {entry?:number;generation?:string; coverage?:Record<string,ReviewAnimalCoverage>;inspected:boolean;unresolved:boolean;subject:number|null;center:[number,number]|null;pendingFlag?:'flagged'|'rejected'|'none'|null}
 interface ReviewQueueSession {photoId:number|null;items:Record<string,ReviewQueueItemState>;followUpOnly:boolean}
 interface ReviewQueuePhoto {id:number;flag?:string;flag_note?:{description?:string}|null}

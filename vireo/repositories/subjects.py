@@ -61,11 +61,9 @@ class SubjectsRepository:
             (photo_id,)).fetchone()
         return row[0] if row else None
 
-    def visible_burst_neighbor(self, photo_id: int, workspace_id: int) -> int | None:
+    def visible_burst_source(self, photo_id: int, workspace_id: int) -> sqlite3.Row | None:
         previous = self.burst_neighbor(photo_id)
-        if previous is None or self.visible_inspection_source(workspace_id, previous) is None:
-            return None
-        return previous
+        return None if previous is None else self.visible_inspection_source(workspace_id, previous)
 
     def following_burst_frames(self, photo_id: int) -> Iterator[int]:
         """Walk ahead in capture order until the first gap in the burst."""
@@ -74,8 +72,11 @@ class SubjectsRepository:
             photo_id = successor
 
     def previous_burst_subject(self, photo_id, *, workspace_id=None):
-        previous = (self.burst_neighbor(photo_id) if workspace_id is None
-                    else self.visible_burst_neighbor(photo_id, workspace_id))
+        if workspace_id is None:
+            previous = self.burst_neighbor(photo_id)
+        else:
+            source = self.visible_burst_source(photo_id, workspace_id)
+            previous = source["id"] if source is not None else None
         if previous is None:
             return None
         return self.conn.execute("""SELECT d.* FROM photo_subject_state st

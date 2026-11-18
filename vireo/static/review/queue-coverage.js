@@ -58,12 +58,12 @@ function rqRenderCoverage() {
 function rqNeighborComparison(inventory, region, item) {
   if (!inventory.previous_photo_id) return '';
   var prior = reviewQueue.session.items[String(inventory.previous_photo_id)];
-  var reviewed = prior?.generation !== undefined;
+  var reviewed = !!inventory.previous_generation && prior?.generation === inventory.previous_generation;
   var id = reviewed ? prior?.subject : inventory.previous_primary;
   var box = inventory.previous_regions.find(r => r.id === id);
   var label = '. Previous burst photo ' + inventory.previous_photo_id +
     (id ? (reviewed ? ' last selected region ' : ' primary region ') + id : ' had no selected region');
-  if (!region || !box || prior?.center || item.center || ![box.x, box.y, box.w, box.h,
+  if (!region || !box || (reviewed && prior?.center) || item.center || ![box.x, box.y, box.w, box.h,
     region.box_x, region.box_y, region.box_w, region.box_h].every(Number.isFinite)) return label + '. Subject continuity unknown.';
   var width = Math.min(box.x + box.w, region.box_x + region.box_w) - Math.max(box.x, region.box_x);
   var height = Math.min(box.y + box.h, region.box_y + region.box_h) - Math.max(box.y, region.box_y);

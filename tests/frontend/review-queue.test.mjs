@@ -219,3 +219,20 @@ test('review outlines only the selected animal and hides invalid or missing boxe
   ctx.rqOutlineSubject(undefined);
   assert.equal(box.hidden, true);
 });
+
+test('burst comparison uses a stored predecessor region and center only for matching evidence', () => {
+  const {ctx} = harness();
+  const prior = {subject: 10, generation: 'original', center: null};
+  ctx.reviewQueue.session.items['7'] = prior;
+  const inventory = {previous_photo_id: 7, previous_primary: 11, previous_generation: 'original',
+    min_overlap: .35, previous_regions: [{id: 10, x: .6, y: .2, w: .2, h: .2},
+      {id: 11, x: .1, y: .2, w: .2, h: .2}]};
+  const compare = () => ctx.rqNeighborComparison(inventory, {box_x: .1, box_y: .2, box_w: .2, box_h: .2}, {});
+  assert.match(compare(), /last selected region 10.*Possible subject switch/);
+  prior.center = [.7, .3];
+  assert.match(compare(), /last selected region 10.*continuity unknown/);
+  inventory.previous_generation = 'replaced';
+  assert.match(compare(), /primary region 11.*Boxes overlap/);
+  inventory.previous_primary = null;
+  assert.match(compare(), /no selected region.*continuity unknown/);
+});
