@@ -487,8 +487,11 @@ def measure_subject_detail(mask, *, source_path, frame_size=None, expected_frame
         image.close()
 
 
-def saved_mask_matches_frame(mask_size, mask_frame, image, *, prompt_frame=None):
+def saved_mask_matches_frame(mask_size, mask_frame, image, *, prompt_frame=None, mask_frame_id=None):
     """Can the saved proxy mask be mapped to this rendering by resizing alone?"""
+    needs_identity = mask_frame_id is not None or image.info.get("vireo_aligned_rendition")
+    if needs_identity and (not mask_frame_id or mask_frame_id != image.info.get("vireo_subject_frame_id")):
+        return False
     w, h = mask_size
     iw, ih = image.size
     # Each thumbnail may round its short dimension by a pixel.
@@ -511,6 +514,7 @@ def measure_cached_subject_detail(mask_path, source_path, frame_size=None, *, ex
     try:
         with Image.open(mask_path) as mask_image:
             mask_frame = mask_image.info.get("vireo_mask_frame")
+            mask_frame_id = mask_image.info.get("vireo_subject_frame_id")
             prompt_frame = mask_image.info.get("vireo_prompt_frame")
             mask = np.asarray(mask_image.convert("L")) > 127
     except (OSError, SyntaxError, ValueError, Image.DecompressionBombError):
@@ -534,7 +538,7 @@ def measure_cached_subject_detail(mask_path, source_path, frame_size=None, *, ex
     with image:
         if expected_frame_id is not None and image.info.get("vireo_subject_frame_id") != expected_frame_id:
             return None
-        if not saved_mask_matches_frame(mask.shape[::-1], mask_frame, image, prompt_frame=prompt_frame):
+        if not saved_mask_matches_frame(mask.shape[::-1], mask_frame, image, prompt_frame=prompt_frame, mask_frame_id=mask_frame_id):
             return MASK_CACHE_INVALID
         return compute_subject_detail(image, mask, frame_size=frame_size)
 

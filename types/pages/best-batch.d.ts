@@ -8,7 +8,7 @@ interface BestBatchCard {
   /** The cross-encounter quality: fixed-scale subject detail and the composite of absolute terms. */
   comparable_quality?: {detail: number; scale_px: number; score: number} | null;
   sharpness?: number | null; eye_x?: number | null; eye_y?: number | null;
-  crop_url?: string | null; focus_crop_url?: string | null; evidence_status?: string;
+  crop_url?: string | null; focus_crop_url?: string | null; evidence_status?: string; evidence_reason?: string;
   eye_status?: string | null; analysis?: {width: number; height: number} | null;
   subject?: {detection_id: number | null; selection: string; candidates: {
     detection_id: number; detector_confidence: number; box: {x: number; y: number; w: number; h: number};

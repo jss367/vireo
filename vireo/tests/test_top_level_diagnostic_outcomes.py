@@ -62,7 +62,7 @@ def _extract_case(original=None, *, logging_fails=False, close_fails=True, publi
     )
     fn = _selected(
         "image_loader.py", "extract_working_copy", RAW_DECODE_PRESERVE_HIGHLIGHTS="invented",
-        load_image=lambda *args, **kwargs: SimpleNamespace(save=save, close=close), os=fake_os,
+        load_image=lambda *args, **kwargs: SimpleNamespace(save=save, close=close, info={}), os=fake_os,
         tempfile=SimpleNamespace(mkstemp=lambda **kwargs: (731, "/invented-target/temp")),
         replace_file=lambda *args: events.append("publish"),
         log=SimpleNamespace(debug=debug, warning=lambda *args, **kwargs: events.append("warning")),
@@ -181,7 +181,7 @@ def test_existing_raw_fallback_diagnostic_keeps_embedded_preview():
     import builtins
 
     original = RuntimeError("invented demosaic failure")
-    embedded = SimpleNamespace(size=(100, 80))
+    embedded = SimpleNamespace(size=(100, 80), info={})
     manager = Mock()
     manager.__enter__ = Mock(return_value=object())
     manager.__exit__ = Mock(return_value=False)

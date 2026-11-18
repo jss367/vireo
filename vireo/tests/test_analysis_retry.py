@@ -22,6 +22,9 @@ def retry_library(app_and_db, tmp_path, monkeypatch):
         path = tmp_path / f"duck-{i}.jpg"
         Image.new("RGB", (100, 80), (100, 160, 80)).save(path)
         ids.append(photo_ingest.add_photo(db, folder, path.name, ".jpg", path.stat().st_size, path.stat().st_mtime))
+    for filename in ("image_encoder.onnx", "mask_decoder.onnx"):
+        (tmp_path / filename).write_bytes(b"test SAM weights")
+    monkeypatch.setattr("masking._sam2_model_dir", lambda variant: str(tmp_path))
     calls = {"detection": [], "segmentation": []}
 
     def detect(path):
@@ -29,6 +32,8 @@ def retry_library(app_and_db, tmp_path, monkeypatch):
         return original_frame_detections(path, [{"box": {"x": .1, "y": .1, "w": .7, "h": .7}, "confidence": .9, "category": "animal"}])
 
     def mask(image, box, variant):
+        from masking import sam_generation
+        image.info["vireo_sam_generation"] = sam_generation(variant)
         calls["segmentation"].append(variant)
         pixels = np.zeros((image.height, image.width), bool)
         pixels[8:64, 10:80] = True
@@ -1232,3 +1237,56 @@ def test_overlapping_reviewer_regions_keep_independent_evidence(retry_library, t
     assert analyze_photo(db, pid, str(source)) == 1
     for did in set(region_ids) - {edited}:
         assert (dict(db.subjects.analysis(did)), db.subjects.ranking_analysis(did, keys[did])) == evidence[did]
+
+
+@pytest.mark.parametrize("legacy", [True, False])
+def test_quality_retry_requires_original_weights_for_comparison(retry_library, tmp_path, legacy):
+    _, db, ids, calls = retry_library
+    pid = ids[0]
+    execute(db, [pid], tmp_path)
+    if legacy:
+        db.conn.execute("UPDATE photo_masks SET comparison_inputs=NULL WHERE photo_id=?", (pid,))
+    else:
+        (tmp_path / "mask_decoder.onnx").write_bytes(b"replacement model weights")
+    db.conn.execute("DELETE FROM subject_ranking_analysis")
+    db.conn.execute("UPDATE photos SET subject_clip_low=NULL WHERE id=?", (pid,))
+    db.commit()
+    calls["segmentation"].clear()
+    result, _ = execute(db, [pid], tmp_path)
+    assert result["ok"] and not calls["segmentation"]
+    assert db.masks_features.get_mask(pid, "sam2-small")["comparison_inputs"] is None
+    assert not db.conn.execute("SELECT 1 FROM subject_ranking_analysis").fetchone()
+
+
+@pytest.mark.parametrize("error", [SyntaxError, Image.DecompressionBombError])
+def test_selected_cache_decoder_failure_is_unusable(retry_library, tmp_path, monkeypatch, error):
+    from subject_readiness import usable_selected_analysis
+
+    _, db, ids, _ = retry_library
+    execute(db, [ids[0]], tmp_path)
+    did, key, _, _ = _damage_cached_quality(db, ids[0], invalid=False)
+    analysis = db.subjects.ranking_analysis(did, key)
+
+    def fail_decode(*args, **kwargs):
+        raise error("unreadable cached PNG")
+
+    monkeypatch.setattr(Image, "open", fail_decode)
+    assert not usable_selected_analysis(analysis)
+
+
+def test_pinned_quality_retry_publishes_selected_evidence_with_legacy_mask(retry_library, tmp_path):
+    from services.analysis_retry import retry_features
+    from subject_readiness import usable_selected_analysis
+
+    _, db, ids, calls = retry_library
+    pid = ids[0]
+    execute(db, [pid], tmp_path)
+    did, key = db.conn.execute("SELECT detection_id,source_key FROM subject_ranking_analysis").fetchone()
+    db.conn.execute("DELETE FROM subject_ranking_analysis")
+    db.conn.execute("UPDATE photo_masks SET comparison_inputs=NULL WHERE photo_id=?", (pid,))
+    db.commit()
+    calls["segmentation"].clear()
+    retry_features(db, pid, db.get_effective_config({}), str(tmp_path), lambda: None,
+                   quality_only=True, expected_primary_detection_id=did)
+    assert calls["segmentation"] == ["sam2-small"]
+    assert usable_selected_analysis(db.subjects.ranking_analysis(did, key))

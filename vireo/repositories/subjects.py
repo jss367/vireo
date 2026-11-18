@@ -185,7 +185,18 @@ class SubjectsRepository:
             "SELECT features, mask_png FROM subject_ranking_analysis "
             "WHERE detection_id=? AND source_key=?", (detection_id, source_key),
         ).fetchone()
-        return {"features": json.loads(row["features"]), "mask_png": row["mask_png"]} if row else None
+        if row is None:
+            return None
+        try:
+            features = json.loads(row["features"])
+        except (json.JSONDecodeError, TypeError):
+            return None
+        return {"features": features, "mask_png": row["mask_png"]}
+
+    def has_ranking_analysis(self, detection_id: int) -> bool:
+        return self.conn.execute(
+            "SELECT 1 FROM subject_ranking_analysis WHERE detection_id=? LIMIT 1", (detection_id,),
+        ).fetchone() is not None
 
     def save_ranking_analysis(
         self, detection_id: int, source_key: str, features: Mapping[str, Any], mask_png: bytes,

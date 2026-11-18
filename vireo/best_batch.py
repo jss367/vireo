@@ -265,6 +265,14 @@ def build_best_batch_response(db, seed_photo_id, rows, *, comparison=None):
     cards.extend(_best_batch_card(photo, result_photos, best["id"], alternate_ids, None)
                  for photo in result_photos if not photo.get("selection_eligible"))
 
+    from primary_comparison import primary_owner
+    masks = db.masks_features.active_measurements(photo_ids)
+    for card in cards:
+        source = by_id[card["id"]]
+        mask = masks.get(card["id"])
+        card["evidence_owner"] = (primary_owner(mask, source.get("subjects", []))
+                                  if mask and mask["path"] == source.get("mask_path") else None)
+
     best_reasons = _best_batch_reasons(best, result_photos, is_best=True)
     return {
         "seed_photo_id": seed_photo_id,

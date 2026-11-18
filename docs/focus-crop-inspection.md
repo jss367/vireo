@@ -51,6 +51,12 @@ or its subject association is stale, the endpoint returns an explicit unavailabl
 error instead of a plain image that could be mistaken for mask evidence. Remove
 `mask=1` to inspect the manual point without analysis.
 
+For RAW subject evidence, Vireo uses the same upright rendering for segmentation,
+detail measurement, and the original-scale crop. On cameras with near-full-size
+embedded JPEGs, this is the camera JPEG. A working-copy mask requires a matching
+frame identity. If the copy was demosaiced differently, choose the original.
+Analyzing the subject again replaces measurements from older analysis versions.
+
 ## Investigation of the reported examples
 
 The two originals and catalog associations were inspected read-only on 2026-10-20.

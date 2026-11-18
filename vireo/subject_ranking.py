@@ -133,7 +133,14 @@ def source_path(db, photo):
 # 7: reviewer coordinates are bound to the actual original frame generation.
 # 8: retire analyses that may have reused masks across reviewer history frames.
 # 9: detector prompts are bound to their actual decoded rendition.
-ANALYSIS_RECIPE_VERSION = 9
+# 10: bind saved mask pixels to the actual decoded source frame.
+ANALYSIS_RECIPE_VERSION = 10
+
+
+def _measurement_settings(pipeline):
+    return {k: pipeline.get(k, default) for k, default in (
+        ("sam2_variant", "sam2-small"), ("eye_detect_enabled", False),
+        ("eye_classifier_conf_gate", .5), ("eye_detection_conf_gate", .5), ("eye_window_k", .08))}
 
 
 def analysis_key(path, detection, effective_cfg):
@@ -162,9 +169,7 @@ def analysis_key(path, detection, effective_cfg):
             weights.append((weight, None))
     inputs = [ANALYSIS_RECIPE_VERSION, EYE_KP_FINGERPRINT_VERSION, detection.get("prediction_fingerprint"), os.path.realpath(path), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_ino, detection["id"],
               detection["detector_model"], dict(detection).get("runtime_fingerprint"), dict(detection).get("frame_id"), [detection["box_" + k] for k in "xywh"], 1024,
-              {k: pipeline.get(k, default) for k, default in (
-                  ("sam2_variant", "sam2-small"), ("eye_detect_enabled", False),
-                  ("eye_classifier_conf_gate", .5), ("eye_detection_conf_gate", .5), ("eye_window_k", .08))}, weights]
+              _measurement_settings(pipeline), weights]
     return hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
 
 
@@ -173,7 +178,37 @@ def cached_analysis(db, photo, detection, effective_cfg):
         key = analysis_key(source_path(db, photo), detection, effective_cfg)
     except OSError:
         return None, None
-    return key, db.subjects.ranking_analysis(detection["id"], key)
+    from subject_readiness import usable_selected_analysis
+    analysis = db.subjects.ranking_analysis(detection["id"], key)
+    return key, analysis if usable_selected_analysis(analysis) else None
+
+
+def comparison_analysis(db, photo, detection, effective_cfg):
+    from detection_id import detection_prompt_runtime, prompt_frame_id
+    from primary_comparison import compatible_primary, digest, primary_owner
+
+    key, analysis = cached_analysis(db, photo, detection, effective_cfg)
+    if analysis:
+        pipeline = effective_cfg.get("pipeline", {})
+        owner = {"kind": "selected", "generation": key, "detection_id": detection["id"],
+                 "region": {k: detection["box_" + k] for k in "xywh"}, "detector_model": detection["detector_model"],
+                 "raster": {"frame_id": prompt_frame_id(detection_prompt_runtime(detection)),
+                            **analysis["features"]["analysis"]},
+                 "sam_variant": pipeline.get("sam2_variant") or "sam2-small",
+                 "recipe": ANALYSIS_RECIPE_VERSION, "settings": _measurement_settings(pipeline)}
+        return key, {**analysis, "owner": owner}, {"status": "selected_current", "reason": "Current selected-subject measurements."}
+    if key is None:
+        return None, None, {"status": "source_unavailable", "reason": "Reconnect the original to check the selected measurements."}
+    row = db.masks_features.active_measurements([photo["id"]]).get(photo["id"])
+    owner = primary_owner(row, dict(photo).get("subjects", []))
+    primary, status, reason = compatible_primary(row, owner, detection, source_path(db, photo),
+                                                 effective_cfg, db.masks_features.masks_dir)
+    evidence = {"status": status, "reason": reason, "primary_owner": owner}
+    if primary:
+        return digest([key, primary["owner"]["generation"]]), primary, evidence
+    if db.subjects.has_ranking_analysis(detection["id"]):
+        evidence.update(selected_cache="stale", reason="The stored selected analysis is stale. " + reason)
+    return None, None, evidence
 
 
 def subject_urls(photo_id, selection, size=512):
@@ -198,9 +233,10 @@ def comparison_frames(db, photos, comparison, effective_cfg):
     frames, eligible = [], []
     for photo in photos:
         detection, selection = resolve_subject(db, photo["id"], comparison)
-        analysis, key = None, None
+        analysis, key, evidence = None, None, {}
         if detection:
-            key, analysis = cached_analysis(db, photo, detection, effective_cfg)
+            key, analysis, evidence = comparison_analysis(db, photo, detection, effective_cfg)
+        reason = evidence.get("reason")
         selection["analysis_key"] = key if analysis else None
         state = selection["selection"] if not detection else ("ready" if analysis else "subject_analysis_missing")
         card = {"id": photo["id"], "filename": photo["filename"], "rank": None, "role": "review", "label": "REVIEW",
@@ -208,9 +244,10 @@ def comparison_frames(db, photos, comparison, effective_cfg):
                 "sharpness": None, "subject_detail": None, "eye_x": None, "eye_y": None, "eye_conf": None, "eye_tenengrad": None,
                 "flag": photo.get("flag") or "none", "rating": photo.get("rating"), "reject_reasons": [],
                 "flag_confirmation_status": photo.get("flag_confirmation_status", "unverified"),
-                "subject": selection, "evidence_status": state, "detection_count": len(selection["candidates"]),
+                "subject": selection, "evidence_status": state, "comparison_evidence": evidence, "evidence_reason": reason,
+                "evidence_owner": analysis["owner"] if analysis else None, "detection_count": len(selection["candidates"]),
                 "has_mask": bool(analysis), "has_quality": bool(analysis), "has_eye": False,
-                "reasons": [] if state == "ready" else [state.replace("_", " ")],
+                "reasons": [] if state == "ready" else [reason or state.replace("_", " ")],
                 **subject_urls(photo["id"], selection)}
         if analysis:
             features = analysis["features"]
@@ -238,10 +275,14 @@ def _mark_unavailable_comparison_cards(cards, photos):
         if photo.get("selection_eligible"):
             continue
         reasons = photo.get("analysis_reasons", [])
-        by_id[photo["id"]].update(
+        card = by_id[photo["id"]]
+        reason = "Selected measurements are incomplete: " + ", ".join(reasons)
+        card["comparison_evidence"].update(status="selected_incomplete", reason=reason)
+        card.update(
             label=photo["label"], has_quality=False, has_eye=False,
             evidence_status="subject_analysis_missing",
             analysis_status=photo["analysis_status"], analysis_reasons=reasons,
+            evidence_reason=reason,
             reasons=["Subject analysis needs review: " + reason.replace("_", " ") for reason in reasons],
         )
 
