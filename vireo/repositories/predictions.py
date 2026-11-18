@@ -1435,12 +1435,13 @@ class PredictionRepository:
                           sub.confidence, sub.classifier_model, sub.group_id,
                           sub.status, sub.detector_confidence, sub.detector_model,
                           sub.max_match_score, sub.background_score, sub.score_kind,
-                          sub.box_w, sub.box_h,
+                          sub.box_x, sub.box_y, sub.box_w, sub.box_h,
                           sub.subject_chosen,
                           sub.subject_rank
                    FROM (
                        SELECT d.photo_id, d.id AS detection_id, pr.id,
-                              pr.species, pr.confidence, d.box_w, d.box_h, d.subject_chosen, d.subject_rank,
+                              pr.species, pr.confidence, d.box_x, d.box_y, d.box_w, d.box_h,
+                          d.subject_chosen, d.subject_rank,
                               pr.classifier_model,
                               pr_rev.group_id,
                               {prediction_review_status()} AS status,

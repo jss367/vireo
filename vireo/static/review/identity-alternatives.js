@@ -187,6 +187,24 @@
     }
   }
   document.addEventListener('DOMContentLoaded', function() {
+    const conflicts = /** @type {HTMLDetailsElement} */ (element('assignmentConflicts'));
+    async function loadConflicts() {
+      if (!conflicts.open) return;
+      const list = element('assignmentConflictList');
+      try {
+        const data = await safeFetch('/api/species/assignment-conflicts', {}, {toast: false});
+        list.replaceChildren();
+        for (const assignment of data.assignments) {
+          const link = document.createElement('a');
+          link.href = '/browse?photo_id=' + assignment.photo_id;
+          link.textContent = assignment.species + ' · Photo ' + assignment.photo_id;
+          list.append(link, document.createElement('br'));
+        }
+        if (!data.assignments.length) list.textContent = 'No outstanding conflicts.';
+      } catch { list.textContent = 'Could not load assignment conflicts.'; }
+    }
+    conflicts.addEventListener('toggle', loadConflicts);
+    document.addEventListener('vireo:edit-history-changed', loadConflicts);
     element('identityLoadPhotos').addEventListener('click', choosePhotos);
     element('identitySelectPhotos').addEventListener('click', function() {
       if (busy) return;

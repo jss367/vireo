@@ -44,7 +44,12 @@ those records have no detection or mask-generation provenance, and overlapping
 animal boxes cannot establish which animal supplied an eye. Per-subject analysis
 provides detection and generation binding. Invalid boxes, stale active prompts,
 changed analysis inputs, and incompatible raster geometry fail closed. A manual
-point remains available independently of a failed automatic association.
+point remains available independently of a failed automatic association when
+no mask is requested. A request with `mask=1` keeps the validated subject mask
+when the center changes and shades it in the new window. If the mask is missing
+or its subject association is stale, the endpoint returns an explicit unavailable
+error instead of a plain image that could be mistaken for mask evidence. Remove
+`mask=1` to inspect the manual point without analysis.
 
 ## Investigation of the reported examples
 

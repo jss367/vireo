@@ -10,6 +10,8 @@ page leads that species with over the same photos:
    one first among photos nobody has compared;
 2. flagged picks, by Vireo's score;
 3. everything else by Vireo's score, unanalyzed photos last.
+4. photos where the species is only in frame or outside the crop
+   (``species_presence``); another bird's pick or score does not promote them.
 
 Each species carries a ``decision`` saying which of these put its first
 photo there (``highlights_payload.best_decision``), so a reader can tell a
@@ -31,7 +33,7 @@ from services.species_choices import PhotoScope
 
 MAX_PHOTOS_PER_SPECIES = 50
 #: Decision kinds where nobody chose the photo: Vireo ordered it.
-GUESSED_KINDS = frozenset({"score", "unanalyzed"})
+GUESSED_KINDS = frozenset({"score", "unanalyzed", "in_frame", "outside_crop"})
 
 
 @dataclass(frozen=True)
@@ -58,6 +60,8 @@ def _photo_entry(photo):
         "folder_name": photo.get("folder_name"),
         "rating": photo.get("rating") or 0,
         "flag": photo.get("flag") or "none",
+        "species_presence": photo.get("species_presence") or "subject",
+        "subject_species": photo.get("subject_species_list") or [],
         "quality_score": photo.get("quality_score"),
         "is_analyzed": photo.get("quality_score") is not None,
         "highlight_score": photo.get("highlight_score"),

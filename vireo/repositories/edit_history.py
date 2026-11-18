@@ -159,7 +159,7 @@ class EditHistoryRepository:
         # Clear redo stack — new edit invalidates undone entries
         self.conn.execute(
             "DELETE FROM edit_history WHERE workspace_id = ? AND undone = 1 "
-            "AND action_type != 'identity_alternatives_superseded'",
+            "AND action_type NOT IN ('identity_alternatives_superseded', 'assignment_review_superseded')",
             (ws,),
         )
         cur = self.conn.execute(
@@ -314,9 +314,9 @@ class EditHistoryRepository:
     def retire_superseded_identity_entry(self, entry_id: int) -> None:
         """Skip a stale action on both cursors while retaining its complete audit."""
         self.conn.execute(
-            "UPDATE edit_history SET action_type='identity_alternatives_superseded', "
+            "UPDATE edit_history SET action_type=action_type || '_superseded', "
             "description='Superseded identification: ' || description "
-            "WHERE id=? AND action_type='identity_alternatives'", (entry_id,),
+            "WHERE id=? AND action_type IN ('identity_alternatives', 'assignment_review')", (entry_id,),
         )
 
     def retire_stale_grouping_entry(self, entry_id: int) -> None:

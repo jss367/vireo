@@ -289,6 +289,22 @@ def test_weak_context_anchors_are_read_without_becoming_retry_targets(retry_libr
     assert calls["detection"] == [] and len(calls["segmentation"]) == 1
     assert result["requested_photo_ids"] == [ids[1]]
 
+    # The same burst still qualifies for contextual rescue after the reviewer
+    # replaces the weak box. Activate the mask against the new manual primary.
+    from subjects import select_reviewer_box
+    pid = ids[1]
+    box = {"x": .482, "y": .07, "w": .083, "h": .433}
+    select_reviewer_box(db, pid, box)
+    did = db.subjects.choice(pid)["detection_id"]
+    db.commit()
+    job = {"id": "manual-primary-in-weak-burst", "progress": {}, "errors": []}
+    repaired = run_retry(Context(db), job, [pid], effective, str(tmp_path), expected_primary_detection_id=did)
+    assert repaired["ok"], repaired["errors"]
+    assert repaired["photos"][0]["status"] == "complete", repaired["photos"][0]
+    mask = db.masks_features.get_mask(pid, "sam2-small")
+    assert mask["detector_model"] == "reviewer-selected"
+    assert {k: mask["prompt_" + k] for k in "xywh"} == box
+
 
 def test_readiness_is_the_same_alone_and_within_its_encounter(retry_library, tmp_path):
     """A full-image-rescued dropout frame must not read as "no subject" when asked about alone.
@@ -1086,3 +1102,31 @@ def test_box_refresh_rechecks_pinned_subject_and_visibility_at_publication(retry
     message = "Primary subject changed" if change == "primary" else "no longer visible"
     assert message in result["photos"][0]["error"]
     assert db.subjects.analysis(expected) == before
+
+
+def test_analyze_subjects_without_boxes_explains_skip(retry_library):
+    from vireo.tests.wait import wait_for_job_via_client
+
+    app, _, ids, _ = retry_library
+    pid = ids[0]
+    client = app.test_client()
+    launched = client.post(f"/api/photos/{pid}/subjects/analyze", json={}).get_json()
+    job = wait_for_job_via_client(client, launched["job_id"])
+    assert job["progress"]["current"] == job["progress"]["total"] == 1
+    assert job["result"]["photos"] == [{"photo_id": pid, "status": "skipped", "reason": "no_retained_subjects"}]
+
+
+def test_quality_only_work_rechecks_mask_owner(retry_library, tmp_path):
+    from services.analysis_retry import retry_features
+
+    _, db, ids, calls = retry_library
+    pid = ids[0]
+    execute(db, [pid], tmp_path)
+    before = db.masks_features.get_mask(pid, "sam2-small")
+    db.conn.execute("UPDATE photo_masks SET detector_model='other-subject' WHERE photo_id=?", (pid,))
+    db.commit()
+    calls["segmentation"].clear()
+    retry_features(db, pid, db.get_effective_config({}), str(tmp_path), lambda: None, quality_only=True)
+    after = db.masks_features.get_mask(pid, "sam2-small")
+    assert calls["segmentation"] == ["sam2-small"]
+    assert after["path"] != before["path"] and after["detector_model"] == before["detector_model"]

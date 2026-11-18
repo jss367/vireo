@@ -51,6 +51,7 @@ transaction (``with db.transaction():``).
 
 import json
 
+from edit_recipe import RecipeError, normalize_recipe
 from keyword_normalization import keyword_match_key
 from repositories import chunks
 from repositories.collections import CollectionRepository
@@ -68,6 +69,7 @@ from repositories.subject_order import chosen_subject_sql, subject_rank_sql
 from settings_source import config_value
 from species_memberships import photo_species_memberships, subject_evidence_order, subject_from_row
 from species_preference import Preferences
+from species_presence import crop_geometry
 
 # ``get_highlights(eligible_only=True)``: the joins and filter that keep only
 # highlights whose photo is reachable, not rejected and still in the bucket.
@@ -403,6 +405,11 @@ class SpeciesCurationRepository:
             ``species``, ``confidence``), highest confidence first. Real
             detections use the workspace's detector floor; full-image anchors
             remain eligible. Accepted keywords are unaffected.
+          * ``crop_geometry`` — the crop of the photo's edit recipe with the
+            rotation, flips and straighten applied before it
+            (``species_presence.crop_geometry``), None for an uncropped
+            photo. With each subject's box it says which regions the crop
+            still shows.
 
         and, for callers that only want one species per photo, the primary
         of each: ``species`` (the most recent accepted keyword, NULL if
@@ -457,11 +464,13 @@ class SpeciesCurationRepository:
         subjects = self._highlight_subject_predictions(
             ws, scope_sql, scope_params,
         )
+        crops = self._highlight_crop_geometry(scope_sql, scope_params)
         for row in rows:
             names = species_names.get(row["id"], [])
             preds = subjects.get(row["id"], [])
             row["species_names"] = names
             row["subject_predictions"] = preds
+            row["crop_geometry"] = crops.get(row["id"])
             row["species"] = names[0] if names else None
             top = preds[0] if preds else None
             row["prediction_id"] = top["prediction_id"] if top else None
@@ -540,6 +549,28 @@ class SpeciesCurationRepository:
             names.setdefault(row["photo_id"], []).append(row["name"])
         return names
 
+    def _highlight_crop_geometry(self, scope_sql, scope_params):
+        """``{photo_id: crop geometry}`` for the scoped photos whose edit
+        recipe crops them. A stored recipe that no longer validates renders
+        unedited, so it is read as uncropped here too."""
+        crops = {}
+        for row in self.conn.execute(
+            f"""WITH scope AS ({scope_sql})
+               SELECT r.photo_id, r.recipe_json
+               FROM photo_edit_recipes r
+               WHERE instr(r.recipe_json, '"crop"') > 0
+                 AND r.photo_id IN (SELECT id FROM scope)""",
+            scope_params,
+        ):
+            try:
+                recipe = normalize_recipe(row["recipe_json"])
+            except RecipeError:
+                continue
+            geometry = crop_geometry(recipe)
+            if geometry:
+                crops[row["photo_id"]] = geometry
+        return crops
+
     def _highlight_subject_predictions(self, ws, scope_sql, scope_params):
         """``{photo_id: [subject, ...]}``: each scoped photo's detections'
         top non-rejected prediction with the region evidence
@@ -559,13 +590,14 @@ class SpeciesCurationRepository:
                SELECT sub.photo_id, sub.detection_id, sub.id, sub.species,
                       sub.confidence, sub.detector_confidence, sub.detector_model,
                       sub.max_match_score, sub.background_score, sub.score_kind,
-                      sub.box_w, sub.box_h,
+                      sub.box_x, sub.box_y, sub.box_w, sub.box_h,
                       sub.subject_chosen,
                       sub.subject_rank
                FROM (
                    SELECT d.photo_id, d.id AS detection_id, pr.id, pr.species,
                           pr.confidence, d.detector_confidence, d.detector_model,
-                          d.box_w, d.box_h, d.subject_chosen, d.subject_rank,
+                          d.box_x, d.box_y, d.box_w, d.box_h,
+                          d.subject_chosen, d.subject_rank,
                           cms.max_match_score, cms.background_score, cms.score_kind,
                           ROW_NUMBER() OVER (
                               PARTITION BY d.id

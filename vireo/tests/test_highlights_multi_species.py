@@ -342,3 +342,132 @@ def test_relabel_response_returns_canonical_stored_species(app_and_db):
         "SELECT name FROM keywords WHERE id = ?", (kid,)
     ).fetchone()["name"]
     assert payload["species"] == stored
+
+
+# -- which species a photo is a picture of (``species_presence``) -----------
+
+
+def _tagged_photo(db, fid, name, species, birds, quality=0.8, flag="none"):
+    """A photo tagged with ``species``, one detected region per
+    ``(species, box, detector confidence)`` in ``birds``."""
+    pid = _photo(db, fid, name, quality)
+    db.conn.execute("UPDATE photos SET flag = ? WHERE id = ?", (flag, pid))
+    for tag in species:
+        keyword_tagging.tag_photo(db, pid, db.keywords.add(tag, is_species=True))
+    db.commit()
+    dets = db.detections.save(
+        pid,
+        [{"box": dict(zip("xywh", box, strict=True)), "confidence": conf,
+          "category": "animal"} for _species, box, conf in birds],
+        detector_model="MDV6",
+    )
+    for det, (bird, _box, _conf) in zip(dets, birds, strict=True):
+        _pred(db, det, bird, 0.9)
+    return pid
+
+
+#: A big dunlin in the middle of the frame and a small plover in a corner.
+_DUNLIN_WITH_PLOVER_BEHIND = [
+    ("Dunlin", (0.3, 0.3, 0.4, 0.4), 0.9),
+    ("Black-bellied Plover", (0.8, 0.1, 0.1, 0.1), 0.6),
+]
+_BOTH = ["Dunlin", "Black-bellied Plover"]
+
+
+def test_a_pick_counts_only_for_the_species_the_photo_is_of(app_and_db):
+    """A picked dunlin photo with a plover behind it leads Dunlin and sorts
+    after the plover's own photos, without the pick's score bonus."""
+    from services.species_choices import PhotoScope
+    from species_best import SpeciesBestQuery, build_species_best_payload
+
+    app, db = app_and_db
+    fid = _folder(db)
+    flock = _tagged_photo(
+        db, fid, "flock.jpg", _BOTH, _DUNLIN_WITH_PLOVER_BEHIND,
+        quality=0.9, flag="flagged",
+    )
+    portrait = _tagged_photo(
+        db, fid, "plover.jpg", ["Black-bellied Plover"],
+        [("Black-bellied Plover", (0.3, 0.3, 0.4, 0.4), 0.9)], quality=0.4,
+    )
+
+    _data, buckets = _buckets(app.test_client(), fid)
+
+    dunlin, plover = buckets["Dunlin"], buckets["Black-bellied Plover"]
+    assert [p["id"] for p in dunlin["photos"]] == [flock]
+    assert dunlin["photos"][0]["species_presence"] == "subject"
+    assert dunlin["best_decision"]["kind"] == "pick"
+    assert dunlin["photos"][0]["highlight_score"] > dunlin["photos"][0]["highlight_base_score"]
+
+    assert [p["id"] for p in plover["photos"]] == [portrait, flock]
+    behind = plover["photos"][1]
+    assert behind["species_presence"] == "in_frame"
+    assert behind["subject_species_list"] == ["Dunlin"]
+    assert behind["flag"] == "flagged"
+    assert behind["highlight_score"] == behind["highlight_base_score"]
+    assert behind["reasons"] == ["scored on another bird"]
+    assert plover["best_decision"]["kind"] == "score"
+    # The bucket ranks on its own photos' scores, not the dunlin photo's.
+    assert plover["best_score"] == plover["photos"][0]["highlight_score"]
+
+    best = build_species_best_payload(
+        db, SpeciesBestQuery(scope=PhotoScope(folder_id=fid), per_species=5),
+    )
+    listed = {entry["species"]: entry["photos"] for entry in best["species"]}
+    assert [p["id"] for p in listed["Black-bellied Plover"]] == [portrait, flock]
+    assert listed["Black-bellied Plover"][1]["species_presence"] == "in_frame"
+    assert listed["Black-bellied Plover"][1]["subject_species"] == ["Dunlin"]
+
+
+def test_a_species_cropped_out_sorts_last_and_leads_only_with_nothing_else(app_and_db):
+    app, db = app_and_db
+    fid = _folder(db)
+    cropped = _tagged_photo(
+        db, fid, "cropped.jpg", _BOTH, _DUNLIN_WITH_PLOVER_BEHIND,
+        quality=0.9, flag="flagged",
+    )
+    # The crop keeps the dunlin (center 0.5, 0.5) and drops the plover
+    # (center 0.85, 0.15).
+    db.set_photo_edit_recipe(
+        cropped, {"crop": {"x": 0.25, "y": 0.25, "w": 0.5, "h": 0.5}},
+    )
+    uncropped = _tagged_photo(
+        db, fid, "uncropped.jpg", _BOTH, _DUNLIN_WITH_PLOVER_BEHIND, quality=0.2,
+    )
+    db.commit()
+    client = app.test_client()
+
+    _data, buckets = _buckets(client, fid)
+
+    plover = buckets["Black-bellied Plover"]
+    assert [(p["id"], p["species_presence"]) for p in plover["photos"]] == [
+        (uncropped, "in_frame"), (cropped, "outside_crop"),
+    ]
+    assert plover["best_decision"]["kind"] == "in_frame"
+    assert plover["best_score"] is None
+    assert [p["id"] for p in buckets["Dunlin"]["photos"]] == [cropped, uncropped]
+
+    db.conn.execute("UPDATE photos SET flag = 'rejected' WHERE id = ?", (uncropped,))
+    db.commit()
+    _data, buckets = _buckets(client, fid)
+    assert buckets["Black-bellied Plover"]["best_decision"]["kind"] == "outside_crop"
+
+
+def test_a_chosen_highlight_leads_even_where_the_species_is_only_in_frame(app_and_db):
+    """The rule orders what nobody chose; a highlight is the user's call."""
+    app, db = app_and_db
+    fid = _folder(db)
+    flock = _tagged_photo(db, fid, "flock.jpg", _BOTH, _DUNLIN_WITH_PLOVER_BEHIND)
+    portrait = _tagged_photo(
+        db, fid, "plover.jpg", ["Black-bellied Plover"],
+        [("Black-bellied Plover", (0.3, 0.3, 0.4, 0.4), 0.9)],
+    )
+    from services.species_choices import add_highlight
+    add_highlight(db, "Black-bellied Plover", flock)
+    db.commit()
+
+    _data, buckets = _buckets(app.test_client(), fid)
+
+    plover = buckets["Black-bellied Plover"]
+    assert [p["id"] for p in plover["photos"]] == [flock, portrait]
+    assert plover["best_decision"]["kind"] == "highlight"

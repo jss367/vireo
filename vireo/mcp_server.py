@@ -97,6 +97,10 @@ then call choose_best_photo with the photos it beat in over and a reason. That
 makes the photo a highlight ahead of them. A choice claims only what it names:
 the photos in over, or the other highlights in the scope you pass. Leave a
 decision whose source is the user's alone unless asked to revisit it.
+When no highlight leads and no photo here has the species as its subject,
+the decision is in_frame or outside_crop. Each photo's species_presence names
+its role for this species; subject_species names the photo's subject. A pick
+and score describe that subject, not another species merely in the frame.
 """
 
 _QUALITY_METRIC_KEYS = ("quality_score", "sharpness", "subject_sharpness", "subject_size")
@@ -397,8 +401,7 @@ def photo_detail(photo, include_exif=False, readiness=None):
             _pick(note, ("flag", "source", "reason", "description", "at"))
             if isinstance(note, dict) else None
         )
-    if "species_assignments" in photo:
-        out["species_assignments"] = photo["species_assignments"]
+    out.update(_pick(photo, ("species_assignments", "review_workspace_id", "assignment_reviews")))
     out["keywords"] = [
         _pick(k, ("id", "name", "type", "display_name", "synonyms", "taxon_id",
                   "source_taxon_id", "scientific_name")) for k in photo.get("keywords") or []
@@ -699,6 +702,27 @@ def _register_species_tools(server, client):
         No analysis, classification, keyword or flag writes are performed.
         """
         return client.post_json("/api/photos/species-evidence", {"photo_ids": photo_ids})
+
+    @server.tool(annotations=mcp_types.ToolAnnotations(read_only_hint=True))
+    def list_assignment_conflicts() -> dict:
+        """List saved species assignments with outstanding conflicts in the active workspace."""
+        return client.get_json("/api/species/assignment-conflicts")
+
+    @server.tool(annotations=mcp_types.ToolAnnotations(read_only_hint=False, destructive_hint=True))
+    def review_species_assignment(photo_id: int, keyword_id: int, observed_workspace_id: int,
+                                  review_version: str, action: str, reviewer: str, reason: str,
+                                  evidence_source: str, species: str | None = None) -> dict:
+        """Report or resolve conflicting evidence on one saved assignment, with Undo.
+
+        Use the review_workspace_id and assignment review_version from get_photo.
+        Report with action='report'. Resolve with 'retain', 'remove', or 'amend'
+        and a replacement species. Attribute the decision to the actual reviewer.
+        """
+        return client.post_json(f"/api/photos/{photo_id}/species/{keyword_id}/review", {
+            "observed_workspace_id": observed_workspace_id, "review_version": review_version,
+            "action": action, "reviewer": reviewer, "reason": reason, "evidence_source": evidence_source,
+            "species": species,
+        })
 
     @server.tool(annotations=mcp_types.ToolAnnotations(read_only_hint=True))
     def preview_species_assignment(photo_ids: list[int], species: str, provenance: dict) -> dict:

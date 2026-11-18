@@ -17,6 +17,14 @@ interface HighlightsPhoto {
   confirmed_species_list?: string[];
   /** Every bucket the photo is in, confirmed or predicted. */
   bucket_species_list?: string[];
+  /**
+   * How this entry's species is in the photo (`species_presence.py`): the
+   * photo's subject, elsewhere in the frame while another bird is the
+   * subject, or outside the photo's crop. A pick counts only for `subject`.
+   */
+  species_presence?: 'subject' | 'in_frame' | 'outside_crop';
+  /** The species the photo is a picture of, by bucket name. */
+  subject_species_list?: string[];
   [key: string]: unknown;
 }
 /** A species bucket or the unidentified section: the photos loaded so far. */
@@ -33,7 +41,7 @@ interface HighlightsBucket extends HighlightsSection {
   best_decision?: HighlightsBestDecision | null;
 }
 interface HighlightsBestDecision {
-  kind: 'highlight' | 'tie' | 'pick' | 'score' | 'unanalyzed';
+  kind: 'highlight' | 'tie' | 'in_frame' | 'outside_crop' | 'pick' | 'score' | 'unanalyzed';
   photo_id: number; contender_ids: number[]; tied_photo_ids: number[];
   source: string | null; reason: string | null; chosen_at: string | null;
 }
