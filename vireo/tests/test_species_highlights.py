@@ -703,3 +703,64 @@ def test_the_merge_is_a_no_op_on_a_catalog_without_the_old_table():
 
     assert conn.execute("SELECT COUNT(*) FROM species_choices").fetchone()[0] == 0
 
+
+def test_the_merge_keeps_an_existing_choice_between_two_representatives():
+    conn = _legacy_catalog()
+    # Both 10 and 11 are already representatives, with 10 chosen over 11.
+    conn.executemany(
+        "INSERT INTO species_representatives (species, photo_id, selected_order) "
+        "VALUES ('Verdin', ?, ?)",
+        [(10, 1), (11, 2)],
+    )
+    choice_id = conn.execute(
+        "INSERT INTO species_choices (species, photo_id) VALUES ('Verdin', 10)"
+    ).lastrowid
+    conn.execute(
+        "INSERT INTO species_choice_losers (choice_id, photo_id) VALUES (?, 11)",
+        (choice_id,),
+    )
+    # A legacy workspace ranked them the other way around.
+    conn.executemany(
+        "INSERT INTO species_highlights (workspace_id, species, photo_id, rank) "
+        "VALUES (1, 'Verdin', ?, ?)",
+        [(11, 1), (10, 2)],
+    )
+
+    _merge_species_highlights(conn)
+
+    ranking = _migrated_order(conn, "Verdin")
+    assert ranking.order[0] == 10
+    assert not ranking.tied
+
+
+def test_the_merge_keeps_a_transitive_rep_chain_against_a_reversed_legacy_rank():
+    conn = _legacy_catalog()
+    # Reps 10, 11, 12 with recorded chain 10 > 11 and 11 > 12.
+    conn.executemany(
+        "INSERT INTO species_representatives (species, photo_id, selected_order) "
+        "VALUES ('Verdin', ?, ?)",
+        [(10, 1), (11, 2), (12, 3)],
+    )
+    for better, worse in [(10, 11), (11, 12)]:
+        cid = conn.execute(
+            "INSERT INTO species_choices (species, photo_id) VALUES ('Verdin', ?)",
+            (better,),
+        ).lastrowid
+        conn.execute(
+            "INSERT INTO species_choice_losers (choice_id, photo_id) VALUES (?, ?)",
+            (cid, worse),
+        )
+    # A legacy workspace ranked 12 ahead of 10, reversing the chain.
+    conn.executemany(
+        "INSERT INTO species_highlights (workspace_id, species, photo_id, rank) "
+        "VALUES (1, 'Verdin', ?, ?)",
+        [(12, 1), (10, 2)],
+    )
+
+    _merge_species_highlights(conn)
+
+    ranking = _migrated_order(conn, "Verdin")
+    # The chain 10 > 11 > 12 must still beat the ranked list's 12 > 10.
+    assert ranking.order[0] == 10
+    assert ranking.order[-1] == 12
+

@@ -39,7 +39,7 @@ from canonical_schema import (
 )
 from db import Database, IncompatibleDatabaseError
 from file_replace import replace_file
-from species_preference import Comparison, split_contradictions
+from species_preference import Comparison, Preferences, split_contradictions
 
 log = logging.getLogger(__name__)
 
@@ -414,15 +414,32 @@ def _merge_species_highlights(conn):
     order = conn.execute(
         "SELECT COALESCE(MAX(selected_order), 0) FROM species_representatives"
     ).fetchone()[0]
+    # A pre-existing choice already settles the pair it covers; the legacy
+    # ranked list must not reverse it because a workspace ranked those same
+    # photos the other way.
+    prior = Preferences(
+        Comparison(row[0], row[1], row[2])
+        for row in conn.execute(
+            """SELECT c.id, c.photo_id, l.photo_id
+               FROM species_choices c
+               JOIN species_choice_losers l ON l.choice_id = c.id"""
+        ).fetchall()
+    )
 
     def record(species, better, worse):
+        losers = [
+            photo_id for photo_id in worse
+            if photo_id != better and not prior.beats(photo_id, better)
+        ]
+        if not losers:
+            return
         choice_id = conn.execute(
             "INSERT INTO species_choices (species, photo_id) VALUES (?, ?)",
             (species, better),
         ).lastrowid
         conn.executemany(
             "INSERT OR IGNORE INTO species_choice_losers (choice_id, photo_id) VALUES (?, ?)",
-            [(choice_id, photo_id) for photo_id in worse if photo_id != better],
+            [(choice_id, photo_id) for photo_id in losers],
         )
 
     added: dict[str, list[int]] = {}
