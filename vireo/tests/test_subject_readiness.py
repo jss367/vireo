@@ -288,3 +288,22 @@ def test_current_selected_subject_can_supply_in_memory_mask():
     assert photo["selection_eligible"] is True
     assert photo["reject_reasons"] == []
     assert photo["focus_evidence"]["absolute_status"] == "not_validated"
+
+
+@pytest.mark.parametrize("png_frame", [None, "different-frame", "measured-frame"])
+def test_selected_mask_frame_matches_its_measurement_basis(png_frame):
+    import io
+
+    from PIL import Image
+    from PIL.PngImagePlugin import PngInfo
+    from subject_readiness import usable_selected_analysis
+
+    metadata = PngInfo()
+    if png_frame is not None:
+        metadata.add_text("vireo_subject_frame_id", png_frame)
+    buffer = io.BytesIO()
+    Image.new("L", (10, 10), 255).save(buffer, "PNG", pnginfo=metadata)
+    features = complete_photo()
+    features["analysis"] = {"source": "original", "measurement_basis": "subject_mask",
+                            "width": 10, "height": 10, "frame_id": "measured-frame"}
+    assert usable_selected_analysis({"features": features, "mask_png": buffer.getvalue()}) == (png_frame == "measured-frame")

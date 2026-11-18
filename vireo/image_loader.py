@@ -665,6 +665,7 @@ def safe_scan_walk(top, onerror=None, cancel_check=None, on_scandir_batch=None,
 def load_image(
     file_path: str | os.PathLike[str], max_size: int | None = ...,
     raw_decode: Literal["jpeg_first", "camera_rendered", "aligned_camera_rendered", "preserve_highlights"] = ...,
+    *, track_frame: bool = ...,
 ) -> Image.Image | None: ...
 
 
@@ -674,7 +675,14 @@ def load_image(
 ) -> Image.Image | FloatImage | None: ...
 
 
-def load_image(file_path, max_size: int | None = 1024, raw_decode=RAW_DECODE_JPEG_FIRST):
+@overload
+def load_image(
+    file_path: str | os.PathLike[str], max_size: int | None = ..., raw_decode: str = ...,
+    *, track_frame: bool,
+) -> Image.Image | FloatImage | None: ...
+
+
+def load_image(file_path, max_size: int | None = 1024, raw_decode=RAW_DECODE_JPEG_FIRST, *, track_frame=False):
     """Load an image file, resized to max_size (Pillow or a float RAW buffer).
 
     Supports JPEG, PNG, TIFF, and RAW formats (NEF, CR2, ARW, etc.).
@@ -692,6 +700,7 @@ def load_image(file_path, max_size: int | None = 1024, raw_decode=RAW_DECODE_JPE
     Args:
         file_path: Path to the image file
         max_size: Maximum dimension (longest side). None or 0 for full resolution.
+        track_frame: Record the decoded frame identity before resizing for a working copy.
         raw_decode: RAW_DECODE_JPEG_FIRST (default),
             RAW_DECODE_CAMERA_RENDERED, RAW_DECODE_ALIGNED (analysis without
             a rejected-preview fallback), RAW_DECODE_PRESERVE_HIGHLIGHTS,
@@ -709,7 +718,7 @@ def load_image(file_path, max_size: int | None = 1024, raw_decode=RAW_DECODE_JPE
         raise ValueError(f"raw_decode must be one of: {', '.join(sorted(_RAW_DECODE_MODES))}")
 
     try:
-        aligned_state = aligned_source_state(path) if raw_decode == RAW_DECODE_ALIGNED else None
+        aligned_state = aligned_source_state(path) if track_frame or raw_decode == RAW_DECODE_ALIGNED else None
         if ext in RAW_EXTENSIONS:
             img = (
                 _load_linear_cached(path, max_size)
@@ -955,6 +964,9 @@ def _load_working_copy_image(wc_path, max_size, record_access):
             preserved_times_ns = None
     working_image = _load_standard(wc_path, max_size)
     if working_image is not None:
+        comment = working_image.info.get("comment", b"")
+        if isinstance(comment, bytes) and comment.startswith(b"vireo-frame:"):
+            working_image.info["vireo_subject_frame_id"] = comment.removeprefix(b"vireo-frame:").decode("ascii", errors="replace")
         if record_access:
             # Only the touch takes
             # ``working_copy_publication_guard``, so it cannot
@@ -1100,6 +1112,7 @@ def extract_working_copy(
             source_path,
             max_size=max_size or None,
             raw_decode=raw_decode,
+            track_frame=True,
         )
         if img is None:
             return False
@@ -1111,7 +1124,9 @@ def extract_working_copy(
             dir=output_dir,
         )
         os.close(fd)
-        img.save(tmp_path, "JPEG", quality=quality)
+        frame_id = img.info.get("vireo_subject_frame_id")
+        comment = f"vireo-frame:{frame_id}".encode("ascii") if frame_id else b""
+        img.save(tmp_path, "JPEG", quality=quality, comment=comment)
         guard = publication_guard() if publication_guard else contextlib.nullcontext()
         with guard:
             replace_file(tmp_path, output_path)
@@ -1250,7 +1265,9 @@ def _load_raw(path, max_size, raw_decode=RAW_DECODE_JPEG_FIRST):
                 None if raw_decode in (RAW_DECODE_CAMERA_RENDERED, RAW_DECODE_ALIGNED) else max_size,
                 preserve_highlights=raw_decode == RAW_DECODE_PRESERVE_HIGHLIGHTS,
             )
-            image.info["vireo_aligned_rendition"] = "sensor"
+            image.info["vireo_aligned_rendition"] = (
+                "sensor-preserve-highlights" if raw_decode == RAW_DECODE_PRESERVE_HIGHLIGHTS else "sensor"
+            )
             if raw_decode in (RAW_DECODE_CAMERA_RENDERED, RAW_DECODE_ALIGNED) and embedded is not None:
                 # Legacy JPEG-first masks at or below this size used the rejected preview.
                 image.info["vireo_rejected_preview_edge"] = max(embedded.size)
@@ -1275,6 +1292,7 @@ def _load_raw(path, max_size, raw_decode=RAW_DECODE_JPEG_FIRST):
                     path, e, embedded.size[0], embedded.size[1], qualifier,
                     exc_info=True,
                 )
+                embedded.info["vireo_aligned_rendition"] = "embedded-preview"
                 return embedded
             raise
 

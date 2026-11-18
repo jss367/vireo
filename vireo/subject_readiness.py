@@ -147,6 +147,8 @@ def usable_selected_analysis(analysis):
         if not isinstance(basis, dict) or basis.get("source") != "original" or basis.get("measurement_basis") != "subject_mask":
             return False
         with Image.open(io.BytesIO(analysis["mask_png"])) as image:
+            if image.info.get("vireo_subject_frame_id") != basis.get("frame_id"):
+                return False
             if image.size != (basis.get("width"), basis.get("height")):
                 return False
             pixels = np.asarray(image)

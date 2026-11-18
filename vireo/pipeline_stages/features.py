@@ -10,6 +10,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Any, Protocol, TypedDict
 
 import numpy as np
@@ -1130,7 +1131,12 @@ class _MaskPass:
         )
         if existing is None:
             return False
-        self.require_original_reviewer_frame(item.image_path, item.detector_runtime, detector_model=item.entry.get("detector_model"))
+        from masking import cached_mask_frame_matches
+
+        frame_id = self.require_original_reviewer_frame(
+            item.image_path, item.detector_runtime,
+            detector_model=item.entry.get("detector_model"), verify_mask_frame=True,
+        )
         cached_prompt = (
             existing["prompt_x"], existing["prompt_y"],
             existing["prompt_w"], existing["prompt_h"],
@@ -1139,7 +1145,8 @@ class _MaskPass:
                 == entry["detector_model"]
                 and cached_prompt == entry["prompt"]
                 and existing["path"]
-                and os.path.isfile(existing["path"])):
+                and os.path.isfile(existing["path"])
+                and cached_mask_frame_matches(existing["path"], frame_id)):
             return False
         # The cheap skip (re-activate only) is correct
         # ONLY when the photos row is already fully
@@ -1385,7 +1392,7 @@ class _MaskPass:
             self.masks_dir,
             photo_id,
             self.sam2_variant,
-            self.save_mask,
+            partial(self.save_mask, frame_id=item.frame_id) if item.frame_id else self.save_mask,
             previous_path=(
                 item.existing["path"] if item.existing else None
             ),

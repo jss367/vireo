@@ -15,6 +15,7 @@ import time
 from collections.abc import Callable
 from contextlib import closing
 from dataclasses import dataclass
+from functools import partial
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
@@ -390,7 +391,7 @@ class _MaskExtractionRun:
 
         subj_emb_blob, global_emb_blob = self._embed(proxy, mask)
         self._store_mask(
-            item, mask, completeness, features, subj_emb_blob, global_emb_blob,
+            item, mask, completeness, features, subj_emb_blob, global_emb_blob, frame_id,
         )
         self.masked += 1
         return True
@@ -452,7 +453,12 @@ class _MaskExtractionRun:
         )
         if existing is None:
             return False
-        self.deps.require_original_reviewer_frame(item.image_path, photo.get("detector_runtime"), detector_model=photo.get("detector_model"))
+        from masking import cached_mask_frame_matches
+
+        frame_id = self.deps.require_original_reviewer_frame(
+            item.image_path, photo.get("detector_runtime"),
+            detector_model=photo.get("detector_model"), verify_mask_frame=True,
+        )
         cached_prompt = (
             existing["prompt_x"], existing["prompt_y"],
             existing["prompt_w"], existing["prompt_h"],
@@ -461,7 +467,8 @@ class _MaskExtractionRun:
                 == photo["detector_model"]
                 and cached_prompt == photo["prompt"]
                 and existing["path"]
-                and os.path.isfile(existing["path"])):
+                and os.path.isfile(existing["path"])
+                and cached_mask_frame_matches(existing["path"], frame_id)):
             return False
         state = thread_db.masks_features.photo_mask_state(item.photo_id)
         if (state is not None
@@ -564,7 +571,7 @@ class _MaskExtractionRun:
 
     def _store_mask(
         self, item: _MaskPhoto, mask: np.ndarray, completeness: float, features: JsonDict, subj_emb_blob: bytes | None,
-        global_emb_blob: bytes,
+        global_emb_blob: bytes, frame_id: str | None,
     ) -> None:
         """Stage the mask file, write its rows in one commit, then publish it."""
         deps = self.deps
@@ -577,7 +584,7 @@ class _MaskExtractionRun:
             self.masks_dir,
             photo_id,
             self.sam2_variant,
-            deps.save_mask,
+            partial(deps.save_mask, frame_id=frame_id) if frame_id else deps.save_mask,
             previous_path=(
                 existing["path"] if existing else None
             ),

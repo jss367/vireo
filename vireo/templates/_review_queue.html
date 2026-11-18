@@ -1,5 +1,5 @@
 <section id="reviewQueue" class="review-queue" aria-label="Resumable photo inspection">
-  <label title="Step through the photos one at a time, each full frame beside its native focus crop."><input type="checkbox" id="rqEnabled"> Inspect photos side by side</label>
+  <label title="Step through the photos one at a time, each full frame beside its native focus crop."><input type="checkbox" id="rqEnabled" disabled> Inspect photos side by side</label>
   <p id="rqStorageStatus">Position, subject choices and inspection notes resume in this browser, within this workspace and filter scope. Flags stay in the catalog.</p>
   <div id="rqContent" hidden>
     <p id="rqProgress" aria-live="polite"></p>
@@ -27,6 +27,7 @@
       <button type="button" id="rqManual" aria-pressed="false">Place manual center</button>
       <button type="button" id="rqResetCenter">Inspect head / eye</button>
     </div>
+    <p id="rqComparison"></p>
     <p id="rqAnalysis"></p>
     <p>If the crop misses the head or bill, check the full frame. Place a manual center on any visible detail, or mark the photo for follow-up if the head is hidden or beyond the source edge.</p>
     <div class="rq-images">
@@ -39,5 +40,17 @@
         <p id="rqCropStatus" aria-live="polite"></p>
       </figure>
     </div>
+    <section id="rqCoverage" hidden aria-label="Animal coverage">
+      <h3>Animal coverage</h3>
+      <p id="rqCoverageStatus" aria-live="polite"></p>
+      <div id="rqAnimals"></div>
+      <div class="rq-toolbar">
+        <button type="button" id="rqSplit">Add another animal in the selected region</button>
+        <button type="button" id="rqUnlocalized">Add unlocalized animal</button>
+        <button type="button" id="rqClipped">Add source-clipped animal</button>
+        <label><input type="checkbox" id="rqConfirmCoverage">I checked the full frame and accounted for every visible animal</label>
+      </div>
+      <details id="rqPrior" hidden><summary>Earlier region generations</summary><pre id="rqPriorNotes"></pre></details>
+    </section>
   </div>
 </section>

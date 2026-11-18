@@ -262,7 +262,7 @@ def test_mask_proxy_and_detail_share_frame_after_preview_rejection(tmp_path, mon
         assert aligned.size == (600, 400)
         assert aligned.getpixel((0, 0)) == (0, 0, 0)
         mask = np.ones((aligned.height, aligned.width), dtype=bool)
-    saved = save_mask(mask, str(tmp_path), 1, "sam2-small")
+    saved = save_mask(mask, str(tmp_path), 1, "sam2-small", frame_id=aligned.info["vireo_subject_frame_id"])
     assert measure_cached_subject_detail(saved, source, (1200, 800))["subject_detail_px"] == 1200
 
 
@@ -689,7 +689,8 @@ def test_extract_working_copy_uses_highlight_preserving_raw_decode(
 
     calls = []
 
-    def fake_load_image(source_path, max_size=1024, raw_decode=None):
+    def fake_load_image(source_path, max_size=1024, raw_decode=None, *, track_frame=False):
+        assert track_frame
         calls.append({
             "source_path": source_path,
             "max_size": max_size,
@@ -2112,3 +2113,90 @@ def test_load_working_image_decode_is_not_serialized_by_the_eviction_guard(
         "then skips the file as replaced and leaves the cache above a "
         f"lowered quota: {lock_held_when_touched!r}"
     )
+
+
+@pytest.mark.parametrize(("sensor", "preview"), [
+    ((5408, 3608), (5392, 3592)),
+    ((8280, 5520), (8256, 5504)),
+])
+def test_focus_masks_follow_the_camera_frame_at_both_scales(tmp_path, monkeypatch, sensor, preview):
+    import numpy as np
+    from focus_crop import focus_window
+    from image_loader import RAW_DECODE_CAMERA_RENDERED, extract_working_copy
+    from masking import cached_mask_frame_matches, render_proxy, write_mask_png
+    from PIL import Image
+    from web.media_common import _focus_source_image
+    from web.media_crops import _focus_masked_crop
+
+    # Two separated red subjects in the camera JPEG. The fake sensor rendering
+    # is black and has almost exactly the same aspect ratio at both sizes.
+    jpeg = io.BytesIO()
+    with Image.new("RGB", preview, (180, 180, 180)) as camera:
+        for x in (preview[0] // 4, preview[0] * 3 // 4):
+            camera.paste("red", (x, preview[1] // 2, x + preview[0] // 16, preview[1] * 5 // 8))
+        camera.save(jpeg, "JPEG")
+    _install_fake_raw(monkeypatch, _FakeRaw(embedded_jpeg=jpeg.getvalue(), sensor_size=sensor, postprocess_size=sensor))
+    path = tmp_path / "birds.nef"
+    path.touch()
+    copy = tmp_path / "working" / "birds.jpg"
+    assert extract_working_copy(path, copy, max_size=2048, raw_decode=RAW_DECODE_CAMERA_RENDERED)
+    photo = dict(filename=path.name, folder_id=1, working_copy_path="working/birds.jpg")
+    config = {"THUMB_CACHE_DIR": str(tmp_path / "thumbs")}
+    folder = {"path": str(tmp_path)}
+    with render_proxy(path, longest_edge=1024) as proxy:
+        pixels = np.asarray(proxy)
+        red = pixels[:, :, 1] < 80
+        frame_id = proxy.info["vireo_subject_frame_id"]
+        mask_bytes = []
+        for right in (False, True):
+            encoded = io.BytesIO()
+            region = red & ((np.arange(proxy.width) >= proxy.width // 2) == right)
+            write_mask_png(region, encoded, frame_id=frame_id)
+            mask_bytes.append(encoded.getvalue())
+    for choice in ("original", "working", "auto"):
+        image, _ = _focus_source_image(config, photo, folder, choice, True)
+        with image:
+            assert image.width == (2048 if choice == "working" else preview[0])
+            for x, selected, other in ((.25, 0, 1), (.75, 1, 0)):
+                window, _ = focus_window(image.size, (x, .55), 128)
+                crop = _focus_masked_crop(image, window, mask_bytes[selected], True)
+                assert crop.getpixel((96, 64))[0] > 240
+                assert crop.getpixel((32, 64))[0] < 80
+                assert _focus_masked_crop(image, window, mask_bytes[other], True).getpixel((96, 64))[0] < 100
+    saved = tmp_path / "subject.png"
+    saved.write_bytes(mask_bytes[0])
+    assert cached_mask_frame_matches(saved, frame_id)
+    assert not cached_mask_frame_matches(saved, "other-frame")
+    Image.new("L", (1024, 683), 255).save(saved)
+    assert not cached_mask_frame_matches(saved, frame_id)
+    # A working copy demosaiced from the same NEF has a different frame.
+    assert extract_working_copy(path, copy, max_size=2048)
+    image, _ = _focus_source_image(config, photo, folder, "working", True)
+    with image, pytest.raises(ValueError, match="incompatible"):
+        _focus_masked_crop(image, (0, 0, 128, 128), mask_bytes[0], True)
+
+
+def test_tracked_sensor_frames_distinguish_highlight_decode_strategy(tmp_path, monkeypatch):
+    import numpy as np
+    from image_loader import RAW_DECODE_ALIGNED, RAW_DECODE_PRESERVE_HIGHLIGHTS, extract_working_copy, load_image
+    from masking import write_mask_png
+    from web.media_common import _focus_source_image
+    from web.media_crops import _focus_masked_crop
+
+    _install_fake_raw(monkeypatch, _FakeRaw(postprocess_size=(120, 80), sensor_size=(120, 80)))
+    source = tmp_path / "synthetic.nef"
+    source.touch()
+    with load_image(source, max_size=None, raw_decode=RAW_DECODE_ALIGNED) as aligned:
+        aligned_id = aligned.info["vireo_subject_frame_id"]
+    with load_image(source, max_size=None, raw_decode=RAW_DECODE_PRESERVE_HIGHLIGHTS, track_frame=True) as working:
+        assert working.size == (120, 80)
+        assert working.info["vireo_subject_frame_id"] != aligned_id
+    copy = tmp_path / "working" / "synthetic.jpg"
+    assert extract_working_copy(source, copy, max_size=120)
+    photo = dict(filename=source.name, folder_id=1, working_copy_path="working/synthetic.jpg")
+    image, _ = _focus_source_image({"THUMB_CACHE_DIR": str(tmp_path / "thumbs")}, photo,
+                                   {"path": str(tmp_path)}, "working", True)
+    mask = io.BytesIO()
+    write_mask_png(np.ones((80, 120), dtype=bool), mask, frame_id=aligned_id)
+    with image, pytest.raises(ValueError, match="incompatible"):
+        _focus_masked_crop(image, (0, 0, 40, 40), mask.getvalue(), True)

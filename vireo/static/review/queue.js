@@ -35,11 +35,13 @@ function renderReviewQueue() {
 }
 
 function rqRenderProgress() {
+  if (!reviewQueue.current || !reviewQueue.items.length) rqElement('rqComparison').textContent = '';
+  rqElement('rqCoverage').hidden = !reviewQueue.current || !reviewQueue.inspection || !reviewQueue.items.length;
   rqShowPendingFlag();
   var counts = rqProgress();
   var index = reviewQueue.items.findIndex(function(p) { return p.photo_id === reviewQueue.session.photoId; });
   rqElement('rqProgress').textContent = 'Position ' + (index + 1) + ' of ' + reviewQueue.items.length +
-    ' photos · scope: ' + counts.total + ' photos with matching predictions · inspected here: ' + counts.inspected +
+    ' photos · scope: ' + counts.total + (reviewQueue.linkedPhoto && counts.total ? ' linked photo without predictions' : ' photos with matching predictions') + ' · inspected here: ' + counts.inspected +
     ' · decided: ' + counts.decided + ' (catalog keep/reject flags at last refresh) · needs follow-up here: ' + counts.unresolved +
     '. Inspected and follow-up counts are browser-local; follow-up can overlap a prior decision.';
   /** @type {HTMLInputElement} */ (rqElement('rqUnresolvedOnly')).checked = reviewQueue.session.followUpOnly;
@@ -54,11 +56,12 @@ function rqRenderProgress() {
   });
 }
 
-/** @param {ReviewPrediction} photo */
+/** @param {ReviewQueuePhotoSummary} photo */
 async function rqOpenPhoto(photo) {
   var sequence = ++reviewQueue.sequence;
   reviewQueue.current = null;
   reviewQueue.subjects = [];
+  reviewQueue.inspection = null;
   rqElement('rqSubjectBox').hidden = true;
   rqClearCrop();
   rqSave();
@@ -73,16 +76,21 @@ async function rqOpenPhoto(photo) {
   try {
     var results = await Promise.allSettled([
       safeFetch('/api/photos/' + photo.photo_id, {}, {toast: false}),
-      safeFetch('/api/photos/' + photo.photo_id + '/subjects', {}, {toast: false}),
+      safeFetch('/api/photos/' + photo.photo_id + '/subjects?coverage=1', {}, {toast: false}),
     ]);
     if (sequence !== reviewQueue.sequence || _predictionsReloading) return;
     var detail = results[0];
     if (!detail || detail.status === 'rejected') throw new Error('Current catalog state is unavailable. Refresh before changing flags.');
     reviewQueue.current = /** @type {ReviewQueuePhoto} */ (detail.value);
     var subjects = results[1];
-    if (subjects?.status === 'fulfilled') reviewQueue.subjects = /** @type {{subjects:ReviewQueueSubject[]}} */ (subjects.value).subjects || [];
     var item = rqItem(photo.photo_id);
-    if (item.subject === null) item.subject = reviewQueue.subjects.find(function(s) { return s.is_primary; })?.id || null;
+    if (subjects?.status === 'fulfilled') {
+      var data = /** @type {{subjects:ReviewQueueSubject[],inspection?:ReviewInspection}} */ (subjects.value);
+      reviewQueue.inspection = data.inspection;
+      reviewQueue.subjects = (data.subjects || []).concat(data.inspection?.additional || []);
+      if (data.inspection) rqPrepareCoverage(item, data.inspection.generation);
+    }
+    if (item.entry === undefined && item.subject === null && !item.center) item.subject = reviewQueue.subjects.find(function(s) { return s.is_primary; })?.id || null;
     allPredictions.forEach(function(p) { if (p.photo_id === photo.photo_id) p.flag = reviewQueue.current?.flag || 'none'; });
     rqShowFlag(); rqRenderSubjects(); rqRenderProgress(); rqSave(); rqLoadCrop();
     if (subjects?.status === 'rejected') rqElement('rqAnalysis').textContent = 'Subject data could not be loaded. Use a manual center; no analysis availability can be inferred.';
@@ -131,6 +139,7 @@ async function rqSetFlag(flag) {
     delete session.items[String(photo.id)]?.pendingFlag;
     if (key) rqWrite(key, session);
     if (sequence !== reviewQueue.sequence) return;
+    if (reviewQueue.linkedPhoto?.photo_id === photo.id) reviewQueue.linkedPhoto.flag = flag;
     photo.flag = flag; photo.flag_note = null;
     var photoId = photo.id;
     allPredictions.forEach(function(p) { if (p.photo_id === photoId) p.flag = flag; });
@@ -153,6 +162,7 @@ async function rqSetFlag(flag) {
 }
 
 function bindReviewQueue() {
+  rqBindCoverage();
   rqElement('rqEnabled').addEventListener('change', function(event) {
     reviewQueue.enabled = /** @type {HTMLInputElement} */ (event.target).checked;
     renderReviewQueue(); rqSave();
@@ -182,6 +192,7 @@ function bindReviewQueue() {
   rqElement('rqSubject').addEventListener('change', function(event) {
     if (!reviewQueue.current) return;
     var item = rqItem(reviewQueue.current.id);
+    delete item.entry;
     item.subject = Number(/** @type {HTMLSelectElement} */ (event.target).value) || null;
     item.center = null; rqSave(); rqRenderSubjects(); rqLoadCrop();
   });
@@ -199,7 +210,11 @@ function bindReviewQueue() {
     reviewQueue.manual = false;
     rqElement('rqManual').setAttribute('aria-pressed', 'false');
     rqElement('rqFullStatus').textContent = 'Full frame for head inspection.';
-    rqItem(reviewQueue.current.id).center = null; rqSave(); rqRenderSubjects(); rqLoadCrop();
+    var item = rqItem(reviewQueue.current.id);
+    item.center = null;
+    var note = item.entry === undefined ? null : rqActiveCoverage()?.notes[item.entry];
+    if (note) note.center = null;
+    rqSave(); rqRenderSubjects(); rqLoadCrop();
   });
   rqElement('rqFull').addEventListener('click', rqPlaceCenter);
   rqElement('rqFull').addEventListener('error', function() { rqElement('rqFullStatus').textContent = 'Full frame unavailable. Manual placement requires this upright source preview.'; });
@@ -207,4 +222,5 @@ function bindReviewQueue() {
     button.addEventListener('click', function() { rqSetFlag(/** @type {HTMLElement} */ (button).dataset.rqFlag || 'none'); });
   });
   window.addEventListener('pagehide', rqSave);
+  /** @type {HTMLInputElement} */ (rqElement('rqEnabled')).disabled = false;
 }
