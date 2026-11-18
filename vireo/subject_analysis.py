@@ -75,11 +75,14 @@ def analyze_detection(db, photo, detection, effective_cfg, checkpoint, *, force=
                     mask = np.asarray(saved_mask.convert("L").resize(image.size, Image.Resampling.NEAREST)) > 0
                 else:
                     existing_mask_path = None
-        inputs = None
+        variant = effective_cfg.get("pipeline", {}).get("sam2_variant") or "sam2-small"
+        # Record provenance for both new and reused masks: when a reused mask
+        # matches the current proxy frame, its measurements belong to this same
+        # raster, so publishing without ``comparison_inputs`` would overwrite a
+        # valid record with NULL and downgrade it to ``primary_unverified``.
+        inputs = (measurement_inputs(image, detection["id"], detection_prompt_runtime(detection), variant)
+                  if defer_publication else None)
         if not existing_mask_path:
-            variant = effective_cfg.get("pipeline", {}).get("sam2_variant") or "sam2-small"
-            if defer_publication:
-                inputs = measurement_inputs(image, detection["id"], detection_prompt_runtime(detection), variant)
             mask = generate_mask(image, {k: detection["box_" + k] for k in "xywh"},
                                  variant=variant)
         if mask is None or not np.any(mask):
@@ -151,8 +154,14 @@ def analyze_selected_subject(db, photo, comparison, effective_cfg, checkpoint):
         db.hold_read_snapshot()
         generation, analysis, _ = comparison_analysis(db, photo, detection, effective_cfg)
         if analysis and analysis["owner"]["kind"] == "primary":
+            # Revalidate against snapshot state: the detection id alone cannot
+            # tell whether prediction state or inputs changed between the first
+            # resolution and the snapshot open, which would leave ``generation``
+            # paired with a stale key downstream readers would not reproduce.
+            current_photo = db.photos.get(photo["id"], verify_workspace=True)
             current, _ = resolve_subject(db, photo["id"], comparison)
-            if not current or current["id"] != detection["id"]:
+            if (current_photo is None or not current or current["id"] != detection["id"]
+                    or analysis_key(source_path(db, current_photo), current, effective_cfg) != key):
                 raise ValueError("Selected subject changed during analysis")
             return {"status": "cached", "detection_id": detection["id"], "analysis_key": generation}
     changed = analyze_detection(db, photo, detection, effective_cfg, checkpoint)

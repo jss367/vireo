@@ -59,7 +59,7 @@ def primary_owner(row, candidates):
     box = {axis: row["prompt_" + axis] for axis in "xywh"}
     try:
         inputs = json.loads(row["comparison_inputs"] or "{}")
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         inputs = {}
     required = {
         "recipe",
@@ -152,12 +152,12 @@ def compatible_primary(row, owner, detection, path, effective_cfg, masks_dir):
         png = mask_path.read_bytes()
         with Image.open(io.BytesIO(png)) as mask:
             if mask.format != "PNG" or list(mask.size) != inputs["size"] or mask.mode != "L" or mask.getbbox() is None:
-                return (
-                    None,
-                    "mask_unavailable",
-                    "The primary mask does not match the measured raster. Analyze this selection.",
-                )
-    except OSError, ValueError:
+                return (None, "mask_unavailable",
+                        "The primary mask does not match the measured raster. Analyze this selection.")
+    except (SyntaxError, Image.DecompressionBombError, Image.UnidentifiedImageError):
+        return (None, "mask_unavailable",
+                "The primary mask could not be decoded. Analyze this selection.")
+    except (OSError, ValueError):
         return (
             None,
             "source_unavailable",
