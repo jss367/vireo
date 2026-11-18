@@ -1,6 +1,7 @@
 """Group sequential photos by EXIF timestamp proximity and visual similarity."""
 
 import logging
+import struct
 from collections import Counter
 from datetime import datetime
 from typing import NamedTuple
@@ -205,6 +206,21 @@ def _camera_label(model, serial):
     return model or None
 
 
+def _pillow_exif_ifd(exif):
+    """The Exif sub-IFD (offsets, body serial), or ``{}`` when it cannot be read.
+
+    The capture time is already in hand when this runs, so a malformed or
+    missing sub-IFD costs only the offset and serial, never the time.
+    """
+    from PIL.ExifTags import IFD
+
+    try:
+        return exif.get_ifd(IFD.Exif)
+    except (AttributeError, KeyError, TypeError, ValueError, OSError, struct.error):
+        log.debug("Could not read the Exif sub-IFD", exc_info=True)
+        return {}
+
+
 def read_exif_clock(image_path):
     """Read the capture time, recorded UTC offset and camera of an image file.
 
@@ -214,7 +230,6 @@ def read_exif_clock(image_path):
     parse as the time, so they cost no extra read.
     """
     from PIL import Image
-    from PIL.ExifTags import IFD
     from PIL.ExifTags import Base as ExifBase
 
     # Try Pillow first (fast path for JPEG/TIFF)
@@ -226,7 +241,7 @@ def read_exif_clock(image_path):
                     ExifBase.DateTimeDigitized
                 )
                 if dt_str:
-                    exif_ifd = exif.get_ifd(IFD.Exif)
+                    exif_ifd = _pillow_exif_ifd(exif)
                     offset = exif_ifd.get(ExifBase.OffsetTimeOriginal) or exif_ifd.get(
                         ExifBase.OffsetTime
                     )
