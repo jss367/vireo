@@ -314,7 +314,7 @@ def test_cache_invalidation_drops_the_row_when_the_unlink_is_refused(
     assert_released(extraction, first)
 
 
-@pytest.mark.parametrize("legacy_version", [None, 46, 47, 48, 49])
+@pytest.mark.parametrize("legacy_version", [None, 46, 47, 48, 49, 52])
 def test_companion_box_cannot_prompt_raw_even_without_a_rejected_preview(
     db, tmp_path, extraction, legacy_version,
 ):
@@ -338,15 +338,23 @@ def test_companion_box_cannot_prompt_raw_even_without_a_rejected_preview(
     if legacy_version is not None:
         db.conn.execute("UPDATE detections SET runtime_fingerprint='legacy' WHERE photo_id=?", (raw,))
         legacy_id = db.detections.get(raw, 0)[0]["id"]
-        db.subjects.set_primary_state(raw, legacy_id)
-        db.conn.execute("UPDATE photos SET subject_detail=123 WHERE id=?", (raw,))
+        if legacy_version == 46:
+            db.subjects.set_primary_state(raw, legacy_id)
+        else:
+            db.subjects.clear_primary_state(raw)
+        db.conn.execute("UPDATE photos SET subject_detail=123, mask_path='old.png' WHERE id=?", (raw,))
         db.conn.execute("INSERT INTO photo_masks (photo_id, variant, path, created_at, detector_model, "
                         "prompt_x, prompt_y, prompt_w, prompt_h, subject_detail) VALUES "
                         "(?, 'sam2-base', 'old.png', 0, 'megadetector-v6', .1, .6, .2, .15, 123)", (raw,))
+        if legacy_version == 52:
+            db.conn.execute("UPDATE detections SET runtime_fingerprint=? WHERE id=?",
+                            (COMPANION_FRAME_RUNTIME, legacy_id))
+            db.conn.execute("DELETE FROM photo_masks WHERE photo_id=?", (raw,))
         db.conn.execute(f"PRAGMA user_version={legacy_version}")
         db.commit()
         schema._apply_pending(db.conn)
-        assert db.conn.execute("SELECT subject_detail FROM photos WHERE id=?", (raw,)).fetchone()[0] is None
+        projection = db.conn.execute("SELECT subject_detail, mask_path FROM photos WHERE id=?", (raw,)).fetchone()
+        assert tuple(projection) == (None, None)
         assert db.masks_features.get_mask(raw, "sam2-base") is None
     row, = db.detections.get(raw, 0)
     assert row["runtime_fingerprint"] == COMPANION_FRAME_RUNTIME
