@@ -3,7 +3,7 @@ import pytest
 from PIL import Image
 from reviewer_helpers import confirmed_reviewer_box, original_frame_detections
 from services import detection_store, photo_ingest, stage_counts, subject_masks, workspace_folders
-from subjects import analyze_photo, payload, select_primary
+from subjects import analyze_photo, payload, select_primary, visible_payload
 
 
 @pytest.fixture
@@ -723,10 +723,9 @@ def test_subject_selection_and_replaced_box_roundtrip_through_undo(app_and_db):
 
 def test_inspection_inventory_includes_filtered_regions_and_tracks_generation(db, subject_photo):
     photo_id, ids, _ = subject_photo
-    photo = db.photos.get(photo_id, verify_workspace=True)
 
     def inventory():
-        return payload(db, photo_id, inspection_photo=photo)["inspection"]
+        return visible_payload(db, photo_id, coverage=True)["inspection"]
 
     first = inventory()
     assert {row["id"]: row["inspection_reason"] for row in first["additional"]} == {
@@ -756,8 +755,7 @@ def test_inspection_payload_uses_one_catalog_snapshot(db, subject_photo, monkeyp
     after = None if restoring else "not_animal"
     db.conn.execute("UPDATE detections SET subject_verdict=? WHERE id=?", (before, target))
     db.commit()
-    photo = db.photos.get(photo_id, verify_workspace=True)
-    expected_generation = payload(db, photo_id, inspection_photo=photo)["inspection"]["generation"]
+    expected_generation = visible_payload(db, photo_id, coverage=True)["inspection"]["generation"]
     path = db.conn.execute("PRAGMA database_list").fetchone()[2]
     original = subjects.retained
     writes = []
@@ -771,7 +769,7 @@ def test_inspection_payload_uses_one_catalog_snapshot(db, subject_photo, monkeyp
         return rows
 
     monkeypatch.setattr(subjects, "retained", racing_retained)
-    result = payload(db, photo_id, inspection_photo=photo)
+    result = visible_payload(db, photo_id, coverage=True)
     assert result["inspection"]["generation"] == expected_generation
     subjects_ids = {r["id"] for r in result["subjects"]}
     additional_ids = {r["id"] for r in result["inspection"]["additional"]}
@@ -779,6 +777,43 @@ def test_inspection_payload_uses_one_catalog_snapshot(db, subject_photo, monkeyp
     assert (target in additional_ids) is restoring
     assert not subjects_ids & additional_ids
     assert not db.conn.in_transaction
-    fresh = payload(db, photo_id, inspection_photo=photo)
+    fresh = visible_payload(db, photo_id, coverage=True)
     assert (target in {r["id"] for r in fresh["subjects"]}) is restoring
     assert fresh["inspection"]["generation"] != result["inspection"]["generation"]
+
+
+def test_source_replacement_and_visibility_lookup_share_inspection_snapshot(db, subject_photo, monkeypatch):
+    import sqlite3
+
+    from repositories.subjects import SubjectsRepository
+
+    photo_id, ids, _ = subject_photo
+    def generation():
+        return visible_payload(db, photo_id, coverage=True)["inspection"]["generation"]
+
+    db.conn.execute("UPDATE photos SET file_hash='first' WHERE id=?", (photo_id,))
+    db.commit()
+    first = generation()
+    db.conn.execute("UPDATE photos SET file_hash='second' WHERE id=?", (photo_id,))
+    db.commit()
+    second = generation()
+    assert first != second
+
+    path = db.conn.execute("PRAGMA database_list").fetchone()[2]
+    lookup = SubjectsRepository.visible_inspection_source
+
+    def racing_lookup(self, workspace_id, pid):
+        source = lookup(self, workspace_id, pid)
+        with sqlite3.connect(path) as writer:
+            writer.execute("UPDATE photos SET file_hash='third' WHERE id=?", (pid,))
+            writer.execute("UPDATE detections SET subject_verdict='not_animal' WHERE id=?", (ids[0],))
+        return source
+
+    with monkeypatch.context() as patch:
+        patch.setattr(SubjectsRepository, "visible_inspection_source", racing_lookup)
+        during = visible_payload(db, photo_id, coverage=True)
+    assert during["inspection"]["generation"] == second
+    assert ids[0] in {row["id"] for row in during["subjects"]}
+    after = visible_payload(db, photo_id, coverage=True)
+    assert after["inspection"]["generation"] != second
+    assert ids[0] in {row["id"] for row in after["inspection"]["additional"]}

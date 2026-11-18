@@ -5,8 +5,7 @@ retained animal box), ``photo_subject_state`` (the detection currently
 projected as the photo's primary) and ``photo_subject_choices`` (a manual
 primary override) are catalog-wide: a subject's analysis is a pure function
 of the photo and its detection, so nothing here resolves the active
-workspace. The one workspace-dependent read, the visible predictions listed
-beside each subject, takes the workspace id from its caller.
+workspace. Workspace-scoped reads take the workspace id from the caller.
 
 Callers reach it as ``db.subjects`` (a fresh repository per access, see
 ``Database.subjects``); there are no forwarding wrappers on ``Database``.
@@ -28,6 +27,14 @@ from repositories.prediction_review import prediction_review_join, prediction_re
 class SubjectsRepository:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
+
+    def visible_inspection_source(self, workspace_id: int, photo_id: int) -> sqlite3.Row | None:
+        """Return the catalog source identity only for a visible photo."""
+        return self.conn.execute(
+            """SELECT p.id, p.file_hash, p.file_size, p.file_mtime, p.width, p.height
+               FROM photos p JOIN photo_workspace_visibility v ON v.photo_id=p.id
+               WHERE p.id=? AND v.workspace_id=?""", (photo_id, workspace_id),
+        ).fetchone()
 
     def focus_point(self, photo_id):
         from focus_point import focus_point
