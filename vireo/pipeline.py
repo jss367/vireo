@@ -1930,7 +1930,7 @@ def _refresh_encounter_confirmed_species(enc, enc_photos):
 
 
 def refresh_cache_species_for_photos(
-    cache_dir, workspace_id, species_by_photo, photos_only=False,
+    cache_dir, workspace_id, species_by_photo, photos_only=False, *, identities_by_photo=None,
 ):
     """Rewrite the on-disk pipeline cache so its per-photo, per-burst, and
     per-encounter species fields match ``species_by_photo`` — a
@@ -1976,6 +1976,8 @@ def refresh_cache_species_for_photos(
         names = [n for n in (species_by_photo.get(p["id"]) or []) if n]
         p["confirmed_species"] = names[0] if names else None
         p["confirmed_species_list"] = list(names)
+        if identities_by_photo is not None:
+            p["confirmed_species_identities"] = list(identities_by_photo.get(p["id"]) or [])
 
     photos_by_id = {p.get("id"): p for p in data.get("photos", [])}
     for enc in data.get("encounters", []) if not photos_only else []:
@@ -2525,21 +2527,25 @@ def _eye_candidates_in_mask(kps, mask, T):
     ``T`` uses the decoder's raw model units. Scores above one are valid;
     NaN/inf scores or coordinates must never reach focus measurement/storage.
     """
-    eye_candidates = []
+    return _keypoints_in_mask(kps, mask, T, {"left_eye", "right_eye"})
+
+
+def _keypoints_in_mask(kps, mask, threshold, names):
+    candidates = []
     for k_point in kps:
-        if k_point["name"] not in ("left_eye", "right_eye"):
+        if k_point["name"] not in names:
             continue
         if not np.isfinite([k_point["conf"], k_point["x"], k_point["y"]]).all():
             continue
-        if k_point["conf"] < T:
+        if k_point["conf"] < threshold:
             continue
         if not (0 <= k_point["x"] < mask.shape[1] and 0 <= k_point["y"] < mask.shape[0]):
             continue
         mx, my = int(k_point["x"]), int(k_point["y"])
         if not mask[my, mx]:
             continue
-        eye_candidates.append(k_point)
-    return eye_candidates
+        candidates.append(k_point)
+    return candidates
 
 
 def _best_eye_by_tenengrad(image, eye_candidates, bbox, k_window):

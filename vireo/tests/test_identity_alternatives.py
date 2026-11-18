@@ -1365,7 +1365,9 @@ def test_species_decisions_and_history_refresh_all_shared_workspace_caches(app_a
     workspaces = [active_ws, folder_shared, photo_shared]
     for ws_id in workspaces:
         save_results_raw({
-            'photos': [{'id': 1, 'confirmed_species': CANDIDATES[0], 'confirmed_species_list': [CANDIDATES[0]]}],
+            'photos': [{'id': 1, 'confirmed_species': CANDIDATES[0], 'confirmed_species_list': [CANDIDATES[0]],
+                        'confirmed_species_identities': db.photo_species.get_species_for_photos(
+                            [1], include_identities=True).get(1, [])}],
             'encounters': [{'photo_ids': [1], 'confirmed_species': CANDIDATES[0],
                             'confirmed_species_list': [CANDIDATES[0]], 'species_confirmed': True,
                             'bursts': [{'photo_ids': [1], 'species_override': {'species': CANDIDATES[0], 'confirmed': True}}]}],
@@ -1375,6 +1377,8 @@ def test_species_decisions_and_history_refresh_all_shared_workspace_caches(app_a
         for ws_id in workspaces:
             cache = load_results_raw(str(tmp_path), ws_id)
             assert cache['photos'][0]['confirmed_species_list'] == names, ws_id
+            assert cache['photos'][0]['confirmed_species_identities'] == db.photo_species.get_species_for_photos(
+                [1], include_identities=True).get(1, []), ws_id
             assert cache['encounters'][0]['confirmed_species_list'] == names, ws_id
             assert cache['encounters'][0]['species_confirmed'] == bool(names), ws_id
 
@@ -1405,7 +1409,7 @@ def test_shared_cache_failure_still_attempts_other_workspaces_after_commit(app_a
     db.commit()
     calls = []
 
-    def refresh(cache_dir, workspace_id, species):
+    def refresh(cache_dir, workspace_id, species, **kwargs):
         calls.append(workspace_id)
         if workspace_id == second:
             raise OSError('read-only shared cache')

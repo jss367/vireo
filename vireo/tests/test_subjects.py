@@ -3,7 +3,7 @@ import pytest
 from PIL import Image
 from reviewer_helpers import confirmed_reviewer_box, original_frame_detections
 from services import detection_store, photo_ingest, stage_counts, subject_masks, workspace_folders
-from subjects import analyze_photo, payload, select_primary
+from subjects import analyze_photo, payload, select_primary, visible_payload
 
 
 @pytest.fixture
@@ -767,3 +767,143 @@ def test_legacy_reviewer_history_restores_original_id_and_rejects_conflicting_re
         db.detections.update_reviewer_region(did, dict(box, x=.35), "reviewer-v1", None)
     assert client.post("/api/undo").status_code == 409
     assert db.detections.row(did)["box_x"] == .35
+
+
+def test_inspection_inventory_includes_filtered_regions_and_tracks_generation(db, subject_photo):
+    photo_id, ids, _ = subject_photo
+
+    def inventory():
+        return visible_payload(db, photo_id, coverage=True)["inspection"]
+
+    first = inventory()
+    assert {row["id"]: row["inspection_reason"] for row in first["additional"]} == {
+        ids[2]: "Below detector confidence threshold", ids[3]: "Detector category: person",
+    }
+    select_primary(db, photo_id, ids[0])
+    assert inventory()["generation"] == first["generation"]
+    db.conn.execute("UPDATE detections SET subject_verdict='not_animal' WHERE id=?", (ids[1],))
+    changed = inventory()
+    assert changed["generation"] != first["generation"]
+    assert any(r["id"] == ids[1] and r["inspection_reason"] == "Catalog verdict: background"
+               for r in changed["additional"])
+    db.detections.clear(photo_id)
+    assert inventory()["additional"] == []
+    assert inventory()["generation"] != changed["generation"]
+
+
+@pytest.mark.parametrize("restoring", [False, True])
+def test_inspection_payload_uses_one_catalog_snapshot(db, subject_photo, monkeypatch, restoring):
+    import sqlite3
+
+    import subjects
+
+    photo_id, ids, _ = subject_photo
+    target = ids[1]
+    before = "not_animal" if restoring else None
+    after = None if restoring else "not_animal"
+    db.conn.execute("UPDATE detections SET subject_verdict=? WHERE id=?", (before, target))
+    db.commit()
+    expected_generation = visible_payload(db, photo_id, coverage=True)["inspection"]["generation"]
+    path = db.conn.execute("PRAGMA database_list").fetchone()[2]
+    original = subjects.retained
+    writes = []
+
+    def racing_retained(*args, **kwargs):
+        rows = original(*args, **kwargs)
+        if not writes:
+            with sqlite3.connect(path) as writer:
+                writer.execute("UPDATE detections SET subject_verdict=? WHERE id=?", (after, target))
+            writes.append(True)
+        return rows
+
+    monkeypatch.setattr(subjects, "retained", racing_retained)
+    result = visible_payload(db, photo_id, coverage=True)
+    assert result["inspection"]["generation"] == expected_generation
+    subjects_ids = {r["id"] for r in result["subjects"]}
+    additional_ids = {r["id"] for r in result["inspection"]["additional"]}
+    assert (target in subjects_ids) is not restoring
+    assert (target in additional_ids) is restoring
+    assert not subjects_ids & additional_ids
+    assert not db.conn.in_transaction
+    fresh = visible_payload(db, photo_id, coverage=True)
+    assert (target in {r["id"] for r in fresh["subjects"]}) is restoring
+    assert fresh["inspection"]["generation"] != result["inspection"]["generation"]
+
+
+def test_source_replacement_and_visibility_lookup_share_inspection_snapshot(db, subject_photo, monkeypatch):
+    import sqlite3
+
+    from repositories.subjects import SubjectsRepository
+
+    photo_id, ids, _ = subject_photo
+    def generation():
+        return visible_payload(db, photo_id, coverage=True)["inspection"]["generation"]
+
+    db.conn.execute("UPDATE photos SET file_hash='first' WHERE id=?", (photo_id,))
+    db.commit()
+    first = generation()
+    db.conn.execute("UPDATE photos SET file_hash='second' WHERE id=?", (photo_id,))
+    db.commit()
+    second = generation()
+    assert first != second
+
+    path = db.conn.execute("PRAGMA database_list").fetchone()[2]
+    lookup = SubjectsRepository.visible_inspection_source
+
+    def racing_lookup(self, workspace_id, pid):
+        source = lookup(self, workspace_id, pid)
+        with sqlite3.connect(path) as writer:
+            writer.execute("UPDATE photos SET file_hash='third' WHERE id=?", (pid,))
+            writer.execute("UPDATE detections SET subject_verdict='not_animal' WHERE id=?", (ids[0],))
+        return source
+
+    with monkeypatch.context() as patch:
+        patch.setattr(SubjectsRepository, "visible_inspection_source", racing_lookup)
+        during = visible_payload(db, photo_id, coverage=True)
+    assert during["inspection"]["generation"] == second
+    assert ids[0] in {row["id"] for row in during["subjects"]}
+    after = visible_payload(db, photo_id, coverage=True)
+    assert after["inspection"]["generation"] != second
+    assert ids[0] in {row["id"] for row in after["inspection"]["additional"]}
+
+
+def test_inspection_neighbor_respects_photo_only_workspace_grants(db, subject_photo):
+    previous, ids, _ = subject_photo
+    folder = db.photos.get(previous)["folder_id"]
+    db.conn.execute("UPDATE photos SET timestamp='2026-01-01 10:00:00.100' WHERE id=?", (previous,))
+    current = photo_ingest.add_photo(db, folder_id=folder, filename="next.jpg", extension=".jpg",
+                                     file_size=100, file_mtime=1, timestamp="2026-01-01 10:00:00.200")
+    select_primary(db, previous, ids[1])
+    detection_store.write_detection_batch(db, current, "megadetector-v6", [
+        {"box": {"x": .02, "y": .1, "w": .1, "h": .2}, "confidence": .95, "category": "animal"},
+    ])
+    workspace = db.create_workspace("Selected frames")
+    db.conn.execute("INSERT INTO workspace_photos(workspace_id, photo_id) VALUES (?, ?)", (workspace, current))
+    db.commit()
+    db.set_active_workspace(workspace)
+
+    result = visible_payload(db, current, coverage=True)
+    inspection = result["inspection"]
+    assert inspection["previous_photo_id"] is None
+    assert inspection["previous_generation"] is None
+    assert inspection["previous_primary"] is None
+    assert inspection["previous_regions"] == []
+    assert not result["possible_subject_switch"]
+
+    db.conn.execute("INSERT INTO workspace_photos(workspace_id, photo_id) VALUES (?, ?)", (workspace, previous))
+    db.commit()
+    result = visible_payload(db, current, coverage=True)
+    inspection = result["inspection"]
+    assert inspection["previous_photo_id"] == previous
+    assert inspection["previous_primary"] == ids[1]
+    assert {r["id"] for r in inspection["previous_regions"]} == set(ids)
+    assert result["possible_subject_switch"]
+    reviewed = visible_payload(db, previous, coverage=True)["inspection"]["generation"]
+    assert inspection["previous_generation"] == reviewed
+    db.conn.execute("UPDATE detections SET subject_verdict='not_animal' WHERE id=?", (ids[1],))
+    db.commit()
+    updated = visible_payload(db, current, coverage=True)["inspection"]
+    assert ids[1] in {r["id"] for r in updated["previous_regions"]}
+    assert updated["previous_primary"] != ids[1]
+    assert updated["previous_generation"] != reviewed
+    assert updated["previous_generation"] == visible_payload(db, previous, coverage=True)["inspection"]["generation"]
