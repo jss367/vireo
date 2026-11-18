@@ -663,7 +663,7 @@ def test_a_streamed_preview_past_the_shared_outing_budget_is_refused_before_near
     monkeypatch.setattr(import_locations, "MAX_OUTING_COMPARISONS", 1)
     paths = [f"/card/{i}.NEF" for i in range(len(points))]
     monkeypatch.setattr(import_locations, "read_source_gps",
-                        lambda paths: dict(zip(paths, points, strict=True)))
+                        lambda paths, **kw: dict(zip(paths, points, strict=True)))
 
     frames = [json.loads(f[len("data: "):]) for f in import_locations.stream_location_suggestions(
         db._db_path, paths, {"google_maps_api_key": "KEY"})]
@@ -705,7 +705,7 @@ def test_both_sides_of_the_antimeridian_share_a_nearby_lookup():
 
 def test_a_streamed_preview_at_the_pole_reports_its_nearby_places(db, monkeypatch, exiftool_present):
     asked = []
-    monkeypatch.setattr(import_locations, "read_source_gps", lambda paths: {paths[0]: (90.0, 180.0)})
+    monkeypatch.setattr(import_locations, "read_source_gps", lambda paths, **kw: {paths[0]: (90.0, 180.0)})
     monkeypatch.setattr(places, "reverse_geocode", lambda *a, **k: dict(_COUNTY))
 
     def fake_nearby(lat, lng, api_key, *, language="en"):
@@ -747,7 +747,7 @@ def test_a_streamed_preview_at_a_pole_makes_one_nearby_lookup(db, monkeypatch, e
     gps = dict(zip(paths, points, strict=True))
     # GPS is read in chunks; answer each chunk's paths.
     monkeypatch.setattr(import_locations, "read_source_gps",
-                        lambda chunk: {path: gps[path] for path in chunk})
+                        lambda chunk, **kw: {path: gps[path] for path in chunk})
     monkeypatch.setattr(places, "reverse_geocode", lambda *a, **k: dict(_COUNTY))
     monkeypatch.setattr(places, "nearby_named_places", lambda *a, **k: [])
 
@@ -805,7 +805,7 @@ def test_a_streamed_preview_offers_places_from_a_half_answered_lookup(db, monkey
     paths = [f"/card/{i}.NEF" for i in range(len(LAGUNA))]
     gps = dict(zip(paths, LAGUNA, strict=True))
     monkeypatch.setattr(import_locations, "read_source_gps",
-                        lambda chunk: {path: gps[path] for path in chunk})
+                        lambda chunk, **kw: {path: gps[path] for path in chunk})
     monkeypatch.setattr(places, "reverse_geocode", lambda *a, **k: dict(_COUNTY))
 
     def half_answered(*a, **k):
@@ -921,7 +921,7 @@ def test_an_over_limit_stream_refuses_before_any_nearby_lookup(db, monkeypatch, 
     monkeypatch.setattr(import_locations, "MAX_CHOICES", 3)
     points = [(10.0 + i * 0.05, 20.0) for i in range(4)]  # 5.5 km apart: four outings
     monkeypatch.setattr(import_locations, "read_source_gps",
-                        lambda paths: dict(zip(paths, points, strict=True)))
+                        lambda paths, **kw: dict(zip(paths, points, strict=True)))
     monkeypatch.setattr(places, "reverse_geocode", lambda *a, **k: dict(_COUNTY))
     monkeypatch.setattr(places, "nearby_named_places",
                         lambda *a, **k: pytest.fail("looked up nearby for an over-limit preview"))
@@ -978,7 +978,7 @@ def test_nearby_distance_is_from_the_closest_photo_in_the_cell(db, monkeypatch):
 
 def test_stream_reports_nearby_lookups_after_naming(db, monkeypatch, broad_google, exiftool_present):
     monkeypatch.setattr(import_locations, "read_source_gps",
-                        lambda paths: dict(zip(paths, LAGUNA, strict=True)))
+                        lambda paths, **kw: dict(zip(paths, LAGUNA, strict=True)))
     paths = [f"/card/{i}.NEF" for i in range(len(LAGUNA))]
 
     frames = [json.loads(f[len("data: "):]) for f in import_locations.stream_location_suggestions(
@@ -1262,7 +1262,7 @@ def exiftool_present(monkeypatch):
 def test_stream_reports_progress_then_the_suggestions(db, monkeypatch, exiftool_present):
     monkeypatch.setattr(import_locations, "_GPS_READ_CHUNK", 2)
     monkeypatch.setattr(import_locations, "read_source_gps",
-                        lambda paths: {p: RIVER[0] for p in paths if "nogps" not in p})
+                        lambda paths, **kw: {p: RIVER[0] for p in paths if "nogps" not in p})
     monkeypatch.setattr(places, "reverse_geocode", lambda *a, **k: None)
     paths = ["/card/a.NEF", "/card/b.NEF", "/card/nogps.NEF", "/card/a.NEF"]
 
@@ -1284,7 +1284,7 @@ def test_closing_the_stream_stops_google_lookups_between_cells(db, monkeypatch, 
     """A superseded preview must not keep spending Google quota."""
     points = [RIVER[0], FAR_AWAY, (51.5, -0.12)]
     monkeypatch.setattr(import_locations, "read_source_gps",
-                        lambda paths: {p: points[i] for i, p in enumerate(paths)})
+                        lambda paths, **kw: {p: points[i] for i, p in enumerate(paths)})
     lookups = []
 
     def fake_reverse_geocode(lat, lng, api_key, *, language="en"):
@@ -1323,7 +1323,7 @@ def test_location_suggestions_route_rejects_bad_paths(app_and_db, body):
 
 def test_location_suggestions_route_streams(app_and_db, monkeypatch, exiftool_present):
     app, _ = app_and_db
-    monkeypatch.setattr(import_locations, "read_source_gps", lambda paths: {})
+    monkeypatch.setattr(import_locations, "read_source_gps", lambda paths, **kw: {})
     resp = app.test_client().post("/api/import/location-suggestions",
                                   json={"paths": ["/card/a.NEF"]})
     assert resp.status_code == 200
@@ -1386,3 +1386,78 @@ def test_nearby_park_cache_from_before_country_checks_is_stale():
     })}
     usable, _ = decode_cached_reverse_geocode(cached, 'en')
     assert not usable
+
+
+def test_import_and_batch_offer_same_park_only_for_walking_frames(app_and_db, monkeypatch):
+    import config as cfg
+
+    app, db = app_and_db
+    cfg.save({**cfg.load(), "google_maps_api_key": "KEY"})
+    park = {"source": "park", "place_id": "park", "name": "Lake Preserve",
+            "lat": 32, "lng": -117, "address_components": []}
+    city = {**park, "source": "area", "place_id": "city", "name": "Lake City", "types": ["locality"]}
+    monkeypatch.setattr(places, "reverse_geocode", lambda lat, *args, **kw: park if lat == 32 else city)
+    points = _files([(32, -117), (32.005, -117), (32.01, -117), (32.016, -117), (32.017, -117)])
+    # A walk, a 670 m drive in one minute, then another visit after lunch.
+    times = dict(zip(points, ["2026-11-14T" + t for t in ("08:00", "08:10", "08:20", "08:21", "12:00")], strict=True))
+    paths = list(points)
+    preview = suggest_import_locations(db, points, api_key="KEY", language="en", capture_times=times)
+    inferred = next(g for g in preview["groups"] if g["suggestion"]["source"] == "outing")
+    assert inferred["outing_paths"] == paths[:3]
+    assert inferred["cells"] == [cell_key(*points[p]) for p in paths[1:3]]
+    assert inferred["suggestion"]["warning"]
+
+    folder = workspace_folders.add_folder(db, "/walk", name="walk")
+    ids = [_photo(db, folder, p.split("/")[-1], point) for p, point in points.items()]
+    db.conn.executemany("UPDATE photos SET timestamp=? WHERE id=?", zip(times.values(), ids, strict=True))
+    db.commit()
+    client = app.test_client()
+
+    def batch(**kwargs):
+        return client.post("/api/batch/location/from-exif", json={"photo_ids": ids[::-1], **kwargs})
+
+    [offer] = batch().get_json()["outings"]
+    assert offer == {"place_id": inferred["suggestion"]["place_id"], "name": "Lake Preserve", "source": "outing",
+                     "photo_ids": ids[:3], "matched_photo_ids": ids[:1], "inferred_photo_ids": ids[1:3]}
+    assert all(_location(db, pid) is None for pid in ids)
+    assert batch(apply=True, outing_choices=[{"place_id": "park", "photo_ids": ids[3:]}]).status_code == 409
+    assert all(_location(db, pid) is None for pid in ids)
+    response = batch(apply=True, outing_choices=[{"place_id": "park", "photo_ids": ids[1:2]}])
+    assert response.get_json()["updated"] == 5
+    assert [_location(db, pid) for pid in ids] == ["Lake Preserve"] * 2 + ["Lake City"] * 3
+    rows = db.photos.get_by_ids(ids)
+    assert [(rows[i]["latitude"], rows[i]["longitude"]) for i in ids] == list(points.values())
+
+
+def test_import_does_not_infer_for_cell_shared_with_a_later_visit(db, monkeypatch):
+    park = {"source": "area", "types": ["natural_feature"], "place_id": "lake",
+            "name": "Lake", "lat": 32, "lng": -117}
+    city = {**park, "types": ["locality"], "place_id": "city", "name": "City"}
+    monkeypatch.setattr(places, "reverse_geocode", lambda lat, *a, **kw: park if lat == 32 else city)
+    points = _files([(32, -117), (32.005, -117), (32.005, -117)])
+    times = dict(zip(points, ["2026-11-14T08:00", "2026-11-14T08:15", "2026-11-15T08:00"], strict=True))
+    preview = suggest_import_locations(db, points, api_key="KEY", language="en", capture_times=times)
+    assert all(g["suggestion"]["source"] != "outing" for g in preview["groups"])
+
+
+def test_stream_uses_camera_times_and_breaks_a_drive_into_short_gps_steps(db, monkeypatch, exiftool_present):
+    import metadata
+
+    paths = [f"/card/{i}.NEF" for i in range(9)]
+    park = {"place_id": "park", "name": "Preserve", "source": "park", "lat": 32, "lng": 0}
+    city = {**park, "place_id": "city", "name": "City", "source": "area", "types": ["locality"]}
+    monkeypatch.setattr(places, "reverse_geocode", lambda lat, *a, **kw: park if lat == 32 else city)
+
+    def extract(paths, restricted_tags, **kwargs):
+        assert "-DateTimeOriginal" in restricted_tags
+        # Each 55 m step fits inside the jitter allowance. Taken together,
+        # one step per second is a drive, even without a single large jump.
+        return {p: {"EXIF": {"DateTimeOriginal": f"2026:11:14 08:00:{i:02}",
+                             "GPSLatitude": 32 + i * .0005, "GPSLongitude": 0}}
+                for i, p in enumerate(paths)}
+
+    monkeypatch.setattr(metadata, "extract_metadata", extract)
+    frames = list(import_locations.stream_location_suggestions(db._db_path, paths, {"google_maps_api_key": "KEY"}))
+    preview = json.loads(frames[-1].removeprefix("data: "))
+    offers = [g for g in preview["groups"] if g["suggestion"]["source"] == "outing"]
+    assert offers and all(paths[-1] not in g["outing_paths"] for g in offers)
