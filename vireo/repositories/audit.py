@@ -181,7 +181,10 @@ class AuditRepository:
         values the Camera Clocks check reads (capture time and its subseconds,
         recorded offsets, camera make, model and serial number, shutter count,
         GPS time and position). Values are as ExifTool stored them; the caller
-        parses them.
+        parses them. The serial coalesces every body-identity tag
+        ``services/same_shot_duplicates.py`` recognizes in either group, so
+        two bodies of the same model do not merge when their serial lives in
+        ``BodySerialNumber`` or ``CameraSerialNumber``.
         """
         workspace_id = self.workspace_id_fn()
         return self.conn.execute(
@@ -193,7 +196,11 @@ class AuditRepository:
                       json_extract(p.exif_data, '$.EXIF.Make') AS make,
                       json_extract(p.exif_data, '$.EXIF.Model') AS model,
                       COALESCE(json_extract(p.exif_data, '$.MakerNotes.SerialNumber'),
-                               json_extract(p.exif_data, '$.EXIF.SerialNumber')) AS serial,
+                               json_extract(p.exif_data, '$.EXIF.SerialNumber'),
+                               json_extract(p.exif_data, '$.MakerNotes.BodySerialNumber'),
+                               json_extract(p.exif_data, '$.EXIF.BodySerialNumber'),
+                               json_extract(p.exif_data, '$.MakerNotes.CameraSerialNumber'),
+                               json_extract(p.exif_data, '$.EXIF.CameraSerialNumber')) AS serial,
                       json_extract(p.exif_data, '$.MakerNotes.ShutterCount') AS shutter_count,
                       json_extract(p.exif_data, '$.Composite.GPSDateTime') AS gps_date_time,
                       json_extract(p.exif_data, '$.Composite.GPSLatitude') AS gps_latitude,

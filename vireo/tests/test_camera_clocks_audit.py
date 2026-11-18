@@ -119,6 +119,52 @@ def test_check_without_location_still_reports_shot_order(clocks_db, monkeypatch)
     assert fixes["-05:00"]["shift_minutes"] == -60
 
 
+@pytest.mark.parametrize(
+    "serial_tag,group",
+    [("BodySerialNumber", "EXIF"), ("BodySerialNumber", "MakerNotes"),
+     ("CameraSerialNumber", "EXIF"), ("CameraSerialNumber", "MakerNotes")],
+)
+def test_body_serial_tags_distinguish_two_bodies_of_one_model(
+    tmp_path, serial_tag, group,
+):
+    """Some cameras record their body identity in ``BodySerialNumber`` or
+    ``CameraSerialNumber`` (in ``EXIF`` or ``MakerNotes``) rather than
+    ``SerialNumber``. Two bodies of the same model that use these tags must
+    keep distinct ``serial`` values in the audit read, so
+    ``check_camera_clocks`` does not merge their frames into one camera.
+    """
+    from db import Database
+    from services import photo_ingest, workspace_folders
+
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.commit()
+    db.set_active_workspace(ws)
+    folder_id = workspace_folders.add_folder(
+        db, str(tmp_path / "2026-01-25"), name="2026-01-25",
+    )
+
+    for serial in ("1111111", "2222222"):
+        pid = photo_ingest.add_photo(
+            db, folder_id=folder_id, filename=f"S{serial}.NEF",
+            extension=".nef", file_size=1, file_mtime=0.0,
+            timestamp=datetime(2026, 1, 25, 12, 53).isoformat(),
+        )
+        exif = {"EXIF": {"Make": "NIKON CORPORATION", "Model": "NIKON D850",
+                         "DateTimeOriginal": "2026:01:25 12:53:59"},
+                "MakerNotes": {"ShutterCount": 100}}
+        exif[group][serial_tag] = serial
+        db.conn.execute(
+            "UPDATE photos SET exif_data = ? WHERE id = ?",
+            (json.dumps(exif), pid),
+        )
+    db.conn.commit()
+
+    rows = db.audit.camera_clock_rows()
+    assert {str(r["serial"]) for r in rows} == {"1111111", "2222222"}
+    db.close()
+
+
 def test_route_records_the_run_for_the_summary(app_and_db, monkeypatch):
     import time_zones
     from services import workspace_folders
