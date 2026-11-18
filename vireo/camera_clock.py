@@ -571,7 +571,10 @@ def _reset_fixes(clock: _CameraClock, covered: set[Hashable]) -> list[ClockFix]:
         frames = [f for f in jump.earlier if f.ref not in covered]
         if not frames:
             continue
-        shift = -int(math.ceil(jump.minutes_back))
+        # Whole minutes strictly past the jump: a shift of exactly the jump
+        # would leave the last earlier frame on the same time as the first
+        # later one, which a capture-time sort can still order either way.
+        shift = -(math.floor(jump.minutes_back) + 1)
         fixes.append(ClockFix(
             frames=frames, group=f"before {jump.after.filename}", recorded_offset=None,
             target_offset=None, shift_minutes=shift,

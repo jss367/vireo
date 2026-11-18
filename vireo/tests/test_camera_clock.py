@@ -142,7 +142,8 @@ def test_clock_set_back_without_offsets_suggests_a_shift():
     assert "clock was set back" in problem.summary
     [fix] = problem.fixes
     assert fix.target_offset is None
-    assert fix.shift_minutes == -59  # 14:05 back to 13:06
+    # 14:05 back to 13:06 is exactly 59 min; one more puts 14:05 at 13:05, before 13:06.
+    assert fix.shift_minutes == -60
     assert [f.ref for f in fix.frames] == [1, 2, 3, 4, 5]
 
 
