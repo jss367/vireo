@@ -1454,6 +1454,11 @@ class SpeciesCurationRepository:
         between keep their order. Returns the number of rows removed.
         """
         species = self._keyword_taxa.resolve_species_display(species)
+        if self.conn.execute(
+            "SELECT 1 FROM species_representatives WHERE species = ? AND photo_id = ?",
+            (species, photo_id),
+        ).fetchone() is None:
+            return 0
         SpeciesChoiceRepository(self.conn).forget_photo(species, photo_id)
         cur = self.conn.execute(
             "DELETE FROM species_representatives WHERE species = ? AND photo_id = ?",

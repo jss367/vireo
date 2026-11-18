@@ -451,13 +451,15 @@ def apply_highlight_preferences(db, buckets):
 def _workspace_highlight_rank(db, species, photo_id):
     """``photo_id``'s place (1 first) among the species' highlights the
     workspace can see, or None when it is not one of them."""
-    photo_ids = db.species_curation.get_highlights(species).get(species, [])
+    photo_ids = db.species_curation.get_highlights(species, eligible_only=True).get(species, [])
     if photo_id not in photo_ids:
         return None
     if len(photo_ids) == 1:
         return 1
+    globally_chosen = db.species_curation.get_globally_eligible_representatives(species)
+    through = {*photo_ids, *globally_chosen.get(species, [])}
     order = Preferences(db.species_choices.comparisons()).rank(
-        photo_ids, photo_ids,
+        photo_ids, through,
     ).order
     return order.index(photo_id) + 1
 

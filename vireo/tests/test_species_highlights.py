@@ -348,6 +348,76 @@ def test_removal_bridges_other_species_choices_without_deleting_them(trips, edge
     assert db.conn.execute("SELECT id FROM species_choices WHERE id = ?", (owned,)).fetchone() is None
 
 
+def test_stale_removal_after_relabel_keeps_the_new_species_order(trips):
+    from services.species_choices import ranked_in_scope
+
+    app, db, folders, photos = trips
+    client = app.test_client()
+    ids = [photos[key] for key in ("a1", "a2", "a3")]
+    for pid in ids:
+        _add(client, pid, folder_id=folders["first"])
+    for pid in ids:
+        keyword_tagging.untag_photo(db, pid, db.keywords.add("Bald Eagle", is_species=True))
+        keyword_tagging.tag_photo(db, pid, db.keywords.add("Golden Eagle", is_species=True))
+    db.species_curation.rename_representatives("Bald Eagle", "Golden Eagle")
+    db.commit()
+    assert ranked_in_scope(db, "Golden Eagle") == ids
+    before = list(db.conn.iterdump())
+
+    response = client.delete("/api/species-highlights", json={
+        "species": "Bald Eagle", "photo_id": ids[1],
+    })
+
+    assert response.status_code == 200
+    assert response.get_json()["removed"] == 0
+    assert list(db.conn.iterdump()) == before
+    assert ranked_in_scope(db, "Golden Eagle") == ids
+
+
+@pytest.mark.parametrize("ineligible_reason", ["rejected", "retagged", "unavailable", "eligible"])
+def test_photo_detail_rank_matches_eligible_highlights(trips, ineligible_reason):
+    app, db, folders, photos = trips
+    client = app.test_client()
+    for key in ("a1", "a2"):
+        assert _add(client, photos[key], folder_id=folders["first"]).status_code == 200
+    if ineligible_reason == "rejected":
+        db.conn.execute("UPDATE photos SET flag = 'rejected' WHERE id = ?", (photos["a1"],))
+    elif ineligible_reason == "retagged":
+        keyword_tagging.untag_photo(db, photos["a1"], db.keywords.add("Bald Eagle", is_species=True))
+    elif ineligible_reason == "unavailable":
+        db.conn.execute("UPDATE photos SET folder_id = ? WHERE id = ?", (folders["second"], photos["a1"]))
+        db.conn.execute("UPDATE folders SET status = 'offline' WHERE id = ?", (folders["second"],))
+    db.commit()
+    expected_rank = 2 if ineligible_reason == "eligible" else 1
+    assert dict(_highlights(_row(db)))[photos["a2"]] == expected_rank
+
+    response = client.get(f"/api/photos/{photos['a2']}")
+
+    assert response.status_code == 200
+    entry = next(e for e in response.get_json()["highlight_list"] if e["species"] == "Bald Eagle")
+    assert entry["is_highlighted"] is True
+    assert entry["highlight_rank"] == expected_rank
+
+
+def test_photo_detail_rank_keeps_chains_outside_the_workspace(trips):
+    app, db, folders, photos = trips
+    first, middle, last = [photos[key] for key in ("a1", "b1", "a3")]
+    for pid in (first, middle, last):
+        db.set_species_representative("Bald Eagle", pid)
+    db.species_choices.record("Bald Eagle", first, [middle])
+    db.species_choices.record("Bald Eagle", middle, [last])
+    db.conn.execute("DELETE FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+                    (db._ws_id(), folders["second"]))
+    db.commit()
+    assert _highlights(_row(db)) == [(first, 1), (last, 2)]
+
+    response = app.test_client().get(f"/api/photos/{last}")
+
+    assert response.status_code == 200
+    entry = next(e for e in response.get_json()["highlight_list"] if e["species"] == "Bald Eagle")
+    assert entry["highlight_rank"] == 2
+
+
 def test_removing_the_middle_highlight_keeps_the_others_in_order(trips):
     app, db, folders, photos = trips
     client = app.test_client()
