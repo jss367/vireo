@@ -38,7 +38,7 @@ Photo pairing, duplicate resolution, and folder/archive collisions carry evidenc
 
 ## Conflicting evidence on a saved assignment
 
-In Browse, expand the species and select **Report conflicting evidence**. Give the reviewer, the reason for questioning that assignment, and a reference to the evidence. Review lists outstanding conflicts under **Saved species assignments with outstanding conflicts**. Open a photo from that list to retain the label, change the species, or remove the assignment. Each resolution records its own reviewer and evidence. Photo details keep earlier reviews, including reviews of removed assignments.
+In Browse, expand the species and select **Report conflicting evidence**. Give the reviewer, the reason for questioning that assignment, and a reference to the evidence. Review lists outstanding conflicts under **Species assignment conflicts**. Open a photo from that list to retain the label, change the species, or remove the assignment. Each resolution records its own reviewer and evidence. Photo details keep earlier reviews, including reviews of removed assignments.
 
 API clients read the photo’s `review_workspace_id` and the assignment’s `review_version` from `GET /api/photos/{photo_id}`. Post them as `observed_workspace_id` and `review_version` to `/api/photos/{photo_id}/species/{keyword_id}/review`, together with `action`, `reviewer`, `reason`, and `evidence_source`. Use `report` to open the conflict. For resolution, read the current version and use `retain`, `remove`, or `amend` with the replacement `species`. A stale version returns HTTP 409. The standard undo and redo endpoints apply to each decision.
 
