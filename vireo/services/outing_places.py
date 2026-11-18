@@ -61,29 +61,19 @@ def outing_offers(frames) -> list[Outing]:
     dated.sort(key=lambda item: (item[0], item[1], _point_key(item[2])))
     offers = []
     run: list[dict] = []
-    reference = None
     jitter = GPS_JITTER_M
     for _, time, frame in dated:
         role = _role(frame["place"]) if has_usable_coordinates(frame) else None
         remaining = None
         if role and run:
-            remaining = _remaining_jitter(run[-1], reference, frame, time, jitter)
+            remaining = _remaining_jitter(run[-1], frame, time, jitter)
         if run and remaining is None:
             if offer := _offer(run):
                 offers.append(offer)
             run = []
-            reference = None
         if role:
-            current = {**frame, "time": time, "role": role}
-            run.append(current)
-            if reference is None:
-                reference = current
-                jitter = GPS_JITTER_M
-            elif remaining is not None and distance_meters(reference, current) >= 2 * GPS_JITTER_M:
-                # Carry the unused allowance to the next leg. Time spent
-                # below walking speed can replenish it up to the original cap.
-                reference = current
-                jitter = remaining
+            run.append({**frame, "time": time, "role": role})
+            jitter = GPS_JITTER_M if remaining is None else remaining
     if offer := _offer(run):
         offers.append(offer)
     return offers
@@ -95,13 +85,14 @@ def _point_key(frame):
     return 0.0, 0.0
 
 
-def _remaining_jitter(previous, reference, frame, time, jitter):
+def _remaining_jitter(previous, frame, time, jitter):
     if (previous["time"].tzinfo is None) != (time.tzinfo is None):
         return None
     seconds = (time - previous["time"]).total_seconds()
-    allowed_step = min(MAX_STEP_M, GPS_JITTER_M + seconds * MAX_SPEED_M_S)
-    if seconds > MAX_GAP_SECONDS or distance_meters(previous, frame) > allowed_step:
+    step = distance_meters(previous, frame)
+    if seconds > MAX_GAP_SECONDS or step > MAX_STEP_M:
         return None
-    elapsed = (time - reference["time"]).total_seconds()
-    remaining = jitter + elapsed * MAX_SPEED_M_S - distance_meters(reference, frame)
+    # Charge every leg, including return travel. Slower legs can restore
+    # the walking allowance up to its original cap.
+    remaining = jitter + seconds * MAX_SPEED_M_S - step
     return min(GPS_JITTER_M, remaining) if remaining >= 0 else None

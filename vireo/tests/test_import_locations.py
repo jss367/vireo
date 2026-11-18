@@ -1483,3 +1483,18 @@ def test_over_budget_saved_evidence_keeps_local_names_without_lookups(db, monkey
     times = dict(zip(points, ["2026-11-14T08:00", "2026-11-14T08:10"], strict=True))
     preview = suggest_import_locations(db, points, api_key="KEY", language="en", capture_times=times)
     assert {g["suggestion"]["name"] for g in preview["groups"]} == {"Saved 0", "Saved 1"}
+
+
+@pytest.mark.parametrize(("seconds", "expected"), [(40, [[0, 1], [2, 3]]), (90, [[0, 1, 2, 3]])])
+def test_return_travel_counts_toward_walking_speed(seconds, expected):
+    from datetime import datetime, timedelta
+
+    from services.outing_places import outing_offers
+
+    park = {"place_id": "park", "source": "park", "lat": 32, "lng": 0}
+    city = {"place_id": "city", "source": "area", "types": ["locality"]}
+    start = datetime(2026, 11, 14, 8)
+    frames = [{"id": i, "timestamp": (start + timedelta(seconds=i * seconds)).isoformat(),
+               "latitude": lat, "longitude": 0, "place": place}
+              for i, (lat, place) in enumerate([(32, park), (32.00216, city)] * 2)]
+    assert [offer.members for offer in outing_offers(frames)] == expected
