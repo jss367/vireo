@@ -9214,17 +9214,22 @@ def _mask_stage_photos(tmp_path, count):
 
 
 @pytest.mark.parametrize("entry_point", ["process", "extract"])
-def test_mask_publication_refuses_reclassified_frame(tmp_path, monkeypatch, caplog, entry_point):
+@pytest.mark.parametrize("cached", [False, True], ids=["fresh", "cached"])
+def test_mask_publication_refuses_reclassification(tmp_path, monkeypatch, caplog, entry_point, cached):
     from contextlib import closing
 
     import masking
+    import quality
     from db import Database
     from PIL import Image
+    from repositories.masks_features import MasksFeaturesRepository
     from services.mask_extraction import MaskExtractionOptions, extract_masks
     from test_mask_extraction_service import Runner as ExtractionRunner
 
     db_path, db, ws_id, (pid,), params = _mask_stage_photos(tmp_path, 1)
+    update_embeddings = MasksFeaturesRepository.update_embeddings
     _stub_extract_masks_heavy_ops(monkeypatch)
+    monkeypatch.setattr(MasksFeaturesRepository, "update_embeddings", update_embeddings)
     box = dict(x=.1, y=.1, w=.5, h=.5)
 
     def write_frame(writer, frame):
@@ -9232,9 +9237,10 @@ def test_mask_publication_refuses_reclassified_frame(tmp_path, monkeypatch, capl
             {"box": box, "confidence": .9, "category": "animal", "frame_id": frame},
         ])
 
-    ids = write_frame(db, "a" * 64)
+    original_frame = db.conn.execute("SELECT frame_id FROM detections WHERE photo_id=?", (pid,)).fetchone()[0]
+    ids = write_frame(db, original_frame)
     proxy = Image.new("RGB", (16, 16))
-    proxy.info["vireo_subject_frame_id"] = "a" * 64
+    proxy.info["vireo_subject_frame_id"] = original_frame
     monkeypatch.setattr(masking, "render_proxy", lambda *args, **kwargs: proxy)
     save_mask = masking.save_mask
 
@@ -9242,8 +9248,6 @@ def test_mask_publication_refuses_reclassified_frame(tmp_path, monkeypatch, capl
         with closing(Database(db_path)) as writer:
             assert write_frame(writer, "b" * 64) == ids
         return save_mask(*args)
-
-    monkeypatch.setattr(masking, "save_mask", reclassify_after_segmentation)
 
     def run_masks():
         if entry_point == "process":
@@ -9254,16 +9258,33 @@ def test_mask_publication_refuses_reclassified_frame(tmp_path, monkeypatch, capl
             options=MaskExtractionOptions(params.collection_id, "sam2-small", "dinov2-base", 512, .2),
         )
 
+    if cached:
+        assert run_masks()["masked"] == 1
+        _null_subject_detail(db, pid)
+
+        def reclassify_during_measurement(*args, **kwargs):
+            with closing(Database(db_path)) as writer:
+                assert write_frame(writer, original_frame) == ids
+            return {"subject_detail": 1234.0, "subject_detail_px": 600.0}
+
+        monkeypatch.setattr(quality, "measure_cached_subject_detail", reclassify_during_measurement)
+    else:
+        monkeypatch.setattr(masking, "save_mask", reclassify_after_segmentation)
+
     result = run_masks()
-    assert result["failed"] == 1 and result["masked"] == 0
-    assert "Subject detection changed during mask extraction" in caplog.text
-    assert not list(tmp_path.rglob("*.generation-*.png"))
-    assert db.detections.row(ids[0])["frame_id"] == "b" * 64
+    assert result["failed"] == 1 and result["masked"] == 0 and result["detail_measured"] == 0
+    if cached:
+        assert "Cached mask changed during detail measurement" in caplog.text
+    else:
+        assert "Subject detection changed during mask extraction" in caplog.text
+        assert not list(tmp_path.rglob("*.generation-*.png"))
+    current_frame = original_frame if cached else "b" * 64
+    assert db.detections.row(ids[0])["frame_id"] == current_frame
     assert db.conn.execute("SELECT path FROM photo_masks WHERE photo_id=?", (pid,)).fetchone() is None
     assert db.conn.execute("SELECT mask_path FROM photos WHERE id=?", (pid,)).fetchone()[0] is None
 
     monkeypatch.setattr(masking, "save_mask", save_mask)
-    proxy.info["vireo_subject_frame_id"] = "b" * 64
+    proxy.info["vireo_subject_frame_id"] = current_frame
     assert run_masks()["masked"] == 1
 
 

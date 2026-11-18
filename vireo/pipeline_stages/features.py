@@ -1348,6 +1348,7 @@ class _MaskPass:
             return False
         self.thread_db.masks_features.set_subject_detail(
             item.photo_id, self.sam2_variant, measured["subject_detail"], measured["subject_detail_px"],
+            expected_path=existing["path"],
         )
         subject_masks.require_current_prompt(
             self.thread_db, item.entry["detection_id"], item.detector_runtime, item.entry["prompt"],
