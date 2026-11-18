@@ -35,9 +35,21 @@ def _open_browse(page, live_server):
     page.wait_for_selector("#grid .grid-card", timeout=15000)
     page.wait_for_selector("#vireoFilterBar", timeout=15000)
     page.wait_for_function(
-        "document.querySelector('.vf-total strong').textContent !== '–'",
+        "document.querySelector('.vf-total strong').textContent !== ''",
         timeout=15000,
     )
+
+
+def test_filter_count_distinguishes_unknown_from_zero(live_server, page):
+    _open_browse(page, live_server)
+    total = page.locator(".vf-total")
+    expect(total).to_have_text("5 photos")
+    page.evaluate("VireoFilter.setResultTotal(null)")
+    expect(total).to_have_text("")
+    page.evaluate("VireoFilter.setResultTotal(0)")
+    expect(total).to_have_text("0 photos")
+    page.evaluate("VireoFilter.setResultTotal(1)")
+    expect(total).to_have_text("1 photo")
 
 
 def test_browse_view_preferences_persist_across_navigation(live_server, page):

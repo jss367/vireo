@@ -146,7 +146,7 @@ export function render() {
   var filtersActive = Boolean(search)
     || taxonomicGroup !== 'all'
     || identificationRank !== 'all';
-  meta.textContent = state.currentData.meta.species_count + ' species on your life list · '
+  meta.textContent = state.currentData.meta.species_count + ' confirmed identifications on your life list · '
     + state.currentData.meta.photo_count + ' tagged photos'
     + (filtersActive ? ' · ' + list.length + ' shown' : '');
 
