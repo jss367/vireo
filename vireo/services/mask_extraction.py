@@ -69,6 +69,7 @@ def _import_mask_extraction_deps() -> SimpleNamespace:
         generate_mask,
         render_proxy,
         require_aligned_detector_prompt,
+        require_original_reviewer_frame,
         save_mask,
     )
     from pipeline_job import (
@@ -97,6 +98,7 @@ def _import_mask_extraction_deps() -> SimpleNamespace:
         generate_mask=generate_mask,
         render_proxy=render_proxy,
         require_aligned_detector_prompt=require_aligned_detector_prompt,
+        require_original_reviewer_frame=require_original_reviewer_frame,
         save_mask=save_mask,
         rollback_failed_mask_photo=_rollback_failed_mask_photo,
         StagedMaskFile=_StagedMaskFile,
@@ -366,8 +368,11 @@ class _MaskExtractionRun:
         # fixed-scale subject detail (comparable across encounters)
         completeness = deps.crop_completeness(mask)
         features = deps.compute_all_quality_features(proxy, mask)
+        frame_id = getattr(proxy, "info", {}).get("vireo_subject_frame_id")
+        proof = {"expected_frame_id": frame_id} if frame_id is not None else {}
         detail = deps.measure_subject_detail(
             mask, source_path=item.image_path, frame_size=deps.frame_size(photo),
+            **proof,
         )
         if detail:
             features.update(detail)
@@ -441,6 +446,7 @@ class _MaskExtractionRun:
         )
         if existing is None:
             return False
+        self.deps.require_original_reviewer_frame(item.image_path, photo.get("detector_runtime"))
         cached_prompt = (
             existing["prompt_x"], existing["prompt_y"],
             existing["prompt_w"], existing["prompt_h"],
@@ -495,8 +501,14 @@ class _MaskExtractionRun:
         existing = item.existing
         if existing is None:
             return False
+        from detection_id import REVIEWER_FRAME_PREFIX
+
+        runtime = item.photo.get("detector_runtime")
+        proof = ({"expected_frame_id": runtime.removeprefix(REVIEWER_FRAME_PREFIX)}
+                 if runtime and runtime.startswith(REVIEWER_FRAME_PREFIX) else {})
         measured = self.deps.measure_cached_subject_detail(
             existing["path"], item.image_path, self.deps.frame_size(item.photo),
+            **proof,
         )
         if measured is self.deps.mask_cache_invalid:
             dropped = self.thread_db.masks_features.drop_cache_entry(

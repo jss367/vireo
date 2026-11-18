@@ -7,7 +7,6 @@ import hashlib
 import json
 import logging
 import math
-import os
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 
@@ -15,7 +14,7 @@ import numpy as np
 from focus_point import FocusMatch
 from services import detection_store
 
-ANALYSIS_VERSION = 3
+ANALYSIS_VERSION = 4
 REVIEWER_MODEL = "reviewer-selected"
 _BURST_REFRESH = ThreadPoolExecutor(max_workers=1, thread_name_prefix="burst-subject-refresh")
 
@@ -84,8 +83,8 @@ def analyze_image(image, detections):
 def analyze_photo(db, photo_id, image_path, *, min_conf=None, force=False, checkpoint=None, detection_id=None,
                   validate_publication=None):
     """Backfill on cached detection runs too; failed/offline reads remain retryable."""
-    from image_loader import RAW_DECODE_ALIGNED, load_image
-    from masking import require_aligned_detector_prompt
+    from image_loader import RAW_DECODE_ALIGNED, aligned_source_state, load_image, subject_box_image_path
+    from masking import require_aligned_detector_prompt, require_original_reviewer_frame
     from pipeline_locks import acquire_photo_mask
 
     detections = retained(db, photo_id, min_conf)
@@ -107,11 +106,21 @@ def analyze_photo(db, photo_id, image_path, *, min_conf=None, force=False, check
                 sync_primary(db, photo_id, min_conf=min_conf)
                 db.commit_with_retry()
         return 0
-    stat = os.stat(image_path)
-    source_key = hashlib.sha256(f"{os.path.realpath(image_path)}:{stat.st_size}:{stat.st_mtime_ns}:{ANALYSIS_VERSION}".encode()).hexdigest()
+    photo = db.photos.get(photo_id, verify_workspace=True)
+    folder = db.folders.get(photo["folder_id"]) if photo is not None else None
+    if photo is None or folder is None:
+        raise ValueError("Original subject frame unavailable; reconnect the original and retry")
+    image_path = subject_box_image_path(photo, None, {photo["folder_id"]: folder["path"]})
+    try:
+        source_state = aligned_source_state(image_path)
+    except OSError as error:
+        raise ValueError("Original subject frame unavailable; reconnect the original and retry") from error
+    source_key = hashlib.sha256(json.dumps([source_state, ANALYSIS_VERSION]).encode()).hexdigest()
     cached = db.subjects.cached_detection_ids(photo_id, source_key)
     pending = [d for d in detections if force or d["id"] not in cached]
     if not pending:
+        for detection in detections:
+            require_original_reviewer_frame(image_path, detection.get("runtime_fingerprint"))
         with acquire_photo_mask(photo_id):
             if checkpoint:
                 checkpoint()
@@ -379,7 +388,7 @@ def payload(db, photo_id):
             "rejected": rejected}
 
 
-def select_reviewer_box(db, photo_id, box, *, aligned_frame=False):
+def select_reviewer_box(db, photo_id, box, *, frame_runtime=None):
     """Save an explicit human region separately from model output, then select it.
 
     Coordinates use the upright, unedited source frame. The stored confidence
@@ -387,8 +396,6 @@ def select_reviewer_box(db, photo_id, box, *, aligned_frame=False):
     model probability. No detector run or species prediction is manufactured.
     Caller holds the photo lock.
     """
-    from detection_id import ALIGNED_REVIEWER_RUNTIME
-
     if not isinstance(box, dict) or set(box) != set("xywh"):
         raise ValueError("box must contain x, y, w and h")
     if any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in box.values()):
@@ -407,8 +414,9 @@ def select_reviewer_box(db, photo_id, box, *, aligned_frame=False):
             db.masks_features.clear_detection_embeddings(photo_id, previous["id"])
         # Clear previous measurements even if a legacy catalog lacks primary state.
         db.subjects.clear_primary_features(photo_id)
+        db.masks_features.retire_prompt_masks(photo_id, REVIEWER_MODEL)
         ids = db.detections.upsert_rows(photo_id, REVIEWER_MODEL, [
-            {"box": box, "confidence": 1.0, "category": "animal"}], ALIGNED_REVIEWER_RUNTIME if aligned_frame else "reviewer-v1")
+            {"box": box, "confidence": 1.0, "category": "animal"}], frame_runtime or "reviewer-v1")
         # Re-saving an identical or quantization-equivalent box reuses its ID.
         # Retire that ID's cached box analysis before sync_primary can project it.
         db.subjects.clear_analysis(ids[0])

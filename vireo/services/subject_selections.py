@@ -36,7 +36,12 @@ def set_selection(
             raise SubjectVerdictError("Photo not found in the active workspace", 404)
         before = _snapshot(db, photo_id)
         if reviewer_box:
-            select_reviewer_box(db, photo_id, body.get("box"), aligned_frame=body.get("frame") == "aligned-original-v1")
+            from services.subject_frames import verified_reviewer_runtime
+
+            if "frame" in body and "frame_token" not in body:
+                raise ValueError("Reload the original frame before confirming the reviewer box")
+            proof = verified_reviewer_runtime(db, photo_id, body["frame_token"]) if "frame_token" in body else None
+            select_reviewer_box(db, photo_id, body.get("box"), frame_runtime=proof)
         else:
             detection_id = body["detection_id"]
             if detection_id is not None and (type(detection_id) is not int

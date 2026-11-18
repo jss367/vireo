@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from PIL import Image
+from reviewer_helpers import confirmed_reviewer_box
 from services import photo_ingest, review_decisions, workspace_folders
 from services.analysis_retry import explain_selected, run_retry
 from testing.waits import synchronization_timeout
@@ -291,7 +292,7 @@ def test_weak_context_anchors_are_read_without_becoming_retry_targets(retry_libr
 
     # The same burst still qualifies for contextual rescue after the reviewer
     # replaces the weak box. Activate the mask against the new manual primary.
-    from subjects import select_reviewer_box
+    from reviewer_helpers import confirmed_reviewer_box as select_reviewer_box
     pid = ids[1]
     box = {"x": .482, "y": .07, "w": .083, "h": .433}
     select_reviewer_box(db, pid, box)
@@ -922,8 +923,10 @@ def test_wrong_trunk_correction_reanalyzes_only_corrected_animal_and_is_undoable
                                       'species_confirmed': True}], 'summary': {}},
                      results_dir, db.require_workspace_id())
     client = app.test_client()
+    frame_token = client.get(f'/photos/{pid}/preview?view=subject&size=1920').headers['X-Vireo-Subject-Frame']
     response = client.put(f'/api/photos/{pid}/subjects/reviewer-box', json={
         "box": bird_box, "source": "gpt-6.1-sol", "reason": "The retained trunk does not contain the bird",
+        "frame_token": frame_token,
     })
     assert response.status_code == 200
     saved = load_results_raw(results_dir, db.require_workspace_id())
@@ -971,8 +974,8 @@ def test_wrong_trunk_correction_reanalyzes_only_corrected_animal_and_is_undoable
 def test_selected_retry_checks_click_identity_after_lock(retry_library, tmp_path, monkeypatch, changed):
     from contextlib import contextmanager
 
+    from reviewer_helpers import confirmed_reviewer_box as select_reviewer_box
     from services import analysis_retry
-    from subjects import select_reviewer_box
 
     _, db, ids, calls = retry_library
     pid = ids[0]
@@ -1007,8 +1010,8 @@ def test_selected_retry_checks_click_identity_after_lock(retry_library, tmp_path
 
 
 def test_selected_retry_rejects_complete_replacement(retry_library, tmp_path):
+    from reviewer_helpers import confirmed_reviewer_box as select_reviewer_box
     from services.analysis_retry import _selected_detection
-    from subjects import select_reviewer_box
 
     _, db, ids, calls = retry_library
     pid = ids[0]
@@ -1086,7 +1089,7 @@ def test_box_refresh_rechecks_pinned_subject_and_visibility_at_publication(retry
     def measure_then_change(image, detections):
         results = original(image, detections)
         if change == "primary":
-            subjects.select_reviewer_box(db, pid, {"x": .6, "y": .1, "w": .2, "h": .2})
+            confirmed_reviewer_box(db, pid, {"x": .6, "y": .1, "w": .2, "h": .2})
             db.commit()
         else:
             folder_id = db.photos.get(pid)["folder_id"]

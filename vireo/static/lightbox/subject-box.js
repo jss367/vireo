@@ -1,5 +1,5 @@
 /* Draw in upright source coordinates, independent of the saved edit recipe. */
-import { safeFetch } from '../navbar-shared-helpers.js';
+import { safeFetch, fetchResponse } from '../navbar-shared-helpers.js';
 
 /** @param {number} photoId @param {(data: NavSubjectData) => void} saved */
 export function openSubjectBox(photoId, saved) {
@@ -21,7 +21,9 @@ export function openSubjectBox(photoId, saved) {
   /** @type {NavBox | null} */ let box = null;
   /** @type {{x: number; y: number} | null} */ let start = null;
   let saving = false;
-  function close() { dialog.close(); dialog.remove(); }
+  /** @type {string | null} */ let frameToken = null;
+  /** @type {string | null} */ let objectUrl = null;
+  function close() { dialog.close(); dialog.remove(); if (objectUrl) URL.revokeObjectURL(objectUrl); }
   function reset() { close(); }
   dialog.addEventListener('close', () => document.removeEventListener('lightbox:subjectreset', reset));
   document.addEventListener('lightbox:subjectreset', reset);
@@ -41,7 +43,7 @@ export function openSubjectBox(photoId, saved) {
       y: Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height))};
   }
   canvas.addEventListener('pointerdown', event => {
-    if (saving || !image.complete || !image.naturalWidth) return;
+    if (saving || !frameToken || !image.complete || !image.naturalWidth) return;
     event.preventDefault(); start = point(event); box = null; save.disabled = true;
     canvas.setPointerCapture(event.pointerId);
   });
@@ -60,12 +62,12 @@ export function openSubjectBox(photoId, saved) {
   });
   canvas.addEventListener('pointercancel', () => { start = null; box = null; save.disabled = true; });
   save.addEventListener('click', async () => {
-    if (!box || saving) return;
+    if (!box || !frameToken || saving) return;
     saving = true; save.disabled = true;
     status.textContent = 'Saving selected subject…';
     try {
       const result = /** @type {NavSubjectData} */ (await safeFetch('/api/photos/' + photoId + '/subjects/reviewer-box', {
-        method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({box, frame: 'aligned-original-v1'})
+        method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({box, frame_token: frameToken})
       }, {toast: false}));
       if (dialog.isConnected) { saved(result); close(); }
     } catch (error) {
@@ -73,5 +75,19 @@ export function openSubjectBox(photoId, saved) {
     } finally { saving = false; save.disabled = false; }
   });
   document.body.append(dialog); dialog.showModal();
-  image.src = '/photos/' + photoId + '/preview?view=subject&size=1920';
+  loadSubjectFrame(photoId).then(({blob, token}) => {
+    if (!dialog.isConnected) return;
+    frameToken = token; objectUrl = URL.createObjectURL(blob); image.src = objectUrl;
+  }).catch(error => {
+    if (dialog.isConnected) status.textContent = error instanceof Error ? error.message : String(error);
+  });
+}
+
+/** @param {number} photoId @returns {Promise<{blob: Blob; token: string}>} */
+async function loadSubjectFrame(photoId) {
+  const response = await fetchResponse('/photos/' + photoId + '/preview?view=subject&size=1920', {cache: 'no-store'});
+  if (!response.ok) throw new Error(await response.text() || 'Original subject frame unavailable.');
+  const token = response.headers.get('X-Vireo-Subject-Frame');
+  if (!token) throw new Error('Original frame could not be verified. Reload it before drawing.');
+  return {blob: await response.blob(), token};
 }

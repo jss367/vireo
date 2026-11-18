@@ -233,20 +233,18 @@ class _PreviewServer:
         """Serve the original in the coordinate system used for subject analysis."""
         import io
 
-        from image_loader import RAW_DECODE_ALIGNED, load_image
+        from services.subject_frames import issue_frame_token, render_subject_frame
 
         db = self._get_db()
-        photo = db.photos.get(photo_id, verify_workspace=True)
-        folder = db.folders.get(photo["folder_id"]) if photo is not None else None
-        if folder is None or photo is None:
-            return "Photo unavailable", 404
-        image = load_image(os.path.join(folder["path"], photo["filename"]), max_size=size, raw_decode=RAW_DECODE_ALIGNED)
-        if image is None:
-            return "Original subject frame unavailable", 404
+        try:
+            image, identity = render_subject_frame(db, photo_id, size)
+        except ValueError as error:
+            return str(error), 404
         with image, io.BytesIO() as data:
             image.save(data, format="JPEG", quality=90)
             response = Response(data.getvalue(), mimetype="image/jpeg")
         response.cache_control.no_store = True
+        response.headers["X-Vireo-Subject-Frame"] = issue_frame_token(db, photo_id, identity)
         return response
 
     def _serve_source_frame(self, photo_id: int, size: int) -> ResponseReturnValue:

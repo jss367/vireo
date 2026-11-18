@@ -13,6 +13,7 @@ silent precision loss when ids ride through JSON to the frontend.
 import hashlib
 
 ALIGNED_REVIEWER_RUNTIME = "reviewer-aligned-v1"
+REVIEWER_FRAME_PREFIX = "reviewer-frame-v2:"
 
 
 def positive_int_hash(*parts: str) -> int:

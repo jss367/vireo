@@ -313,6 +313,23 @@ def _validate_subject_detail(conn):
             raise RuntimeError(f"{table} is missing {', '.join(missing)}")
 
 
+def _unmeasure_unverified_reviewer_detail(conn):
+    """Retire coordinate-analysis caches while preserving human decisions/files."""
+    affected = "SELECT d.photo_id FROM detection_subjects s JOIN detections d ON d.id=s.detection_id"
+    conn.execute("UPDATE photos SET quality_score=NULL, subject_sharpness=NULL "
+                 f"WHERE id IN ({affected})")
+    conn.execute("UPDATE photos SET subject_size=NULL, subject_clip_high=NULL, "
+                 "subject_clip_low=NULL, subject_y_median=NULL "
+                 f"WHERE mask_path IS NULL AND id IN ({affected})")
+    conn.execute("DELETE FROM detection_subjects")
+    conn.execute("UPDATE photo_masks SET subject_detail=NULL, subject_detail_px=NULL "
+                 "WHERE detector_model='reviewer-selected' AND "
+                 "(subject_detail_px IS NOT NULL OR subject_detail != 0)")
+    conn.execute("UPDATE photos SET subject_detail=NULL, subject_detail_px=NULL "
+                 "WHERE EXISTS (SELECT 1 FROM detections d WHERE d.photo_id=photos.id "
+                 "AND d.detector_model='reviewer-selected')")
+
+
 def _repair_alternate_branch_schemas(conn):
     """Restore main's migrations skipped by alternate version 39 and 40 catalogs."""
     _add_job_history_errors(conn)
@@ -612,6 +629,7 @@ MIGRATIONS = (
     Migration(44, "subject_detail_full_resolution", _clear_subject_detail_from_other_read_paths),
     Migration(45, "subject_detail_mask_alignment", _clear_subject_detail_from_other_read_paths),
     Migration(46, "reconcile_highlights_and_detail", _reconcile_highlights_and_detail, _validate_merged_species_highlights),
+    Migration(47, "verified_reviewer_frame", _unmeasure_unverified_reviewer_detail),
 )
 
 

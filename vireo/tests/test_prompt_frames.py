@@ -25,6 +25,10 @@ def cropped_raw_scene(tmp_path, monkeypatch):
         image = (preview if use_preview else sensor).copy()
         if raw_decode in (image_loader.RAW_DECODE_CAMERA_RENDERED, image_loader.RAW_DECODE_ALIGNED):
             image.info["vireo_rejected_preview_edge"] = 1600
+        if raw_decode == image_loader.RAW_DECODE_ALIGNED:
+            image.info["vireo_aligned_rendition"] = "sensor"
+            image.info["vireo_subject_frame_id"] = image_loader.aligned_frame_identity(
+                _path, image, image_loader.aligned_source_state(_path))
         if max_size:
             image.thumbnail((max_size, max_size))
         return image
@@ -174,7 +178,8 @@ def test_redrawing_on_aligned_original_repairs_legacy_reviewer_box(app_and_db, c
     with Image.open(io.BytesIO(response.data)) as frame:
         assert frame.size == (1600, 1000)
         assert frame.getpixel((800, 700))[0] > 200
-    result = client.put(url, json={"box": box, "frame": "aligned-original-v1"}).get_json()
+    token = response.headers["X-Vireo-Subject-Frame"]
+    result = client.put(url, json={"box": box, "frame_token": token}).get_json()
     assert result["primary_detection_id"] == previous
     assert analyze_photo(db, pid, path, detection_id=previous) == 1
     assert client.post("/api/undo").status_code == 200

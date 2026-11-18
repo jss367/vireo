@@ -452,18 +452,33 @@ def require_aligned_detector_prompt(image, detector_runtime):
     pass; their boxes have no crop transform. Preserve those reviewed boxes
     and require an explicit detector rerun instead of guessing a mapping.
     """
+    from computation_cache import megadetector_runtime_fingerprint
+    from detection_id import ALIGNED_REVIEWER_RUNTIME, REVIEWER_FRAME_PREFIX
+
+    if isinstance(detector_runtime, str) and detector_runtime.startswith(REVIEWER_FRAME_PREFIX):
+        if detector_runtime == REVIEWER_FRAME_PREFIX + getattr(image, "info", {}).get("vireo_subject_frame_id", ""):
+            return
+        raise PromptFrameError("Original reviewer frame changed or is unavailable; open Subjects and confirm the box again on the original.")
+    if detector_runtime in ("reviewer-v1", ALIGNED_REVIEWER_RUNTIME):
+        raise PromptFrameError("This reviewer box uses an unverified original frame. Open Subjects and draw the box again on the original.")
     if not getattr(image, "info", {}).get("vireo_rejected_preview_edge"):
         return
-    from computation_cache import megadetector_runtime_fingerprint
-    from detection_id import ALIGNED_REVIEWER_RUNTIME
-
-    if detector_runtime == ALIGNED_REVIEWER_RUNTIME:
-        return
-    if detector_runtime == "reviewer-v1":
-        raise PromptFrameError("This reviewer box uses an unverified RAW frame. Open Subjects and draw the box again on the original.")
     current = megadetector_runtime_fingerprint()
     if current is None or detector_runtime != current:
         raise PromptFrameError("Detector coordinates use an unverified RAW frame; enable Re-classify to rerun detection before subject analysis")
+
+
+def require_original_reviewer_frame(image_path, runtime):
+    """Cached measurements cannot bypass a reviewer's original-frame proof."""
+    if not isinstance(runtime, str) or not runtime.startswith("reviewer"):
+        return
+    from image_loader import RAW_DECODE_ALIGNED, load_image
+
+    image = load_image(image_path, max_size=1024, raw_decode=RAW_DECODE_ALIGNED)
+    if image is None:
+        raise PromptFrameError("Original reviewer frame unavailable; reconnect the original before analysis")
+    with image:
+        require_aligned_detector_prompt(image, runtime)
 
 
 def load_mask(masks_dir, photo_id, variant):

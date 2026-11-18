@@ -44,12 +44,20 @@ def measure_eye(db, photo_id, detection, image, mask, effective_cfg):
 
 
 def analyze_detection(db, photo, detection, effective_cfg, checkpoint, *, force=False, existing_mask_path=None, defer_publication=False):
-    from masking import crop_completeness, generate_mask, render_proxy, require_aligned_detector_prompt, write_mask_png
+    from masking import (
+        crop_completeness,
+        generate_mask,
+        render_proxy,
+        require_aligned_detector_prompt,
+        require_original_reviewer_frame,
+        write_mask_png,
+    )
     from quality import compute_all_quality_features, saved_mask_matches_frame
 
     path = source_path(db, photo)
     key = analysis_key(path, detection, effective_cfg)
     if not force and _usable_analysis(_existing_analysis(db, detection["id"], key)):
+        require_original_reviewer_frame(path, dict(detection).get("runtime_fingerprint"))
         return False
     checkpoint()
     image = render_proxy(path, longest_edge=1024)
@@ -72,7 +80,7 @@ def analyze_detection(db, photo, detection, effective_cfg, checkpoint, *, force=
         checkpoint()
         features = compute_all_quality_features(image, mask)
         features.update(subject_size=float(mask.mean()), crop_complete=crop_completeness(mask))
-        features.update(_measure_detail(path, mask, photo))
+        features.update(_measure_detail(path, mask, photo, image.info.get("vireo_subject_frame_id")))
         features.update(measure_eye(db, photo["id"], detection, image, mask, effective_cfg))
         features["analysis"] = {"source": "original", "width": image.width, "height": image.height,
                                 "longest_edge_limit": 1024, "measurement_basis": "subject_mask"}
@@ -92,7 +100,7 @@ def analyze_detection(db, photo, detection, effective_cfg, checkpoint, *, force=
     return True
 
 
-def _measure_detail(path, mask, photo):
+def _measure_detail(path, mask, photo, frame_id=None):
     """Subject detail beside the 1024 px analysis (``quality.measure_subject_detail``).
 
     A source that cannot be re-read for it leaves the measurement out, so
@@ -100,7 +108,8 @@ def _measure_detail(path, mask, photo):
     """
     from quality import frame_size, measure_subject_detail
 
-    return measure_subject_detail(mask, source_path=path, frame_size=frame_size(photo))
+    proof = {"expected_frame_id": frame_id} if frame_id is not None else {}
+    return measure_subject_detail(mask, source_path=path, frame_size=frame_size(photo), **proof)
 
 
 def _existing_analysis(db, detection_id, key):

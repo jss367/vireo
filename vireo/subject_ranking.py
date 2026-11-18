@@ -130,7 +130,8 @@ def source_path(db, photo):
 # 4: always use a full-resolution demosaic before resizing.
 # 5: segment and measure the same camera-rendered frame.
 # 6: detector boxes and SAM prompts share a verified camera-rendered frame.
-ANALYSIS_RECIPE_VERSION = 6
+# 7: reviewer coordinates are bound to the actual original frame generation.
+ANALYSIS_RECIPE_VERSION = 7
 
 
 def analysis_key(path, detection, effective_cfg):
@@ -157,7 +158,7 @@ def analysis_key(path, detection, effective_cfg):
             weights.append((weight, info.st_size, info.st_mtime_ns))
         except FileNotFoundError:
             weights.append((weight, None))
-    inputs = [ANALYSIS_RECIPE_VERSION, EYE_KP_FINGERPRINT_VERSION, detection.get("prediction_fingerprint"), os.path.realpath(path), stat.st_size, stat.st_mtime_ns, detection["id"],
+    inputs = [ANALYSIS_RECIPE_VERSION, EYE_KP_FINGERPRINT_VERSION, detection.get("prediction_fingerprint"), os.path.realpath(path), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_ino, detection["id"],
               detection["detector_model"], dict(detection).get("runtime_fingerprint"), [detection["box_" + k] for k in "xywh"], 1024,
               {k: pipeline.get(k, default) for k, default in (
                   ("sam2_variant", "sam2-small"), ("eye_detect_enabled", False),

@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
 from PIL import Image
+from reviewer_helpers import confirmed_reviewer_box
 from services import detection_store, photo_ingest, stage_counts, subject_masks, workspace_folders
 from subjects import analyze_photo, payload, select_primary
 
@@ -145,7 +146,7 @@ def test_unanalyzed_choice_does_not_inherit_previous_subject_score(db, subject_p
 def test_offline_source_does_not_poison_analysis_cache(db, subject_photo):
     photo_id, ids, path = subject_photo
     path.unlink()
-    with pytest.raises(OSError):
+    with pytest.raises(ValueError, match='reconnect the original'):
         analyze_photo(db, photo_id, path)
     assert all(s['analysis'] is None for s in payload(db, photo_id)['subjects'])
 
@@ -452,7 +453,7 @@ def test_detectorless_cached_run_clears_ineligible_primary(db, subject_photo, mo
 
 
 def test_reviewer_region_keeps_fallback_separate_and_retries_only_that_box(db, subject_photo):
-    from subjects import select_reviewer_box
+    from reviewer_helpers import confirmed_reviewer_box as select_reviewer_box
     photo_id, ids, path = subject_photo
     analyze_photo(db, photo_id, path)
     fallback = detection_store.write_detection_batch(db, photo_id, 'full-image', [
@@ -484,7 +485,7 @@ def test_reviewer_region_keeps_fallback_separate_and_retries_only_that_box(db, s
     dict(x=0, y=0, w=0, h=.1), dict(x=-.1, y=0, w=.2, h=.1),
     dict(x=10**400, y=0, w=.1, h=.1), dict(x=0, y=0, w=-(10**400), h=.1)])
 def test_invalid_reviewer_box_preserves_previous_analysis(db, subject_photo, box):
-    from subjects import select_reviewer_box
+    from reviewer_helpers import confirmed_reviewer_box as select_reviewer_box
     photo_id, ids, path = subject_photo
     analyze_photo(db, photo_id, path)
     before = payload(db, photo_id)
@@ -498,11 +499,11 @@ def test_invalid_reviewer_box_preserves_previous_analysis(db, subject_photo, box
 def test_replaced_reviewer_box_rejects_inflight_analysis(db, subject_photo, monkeypatch, replacement_x, scoped):
     import subjects
     photo_id, ids, path = subject_photo
-    chosen = subjects.select_reviewer_box(db, photo_id, dict(x=.1, y=.1, w=.1, h=.1))
+    chosen = confirmed_reviewer_box(db, photo_id, dict(x=.1, y=.1, w=.1, h=.1))
     original = subjects.analyze_image
     def replace(image, detections):
         results = original(image, detections)
-        replacement = subjects.select_reviewer_box(db, photo_id, dict(x=replacement_x, y=.1, w=.1, h=.1))
+        replacement = confirmed_reviewer_box(db, photo_id, dict(x=replacement_x, y=.1, w=.1, h=.1))
         if replacement_x == .10001:
             assert replacement == chosen
         return results
@@ -548,7 +549,7 @@ def test_reviewer_box_api_validates_scope_and_subject(app_and_db):
 @pytest.mark.parametrize('source_changed', [False, True])
 def test_resaving_reviewer_box_invalidates_only_its_cached_measurements(
         db, subject_photo, coordinate_delta, source_changed):
-    from subjects import select_reviewer_box
+    from reviewer_helpers import confirmed_reviewer_box as select_reviewer_box
     photo_id, ids, path = subject_photo
     analyze_photo(db, photo_id, path)
     sibling = dict(db.subjects.analysis(ids[0]))
@@ -638,7 +639,7 @@ def test_classification_publication_blocks_reviewer_redraw(app_and_db):
 
 @pytest.mark.parametrize('replacement_x', [.10001, .6])
 def test_reviewer_redraw_invalidates_classifier_embeddings(db, subject_photo, replacement_x):
-    from subjects import select_reviewer_box
+    from reviewer_helpers import confirmed_reviewer_box as select_reviewer_box
     pid, automatic_ids, _ = subject_photo
     chosen = select_reviewer_box(db, pid, dict(x=.1, y=.1, w=.2, h=.2))
     with db.transaction():
@@ -656,7 +657,7 @@ def test_reviewer_redraw_invalidates_classifier_embeddings(db, subject_photo, re
 def test_cached_only_reviewer_results_reject_redraw(db, subject_photo, monkeypatch, replacement_x):
     from classify_job import cached_only
     from classify_job.store_predictions import _store_grouped_predictions
-    from subjects import select_reviewer_box
+    from reviewer_helpers import confirmed_reviewer_box as select_reviewer_box
     pid, _, _ = subject_photo
     chosen = select_reviewer_box(db, pid, dict(x=.1, y=.1, w=.2, h=.2))
     db.predictions.add(chosen, 'Robin', .8, 'BioCLIP')

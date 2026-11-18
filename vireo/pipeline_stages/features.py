@@ -263,6 +263,7 @@ class _MaskPhoto:
     existing: dict[str, Any] | None = None
     mask_file_stage: _MaskFileStage | None = None
     detector_runtime: str | None = None
+    frame_id: str | None = None
 
 
 class _MaskPass:
@@ -353,6 +354,7 @@ class _MaskPass:
             generate_mask,
             render_proxy,
             require_aligned_detector_prompt,
+            require_original_reviewer_frame,
             save_mask,
         )
         from quality import (
@@ -371,6 +373,7 @@ class _MaskPass:
         self.generate_mask = generate_mask
         self.render_proxy = render_proxy
         self.require_aligned_detector_prompt = require_aligned_detector_prompt
+        self.require_original_reviewer_frame = require_original_reviewer_frame
         self.save_mask = save_mask
         self.compute_all_quality_features = compute_all_quality_features
         self.measure_subject_detail = measure_subject_detail
@@ -1131,6 +1134,7 @@ class _MaskPass:
         )
         if existing is None:
             return False
+        self.require_original_reviewer_frame(item.image_path, item.detector_runtime)
         cached_prompt = (
             existing["prompt_x"], existing["prompt_y"],
             existing["prompt_w"], existing["prompt_h"],
@@ -1214,6 +1218,7 @@ class _MaskPass:
 
     def _generate_aligned_mask(self, item: _MaskPhoto, proxy: Image.Image) -> np.ndarray | None:
         with self._timed("segment"):
+            item.frame_id = getattr(proxy, "info", {}).get("vireo_subject_frame_id")
             self.require_aligned_detector_prompt(proxy, item.detector_runtime)
             return self.generate_mask(proxy, item.det_box, variant=self.sam2_variant)
 
@@ -1291,8 +1296,10 @@ class _MaskPass:
         does not report "completed" with planned work left behind.
         """
         with self._timed("detail"):
+            proof = {"expected_frame_id": item.frame_id} if item.frame_id is not None else {}
             measured = self.measure_subject_detail(
                 mask, source_path=item.image_path, frame_size=self.frame_size(item.photo),
+                **proof,
             )
         if not measured:
             self.detail_unreadable += 1
@@ -1323,8 +1330,13 @@ class _MaskPass:
             self.detail_unreadable += 1
             return False
         with self._timed("detail"):
+            from detection_id import REVIEWER_FRAME_PREFIX
+
+            proof = ({"expected_frame_id": item.detector_runtime.removeprefix(REVIEWER_FRAME_PREFIX)}
+                     if item.detector_runtime and item.detector_runtime.startswith(REVIEWER_FRAME_PREFIX) else {})
             measured = self.measure_cached_subject_detail(
                 existing["path"], item.image_path, self.frame_size(item.photo),
+                **proof,
             )
         if measured is self.mask_cache_invalid:
             dropped = self.thread_db.masks_features.drop_cache_entry(

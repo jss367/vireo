@@ -32,7 +32,9 @@ RAW strategy:
 """
 
 import contextlib
+import hashlib
 import io
+import json
 import logging
 import os
 import sys
@@ -707,6 +709,7 @@ def load_image(file_path, max_size: int | None = 1024, raw_decode=RAW_DECODE_JPE
         raise ValueError(f"raw_decode must be one of: {', '.join(sorted(_RAW_DECODE_MODES))}")
 
     try:
+        aligned_state = aligned_source_state(path) if raw_decode == RAW_DECODE_ALIGNED else None
         if ext in RAW_EXTENSIONS:
             img = (
                 _load_linear_cached(path, max_size)
@@ -737,6 +740,8 @@ def load_image(file_path, max_size: int | None = 1024, raw_decode=RAW_DECODE_JPE
         if img is None:
             return None
 
+        if aligned_state is not None:
+            img.info["vireo_subject_frame_id"] = aligned_frame_identity(path, img, aligned_state)
         if max_size and max_size > 0 and max(img.size) > max_size:
             img.thumbnail((max_size, max_size), Image.LANCZOS)
 
@@ -744,6 +749,20 @@ def load_image(file_path, max_size: int | None = 1024, raw_decode=RAW_DECODE_JPE
     except Exception as e:  # broad: decoders raise a wide set on bad files; callers treat None as unreadable
         log.warning("Failed to load image: %s — %s", file_path, e, exc_info=True)
         return None
+
+
+def aligned_source_state(path):
+    """Bind a frame to the original file generation, without exposing its path."""
+    stat = os.stat(path)
+    return (os.path.realpath(path), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+
+
+def aligned_frame_identity(path, image, before):
+    """Identify the unscaled actual rendition, independent of preview size."""
+    if aligned_source_state(path) != before:
+        raise OSError("Original changed while its subject frame was decoded")
+    basis = image.info.get("vireo_aligned_rendition", "image")
+    return hashlib.sha256(json.dumps([1, RAW_DECODE_ALIGNED, before, basis, image.size]).encode()).hexdigest()
 
 
 def _load_raw_with_retry(path, max_size, raw_decode=RAW_DECODE_JPEG_FIRST):
@@ -805,10 +824,8 @@ def _photo_field(photo, key):
 
 
 def subject_box_image_path(photo, vireo_dir, folders):
-    """RAW box coordinates refer to the original, even when a local JPEG exists."""
-    if Path(photo["filename"]).suffix.lower() in RAW_EXTENSIONS:
-        return os.path.join(folders.get(photo["folder_id"], ""), photo["filename"])
-    return get_canonical_image_path(photo, vireo_dir, folders)
+    """Coordinate analysis uses the original; browsing may still use working copies."""
+    return os.path.join(folders.get(photo["folder_id"], ""), photo["filename"])
 
 
 def get_canonical_image_path(photo, vireo_dir, folders):
@@ -1213,6 +1230,7 @@ def _load_raw(path, max_size, raw_decode=RAW_DECODE_JPEG_FIRST):
         )
 
         if _embedded_preview_suffices(raw, embedded, max_size, raw_decode):
+            embedded.info["vireo_aligned_rendition"] = "embedded-preview"
             return embedded
 
         # Otherwise demosaic the sensor data, falling back to the embedded
@@ -1225,6 +1243,7 @@ def _load_raw(path, max_size, raw_decode=RAW_DECODE_JPEG_FIRST):
                 None if raw_decode in (RAW_DECODE_CAMERA_RENDERED, RAW_DECODE_ALIGNED) else max_size,
                 preserve_highlights=raw_decode == RAW_DECODE_PRESERVE_HIGHLIGHTS,
             )
+            image.info["vireo_aligned_rendition"] = "sensor"
             if raw_decode in (RAW_DECODE_CAMERA_RENDERED, RAW_DECODE_ALIGNED) and embedded is not None:
                 # Legacy JPEG-first masks at or below this size used the rejected preview.
                 image.info["vireo_rejected_preview_edge"] = max(embedded.size)

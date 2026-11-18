@@ -183,6 +183,11 @@ class MasksFeaturesRepository:
         """Delete a mask file, only inside the masks directory."""
         safe_remove_mask_file(self.masks_dir, path)
 
+    def retire_prompt_masks(self, photo_id: int, detector_model: str) -> None:
+        """Retire derived cache rows while preserving immutable mask files/history."""
+        self.conn.execute("DELETE FROM photo_masks WHERE photo_id=? AND detector_model=?",
+                          (photo_id, detector_model))
+
     def drop_cache_entry(
         self, photo_id: int, variant: str, path: str | None,
     ) -> bool:

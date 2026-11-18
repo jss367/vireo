@@ -460,7 +460,7 @@ def load_detail_source(source_path, needed, frame_size=None):
     return load_image(source_path, max_size=None if whole else needed, raw_decode=RAW_DECODE_ALIGNED)
 
 
-def measure_subject_detail(mask, *, source_path, frame_size=None):
+def measure_subject_detail(mask, *, source_path, frame_size=None, expected_frame_id=None):
     """Subject detail for ``mask``, read from ``source_path`` through ``load_detail_source``.
 
     The source is always read again, even when the caller already holds a
@@ -480,6 +480,8 @@ def measure_subject_detail(mask, *, source_path, frame_size=None):
     if image is None:
         return {}
     try:
+        if expected_frame_id is not None and image.info.get("vireo_subject_frame_id") != expected_frame_id:
+            return {}
         return compute_subject_detail(image, mask, frame_size=frame_size)
     finally:
         image.close()
@@ -497,7 +499,7 @@ def saved_mask_matches_frame(mask_size, mask_frame, image, *, prompt_frame=None)
     return mask_frame == "camera_rendered" or max(w, h) > image.info.get("vireo_rejected_preview_edge", 0)
 
 
-def measure_cached_subject_detail(mask_path, source_path, frame_size=None):
+def measure_cached_subject_detail(mask_path, source_path, frame_size=None, *, expected_frame_id=None):
     """Subject detail for a saved mask PNG whose row predates the measurement.
 
     Reads the mask from disk and measures it as ``measure_subject_detail``
@@ -530,6 +532,8 @@ def measure_cached_subject_detail(mask_path, source_path, frame_size=None):
     if image is None:
         return None
     with image:
+        if expected_frame_id is not None and image.info.get("vireo_subject_frame_id") != expected_frame_id:
+            return None
         if not saved_mask_matches_frame(mask.shape[::-1], mask_frame, image, prompt_frame=prompt_frame):
             return MASK_CACHE_INVALID
         return compute_subject_detail(image, mask, frame_size=frame_size)
