@@ -5,19 +5,15 @@
 import { state } from './state.js';
 
 // True when a rejection needs a reload rather than just a local prune: an
-// active yes/no curation filter treats the rejected photo's highlight or
-// representative role as an active bucket signal, and the eligible-only
-// query on the server would drop it. If we only prune locally the bucket
-// keeps its stale has_highlight_selection / has_species_representative
-// state and stays visible under the wrong filter.
+// active yes/no highlight filter treats the rejected photo's highlight as an
+// active bucket signal, and the eligible-only query on the server would drop
+// it. If we only prune locally the bucket keeps its stale
+// has_highlight_selection state and stays visible under the wrong filter.
 /** @param {HighlightsPhoto | null | undefined} photo */
 export function curationFilterAffectedByReject(photo) {
   if (!photo) return false;
   var highlightFilter = /** @type {HTMLSelectElement} */ (document.getElementById('highlightSelectionFilter')).value || 'all';
-  var repFilter = /** @type {HTMLSelectElement} */ (document.getElementById('representativeFilter')).value || 'all';
-  if (highlightFilter !== 'all' && photo.is_highlighted) return true;
-  if (repFilter !== 'all' && photo.is_species_representative) return true;
-  return false;
+  return highlightFilter !== 'all' && !!photo.is_highlighted;
 }
 
 // Drop a photo from the in-memory model after it is rejected, so the grid
@@ -41,8 +37,8 @@ export function removeRejectedPhotoFromModel(photoId) {
       if (typeof section.loaded_count === 'number') {
         section.loaded_count = Math.max(0, section.loaded_count - 1);
       }
-      // A tie decision names the row's chosen contenders; pruning one of them
-      // leaves "N representatives here" false until the next reload, so clear
+      // A tie decision names the row's tied highlights; pruning one of them
+      // leaves "N highlights here" false until the next reload, so clear
       // it and let bucketDecision skip the line in the meantime.
       var decision = /** @type {HighlightsBucket} */ (section).best_decision;
       if (decision && Array.isArray(decision.tied_photo_ids)

@@ -311,7 +311,7 @@ function renderPhotoCard(p, encIdx, burstIdx, speciesConflict) {
   html += '<img src="' + escapeAttr(thumbUrl) + '" loading="lazy" alt="" onclick="openInspect(' + p.id + ')">';
   if (visibleLabel) html += '<span class="photo-label ' + visibleLabelClass + '">' + visibleLabel + '</span>';
   if (p.rarity_protected) html += '<span class="photo-rarity">protected</span>';
-  if (p.is_species_representative) html += '<span class="photo-representative">Representative</span>';
+  if (p.is_species_representative) html += '<span class="photo-representative">Top highlight</span>';
   if (p.flag === 'flagged') html += '<span class="photo-flag-badge flag-flagged">P</span>';
   else if (p.flag === 'rejected') html += '<span class="photo-flag-badge flag-rejected">X</span>';
   if (encIdx != null && burstIdx != null) {

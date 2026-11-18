@@ -125,7 +125,7 @@ export function render() {
           '<span class="dot cat-' + cat + '"></span>' +
           escapeHtml(CATEGORY_LABELS[cat]) +
         '</span>' +
-        (p.is_species_representative ? '<span class="miss-card-representative">Representative</span>' : '') +
+        (p.is_species_representative ? '<span class="miss-card-representative">Top highlight</span>' : '') +
         '<button class="miss-card-unflag" ' +
           'title="Unflag as miss (U)" ' +
           'data-testid="miss-unflag-' + cat + '-' + p.id + '" ' +

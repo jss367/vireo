@@ -721,68 +721,18 @@ class WorkspaceFolderRepository:
                 [source_ws_id] + chunk,
             )
 
-    def _append_moved_highlights(
-        self, source_ws_id: int, target_ws_id: int, placeholders: str,
-        chunk: list[int],
-    ) -> int:
-        """Append one chunk's source highlights to the target buckets."""
-        moved = 0
-        # Append moved highlights after the target workspace's
-        # existing rows per species. Preserving the source `rank`
-        # verbatim would collide with the target's ranks (rank is
-        # not part of the PK), corrupting the curated order the
-        # target uses in `ORDER BY rank, created_at, photo_id`.
-        src_highlights = self.conn.execute(
-            f"""SELECT species, photo_id, rank, created_at, updated_at
-                        FROM species_highlights
-                        WHERE workspace_id = ?
-                          AND photo_id IN (
-                              SELECT id FROM photos WHERE folder_id IN ({placeholders})
-                          )
-                        ORDER BY species, rank, created_at, photo_id""",
-            [source_ws_id] + chunk,
-        ).fetchall()
-        by_species = {}
-        for src_row in src_highlights:
-            by_species.setdefault(src_row["species"], []).append(src_row)
-        for sp, sp_rows in by_species.items():
-            next_rank = int(self.conn.execute(
-                """SELECT COALESCE(MAX(rank), 0) AS max_rank
-                           FROM species_highlights
-                           WHERE workspace_id = ? AND species = ?""",
-                (target_ws_id, sp),
-            ).fetchone()["max_rank"] or 0) + 1
-            for src_row in sp_rows:
-                cur = self.conn.execute(
-                    """INSERT OR IGNORE INTO species_highlights
-                                   (workspace_id, species, photo_id, rank,
-                                    created_at, updated_at)
-                               VALUES (?, ?, ?, ?, ?, ?)""",
-                    (
-                        target_ws_id,
-                        sp,
-                        src_row["photo_id"],
-                        next_rank,
-                        src_row["created_at"],
-                        src_row["updated_at"],
-                    ),
-                )
-                if cur.rowcount:
-                    moved += 1
-                    next_rank += 1
-        return moved
-
-    def _move_preferences_and_highlights(
+    def _move_preferences(
         self, source_ws_id: int, target_ws_id: int,
         moved_folder_ids: Sequence[int],
-    ) -> tuple[int, int]:
-        """Carry representative preferences and highlights to the target."""
-        # Move manually selected Life List / Highlights representative
-        # photos with the folder. If the target already has a preference
-        # for the same (purpose, species), keep the target value and drop
-        # the now-stale source row.
+    ) -> int:
+        """Carry the workspace's preference rows to the target.
+
+        Highlights need no move: they are catalog-wide, so the target
+        workspace sees them as soon as it shows the folder.
+        """
+        # If the target already has a preference for the same (purpose,
+        # species), keep the target value and drop the now-stale source row.
         photo_preferences_moved = 0
-        species_highlights_moved = 0
         for chunk in self._chunks(moved_folder_ids):
             placeholders = ",".join("?" for _ in chunk)
             cur = self.conn.execute(
@@ -807,19 +757,7 @@ class WorkspaceFolderRepository:
                           )""",
                 [source_ws_id] + chunk,
             )
-
-            species_highlights_moved += self._append_moved_highlights(
-                source_ws_id, target_ws_id, placeholders, chunk,
-            )
-            self.conn.execute(
-                f"""DELETE FROM species_highlights
-                        WHERE workspace_id = ?
-                          AND photo_id IN (
-                              SELECT id FROM photos WHERE folder_id IN ({placeholders})
-                          )""",
-                [source_ws_id] + chunk,
-            )
-        return photo_preferences_moved, species_highlights_moved
+        return photo_preferences_moved
 
     def _move_folder_membership(
         self, source_ws_id: int, target_ws_id: int, folder_ids: Iterable[int],
@@ -859,28 +797,27 @@ class WorkspaceFolderRepository:
     def move_folders(
         self, source_ws_id: int, target_ws_id: int, folder_ids: Iterable[int],
         moved_folder_ids: Sequence[int],
-    ) -> tuple[int, int, int]:
+    ) -> tuple[int, int]:
         """Move ``moved_folder_ids`` and their workspace-scoped rows (no commit).
 
         ``folder_ids`` are the user-selected folders (they become roots in
         the target); ``moved_folder_ids`` are those plus their linked
         descendants. The caller's unit of work makes the move atomic. Returns
-        ``(pending_changes_moved, photo_preferences_moved,
-        species_highlights_moved)``.
+        ``(pending_changes_moved, photo_preferences_moved)``.
         """
         pending_changes_moved = self._move_pending_changes(
             source_ws_id, target_ws_id, moved_folder_ids,
         )
         self._move_prediction_reviews(source_ws_id, target_ws_id, moved_folder_ids)
         self._move_color_labels(source_ws_id, target_ws_id, moved_folder_ids)
-        photo_preferences_moved, species_highlights_moved = (
-            self._move_preferences_and_highlights(source_ws_id, target_ws_id, moved_folder_ids)
+        photo_preferences_moved = self._move_preferences(
+            source_ws_id, target_ws_id, moved_folder_ids,
         )
         self._move_folder_membership(
             source_ws_id, target_ws_id, folder_ids, moved_folder_ids,
         )
 
-        return pending_changes_moved, photo_preferences_moved, species_highlights_moved
+        return pending_changes_moved, photo_preferences_moved
 
     # -- merge helpers: root ancestry and pruning --------------------------------
 

@@ -1,9 +1,9 @@
 """Behavior pins for the species-curation domain of ``Database``.
 
-Species curation covers the Highlights ordering (``species_highlights``),
-the global representative photos (``species_representatives``), the
-per-workspace photo preferences (``photo_preferences``), the Life List and
-taxonomy-explorer reads, and the two one-shot legacy backfills.
+Species curation covers a species' highlights (``species_representatives``,
+catalog-wide, ordered by the comparisons ``services.species_choices``
+records), the per-workspace photo preferences (``photo_preferences``), the
+Life List and taxonomy-explorer reads, and the two one-shot legacy backfills.
 
 The tests go through ``db.species_curation`` (the domain accessor) and the
 two renames that stay on the ``Database`` façade. They pin return shapes and
@@ -26,7 +26,14 @@ import pytest
 from db import Database
 from repositories.keyword_taxa import KeywordTaxonRepository
 from repositories.species_curation import SpeciesCurationRepository
-from services import keyword_tagging, photo_ingest, review_decisions, workspace_folders
+from services import (
+    keyword_tagging,
+    photo_ingest,
+    review_decisions,
+    species_choices,
+    workspace_folders,
+)
+from species_preference import Preferences
 
 
 def _visible(db, sql, params=()):
@@ -39,18 +46,6 @@ def _trace(db):
     statements = []
     db.conn.set_trace_callback(statements.append)
     return statements
-
-
-def _highlights(db, ws=None):
-    ws = db._active_workspace_id if ws is None else ws
-    return [
-        tuple(r)
-        for r in db.conn.execute(
-            "SELECT species, photo_id, rank FROM species_highlights "
-            "WHERE workspace_id = ? ORDER BY species, rank, photo_id",
-            (ws,),
-        ).fetchall()
-    ]
 
 
 def _reps(db):
@@ -768,113 +763,138 @@ def test_clear_species_representative_leaves_commit_to_caller(db, cur):
 # -- species highlights --------------------------------------------------------------------
 
 
-def test_add_species_highlight_appends_and_commits_with_the_callers_unit(db, cur):
+def _tag_robins(db, cur, *names):
+    """Tag more of the fixture's photos American Robin, so each can be one of
+    its highlights (a highlight counts only while its photo shows the species)."""
+    for name in names:
+        keyword_tagging.tag_photo(db, cur["p"][name], cur["k"]["robin"])
+    db.commit()
+
+
+def _ranked(db, species="American Robin"):
+    """The species' highlights the workspace can see, best first."""
+    return species_choices.ranked_in_scope(db, species)
+
+
+def test_add_highlight_appends_and_commits_with_the_callers_unit(db, cur):
     p = cur["p"]
     with db.transaction():
-        assert db.species_curation.add_highlight("American Robin", p["robin1"]) == 1
-        assert db.species_curation.add_highlight("American Robin", p["robin2"]) == 2
-        assert db.species_curation.add_highlight("Northern Cardinal", p["card1"]) == 1
+        first = species_choices.add_highlight(db, "American Robin", p["robin1"])
+        second = species_choices.add_highlight(db, "American Robin", p["robin2"])
+        other = species_choices.add_highlight(db, "Northern Cardinal", p["card1"])
+    assert (first["added"], first["after"]) == (True, [])
+    assert (second["added"], second["after"]) == (True, [p["robin1"]])
+    assert (other["added"], other["after"]) == (True, [])
     assert not db.conn.in_transaction
     assert _visible(
         db,
-        "SELECT species, photo_id, rank FROM species_highlights "
-        "ORDER BY species, rank",
+        "SELECT species, photo_id FROM species_representatives "
+        "ORDER BY species, selected_order",
     ) == [
-        ("American Robin", p["robin1"], 1),
-        ("American Robin", p["robin2"], 2),
-        ("Northern Cardinal", p["card1"], 1),
+        ("American Robin", p["robin1"]),
+        ("American Robin", p["robin2"]),
+        ("Northern Cardinal", p["card1"]),
     ]
+    # The second highlight was recorded behind the first, so the order holds
+    # although the newest selection breaks ties.
+    assert _ranked(db) == [p["robin1"], p["robin2"]]
+    assert _ranked(db, "Northern Cardinal") == [p["card1"]]
 
 
-def test_add_species_highlight_existing_row_keeps_rank(db, cur):
+def test_add_highlight_leaves_an_existing_highlight_where_it_is(db, cur):
     p = cur["p"]
-    db.species_curation.add_highlight("American Robin", p["robin1"])
-    db.species_curation.add_highlight("American Robin", p["robin2"])
-    db.conn.execute("UPDATE species_highlights SET updated_at = '2000-01-01'")
-    db.conn.commit()
     with db.transaction():
-        assert db.species_curation.add_highlight("American Robin", p["robin2"]) == 2
+        species_choices.add_highlight(db, "American Robin", p["robin1"])
+        species_choices.add_highlight(db, "American Robin", p["robin2"])
+    before = _reps(db)
+    with db.transaction():
+        again = species_choices.add_highlight(db, "American Robin", p["robin1"])
     assert not db.conn.in_transaction
-    assert _visible(
-        db,
-        "SELECT photo_id FROM species_highlights WHERE updated_at != '2000-01-01'",
-    ) == [(p["robin2"],)]
-    assert db.species_curation.add_highlight("American Robin", p["robin1"]) == 1
+    assert (again["added"], again["after"]) == (False, [])
+    # Neither its selection order nor the comparisons changed.
+    assert _reps(db) == before
+    assert _visible(db, "SELECT COUNT(*) FROM species_choices") == [(2,)]
+    assert _ranked(db) == [p["robin1"], p["robin2"]]
+
+
+def test_add_highlight_leaves_commit_to_caller(db, cur):
+    result = species_choices.add_highlight(db, "American Robin", cur["p"]["robin1"])
+    assert result["added"] is True
     assert db.conn.in_transaction
-    db.conn.rollback()
+    assert _visible(db, "SELECT COUNT(*) FROM species_representatives") == [(0,)]
+    assert _visible(db, "SELECT COUNT(*) FROM species_choices") == [(0,)]
 
 
-def test_add_species_highlight_leaves_commit_to_caller(db, cur):
-    assert db.species_curation.add_highlight("American Robin", cur["p"]["robin1"]) == 1
-    assert db.conn.in_transaction
-    assert _visible(db, "SELECT COUNT(*) FROM species_highlights") == [(0,)]
-
-
-def test_add_species_highlight_canonicalizes_through_facade(db, cur, monkeypatch):
+def test_add_highlight_canonicalizes_through_facade(db, cur, monkeypatch):
     names = []
     monkeypatch.setattr(KeywordTaxonRepository, "resolve_species_display",
                         lambda _repo, name: names.append(name) or "Canonical")
-    db.species_curation.add_highlight("raw", cur["p"]["robin1"])
-    assert names == ["raw"]
-    assert _highlights(db) == [("Canonical", cur["p"]["robin1"], 1)]
+    result = species_choices.add_highlight(db, "raw", cur["p"]["robin1"])
+    assert names[0] == "raw"
+    assert result["species"] == "Canonical"
+    assert _reps(db) == [("Canonical", cur["p"]["robin1"], 1)]
+    assert [tuple(r) for r in db.conn.execute(
+        "SELECT species, photo_id FROM species_choices"
+    )] == [("Canonical", cur["p"]["robin1"])]
 
 
-def test_species_highlights_read_shapes(db, cur):
+def test_highlights_read_shapes(db, cur):
     p = cur["p"]
     other = db.create_workspace("Other")
     db.commit()
-    db.species_curation.add_highlight("American Robin", p["robin2"])
-    db.species_curation.add_highlight("American Robin", p["robin1"])
-    db.species_curation.add_highlight("Northern Cardinal", p["card1"])
-    db.set_active_workspace(other)
-    db.species_curation.add_highlight("American Robin", p["card2"])
-    db.set_active_workspace(cur["ws"])
+    db.set_species_representative("American Robin", p["robin2"])
+    db.set_species_representative("American Robin", p["robin1"])
+    db.set_species_representative("Northern Cardinal", p["card1"])
+    # A highlight is catalog-wide, but a workspace reads only the ones on
+    # photos it shows: ``outside`` sits in a folder this workspace lacks.
+    db.set_species_representative("Northern Cardinal", p["outside"])
     assert db.species_curation.get_highlights() == {
-        "American Robin": {p["robin2"]: 1, p["robin1"]: 2},
-        "Northern Cardinal": {p["card1"]: 1},
+        "American Robin": [p["robin1"], p["robin2"]],
+        "Northern Cardinal": [p["card1"]],
     }
-    assert list(db.species_curation.get_highlights()["American Robin"]) == [
-        p["robin2"], p["robin1"],
-    ]
     assert db.species_curation.get_highlights(species="Northern Cardinal") == {
-        "Northern Cardinal": {p["card1"]: 1},
+        "Northern Cardinal": [p["card1"]],
     }
     assert db.species_curation.get_highlights(species="Nope") == {}
+    # A workspace that shows none of the photos reads none of the highlights.
+    db.set_active_workspace(other)
+    assert db.species_curation.get_highlights() == {}
+    db.set_active_workspace(cur["ws"])
 
 
-def test_species_highlights_eligible_only(db, cur):
+def _raw_highlight(db, species, photo_id):
+    """Store a highlight row under ``species`` exactly as spelled."""
+    db.conn.execute(
+        "INSERT INTO species_representatives (species, photo_id, selected_order) "
+        "VALUES (?, ?, ?)",
+        (species, photo_id, db.species_curation.next_representative_order()),
+    )
+
+
+def test_highlights_eligible_only(db, cur):
     p = cur["p"]
-    ws = cur["ws"]
     # Accepted keyword matches; rejected photo and wrong-species photo drop.
-    db.species_curation.add_highlight("American Robin", p["robin1"])
-    db.species_curation.add_highlight("American Robin", p["card1"])
-    db.species_curation.add_highlight("Northern Cardinal", p["rejected"])
-    db.species_curation.add_highlight("Northern Cardinal", p["card1"])
+    db.set_species_representative("American Robin", p["robin1"])
+    db.set_species_representative("American Robin", p["card1"])
+    db.set_species_representative("Northern Cardinal", p["rejected"])
+    db.set_species_representative("Northern Cardinal", p["card1"])
     # Prediction fallback for a photo without any species-rank keyword,
     # compared NOCASE against the canonical spelling.
     _detect(db, p["card2"], [("Blue Jay", 0.9), ("Gray Jay", 0.2)])
-    db.conn.execute(
-        "INSERT INTO species_highlights (workspace_id, species, photo_id, rank) "
-        "VALUES (?, 'blue jay', ?, 1)",
-        (ws, p["card2"]),
-    )
-    db.conn.execute(
-        "INSERT INTO species_highlights (workspace_id, species, photo_id, rank) "
-        "VALUES (?, 'Gray Jay', ?, 1)",
-        (ws, p["card2"]),
-    )
+    _raw_highlight(db, "blue jay", p["card2"])
+    _raw_highlight(db, "Gray Jay", p["card2"])
     # Unscored photo stays eligible via its keyword.
-    db.species_curation.add_highlight("Cougar", p["puma"])
+    db.set_species_representative("Cougar", p["puma"])
     db.conn.commit()
     assert db.species_curation.get_highlights(eligible_only=True) == {
-        "American Robin": {p["robin1"]: 1},
-        "Cougar": {p["puma"]: 1},
-        "Northern Cardinal": {p["card1"]: 2},
-        "blue jay": {p["card2"]: 1},
+        "American Robin": [p["robin1"]],
+        "Cougar": [p["puma"]],
+        "Northern Cardinal": [p["card1"]],
+        "blue jay": [p["card2"]],
     }
     assert db.species_curation.get_highlights(species="American Robin",
                                               eligible_only=True) == {
-        "American Robin": {p["robin1"]: 1},
+        "American Robin": [p["robin1"]],
     }
 
 
@@ -894,7 +914,7 @@ def _detect_subjects(db, pid, species_conf, model="m1"):
     return det_ids
 
 
-def test_species_highlights_eligible_second_bucket_of_tagged_photo(db, cur):
+def test_highlights_eligible_second_bucket_of_tagged_photo(db, cur):
     """A highlight saved from the second-species bucket of a tagged photo
     stays eligible exactly as long as the photo stays in that bucket.
 
@@ -914,11 +934,11 @@ def test_species_highlights_eligible_second_bucket_of_tagged_photo(db, cur):
     )
     # card2 (genus-only keyword) keeps a Blue Jay bucket on the page.
     _detect(db, p["card2"], [("Blue Jay", 0.9)])
-    db.species_curation.add_highlight("Blue Jay", p["card1"])
+    db.set_species_representative("Blue Jay", p["card1"])
     db.conn.commit()
     assert db.species_curation.get_highlights(
         species="Blue Jay", eligible_only=True
-    ) == {"Blue Jay": {p["card1"]: 1}}
+    ) == {"Blue Jay": [p["card1"]]}
 
     cardinal_pred = db.conn.execute(
         "SELECT id FROM predictions WHERE detection_id = ?", (cardinal_det,),
@@ -934,40 +954,33 @@ def test_species_highlights_eligible_second_bucket_of_tagged_photo(db, cur):
     assert jay["has_highlight_selection"] is False
     # The stored row is kept, so the selection returns with the subject.
     assert db.species_curation.get_highlights(species="Blue Jay") == {
-        "Blue Jay": {p["card1"]: 1},
+        "Blue Jay": [p["card1"]],
     }
 
 
-def test_species_highlights_eligible_lower_confidence_subject_bucket(db, cur):
+def test_highlights_eligible_lower_confidence_subject_bucket(db, cur):
     """A highlight saved from a lower-confidence subject's prediction
     bucket of an untagged photo survives on reload.
 
     ``collect_highlight_buckets`` places the photo in each subject's
-    bucket. Before the fix, the eligibility filter only accepted
-    ``sh.species`` equal to the photo-wide top prediction (``ORDER BY
-    pr.confidence DESC LIMIT 1``), so a highlight starred from the
-    second subject's bucket was dropped. The prediction branch now
-    iterates each detection's top non-rejected prediction.
+    bucket, so the eligibility filter accepts a highlight whose species is
+    the top non-rejected prediction of any of the photo's detections, not
+    only the photo-wide top prediction.
     """
     p = cur["p"]
-    ws = cur["ws"]
     # Two separate detections on card2 (its genus-rank Turdus keyword
     # doesn't satisfy the species accepted branch); Blue Jay is the
     # photo-wide top, Gray Jay is a second subject's top.
     _detect(db, p["card2"], [("Blue Jay", 0.9)])
     _detect(db, p["card2"], [("Gray Jay", 0.5)], fingerprint="fp2")
-    db.conn.execute(
-        "INSERT INTO species_highlights (workspace_id, species, photo_id, rank) "
-        "VALUES (?, 'Gray Jay', ?, 1)",
-        (ws, p["card2"]),
-    )
+    _raw_highlight(db, "Gray Jay", p["card2"])
     db.conn.commit()
     assert db.species_curation.get_highlights(
         species="Gray Jay", eligible_only=True
-    ) == {"Gray Jay": {p["card2"]: 1}}
+    ) == {"Gray Jay": [p["card2"]]}
 
 
-def test_species_highlights_eligible_rejected_sibling_prediction_dropped(
+def test_highlights_eligible_rejected_sibling_prediction_dropped(
     db, cur,
 ):
     """A highlight saved against a prediction species that was then
@@ -979,15 +992,11 @@ def test_species_highlights_eligible_rejected_sibling_prediction_dropped(
     did = _detect(db, p["card2"], [("Blue Jay", 0.9), ("Gray Jay", 0.5)])
     # Blue Jay highlight is eligible: it's the detection's top non-rejected
     # prediction.
-    db.conn.execute(
-        "INSERT INTO species_highlights (workspace_id, species, photo_id, rank) "
-        "VALUES (?, 'Blue Jay', ?, 1)",
-        (ws, p["card2"]),
-    )
+    _raw_highlight(db, "Blue Jay", p["card2"])
     db.conn.commit()
     assert p["card2"] in db.species_curation.get_highlights(
         species="Blue Jay", eligible_only=True
-    ).get("Blue Jay", {})
+    ).get("Blue Jay", [])
     # Reject the Blue Jay prediction; Gray Jay (0.5) becomes the top
     # non-rejected prediction for this detection. The Blue Jay highlight
     # loses eligibility because no detection's top prediction now
@@ -1007,33 +1016,28 @@ def test_species_highlights_eligible_rejected_sibling_prediction_dropped(
     ) == {}
 
 
-def test_species_highlights_eligible_prediction_root_canonicalization(db, cur):
+def test_highlights_eligible_prediction_root_canonicalization(db, cur):
     p = cur["p"]
-    ws = cur["ws"]
     # A hierarchy leaf with a unique linked taxon canonicalizes to the root.
     leaf = _leaf(db, "Robin Leaf", cur["k"]["turdus"])
     _link(db, leaf, 4)
     db.conn.commit()
     _detect(db, p["plain"], [("robin leaf", 0.9)])
     db.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (p["plain"],))
-    db.conn.execute(
-        "INSERT INTO species_highlights (workspace_id, species, photo_id, rank) "
-        "VALUES (?, 'American Robin', ?, 1)",
-        (ws, p["plain"]),
-    )
+    _raw_highlight(db, "American Robin", p["plain"])
     db.conn.commit()
     assert db.species_curation.get_highlights(eligible_only=True) == {
-        "American Robin": {p["plain"]: 1},
+        "American Robin": [p["plain"]],
     }
 
 
-def test_species_highlights_canonicalize_species_filter(db, cur, monkeypatch):
-    db.species_curation.add_highlight("American Robin", cur["p"]["robin1"])
+def test_highlights_canonicalize_species_filter(db, cur, monkeypatch):
+    db.set_species_representative("American Robin", cur["p"]["robin1"])
     names = []
     monkeypatch.setattr(KeywordTaxonRepository, "resolve_species_display",
                         lambda _repo, name: names.append(name) or "American Robin")
     assert db.species_curation.get_highlights(species="american robin") == {
-        "American Robin": {cur["p"]["robin1"]: 1},
+        "American Robin": [cur["p"]["robin1"]],
     }
     assert names == ["american robin"]
     names.clear()
@@ -1041,91 +1045,130 @@ def test_species_highlights_canonicalize_species_filter(db, cur, monkeypatch):
     assert names == []
 
 
-def test_promote_species_highlight(db, cur):
+def test_choose_best_puts_a_photo_ahead_of_the_other_highlights(db, cur):
     p = cur["p"]
-    for pid in (p["robin1"], p["robin2"], p["card1"]):
-        db.species_curation.add_highlight("American Robin", pid)
+    _tag_robins(db, cur, "card1", "puma")
     with db.transaction():
-        assert db.species_curation.promote_highlight("American Robin", p["card1"]) == 1
+        for name in ("robin1", "robin2", "card1"):
+            species_choices.add_highlight(db, "American Robin", p[name])
+    assert _ranked(db) == [p["robin1"], p["robin2"], p["card1"]]
+    with db.transaction():
+        choice = species_choices.choose_best(db, "American Robin", p["card1"])
     assert not db.conn.in_transaction
+    assert set(choice["over"]) == {p["robin1"], p["robin2"]}
+    assert _visible(db, "SELECT COUNT(*) FROM species_choices") == [(4,)]
+    assert _ranked(db) == [p["card1"], p["robin1"], p["robin2"]]
+    # A photo that is not a highlight yet becomes the first one.
+    species_choices.choose_best(db, "American Robin", p["puma"])
+    assert _ranked(db) == [p["puma"], p["card1"], p["robin1"], p["robin2"]]
+
+
+def test_choose_best_leaves_commit_to_caller(db, cur):
+    with db.transaction():
+        species_choices.add_highlight(db, "American Robin", cur["p"]["robin1"])
+    choice = species_choices.choose_best(db, "American Robin", cur["p"]["robin2"])
+    assert choice["over"] == [cur["p"]["robin1"]]
+    assert db.conn.in_transaction
+    assert _visible(db, "SELECT COUNT(*) FROM species_representatives") == [(1,)]
+
+
+def test_remove_highlight_keeps_the_order_of_the_rest(db, cur):
+    p = cur["p"]
+    _tag_robins(db, cur, "card1")
+    # robin1 over robin2 over card1: robin1 stands ahead of card1 only
+    # through robin2.
+    with db.transaction():
+        species_choices.choose_best(db, "American Robin", p["robin2"], over=[p["card1"]])
+        species_choices.choose_best(db, "American Robin", p["robin1"], over=[p["robin2"]])
+        db.set_species_representative("American Robin", p["card1"])
+    assert _ranked(db) == [p["robin1"], p["robin2"], p["card1"]]
+    with db.transaction():
+        assert db.species_curation.remove_highlight("American Robin", p["robin2"]) == 1
+    assert not db.conn.in_transaction
+    assert _visible(
+        db, "SELECT photo_id FROM species_representatives ORDER BY photo_id"
+    ) == sorted([(p["robin1"],), (p["card1"],)])
+    # Nothing recorded for the species names the removed photo any more, so
+    # highlighting it again revives no comparison.
     assert _visible(
         db,
-        "SELECT photo_id, rank FROM species_highlights ORDER BY rank",
-    ) == [(p["card1"], 1), (p["robin1"], 2), (p["robin2"], 3)]
-    # A photo not yet in the bucket is inserted at the top.
-    assert db.species_curation.promote_highlight("American Robin", p["puma"]) == 1
-    assert _highlights(db) == [
-        ("American Robin", p["puma"], 1),
-        ("American Robin", p["card1"], 2),
-        ("American Robin", p["robin1"], 3),
-        ("American Robin", p["robin2"], 4),
-    ]
-
-
-def test_promote_species_highlight_leaves_commit_to_caller(db, cur):
-    with db.transaction():
-        db.species_curation.add_highlight("American Robin", cur["p"]["robin1"])
-    assert db.species_curation.promote_highlight("American Robin", cur["p"]["robin2"]) == 1
+        "SELECT (SELECT COUNT(*) FROM species_choices WHERE photo_id = :pid)"
+        " + (SELECT COUNT(*) FROM species_choice_losers WHERE photo_id = :pid)"
+        " + (SELECT COUNT(*) FROM species_choice_winners WHERE photo_id = :pid)",
+        {"pid": p["robin2"]},
+    ) == [(0,)]
+    # card1 is the newer selection, so only the bridged comparison keeps
+    # robin1 ahead of it.
+    ranking = Preferences(db.species_choices.comparisons()).rank(
+        [p["card1"], p["robin1"]],
+    )
+    assert ranking.order == (p["robin1"], p["card1"])
+    assert not ranking.tied
+    assert _ranked(db) == [p["robin1"], p["card1"]]
+    assert db.species_curation.remove_highlight("American Robin", p["robin2"]) == 0
+    assert db.species_curation.remove_highlight("American Robin", p["robin1"]) == 1
     assert db.conn.in_transaction
-    assert _visible(db, "SELECT COUNT(*) FROM species_highlights") == [(1,)]
+    assert _visible(db, "SELECT COUNT(*) FROM species_representatives") == [(2,)]
 
 
-def test_remove_species_highlight(db, cur):
+def test_remove_highlight_canonicalizes_species(db, cur):
     p = cur["p"]
-    db.species_curation.add_highlight("American Robin", p["robin1"])
-    db.species_curation.add_highlight("American Robin", p["robin2"])
     with db.transaction():
-        assert db.species_curation.remove_highlight("American Robin", p["robin1"]) == 1
-    assert not db.conn.in_transaction
-    assert _visible(db, "SELECT photo_id, rank FROM species_highlights") == [
-        (p["robin2"], 2)
-    ]
-    assert db.species_curation.remove_highlight("American Robin", p["robin1"]) == 0
-    assert db.species_curation.remove_highlight("American Robin", p["robin2"]) == 1
-    assert db.conn.in_transaction
-    assert _visible(db, "SELECT COUNT(*) FROM species_highlights") == [(1,)]
+        species_choices.add_highlight(db, "American Robin", p["robin1"])
+    with db.transaction():
+        assert species_choices.remove_highlight(db, "american robin", p["robin1"]) == 1
+    assert _reps(db) == []
+    # The compatibility preference row leaves with the highlight.
+    assert _prefs(db) == []
 
 
-def test_move_species_highlight(db, cur):
+def test_move_highlight(db, cur):
     p = cur["p"]
-    for pid in (p["robin1"], p["robin2"], p["card1"]):
-        db.species_curation.add_highlight("American Robin", pid)
-    order = lambda: [pid for _s, pid, _r in _highlights(db)]  # noqa: E731
-    assert db.species_curation.move_highlight("American Robin", p["puma"], "up") is False
-    assert db.species_curation.move_highlight("American Robin", p["robin2"], "sideways") is False
+    _tag_robins(db, cur, "card1")
+    with db.transaction():
+        for name in ("robin1", "robin2", "card1"):
+            species_choices.add_highlight(db, "American Robin", p[name])
+
+    def move(name, direction):
+        return species_choices.move_highlight(
+            db, "American Robin", p[name], direction,
+        )
+
+    # A photo that is not a highlight of the species cannot be moved.
+    assert move("puma", "up") is None
+    # The settled first highlight has nowhere to go up, nor the last down.
     statements = _trace(db)
-    assert db.species_curation.move_highlight("American Robin", p["robin1"], "up") is True
-    assert db.species_curation.move_highlight("American Robin", p["card1"], "down") is True
+    top = move("robin1", "up")
+    bottom = move("card1", "down")
     db.conn.set_trace_callback(None)
-    assert not any(s.lstrip().startswith("UPDATE") for s in statements)
+    assert top["moved"] is False and bottom["moved"] is False
+    assert not any(
+        s.lstrip().startswith(("INSERT", "UPDATE", "DELETE")) for s in statements
+    )
     with db.transaction():
-        assert db.species_curation.move_highlight("American Robin", p["robin1"], "down") is True
+        moved = move("robin1", "down")
     assert not db.conn.in_transaction
-    assert order() == [p["robin2"], p["robin1"], p["card1"]]
-    assert _visible(
-        db, "SELECT photo_id, rank FROM species_highlights ORDER BY rank"
-    ) == [(p["robin2"], 1), (p["robin1"], 2), (p["card1"], 3)]
-    assert db.species_curation.move_highlight("American Robin", p["card1"], "up") is True
-    assert order() == [p["robin2"], p["card1"], p["robin1"]]
+    assert moved["moved"] is True and moved["after"] == [p["robin2"]]
+    assert _ranked(db) == [p["robin2"], p["robin1"], p["card1"]]
+    assert _visible(db, "SELECT COUNT(*) FROM species_choices") == [(4,)]
+    moved = move("card1", "up")
+    assert moved["moved"] is True and moved["over"] == [p["robin1"]]
+    assert _ranked(db) == [p["robin2"], p["card1"], p["robin1"]]
 
 
-def test_move_species_highlight_leaves_commit_to_caller(db, cur):
+def test_move_highlight_leaves_commit_to_caller(db, cur):
     p = cur["p"]
     with db.transaction():
-        db.species_curation.add_highlight("American Robin", p["robin1"])
-        db.species_curation.add_highlight("American Robin", p["robin2"])
-    assert db.species_curation.move_highlight("American Robin", p["robin2"], "up") is True
+        species_choices.add_highlight(db, "American Robin", p["robin1"])
+        species_choices.add_highlight(db, "American Robin", p["robin2"])
+    moved = species_choices.move_highlight(db, "American Robin", p["robin2"], "up")
+    assert moved["moved"] is True
     assert db.conn.in_transaction
-    assert _visible(
-        db, "SELECT photo_id FROM species_highlights ORDER BY rank"
-    ) == [(p["robin1"],), (p["robin2"],)]
+    assert _ranked(db) == [p["robin2"], p["robin1"]]
+    assert _visible(db, "SELECT COUNT(*) FROM species_choices") == [(2,)]
 
 
 @pytest.mark.parametrize("method,args", [
-    ("promote_highlight", ("American Robin", 1)),
-    ("remove_highlight", ("American Robin", 1)),
-    ("move_highlight", ("American Robin", 1, "up")),
-    ("add_highlight", ("American Robin", 1)),
     ("clear_representative", ("American Robin",)),
     ("get_highlights", ()),
     ("get_representative_lists", ()),
@@ -1135,7 +1178,6 @@ def test_move_species_highlight_leaves_commit_to_caller(db, cur):
     ("get_life_list_uncounted_identifications", ()),
     ("get_photo_life_list_species", (1,)),
     ("get_life_list_locations", ()),
-    ("highlight_rows_for_photos", ([1],)),
     ("preference_purposes_for_species", ("American Robin",)),
     ("preference_rows_for_photos", ([1],)),
     ("photo_is_life_list_preference_eligible", ("American Robin", 1)),
@@ -1154,7 +1196,6 @@ def test_renames_ignore_empty_and_identity(db, cur, old, new):
     statements = _trace(db)
     assert db.species_curation.rename_photo_preferences(old, new) == 0
     assert db.species_curation.rename_representatives(old, new) == 0
-    assert db.species_curation.rename_highlights(old, new) == 0
     assert db.species_curation.rename_photo_preferences(old, new, [(1, 1)]) == 0
     db.conn.set_trace_callback(None)
     assert statements == []
@@ -1325,118 +1366,14 @@ def test_rename_species_representatives_leave_commit_to_caller(db, cur, photo_id
     ) == [(2,)]
 
 
-def _seed_highlight_renames(db, cur):
-    p, ws = cur["p"], cur["ws"]
-    other = db.create_workspace("Other")
-    db.commit()
-    for pid in (p["robin1"], p["robin2"], p["card1"]):
-        db.species_curation.add_highlight("Old Name", pid)
-    db.species_curation.add_highlight("New Name", p["card2"])
-    db.species_curation.add_highlight("New Name", p["robin2"])
-    db.set_active_workspace(other)
-    db.species_curation.add_highlight("Old Name", p["puma"])
-    db.species_curation.add_highlight("Old Name", p["plain"])
-    db.set_active_workspace(ws)
-    db.commit()
-    return other
-
-
-def test_rename_species_highlights_all_workspaces(db, cur):
-    p, ws = cur["p"], cur["ws"]
-    other = _seed_highlight_renames(db, cur)
-    with db.transaction():
-        assert db.species_curation.rename_highlights("Old Name", "New Name") == 4
-    assert not db.conn.in_transaction
-    assert _visible(
-        db,
-        "SELECT workspace_id, species, photo_id, rank FROM species_highlights "
-        "ORDER BY workspace_id, species, rank",
-    ) == [
-        (ws, "New Name", p["card2"], 1),
-        (ws, "New Name", p["robin2"], 2),
-        (ws, "New Name", p["robin1"], 3),
-        (ws, "New Name", p["card1"], 4),
-        (other, "New Name", p["puma"], 1),
-        (other, "New Name", p["plain"], 2),
-    ]
-
-
-def test_rename_species_highlights_selected_pairs(db, cur):
-    p, ws = cur["p"], cur["ws"]
-    other = _seed_highlight_renames(db, cur)
-    moved = db.species_curation.rename_highlights(
-        "Old Name", "New Name",
-        [(p["card1"], ws), (p["robin1"], ws), (p["card1"], ws),
-         (p["plain"], other), (p["robin1"], 999)],
-    )
-    assert moved == 3
-    assert _highlights(db) == [
-        ("New Name", p["card2"], 1),
-        ("New Name", p["robin2"], 2),
-        ("New Name", p["robin1"], 3),
-        ("New Name", p["card1"], 4),
-        ("Old Name", p["robin2"], 2),
-    ]
-    assert _highlights(db, other) == [
-        ("New Name", p["plain"], 1),
-        ("Old Name", p["puma"], 1),
-    ]
-
-
-def test_rename_species_highlights_chunks_selected_photos(db, cur):
-    p, ws = cur["p"], cur["ws"]
-    _seed_highlight_renames(db, cur)
-    pairs = [(pid, ws) for pid in range(10_000, 10_800)] + [(p["card1"], ws)]
-    statements = _trace(db)
-    assert db.species_curation.rename_highlights("Old Name", "New Name", pairs) == 1
-    db.conn.set_trace_callback(None)
-    distinct = list(dict.fromkeys(s.strip() for s in statements))
-    assert len([s for s in distinct if "AND photo_id IN (" in s]) == 2
-
-
-@pytest.mark.parametrize("pairs", [None, "selected"])
-def test_rename_species_highlights_leave_commit_to_caller(db, cur, pairs):
-    p, ws = cur["p"], cur["ws"]
-    _seed_highlight_renames(db, cur)
-    if pairs == "selected":
-        pairs = [(p["robin1"], ws)]
-    db.species_curation.rename_highlights("Old Name", "New Name", pairs)
-    assert db.conn.in_transaction
-    assert _visible(
-        db, "SELECT COUNT(*) FROM species_highlights WHERE species = 'Old Name'"
-    ) == [(5,)]
-
-
-def test_rename_species_highlights_no_source_rows(db, cur):
-    p, ws = cur["p"], cur["ws"]
-    _seed_highlight_renames(db, cur)
-    statements = _trace(db)
-    assert db.species_curation.rename_highlights(
-        "Old Name", "New Name", [(p["card2"], ws)]
-    ) == 0
-    db.conn.set_trace_callback(None)
-    assert not any("MAX(rank)" in s for s in statements)
-    assert db.species_curation.rename_highlights("Missing", "New Name") == 0
-
-
 # -- relabel and eligibility reads --------------------------------------------------------
 
 
 def test_relabel_snapshot_reads(db, cur):
     p, ws = cur["p"], cur["ws"]
     other = _seed_renames(db, cur)
-    db.conn.executemany(
-        "INSERT INTO species_highlights (workspace_id, species, photo_id, rank) "
-        "VALUES (?, ?, ?, ?)",
-        [(ws, "Old Name", p["robin1"], 1), (ws, "Old Name", p["robin2"], 2),
-         (ws, "Other Bird", p["card1"], 1), (other, "Old Name", p["card2"], 1)],
-    )
-    db.conn.commit()
     ids = [p["robin1"], p["robin2"], p["card2"], 987_654]
 
-    assert sorted(tuple(r) for r in db.species_curation.highlight_rows_for_photos(ids)) == sorted(
-        [("Old Name", p["robin1"], 1), ("Old Name", p["robin2"], 2)]
-    )
     # Only the representative-style purposes, only this workspace.
     assert sorted(tuple(r) for r in db.species_curation.preference_rows_for_photos(ids)) == [
         ("Old Name", p["robin1"], "life_list"),
@@ -1467,13 +1404,12 @@ def test_relabel_snapshot_reads_chunk_photo_ids(db, cur):
     _seed_renames(db, cur)
     padded = list(range(1_000_000, 1_000_900)) + [p["robin1"]]
     statements = _trace(db)
-    db.species_curation.highlight_rows_for_photos(padded)
     db.species_curation.preference_rows_for_photos(padded)
     assert db.species_curation.representative_photo_ids_for_species("Old Name", padded) == {p["robin1"]}
     assert len(db.species_curation.representative_rows_for_photos(padded)) == 1
     db.conn.set_trace_callback(None)
     distinct = list(dict.fromkeys(statements))
-    for needle in ("FROM species_highlights", "FROM photo_preferences",
+    for needle in ("FROM photo_preferences",
                    "SELECT photo_id FROM species_representatives",
                    "SELECT species, photo_id, selected_order"):
         assert len([s for s in distinct if needle in s]) == 2, needle
@@ -1607,11 +1543,11 @@ def test_species_curation_signatures_unchanged():
     from repositories.species_curation import SpeciesCurationRepository
 
     sig = {n: str(inspect.signature(getattr(SpeciesCurationRepository, n)))
-           for n in ("rename_photo_preferences", "rename_highlights")}
+           for n in ("rename_photo_preferences",)}
     sig.update({
         f"repo.{n}": str(inspect.signature(getattr(SpeciesCurationRepository, n)))
         for n in ("get_highlights_candidates", "set_photo_preference",
-                  "move_highlight", "rename_representatives",
+                  "remove_highlight", "rename_representatives",
                   "restore_representative", "get_taxon_subtree",
                   "get_explorer_root", "get_representative_lists",
                   "get_highlights")
@@ -1623,13 +1559,8 @@ def test_species_curation_signatures_unchanged():
     assert sig["repo.set_photo_preference"] == (
         "(self, purpose, species, photo_id)"
     )
-    assert sig["repo.move_highlight"] == (
-        "(self, species, photo_id, direction)"
-    )
+    assert sig["repo.remove_highlight"] == "(self, species, photo_id)"
     assert sig["rename_photo_preferences"] == (
-        "(self, old_species, new_species, photo_workspace_pairs=None)"
-    )
-    assert sig["rename_highlights"] == (
         "(self, old_species, new_species, photo_workspace_pairs=None)"
     )
     assert sig["repo.rename_representatives"] == (

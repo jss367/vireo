@@ -739,7 +739,6 @@ def test_move_empty_folder_list_returns_zero_counts(db, move_setup, cache):
         "folders_moved": 0,
         "pending_changes_moved": 0,
         "photo_preferences_moved": 0,
-        "species_highlights_moved": 0,
     }
     assert cache.invalidated == []
     assert _links(db, target) == {}
@@ -779,12 +778,11 @@ def test_move_folders_carries_workspace_scoped_rows(db, move_setup, cache):
         [(src, "life_list", "Robin", pb), (src, "highlights", "Wren", pp),
          (target, "highlights", "Wren", pq), (src, "life_list", "Crow", pq)],
     )
+    # Highlights are catalog-wide: the move neither rewrites nor counts them.
     db.conn.executemany(
-        "INSERT INTO species_highlights (workspace_id, species, photo_id, rank, created_at) "
-        "VALUES (?, ?, ?, ?, ?)",
-        [(target, "Robin", pq, 4, "t0"), (target, "Robin", pp, 7, "t0"),
-         (src, "Robin", pb, 1, "t1"), (src, "Robin", pp, 2, "t2"),
-         (src, "Wren", pp, 9, "t3"), (src, "Crow", pq, 1, "t4")],
+        "INSERT INTO species_representatives (species, photo_id, selected_order) "
+        "VALUES (?, ?, ?)",
+        [("Robin", pb, 1), ("Robin", pp, 2), ("Crow", pq, 3)],
     )
     db.conn.commit()
     cache.invalidated.clear()
@@ -795,7 +793,6 @@ def test_move_folders_carries_workspace_scoped_rows(db, move_setup, cache):
         "folders_moved": 1,
         "pending_changes_moved": 2,
         "photo_preferences_moved": 1,
-        "species_highlights_moved": 2,
     }
     assert _links(db, src) == {q: 1}
     assert _links(db, target) == {p: 1, a: 0, b: 0}
@@ -823,16 +820,19 @@ def test_move_folders_carries_workspace_scoped_rows(db, move_setup, cache):
         (src, "life_list", "Crow"): pq,
     }
     highlights = [
-        (r["workspace_id"], r["species"], r["photo_id"], r["rank"], r["created_at"])
-        for r in db.conn.execute("SELECT * FROM species_highlights")
+        (r["species"], r["photo_id"], r["selected_order"])
+        for r in db.conn.execute("SELECT * FROM species_representatives")
     ]
     assert sorted(highlights) == sorted([
-        (target, "Robin", pq, 4, "t0"),
-        (target, "Robin", pp, 7, "t0"),       # already present: IGNOREd, no rank bump
-        (target, "Robin", pb, 8, "t1"),
-        (target, "Wren", pp, 1, "t3"),
-        (src, "Crow", pq, 1, "t4"),
+        ("Robin", pb, 1), ("Robin", pp, 2), ("Crow", pq, 3),
     ])
+    # Each workspace reads the highlights on the photos it now shows.
+    active = db.active_workspace_id
+    db.set_active_workspace(target)
+    assert db.species_curation.get_highlights() == {"Robin": [pp, pb]}
+    db.set_active_workspace(src)
+    assert db.species_curation.get_highlights() == {"Crow": [pq]}
+    db.set_active_workspace(active)
     with _reader(db) as conn:
         assert _links(db, target, conn) == {p: 1, a: 0, b: 0}
     assert cache.invalidated == [(db._db_path, sorted([src, target]))]

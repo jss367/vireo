@@ -31,6 +31,11 @@ class SpeciesChoiceRemapTests(unittest.TestCase):
                 photo_id INTEGER REFERENCES photos ON DELETE CASCADE,
                 PRIMARY KEY(choice_id, photo_id)
             );
+            CREATE TABLE species_choice_winners (
+                choice_id INTEGER REFERENCES species_choices ON DELETE CASCADE,
+                photo_id INTEGER REFERENCES photos ON DELETE CASCADE,
+                PRIMARY KEY(choice_id, photo_id)
+            );
             INSERT INTO photos VALUES (1), (2), (3), (4);
         """)
         self.repo = SpeciesChoiceRepository(self.conn)
@@ -67,3 +72,12 @@ class SpeciesChoiceRemapTests(unittest.TestCase):
         self.conn.execute("DELETE FROM photos WHERE id = 3")
 
         self.assertEqual(self.repo.comparisons(), [Comparison(older, 1, 2)])
+
+    def test_a_photo_recorded_behind_a_folded_photo_stays_behind_the_survivor(self):
+        # Photo 1 was placed behind photo 2 (an added highlight); 2 folds into 4.
+        added = self.repo.record("Synthetic species", 1, winner_ids=[2])
+
+        self.repo.remap_photos({2: 4})
+        self.conn.execute("DELETE FROM photos WHERE id = 2")
+
+        self.assertEqual(self.repo.comparisons(), [Comparison(added, 4, 1)])

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from flask import Blueprint, jsonify, request
@@ -20,7 +21,6 @@ from highlights_payload import (
     HighlightsQuery,
     TextMatch,
     apply_highlight_preferences,
-    apply_ordered_highlights,
     bucket_best_score,
     build_highlights_payload,
     collect_highlight_buckets,
@@ -78,13 +78,6 @@ class _HighlightsRelabel:
         self.ws_id = None
         self.predicted_species_by_pid = {}
         self.current_species_by_pid = {}
-        self.highlight_renames = {}
-        self.hl_prev_by_pid = {}
-        # Photos that already had a `(species=<target>, photo_id)` row in
-        # species_highlights before the relabel. rename_species_highlights_species
-        # skips inserting a duplicate for these, so the destination row is
-        # pre-existing and undo must not delete it.
-        self.hl_dst_preexisting = set()
         self.pref_dst_taken = set()
         self.rep_dst_preexisting = set()
         self.rep_selected_order_by_pid_species = {}
@@ -105,7 +98,6 @@ class _HighlightsRelabel:
         # so a bulk relabel of >999 photos would otherwise blow
         # SQLITE_MAX_VARIABLE_NUMBER on legacy SQLite builds.
         self._snapshot_current_species()
-        self._snapshot_highlights()
         self._snapshot_destination_slots()
         self._snapshot_preferences()
         self._snapshot_representatives()
@@ -206,34 +198,6 @@ class _HighlightsRelabel:
             return old_key in current
         predicted = self.predicted_species_by_pid.get(pid) or set()
         return old_key in predicted
-
-    def _snapshot_highlights(self) -> None:
-        species = self.species
-        for row in self.db.species_curation.highlight_rows_for_photos(self.photo_ids):
-            old_species_name = row["species"]
-            if old_species_name == species:
-                self.hl_dst_preexisting.add(row["photo_id"])
-                continue
-            if not self._accept_curation_source(
-                row["photo_id"], old_species_name
-            ):
-                continue
-            self.highlight_renames.setdefault(old_species_name, []).append(
-                row["photo_id"]
-            )
-            # Snapshot the original rank so undo can restore each
-            # highlighted photo at its original position instead of
-            # dumping it at MAX(rank)+1 (see EditHistoryRepository.restore_relabel_curation).
-            self.hl_prev_by_pid.setdefault(row["photo_id"], []).append({
-                "species": old_species_name,
-                "rank": row["rank"],
-            })
-        # Backfill dst_existed onto each entry now that the target-species
-        # pass has finished (row order within the query is unspecified).
-        for pid, entries in self.hl_prev_by_pid.items():
-            dst = pid in self.hl_dst_preexisting
-            for entry in entries:
-                entry["dst_existed"] = dst
 
     def _snapshot_destination_slots(self) -> None:
         db = self.db
@@ -387,13 +351,11 @@ class _HighlightsRelabel:
     def _history_old_value(self, pid: int, pred: Row | None, old_primary: Row | None, old_rows: list[Row]) -> str:
         old_value = str(old_primary["id"]) if old_primary else ""
         old_keyword_ids = [old["id"] for old in old_rows]
-        hl_prev = self.hl_prev_by_pid.get(pid) or []
         pref_prev = self.pref_prev_by_pid.get(pid) or []
         rep_prev = self.rep_prev_by_pid.get(pid) or []
         needs_payload = (
             pred is not None
             or len(old_keyword_ids) > 1
-            or hl_prev
             or pref_prev
             or rep_prev
         )
@@ -407,11 +369,8 @@ class _HighlightsRelabel:
                     "prediction_id": pred["id"],
                     "prediction_status": pred["status"],
                 })
-            if hl_prev or pref_prev or rep_prev:
-                curation = {
-                    "hl_prev": hl_prev,
-                    "pref_prev": pref_prev,
-                }
+            if pref_prev or rep_prev:
+                curation = {"pref_prev": pref_prev}
                 if rep_prev:
                     curation["rep_prev"] = rep_prev
                 old_payload["curation"] = curation
@@ -423,12 +382,6 @@ class _HighlightsRelabel:
         species = self.species
         ws_id = self.ws_id
         assert ws_id is not None  # Set by preflight before any relabel writes.
-        for old_species_name, pids in self.highlight_renames.items():
-            db.species_curation.rename_highlights(
-                old_species_name,
-                species,
-                [(pid, ws_id) for pid in pids],
-            )
         for old_species_name, pids in self.preference_renames.items():
             db.species_curation.rename_photo_preferences(
                 old_species_name,
@@ -644,6 +597,15 @@ def _accept_confirm_targets(
     return affected, skipped
 
 
+@dataclass(frozen=True)
+class _HighlightWrite:
+    """What a highlight write covers and who made it."""
+
+    scope: PhotoScope
+    source: str | None
+    reason: str | None
+
+
 def create_highlights_blueprint(get_db: GetDb, json_error: JsonError, visual_scope: VisualScope) -> Blueprint:
     """Build the highlights / photo-preferences blueprint.
 
@@ -760,95 +722,100 @@ def create_highlights_blueprint(get_db: GetDb, json_error: JsonError, visual_sco
             return any(p["id"] == photo_id for p in bucket["photos"])
         return False
 
-    def _photo_can_be_preference(db: Database, purpose: str, species: str, photo_id: int) -> bool:
-        # Ordered highlights use their own (stricter) eligibility check —
-        # the photo must appear in the workspace's highlight buckets for
-        # this species. Representative-style purposes (species_representative,
-        # life_list) only require the photo to carry the species keyword.
-        if purpose == "highlights":
-            return _photo_can_be_highlights_preference(db, species, photo_id)
-        return _photo_can_be_life_list_preference(db, species, photo_id)
-
-    def _promote_representative_highlight(db: Database, parsed: JsonDict) -> int | None:
-        """Make a new representative the species' first ranked highlight.
-
-        Only when the photo is a Highlights candidate: otherwise the row
-        would be invisible on the Highlights page, where the user could
-        neither see it nor remove it.
-        """
-        if not _photo_can_be_highlights_preference(
-            db, parsed["species"], parsed["photo_id"]
-        ):
-            return None
-        return db.species_curation.promote_highlight(
-            parsed["species"], parsed["photo_id"]
+    def _photo_can_be_highlighted(db: Database, species: str, photo_id: int) -> bool:
+        """Whether the photo can be a highlight of the species: it carries
+        the species (checked first, since that is one indexed read), or it
+        sits in the species' Highlights bucket through a prediction."""
+        return (
+            _photo_can_be_life_list_preference(db, species, photo_id)
+            or _photo_can_be_highlights_preference(db, species, photo_id)
         )
+
+    def _highlight_request(
+        body: JsonDict, parsed: JsonDict,
+    ) -> _HighlightWrite | ResponseReturnValue:
+        """The scope and provenance of a highlight write, or the error
+        response. A hand click sends no source or reason; a headless reviewer
+        that does has them recorded with the choice. A page showing one
+        folder sends it, so the write claims only the highlights the user
+        could see there; with no scope it covers the whole workspace."""
+        db = get_db()
+        invalid = _validate_highlight_photo_ids(db, [parsed["photo_id"]])
+        if invalid:
+            return json_error(*invalid)
+        provenance, error = flag_provenance(body)
+        if provenance is None:
+            return json_error(error or "invalid source or reason")
+        scope = scope_from(db, body, json_error=json_error, visual_scope=visual_scope)
+        if not isinstance(scope, PhotoScope):
+            return scope
+        return _HighlightWrite(scope, provenance[0], provenance[1])
+
+    def _add_highlight(body: JsonDict, parsed: JsonDict) -> ResponseReturnValue:
+        db = get_db()
+        request_parts = _highlight_request(body, parsed)
+        if not isinstance(request_parts, _HighlightWrite):
+            return request_parts
+        scope, source, reason = request_parts.scope, request_parts.source, request_parts.reason
+        if not _photo_can_be_highlighted(db, parsed["species"], parsed["photo_id"]):
+            return json_error(
+                "photo_id is not eligible as a highlight for that species", 400,
+            )
+        try:
+            with db.transaction():
+                result = species_choices.add_highlight(
+                    db, parsed["species"], parsed["photo_id"], scope=scope,
+                    source=source, reason=reason,
+                )
+        except ValueError as exc:
+            return json_error(str(exc), 400)
+        return jsonify({"ok": True, **parsed, **result})
 
     @blueprint.route("/api/photo-preferences", methods=["POST"])
     def api_photo_preferences_set() -> ResponseReturnValue:
+        """Make a photo the first highlight of a species within a scope.
+
+        ``purpose=highlights`` adds it after the highlights already there
+        instead, the same as ``POST /api/species-highlights``.
+        """
         db = get_db()
         body = request.get_json(silent=True) or {}
         parsed, error = _parse_photo_preference_body(body)
         if error:
             return json_error(error)
-        invalid = _validate_highlight_photo_ids(db, [parsed["photo_id"]])
-        if invalid:
-            return json_error(*invalid)
-        if not _photo_can_be_preference(
-            db, parsed["purpose"], parsed["species"], parsed["photo_id"]
-        ):
+        if parsed["purpose"] == "highlights":
+            return _add_highlight(body, parsed)
+        request_parts = _highlight_request(body, parsed)
+        if not isinstance(request_parts, _HighlightWrite):
+            return request_parts
+        scope, source, reason = request_parts.scope, request_parts.source, request_parts.reason
+        if not _photo_can_be_highlighted(db, parsed["species"], parsed["photo_id"]):
             return json_error(
                 "photo_id is not eligible for that purpose/species", 400,
             )
-        # Route legacy `purpose=highlights` writes to the ordered-highlights
-        # table so a cached Highlights page or older client doesn't silently
-        # overwrite the species representative instead.
-        if parsed["purpose"] == "highlights":
-            with db.transaction():
-                rank = db.species_curation.add_highlight(
-                    parsed["species"], parsed["photo_id"]
-                )
-            return jsonify({"ok": True, **parsed, "rank": rank})
-        # A hand click sends no provenance; a caller that does (a headless
-        # reviewer on the older route) has it recorded with the choice.
-        provenance, error = flag_provenance(body)
-        if provenance is None:
-            return json_error(error or "invalid source or reason")
-        # A page showing one folder sends it, so the choice claims only the
-        # chosen photos the user could see; with no scope it is chosen over
-        # every other chosen photo of the species.
-        scope = scope_from(db, body, json_error=json_error, visual_scope=visual_scope)
-        if not isinstance(scope, PhotoScope):
-            return scope
-        # The choice and its promotion land together.
         try:
             with db.transaction():
                 choice = species_choices.choose_best(
                     db, parsed["species"], parsed["photo_id"], scope=scope,
-                    source=provenance[0], reason=provenance[1],
+                    source=source, reason=reason,
                 )
-                rank = _promote_representative_highlight(db, parsed)
         except ValueError as exc:
             return json_error(str(exc), 400)
-        return jsonify({
-            "ok": True, **parsed, "highlight_rank": rank, "over": choice["over"],
-        })
+        return jsonify({"ok": True, **parsed, "over": choice["over"]})
 
     @blueprint.route("/api/photo-preferences", methods=["DELETE"])
     def api_photo_preferences_clear() -> ResponseReturnValue:
+        """Remove every highlight of a species, or with ``purpose=highlights``
+        the one photo named."""
         db = get_db()
         body = request.get_json(silent=True) or {}
         parsed, error = _parse_photo_preference_body(body, require_photo=False)
         if error:
             return json_error(error)
-        # See the POST handler: `purpose=highlights` targets one row in the
-        # ordered-highlights table, so it needs a photo_id (enforced by
-        # _parse_photo_preference_body) and routes to species_curation.remove_highlight
-        # rather than clearing all representative rows for the species.
         if parsed["purpose"] == "highlights":
             with db.transaction():
-                removed = db.species_curation.remove_highlight(
-                    parsed["species"], parsed["photo_id"]
+                removed = species_choices.remove_highlight(
+                    db, parsed["species"], parsed["photo_id"],
                 )
             return jsonify({
                 "ok": True,
@@ -882,34 +849,28 @@ def create_highlights_blueprint(get_db: GetDb, json_error: JsonError, visual_sco
         photo_id = body.get("photo_id")
         if isinstance(photo_id, bool) or not isinstance(photo_id, int):
             return {}, "photo_id must be an integer"
-        parsed = {"species": species, "photo_id": photo_id}
+        parsed: JsonDict = {"species": species, "photo_id": photo_id}
         if require_direction:
             direction = body.get("direction", "")
             direction = direction.strip().lower() if isinstance(direction, str) else ""
             if direction not in {"up", "down"}:
                 return {}, "direction must be up or down"
             parsed["direction"] = direction
+            neighbor_id = body.get("neighbor_id")
+            if neighbor_id is not None and (
+                isinstance(neighbor_id, bool) or not isinstance(neighbor_id, int)
+            ):
+                return {}, "neighbor_id must be an integer"
+            parsed["neighbor_id"] = neighbor_id
         return parsed, None
 
     @blueprint.route("/api/species-highlights", methods=["POST"])
     def api_species_highlights_add() -> ResponseReturnValue:
-        db = get_db()
         body = request.get_json(silent=True) or {}
         parsed, error = _parse_species_highlight_body(body)
         if error:
             return json_error(error)
-        invalid = _validate_highlight_photo_ids(db, [parsed["photo_id"]])
-        if invalid:
-            return json_error(*invalid)
-        if not _photo_can_be_highlights_preference(
-            db, parsed["species"], parsed["photo_id"]
-        ):
-            return json_error(
-                "photo_id is not eligible as a highlight for that species", 400,
-            )
-        with db.transaction():
-            rank = db.species_curation.add_highlight(parsed["species"], parsed["photo_id"])
-        return jsonify({"ok": True, **parsed, "rank": rank})
+        return _add_highlight(body, parsed)
 
     @blueprint.route("/api/species-highlights", methods=["DELETE"])
     def api_species_highlights_remove() -> ResponseReturnValue:
@@ -922,26 +883,35 @@ def create_highlights_blueprint(get_db: GetDb, json_error: JsonError, visual_sco
         if invalid:
             return json_error(*invalid)
         with db.transaction():
-            removed = db.species_curation.remove_highlight(parsed["species"], parsed["photo_id"])
+            removed = species_choices.remove_highlight(
+                db, parsed["species"], parsed["photo_id"],
+            )
         return jsonify({"ok": True, **parsed, "removed": removed})
 
     @blueprint.route("/api/species-highlights/order", methods=["PATCH", "POST"])
     def api_species_highlights_order() -> ResponseReturnValue:
+        """Move a highlight one place up or down among the ones in scope."""
         db = get_db()
         body = request.get_json(silent=True) or {}
         parsed, error = _parse_species_highlight_body(body, require_direction=True)
         if error:
             return json_error(error)
-        invalid = _validate_highlight_photo_ids(db, [parsed["photo_id"]])
-        if invalid:
-            return json_error(*invalid)
-        with db.transaction():
-            ok = db.species_curation.move_highlight(
-                parsed["species"], parsed["photo_id"], parsed["direction"]
-            )
-        if not ok:
+        request_parts = _highlight_request(body, parsed)
+        if not isinstance(request_parts, _HighlightWrite):
+            return request_parts
+        scope, source, reason = request_parts.scope, request_parts.source, request_parts.reason
+        try:
+            with db.transaction():
+                result = species_choices.move_highlight(
+                    db, parsed["species"], parsed["photo_id"], parsed["direction"],
+                    neighbor_id=parsed["neighbor_id"], scope=scope,
+                    source=source, reason=reason,
+                )
+        except ValueError as exc:
+            return json_error(str(exc), 400)
+        if result is None:
             return json_error("highlight not found", 404)
-        return jsonify({"ok": True, **parsed})
+        return jsonify({"ok": True, **parsed, **result})
 
     def highlights_query(db: Database) -> HighlightsQuery | ErrorResponse:
         scope = scope_from(
@@ -972,9 +942,6 @@ def create_highlights_blueprint(get_db: GetDb, json_error: JsonError, visual_sco
             ),
             confirmation_filter=request.args.get("confirmation") or "all",
             highlight_filter=request.args.get("highlight_selection") or "all",
-            representative_filter=(
-                request.args.get("species_representative") or "all"
-            ),
         )
 
     @blueprint.route("/api/highlights")
@@ -1151,12 +1118,11 @@ def create_highlights_blueprint(get_db: GetDb, json_error: JsonError, visual_sco
             unidentified_photos,
             query.search.text, query.search.match_case, query.search.whole_word,
         )
-        apply_ordered_highlights(db, buckets)
         apply_highlight_preferences(db, buckets)
         buckets, unidentified_photos = filter_highlight_curation_state(
             buckets,
             unidentified_photos,
-            query.highlight_filter, query.representative_filter,
+            query.highlight_filter,
         )
         if species == "__unidentified__":
             photos = unidentified_photos

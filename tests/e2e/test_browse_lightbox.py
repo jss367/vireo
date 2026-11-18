@@ -1545,7 +1545,7 @@ def test_browse_lightbox_conditional_controls_keep_fitted_photo_size_stable(
 ):
     """Conditional bottom controls must not resize the fitted photo.
 
-    A species-eligible photo shows a representative control in the lightbox.
+    A species-eligible photo shows a top-highlight control in the lightbox.
     Rejecting that photo hides the control after the flag write settles.  The
     bottom chrome may change internally, but its reserved viewport must remain
     stable so culling does not make the photo jump in size.

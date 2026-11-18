@@ -530,18 +530,6 @@
   ],
   [
    "table",
-   "species_highlights",
-   "species_highlights",
-   "CREATE TABLE species_highlights (\n                workspace_id  INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,\n                species       TEXT NOT NULL,\n                photo_id      INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,\n                rank          INTEGER NOT NULL,\n                created_at    TEXT DEFAULT (datetime('now')),\n                updated_at    TEXT DEFAULT (datetime('now')),\n                PRIMARY KEY (workspace_id, species, photo_id)\n            )"
-  ],
-  [
-   "index",
-   "sqlite_autoindex_species_highlights_1",
-   "species_highlights",
-   null
-  ],
-  [
-   "table",
    "preview_cache",
    "preview_cache",
    "CREATE TABLE preview_cache (\n                photo_id INTEGER NOT NULL,\n                size INTEGER NOT NULL,\n                bytes INTEGER NOT NULL,\n                last_access_at REAL NOT NULL,\n                PRIMARY KEY (photo_id, size),\n                FOREIGN KEY (photo_id) REFERENCES photos(id) ON DELETE CASCADE\n            )"
@@ -761,18 +749,6 @@
    "idx_species_representatives_order",
    "species_representatives",
    "CREATE INDEX idx_species_representatives_order\n                ON species_representatives(species, selected_order DESC)"
-  ],
-  [
-   "index",
-   "idx_species_highlights_photo",
-   "species_highlights",
-   "CREATE INDEX idx_species_highlights_photo\n                ON species_highlights(photo_id)"
-  ],
-  [
-   "index",
-   "idx_species_highlights_rank",
-   "species_highlights",
-   "CREATE INDEX idx_species_highlights_rank\n                ON species_highlights(workspace_id, species, rank)"
   ],
   [
    "index",
@@ -1145,6 +1121,24 @@
    "sqlite_autoindex_species_choice_losers_1",
    "species_choice_losers",
    null
+  ],
+  [
+   "table",
+   "species_choice_winners",
+   "species_choice_winners",
+   "CREATE TABLE species_choice_winners (\n        choice_id INTEGER NOT NULL REFERENCES species_choices(id) ON DELETE CASCADE,\n        photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,\n        PRIMARY KEY (choice_id, photo_id)\n    )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_species_choice_winners_1",
+   "species_choice_winners",
+   null
+  ],
+  [
+   "index",
+   "idx_species_choice_winners_photo",
+   "species_choice_winners",
+   "CREATE INDEX idx_species_choice_winners_photo ON species_choice_winners(photo_id)"
   ],
   [
    "index",

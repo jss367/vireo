@@ -1,14 +1,14 @@
-"""Persistence for species curation: Highlights, representatives, the Life List.
+"""Persistence for species curation: a species' highlights and the Life List.
 
 This module owns the SQL behind the curated-species features:
 
-- ``species_highlights``: the ordered per-workspace Highlights buckets (add,
-  promote, move, remove, rename, and the eligibility-filtered read);
-- ``species_representatives``: the global representative photos per species
-  (a species' chosen photos), with the undo restore and the rename. Which of
-  them leads is decided by the comparisons in ``repositories.species_choices``
-  through ``species_preference.Preferences``; the newest selection leads
-  among photos nobody has compared;
+- ``species_representatives``: a species' highlights, catalog-wide (the
+  photos chosen to show for it), with the eligibility-filtered reads
+  (``get_highlights`` for the Highlights buckets, ``get_representative_lists``
+  for confirmed species), the single-photo removal, the undo restore and the
+  rename. Their order is decided by the comparisons in
+  ``repositories.species_choices`` through ``species_preference.Preferences``;
+  the newest selection leads among photos nobody has compared;
 - ``photo_preferences``: the per-workspace preference rows kept for older
   callers, their clear and rename;
 - the Life List and taxonomy-explorer reads (candidates, found taxa,
@@ -16,7 +16,7 @@ This module owns the SQL behind the curated-species features:
   the per-photo eligible identifications);
 - the two one-shot legacy backfills from ``photo_preferences``;
 - the reads ``web/highlights.py`` runs: the Highlights relabel's curation
-  snapshot (``highlight_rows_for_photos`` through
+  snapshot (``preference_rows_for_photos`` and
   ``representative_rows_for_photos``) and the life-list preference
   eligibility check (``photo_is_life_list_preference_eligible``). Their SQL
   came from that module unchanged, except that chunking goes through
@@ -726,12 +726,12 @@ class SpeciesCurationRepository:
         ).fetchall()
 
     def get_life_list_selections(self, species_names=None):
-        """Read saved selections across aliases without changing stored keys.
+        """The highlight rows the workspace can see, newest selection first,
+        read across aliases without changing stored keys.
 
-        Representatives retain their global newest-selection order across
-        names; highlights retain each name's existing rank order. Restrict
-        paging to the requested taxon's aliases, using one JSON parameter
-        rather than a caller-sized list of SQL variables.
+        ``species_names`` restricts paging to the requested taxon's aliases,
+        using one JSON parameter rather than a caller-sized list of SQL
+        variables.
         """
         ws = self.workspace_id
         params = [ws]
@@ -739,7 +739,7 @@ class SpeciesCurationRepository:
         if species_names is not None:
             species_filter = "AND s.species IN (SELECT value FROM json_each(?))"
             params.append(json.dumps(sorted(species_names)))
-        representatives = self.conn.execute(
+        return self.conn.execute(
             f"""SELECT s.species, s.photo_id
                 FROM species_representatives s
                 JOIN photo_workspace_visibility wf ON wf.photo_id = s.photo_id
@@ -748,14 +748,6 @@ class SpeciesCurationRepository:
                 ORDER BY s.selected_order DESC, s.id DESC""",
             params,
         ).fetchall()
-        highlights = self.conn.execute(
-            f"""SELECT s.species, s.photo_id, s.rank
-                FROM species_highlights s
-                WHERE s.workspace_id = ? {species_filter}
-                ORDER BY s.species, s.rank, s.created_at, s.photo_id""",
-            params,
-        ).fetchall()
-        return representatives, highlights
 
     def get_explorer_root(self, name="Aves", rank="class"):
         """Return {id,name,common_name,rank} for the default explorer root class,
@@ -1174,10 +1166,11 @@ class SpeciesCurationRepository:
     def get_globally_eligible_representatives(self, species=None):
         """``{species: [photo_id, ...]}`` of catalog-wide eligible representatives.
 
-        Same eligibility as :meth:`get_representative_lists` with
-        ``eligible_only=True`` (photo not rejected, folder ok/partial, still
-        carries the species keyword), but without scoping to the active
-        workspace's visible folders. Callers use it as the traversal set when
+        Confirmed highlights use :meth:`get_representative_lists` eligibility
+        without the active workspace's visibility restriction. Prediction-held
+        highlights count when eligible under :meth:`get_highlights` in any
+        workspace that can see them, using that workspace's reviews and floor.
+        Callers use the union as the traversal set when
         ranking, so comparisons chained through an intermediate representative
         visible only in another workspace still settle a scoped pair — the
         chain's photo is still chosen for the species, just not in sight.
@@ -1204,6 +1197,17 @@ class SpeciesCurationRepository:
             ids = result.setdefault(row["species"], [])
             if row["photo_id"] not in ids:
                 ids.append(row["photo_id"])
+        workspace_ids = [row[0] for row in self.conn.execute(
+            "SELECT DISTINCT v.workspace_id FROM photo_workspace_visibility v "
+            "JOIN species_representatives sr ON sr.photo_id = v.photo_id"
+        )]
+        for workspace_id in workspace_ids:
+            # Resolve each workspace locally; reading traversal cannot switch
+            # the caller's active workspace or apply its floor to another one.
+            repository = SpeciesCurationRepository(self.conn, lambda ws=workspace_id: ws)
+            for name, photo_ids in repository.get_highlights(species, eligible_only=True).items():
+                ids = result.setdefault(name, [])
+                ids.extend(pid for pid in photo_ids if pid not in ids)
         return result
 
     def get_representative_lists(self, eligible_only=False, species=None, ranked=True):
@@ -1363,7 +1367,14 @@ class SpeciesCurationRepository:
         )
 
     def get_highlights(self, species=None, eligible_only=False):
-        """Return ordered highlighted photo ids for the active workspace.
+        """``{species: [photo_id, ...]}``: each species' highlights that the
+        active workspace can see, newest selection first.
+
+        A highlight is catalog-wide (a ``species_representatives`` row); this
+        read keeps the ones on photos the active workspace shows. Their order
+        within a set of photos comes from the recorded comparisons
+        (``species_preference.Preferences.rank``), which the caller applies
+        to the photos it is showing; the order here is only the tie-break.
 
         When ``eligible_only`` is true, omit rejected photos and photos that
         are no longer in the species' Highlights bucket. Stored rows are kept
@@ -1374,40 +1385,44 @@ class SpeciesCurationRepository:
 
         Eligibility mirrors :meth:`get_highlights_candidates` at the default
         quality floor: not-yet-analyzed (``quality_score IS NULL``) photos
-        stay eligible, because they now appear on the Highlights page and can
-        be saved as highlights. Filtering them out here would silently drop a
+        stay eligible, because they appear on the Highlights page and can be
+        saved as highlights. Filtering them out here would silently drop a
         highlight the user just chose until analysis ran.
-
-        Result shape is ``{species: {photo_id: rank}}``.
         """
         if species is not None:
             species = self._keyword_taxa.resolve_species_display(species)
         ws = self.workspace_id
-        eligibility_joins = ""
+        joins = """
+                   JOIN photo_workspace_visibility wf ON wf.photo_id = sh.photo_id
+                    AND wf.workspace_id = sh.workspace_id"""
         eligibility_filter = ""
         keyword_match = "1"
         if eligible_only:
-            eligibility_joins = _HIGHLIGHT_ELIGIBILITY_JOINS
+            joins = _HIGHLIGHT_ELIGIBILITY_JOINS
             eligibility_filter = _HIGHLIGHT_ELIGIBILITY_FILTER
             keyword_match = _HIGHLIGHT_KEYWORD_MATCH
         eligibility_params = (self._detector_floor(),) if eligible_only else ()
         species_filter = "AND sh.species = ?" if species else ""
         species_params = (species,) if species else ()
+        # The eligibility SQL reads the workspace from the row it is checking.
         rows = self.conn.execute(
-            f"""SELECT sh.species, sh.photo_id, sh.rank,
+            f"""SELECT sh.species, sh.photo_id,
                       ({keyword_match}) AS keyword_match
-               FROM species_highlights sh
-               {eligibility_joins}
-               WHERE sh.workspace_id = ? {species_filter}
+               FROM (SELECT ? AS workspace_id, id, species, photo_id, selected_order
+                     FROM species_representatives) sh
+               {joins}
+               WHERE 1 = 1 {species_filter}
                {eligibility_filter}
-               ORDER BY sh.species, sh.rank, sh.created_at, sh.photo_id""",
+               ORDER BY sh.species, sh.selected_order DESC, sh.id DESC""",
             (ws, *species_params, *eligibility_params),
         ).fetchall()
         if eligible_only:
             rows = self._in_prediction_bucket(ws, rows)
         result = {}
         for r in rows:
-            result.setdefault(r["species"], {})[r["photo_id"]] = r["rank"]
+            ids = result.setdefault(r["species"], [])
+            if r["photo_id"] not in ids:
+                ids.append(r["photo_id"])
         return result
 
     def _in_prediction_bucket(self, ws, rows):
@@ -1415,12 +1430,9 @@ class SpeciesCurationRepository:
         that species' bucket under ``photo_species_memberships``."""
         if all(r["keyword_match"] for r in rows):
             return rows
-        scope_sql = (
-            "SELECT DISTINCT photo_id AS id FROM species_highlights "
-            "WHERE workspace_id = ?"
-        )
-        names = self._highlight_species_names(scope_sql, (ws,))
-        subjects = self._highlight_subject_predictions(ws, scope_sql, (ws,))
+        scope_sql = "SELECT DISTINCT photo_id AS id FROM species_representatives"
+        names = self._highlight_species_names(scope_sql, ())
+        subjects = self._highlight_subject_predictions(ws, scope_sql, ())
         cache = {}
 
         def canonicalize(name):
@@ -1447,119 +1459,31 @@ class SpeciesCurationRepository:
                 kept.append(r)
         return kept
 
-    def add_highlight(self, species, photo_id):
-        """Add a photo to a species' ordered highlights, appending if new.
+    def remove_highlight(self, species, photo_id):
+        """Take one photo off a species' highlights, catalog-wide.
 
-        ``species`` is canonicalized to the spelling ``add_keyword`` would
-        store (see :meth:`set_photo_preference`) so highlight rows written
-        from prediction-cased bucket labels key on the same string the
-        keyword row and eligibility queries use.
+        The comparisons around it are bridged first
+        (``SpeciesChoiceRepository.forget_photo``), so the highlights it sat
+        between keep their order. Returns the number of rows removed.
         """
         species = self._keyword_taxa.resolve_species_display(species)
-        ws = self.workspace_id
-        row = self.conn.execute(
-            """SELECT rank FROM species_highlights
-               WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
-            (ws, species, photo_id),
-        ).fetchone()
-        if row:
-            self.conn.execute(
-                """UPDATE species_highlights
-                   SET updated_at = datetime('now')
-                   WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
-                (ws, species, photo_id),
-            )
-            return row["rank"]
-        max_rank = self.conn.execute(
-            """SELECT COALESCE(MAX(rank), 0) AS max_rank
-               FROM species_highlights
-               WHERE workspace_id = ? AND species = ?""",
-            (ws, species),
-        ).fetchone()["max_rank"]
-        rank = int(max_rank or 0) + 1
-        self.conn.execute(
-            """INSERT INTO species_highlights
-                   (workspace_id, species, photo_id, rank, created_at, updated_at)
-               VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))""",
-            (ws, species, photo_id, rank),
-        )
-        return rank
-
-    def promote_highlight(self, species, photo_id):
-        """Add a photo to a species' ordered highlights at rank 1."""
-        species = self._keyword_taxa.resolve_species_display(species)
-        ws = self.workspace_id
-        rows = self.conn.execute(
-            """SELECT photo_id
-               FROM species_highlights
-               WHERE workspace_id = ? AND species = ?
-               ORDER BY rank, created_at, photo_id""",
-            (ws, species),
-        ).fetchall()
-        ids = [r["photo_id"] for r in rows if r["photo_id"] != photo_id]
-        ids.insert(0, photo_id)
-
-        self.conn.execute(
-            """INSERT INTO species_highlights
-                   (workspace_id, species, photo_id, rank, created_at, updated_at)
-               VALUES (?, ?, ?, 1, datetime('now'), datetime('now'))
-               ON CONFLICT(workspace_id, species, photo_id) DO UPDATE SET
-                   rank = excluded.rank,
-                   updated_at = excluded.updated_at""",
-            (ws, species, photo_id),
-        )
-        for rank, pid in enumerate(ids, start=1):
-            self.conn.execute(
-                """UPDATE species_highlights
-                   SET rank = ?, updated_at = datetime('now')
-                   WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
-                (rank, ws, species, pid),
-            )
-        return 1
-
-    def remove_highlight(self, species, photo_id):
-        """Remove a photo from a species' ordered highlights."""
-        species = self._keyword_taxa.resolve_species_display(species)
-        ws = self.workspace_id
+        if self.conn.execute(
+            "SELECT 1 FROM species_representatives WHERE species = ? AND photo_id = ?",
+            (species, photo_id),
+        ).fetchone() is None:
+            return 0
+        SpeciesChoiceRepository(self.conn).forget_photo(species, photo_id)
         cur = self.conn.execute(
-            """DELETE FROM species_highlights
-               WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
-            (ws, species, photo_id),
+            "DELETE FROM species_representatives WHERE species = ? AND photo_id = ?",
+            (species, photo_id),
+        )
+        self.conn.execute(
+            """DELETE FROM photo_preferences
+               WHERE species = ? AND photo_id = ?
+                 AND purpose IN ('species_representative', 'life_list', 'highlights')""",
+            (species, photo_id),
         )
         return cur.rowcount
-
-    def move_highlight(self, species, photo_id, direction):
-        """Move a highlighted photo one step up/down within its species."""
-        species = self._keyword_taxa.resolve_species_display(species)
-        ws = self.workspace_id
-        rows = self.conn.execute(
-            """SELECT photo_id
-               FROM species_highlights
-               WHERE workspace_id = ? AND species = ?
-               ORDER BY rank, created_at, photo_id""",
-            (ws, species),
-        ).fetchall()
-        ids = [r["photo_id"] for r in rows]
-        if photo_id not in ids:
-            return False
-        idx = ids.index(photo_id)
-        if direction == "up":
-            new_idx = max(0, idx - 1)
-        elif direction == "down":
-            new_idx = min(len(ids) - 1, idx + 1)
-        else:
-            return False
-        if new_idx == idx:
-            return True
-        ids.insert(new_idx, ids.pop(idx))
-        for rank, pid in enumerate(ids, start=1):
-            self.conn.execute(
-                """UPDATE species_highlights
-                   SET rank = ?, updated_at = datetime('now')
-                   WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
-                (rank, ws, species, pid),
-            )
-        return True
 
     def rename_photo_preferences(
         self, old_species, new_species, photo_workspace_pairs=None,
@@ -1674,158 +1598,6 @@ class SpeciesCurationRepository:
                 [old_species, *chunk],
             )
         return moved
-
-    def _highlight_rename_scopes(self, old_species, photo_workspace_pairs):
-        """``[(workspace_id, photo_ids or None)]`` a highlight rename visits."""
-        if photo_workspace_pairs is not None:
-            by_ws = {}
-            seen = set()
-            for photo_id, workspace_id in photo_workspace_pairs:
-                key = (photo_id, workspace_id)
-                if key in seen:
-                    continue
-                seen.add(key)
-                by_ws.setdefault(workspace_id, []).append(photo_id)
-            workspace_scopes = list(by_ws.items())
-        else:
-            workspace_ids = [
-                r["workspace_id"] for r in self.conn.execute(
-                    """SELECT DISTINCT workspace_id
-                       FROM species_highlights
-                       WHERE species = ?""",
-                    (old_species,),
-                ).fetchall()
-            ]
-            workspace_scopes = [(ws, None) for ws in workspace_ids]
-        return workspace_scopes
-
-    def _highlight_rename_source_rows(self, workspace_id, photo_ids, old_species):
-        """The old bucket's rows to move, in their bucket order."""
-        if photo_ids is None:
-            src_rows = self.conn.execute(
-                """SELECT photo_id
-                       FROM species_highlights
-                       WHERE workspace_id = ? AND species = ?
-                       ORDER BY rank, created_at, photo_id""",
-                (workspace_id, old_species),
-            ).fetchall()
-        else:
-            # Chunk the IN(...) clause: photo_ids can carry every photo
-            # tagged with the renamed keyword in this workspace, which on
-            # legacy SQLite builds (SQLITE_MAX_VARIABLE_NUMBER=999) blows
-            # the parameter cap once a species passes ~997 tagged photos.
-            # Chunk in memory then re-sort so the rebucket order matches
-            # the single-query path.
-            raw_rows = []
-            for chunk in chunks(photo_ids):
-                placeholders = ",".join("?" for _ in chunk)
-                raw_rows.extend(self.conn.execute(
-                    f"""SELECT photo_id, rank, created_at
-                            FROM species_highlights
-                            WHERE workspace_id = ? AND species = ?
-                              AND photo_id IN ({placeholders})""",
-                    (workspace_id, old_species, *chunk),
-                ).fetchall())
-            raw_rows.sort(
-                key=lambda r: (r["rank"], r["created_at"], r["photo_id"])
-            )
-            src_rows = raw_rows
-        return src_rows
-
-    def rename_highlights(
-        self, old_species, new_species, photo_workspace_pairs=None,
-    ):
-        """Rename ordered species-highlight rows to a new species bucket.
-
-        Companion to :meth:`rename_photo_preferences_species` for the
-        ``species_highlights`` table. The rows carry a per-species ``rank``,
-        so we can't just rewrite the ``species`` column — a bucket may
-        already exist for ``new_species`` with its own ranks. Instead, each
-        moved row is deleted from the old bucket and inserted at the end
-        of the new bucket (``MAX(rank) + 1``) while preserving its
-        old-bucket order. Rows whose photo already appears in the new
-        bucket are dropped rather than duplicated.
-
-        When ``photo_workspace_pairs`` is provided, only rows matching
-        those ``(photo_id, workspace_id)`` pairs are moved (used by
-        ``api_update_keyword`` so we only rebucket highlights for photos
-        actually tagged with the renamed keyword). When omitted, all
-        workspaces are rebucketed.
-
-        Returns the count of highlight rows that landed in the new bucket
-        (excludes rows dropped as duplicates).
-        """
-        if not old_species or not new_species or old_species == new_species:
-            return 0
-
-        workspace_scopes = self._highlight_rename_scopes(
-            old_species, photo_workspace_pairs,
-        )
-
-        moved = 0
-        for workspace_id, photo_ids in workspace_scopes:
-            src_rows = self._highlight_rename_source_rows(
-                workspace_id, photo_ids, old_species,
-            )
-            if not src_rows:
-                continue
-            existing = {
-                r["photo_id"] for r in self.conn.execute(
-                    """SELECT photo_id FROM species_highlights
-                       WHERE workspace_id = ? AND species = ?""",
-                    (workspace_id, new_species),
-                ).fetchall()
-            }
-            next_rank = int(self.conn.execute(
-                """SELECT COALESCE(MAX(rank), 0) AS max_rank
-                   FROM species_highlights
-                   WHERE workspace_id = ? AND species = ?""",
-                (workspace_id, new_species),
-            ).fetchone()["max_rank"] or 0) + 1
-            for r in src_rows:
-                pid = r["photo_id"]
-                self.conn.execute(
-                    """DELETE FROM species_highlights
-                       WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
-                    (workspace_id, old_species, pid),
-                )
-                if pid in existing:
-                    continue
-                self.conn.execute(
-                    """INSERT INTO species_highlights
-                           (workspace_id, species, photo_id, rank,
-                            created_at, updated_at)
-                       VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))""",
-                    (workspace_id, new_species, pid, next_rank),
-                )
-                next_rank += 1
-                moved += 1
-        return moved
-
-    # -- relabel and eligibility reads ---------------------------------------------------
-    #
-    # The reads ``web/highlights.py`` runs: the Highlights relabel's curation
-    # snapshot (taken under the prediction-decision lock, before any write)
-    # and the life-list preference eligibility check. Their SQL came from
-    # that module unchanged, except that chunking goes through
-    # ``self._chunks``. None of these writes or commits.
-
-    def highlight_rows_for_photos(self, photo_ids):
-        """The active workspace's ``species_highlights`` rows on ``photo_ids``.
-
-        Rows carry ``species``, ``photo_id`` and ``rank``, in no particular
-        order.
-        """
-        ws = self.workspace_id
-        rows = []
-        for chunk in chunks(photo_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            rows.extend(self.conn.execute(
-                f"""SELECT species, photo_id, rank FROM species_highlights
-                    WHERE workspace_id = ? AND photo_id IN ({placeholders})""",
-                (ws, *chunk),
-            ).fetchall())
-        return rows
 
     def preference_purposes_for_species(self, species):
         """The representative-style purposes the active workspace has a
