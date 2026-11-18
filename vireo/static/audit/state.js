@@ -9,6 +9,7 @@
  * @property {AuditFileEntry[]} untrackedData
  * @property {AuditFileEntry[]} sidecarData
  * @property {AuditIntegrity | null} integrityData
+ * @property {AuditClockResult | null} clockData
  */
 
 /** @type {AuditState} */
@@ -18,12 +19,13 @@ export const state = {
   untrackedData: [],
   sidecarData: [],
   integrityData: null,
+  clockData: null,
 };
 
 /** @type {Record<string, string>} */
 export const CHECK_LABELS = {
   drift: 'Drift', orphans: 'Orphans', untracked: 'Untracked',
-  sidecars: 'Sidecars', integrity: 'Integrity',
+  sidecars: 'Sidecars', clocks: 'Camera Clocks', integrity: 'Integrity',
 };
 
 /** @type {Record<string, {label: string, cls: string, hint: string}>} */

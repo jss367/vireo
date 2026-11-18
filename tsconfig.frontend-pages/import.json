@@ -4,6 +4,7 @@
     "../types/pages/import.d.ts",
     "../vireo/static/import/after-import.js",
     "../vireo/static/import/boot.js",
+    "../vireo/static/import/clock-check.js",
     "../vireo/static/import/destinations.js",
     "../vireo/static/import/folder-browser.js",
     "../vireo/static/import/form.js",

@@ -109,17 +109,27 @@ def _normalize_subsec(subsec):
 def _normalize_inputs(mode, target_offset, shift_minutes):
     """Validate user inputs and return (target_minutes, manual_shift, target_offset_str).
 
-    In ``manual`` mode ``target_offset`` is intentionally ignored so a stale
-    or prefilled value can't silently overwrite ``OffsetTime*`` tags when the
-    user only asked for a minute shift.
+    ``preserve_instant`` sets the offset and moves the clock time by the
+    offset difference, so the moment of capture stays. ``set_offset`` sets the
+    offset and moves the clock time by ``shift_minutes`` (0 keeps it), for a
+    camera whose recorded time zone was wrong while its clock showed local
+    time, or whose clock was also off. In ``manual`` mode ``target_offset`` is
+    intentionally ignored so a stale or prefilled value can't silently
+    overwrite ``OffsetTime*`` tags when the user only asked for a minute shift.
     """
-    if mode == "manual":
+    if mode in ("manual", "set_offset"):
+        if isinstance(shift_minutes, bool):
+            raise ValueError("shift_minutes must be an integer")
         try:
             manual_shift = int(shift_minutes or 0)
         except (TypeError, ValueError) as exc:
             raise ValueError("shift_minutes must be an integer") from exc
         target_minutes = None
         target_offset_str = None
+        if mode == "set_offset":
+            if parse_offset_minutes(target_offset) is None:
+                raise ValueError("target_offset is required for set_offset")
+            target_offset_str = validate_offset(target_offset)
     elif mode == "preserve_instant":
         target_minutes = parse_offset_minutes(target_offset)
         if target_minutes is None:
@@ -127,13 +137,13 @@ def _normalize_inputs(mode, target_offset, shift_minutes):
         manual_shift = None
         target_offset_str = validate_offset(target_offset)
     else:
-        raise ValueError("mode must be preserve_instant or manual")
+        raise ValueError("mode must be preserve_instant, set_offset or manual")
     return target_minutes, manual_shift, target_offset_str
 
 
 def _photo_shift_minutes(mode, target_minutes, manual_shift, photo):
     """Return the signed minute shift for a single photo, or raise ValueError."""
-    if mode == "manual":
+    if mode in ("manual", "set_offset"):
         return manual_shift
     current_minutes = parse_offset_minutes(_capture_offset(photo))
     if current_minutes is None:

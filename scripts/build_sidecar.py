@@ -196,6 +196,10 @@ def main():
         "--hidden-import", "timm_classifier",
         "--hidden-import", "text_encoder",
         "--hidden-import", "xmp",
+        # Camera-clock audit; tzfpy carries its zone boundaries compiled in.
+        "--hidden-import", "camera_clock",
+        "--hidden-import", "time_zones",
+        "--hidden-import", "tzfpy",
         "--hidden-import", "catalog",
         # ``vireo-server --mcp``: the MCP server and the SDK it is built on.
         # hook-mcp.py collects the SDK without importing its optional CLI.

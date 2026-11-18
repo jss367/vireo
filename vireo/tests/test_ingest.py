@@ -617,6 +617,7 @@ def test_ingest_uses_metadata_dates_when_lightweight_exif_fails(
     tmp_path, monkeypatch
 ):
     """ExifTool metadata keeps copied files split by capture date."""
+    import grouping
     import import_dedup as import_dedup_module
     import metadata as metadata_module
 
@@ -632,7 +633,7 @@ def test_ingest_uses_metadata_dates_when_lightweight_exif_fails(
         os.utime(str(src / name), (mtime, mtime))
 
     monkeypatch.setattr(
-        import_dedup_module, "read_exif_timestamp", lambda _path: None
+        import_dedup_module, "read_exif_clock", lambda _path: grouping.ExifClock(None, None, None)
     )
 
     def fake_extract_metadata(paths, restricted_tags=None):
@@ -2198,6 +2199,7 @@ def test_preview_destination_uses_metadata_dates_when_lightweight_exif_fails(
     tmp_path, monkeypatch
 ):
     """Preview keeps capture-date folders when ExifTool has the date."""
+    import grouping
     import import_dedup as import_dedup_module
     import metadata as metadata_module
 
@@ -2212,7 +2214,7 @@ def test_preview_destination_uses_metadata_dates_when_lightweight_exif_fails(
         os.utime(str(src / name), (mtime, mtime))
 
     monkeypatch.setattr(
-        import_dedup_module, "read_exif_timestamp", lambda _path: None
+        import_dedup_module, "read_exif_clock", lambda _path: grouping.ExifClock(None, None, None)
     )
 
     def fake_extract_metadata(paths, restricted_tags=None):

@@ -373,6 +373,9 @@ class _DuplicateCheckStream:
         # str(path) -> capture datetime for recovery planning and day summaries when
         # verify_by_hash disables the checker's own EXIF batching.
         self.recovery_times: dict[str, datetime] = {}
+        # str(path) -> recorded UTC offset / camera, read with recovery_times.
+        self.recovery_offsets: dict[str, str | None] = {}
+        self.recovery_cameras: dict[str, str | None] = {}
 
         # Include every occupied name, one scandir per planned folder —
         # the destination may be a network mount, so listings are batched
@@ -386,6 +389,7 @@ class _DuplicateCheckStream:
         yield from self._index_catalog()
         total = len(self.paths)
         yield from self._prepare_metadata(total)
+        yield from self._clock_check()
         yield from self._check_paths(total)
         yield f"data: {json.dumps({'done': True, 'duplicate_count': self.duplicate_count, 'recovered_count': self.recovered_count, 'checked': total, 'total': total})}\n\n"
 
@@ -433,10 +437,12 @@ class _DuplicateCheckStream:
                 # summaries need capture times — resolve them alongside
                 # the same chunk so both prep paths share the same
                 # cancellation cadence.
-                self.recovery_times.update({
-                    str(f): dt
-                    for f, dt in self.source_capture_timestamps(chunk).items()
-                })
+                from import_dedup import capture_cameras, capture_offsets
+
+                resolved = self.source_capture_timestamps(chunk)
+                self.recovery_times.update({str(f): dt for f, dt in resolved.items()})
+                self.recovery_offsets.update({str(f): o for f, o in capture_offsets(resolved).items()})
+                self.recovery_cameras.update({str(f): c for f, c in capture_cameras(resolved).items()})
             # Cheap heartbeat frame the client can render as
             # "preparing metadata…" and, more importantly, the yield
             # that lets the WSGI server notice a disconnected client
@@ -453,6 +459,39 @@ class _DuplicateCheckStream:
                     dates[str(source_file)] = timestamp.date().isoformat() if timestamp else None
                 frame["capture_dates"] = dates
             yield f"data: {json.dumps(frame)}\n\n"
+
+    def _clock_check(self) -> Iterator[str]:
+        """Report camera clocks that changed mid-card, before the per-file checks.
+
+        Uses only what the metadata pass already read: shot order from the
+        DCF file number, clock time and recorded offset (``camera_clock``'s
+        jumps and time-zone switches; GPS and location are the Audit's
+        Camera Clocks check). Frames are grouped by camera when the header
+        names one, else by file-name prefix. Files with no capture time, as
+        in verify-by-hash mode without capture dates, are left out.
+        """
+        from camera_clock import ClockFrame, dcf_frame_number, find_clock_problems, parse_offset
+
+        frames = []
+        for path in self.paths:
+            source_file = Path(path)
+            captured = self._capture_time(source_file)
+            dcf = dcf_frame_number(source_file.name)
+            if captured is None or dcf is None:
+                continue
+            if self.verify_by_hash:
+                offset, camera = self.recovery_offsets.get(path), self.recovery_cameras.get(path)
+            else:
+                offset, camera = self.checker.capture_offset(source_file), self.checker.capture_camera(source_file)
+            frames.append(ClockFrame(
+                ref=path, filename=source_file.name, captured=captured,
+                offset_minutes=parse_offset(offset),
+                camera=camera or f"Files named {dcf[0]}…",
+            ))
+        problems = find_clock_problems(frames, use_gps=False)
+        if problems:
+            payload = [problem.to_json(include_refs=False) for problem in problems]
+            yield f"data: {json.dumps({'clock_problems': payload})}\n\n"
 
     def _capture_time(self, source_file: Path) -> datetime | None:
         if self.verify_by_hash:

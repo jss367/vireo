@@ -3,6 +3,7 @@
 import logging
 from collections import Counter
 from datetime import datetime
+from typing import NamedTuple
 
 import numpy as np
 
@@ -183,9 +184,37 @@ def read_exif_timestamp(image_path):
     Returns:
         datetime or None if not available
     """
-    from datetime import datetime
+    return read_exif_clock(image_path).captured
 
+
+class ExifClock(NamedTuple):
+    """A file's capture time with the clock evidence read alongside it."""
+
+    captured: datetime | None
+    # The UTC offset as the camera wrote it ('-07:00'), or None.
+    offset: str | None
+    # Camera model, with ' #<body serial>' when the file records one.
+    camera: str | None
+
+
+def _camera_label(model, serial):
+    model = str(model).strip() if model else ""
+    serial = str(serial).strip() if serial else ""
+    if serial:
+        return f"{model or 'Camera'} #{serial}"
+    return model or None
+
+
+def read_exif_clock(image_path):
+    """Read the capture time, recorded UTC offset and camera of an image file.
+
+    Same readers and order as ``read_exif_timestamp``, returning an
+    ``ExifClock``. The offset (``OffsetTimeOriginal``, else ``OffsetTime``)
+    and the camera (``Model`` and ``BodySerialNumber``) come from the same
+    parse as the time, so they cost no extra read.
+    """
     from PIL import Image
+    from PIL.ExifTags import IFD
     from PIL.ExifTags import Base as ExifBase
 
     # Try Pillow first (fast path for JPEG/TIFF)
@@ -197,7 +226,16 @@ def read_exif_timestamp(image_path):
                     ExifBase.DateTimeDigitized
                 )
                 if dt_str:
-                    return datetime.strptime(dt_str, "%Y:%m:%d %H:%M:%S")
+                    exif_ifd = exif.get_ifd(IFD.Exif)
+                    offset = exif_ifd.get(ExifBase.OffsetTimeOriginal) or exif_ifd.get(
+                        ExifBase.OffsetTime
+                    )
+                    return ExifClock(
+                        datetime.strptime(dt_str, "%Y:%m:%d %H:%M:%S"),
+                        str(offset).strip() if offset else None,
+                        _camera_label(exif.get(ExifBase.Model),
+                                      exif_ifd.get(ExifBase.BodySerialNumber)),
+                    )
     except Exception:  # broad: PIL raises a wide set on malformed EXIF; exifread is tried next
         log.debug("Pillow could not read a capture time from %s", image_path, exc_info=True)
 
@@ -216,9 +254,14 @@ def read_exif_timestamp(image_path):
                 or tags.get("Image DateTime")
             )
             if tag:
-                return datetime.strptime(str(tag), "%Y:%m:%d %H:%M:%S")
+                offset = tags.get("EXIF OffsetTimeOriginal") or tags.get("EXIF OffsetTime")
+                return ExifClock(
+                    datetime.strptime(str(tag), "%Y:%m:%d %H:%M:%S"),
+                    str(offset).strip() if offset else None,
+                    _camera_label(tags.get("Image Model"), tags.get("EXIF BodySerialNumber")),
+                )
     except Exception:  # broad: exifread raises undocumented errors; the capture time stays unknown
         log.debug("exifread could not read a capture time from %s", image_path, exc_info=True)
 
     log.warning("Could not read EXIF from %s", image_path)
-    return None
+    return ExifClock(None, None, None)

@@ -95,6 +95,11 @@ body {
 .preview-selection-row input { accent-color: var(--accent); }
 .preview-filter { display: inline-flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 12px; color: var(--text-secondary); }
 .import-day-summary { margin-top: 12px; overflow-x: auto; }
+.import-clock-problems { margin-top: 12px; border: 1px solid var(--warning); border-radius: 6px; padding: 10px 12px; font-size: 13px; color: var(--text-secondary); }
+.import-clock-problems h4 { margin: 0 0 6px; font-size: 13px; color: var(--warning); }
+.import-clock-problem + .import-clock-problem { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border-subtle); }
+.import-clock-problem ul { margin: 4px 0 0 18px; padding: 0; }
+.import-clock-problem .hint { margin-top: 6px; }
 .import-day-summary input { accent-color: var(--accent); }
 .import-day-toggle { border: 0; background: none; color: var(--text-primary); font: inherit; cursor: pointer; padding: 4px 0; white-space: nowrap; }
 .import-day-toggle:hover { text-decoration: underline; }
@@ -486,6 +491,7 @@ body {
         <input type="checkbox" id="chkHideDuplicates" onchange="onHideDuplicatesToggle()">
         <span id="hideDuplicatesLabel">Hide duplicates</span>
       </label>
+      <div id="importClockProblems" class="import-clock-problems" role="status" style="display:none;"></div>
       <div id="importDaySummary" class="import-day-summary" style="display:none;">
         <div class="hint">Uncheck a capture date to skip its photos for this import. Click a date to show or hide its photos.</div>
         <table class="structure-table">
@@ -579,6 +585,7 @@ body {
 <script defer src="/static/import/results.js"></script>
 <script defer src="/static/import/new-images.js"></script>
 <script defer src="/static/import/locations.js"></script>
+<script defer src="/static/import/clock-check.js"></script>
 <script defer src="/static/import/loading.js"></script>
 <script defer src="/static/import/boot.js"></script>
 </body>

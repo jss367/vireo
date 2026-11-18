@@ -10,6 +10,7 @@ import { bindOrphanTable, removeAllOrphans, runOrphanCheck } from './orphans.js'
 import { bindUntrackedTable, importAllUntracked, runUntrackedCheck, sendToPipeline } from './untracked.js';
 import { bindSidecarTable, deleteAllSidecars, runSidecarCheck } from './sidecars.js';
 import { bindIntegrityTable, loadIntegrity, runHashVerify } from './integrity.js';
+import { bindClockTable, runClockCheck } from './clocks.js';
 
 /** @param {string} id @param {() => unknown} action */
 function onClick(id, action) {
@@ -28,12 +29,14 @@ onClick('btnImportAllUntracked', importAllUntracked);
 onClick('sendToPipelineBtn', sendToPipeline);
 onClick('btnSidecars', runSidecarCheck);
 onClick('btnDeleteAllSidecars', deleteAllSidecars);
+onClick('btnClocks', runClockCheck);
 onClick('btnVerify', runHashVerify);
 bindDriftTable();
 bindOrphanTable();
 bindUntrackedTable();
 bindSidecarTable();
 bindIntegrityTable();
+bindClockTable();
 
 loadSummary();
 loadIntegrity();
