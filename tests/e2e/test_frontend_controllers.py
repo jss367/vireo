@@ -365,6 +365,18 @@ def mount_lightbox_viewport(page):
     page.evaluate("viewport.beginPhoto(1); viewport.recomputeNativeZoom()")
 
 
+def test_viewport_sizes_portrait_crop_in_original_pixels(page):
+    mount_lightbox_viewport(page)
+    page.evaluate("""async () => {
+        Object.assign(photo, {width: 5408, height: 3608, orientation: 1,
+            recipe: {crop: {x: 0.434213, y: 0.485522, w: 0.176887, h: 0.331419}}});
+        const image = document.getElementById('lightboxImg');
+        image.src = "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='320' height='400'/>";
+        await image.decode();
+    }""")
+    assert page.evaluate("viewport.layoutDims()") == {"w": 957, "h": 1196}
+
+
 def test_viewport_preserves_zoom_anchor_and_copies_saved_views(page):
     mount_lightbox_viewport(page)
     result = page.evaluate('''() => {
