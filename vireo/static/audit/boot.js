@@ -4,6 +4,7 @@
 // ES module.
 
 import { runSubjectCheck } from './subjects.js';
+import { runGpsCheck } from './gps.js';
 import { byId } from './helpers.js';
 import { bindTabs, loadSummary, runAllChecks, switchTab } from './summary.js';
 import { bindDriftTable, resolveAll, runDriftCheck } from './drift.js';
@@ -32,6 +33,7 @@ onClick('sendToPipelineBtn', sendToPipeline);
 onClick('btnSidecars', runSidecarCheck);
 onClick('btnDeleteAllSidecars', deleteAllSidecars);
 onClick('btnSubjects', runSubjectCheck);
+onClick('btnGps', runGpsCheck);
 onClick('btnClocks', runClockCheck);
 onClick('btnVerify', runHashVerify);
 bindDriftTable();

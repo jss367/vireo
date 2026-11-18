@@ -22,6 +22,7 @@ DELETE,GET,PUT /api/photos/<int:photo_id>/versions/<version_id>
 GET          /
 GET          /api/audit/camera-clocks
 GET          /api/audit/drift
+GET          /api/audit/gps-jumps
 GET          /api/audit/integrity
 GET          /api/audit/orphans
 GET          /api/audit/sidecars
@@ -78,7 +79,9 @@ GET          /api/import/orphaned-staging
 GET          /api/import/pending-archives
 GET          /api/import/readiness
 GET          /api/inat/account-species
+GET          /api/inat/locations
 GET          /api/inat/prepare/<int:photo_id>
+GET          /api/inat/species-match
 GET          /api/inat/submissions
 GET          /api/jobs
 GET          /api/jobs/<job_id>
@@ -247,6 +250,7 @@ PATCH        /api/settings/workspace
 PATCH,POST   /api/species-highlights/order
 POST         /api/audit/accept-hash
 POST         /api/audit/delete-sidecars
+POST         /api/audit/gps-jumps
 POST         /api/audit/import-untracked
 POST         /api/audit/remove-orphans
 POST         /api/audit/resolve

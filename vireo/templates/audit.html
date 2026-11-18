@@ -132,6 +132,7 @@
     <div class="tab" data-tab="orphans">Orphans <span class="badge" id="orphanBadge">-</span></div>
     <div class="tab" data-tab="untracked">Untracked <span class="badge" id="untrackedBadge">-</span></div>
     <div class="tab" data-tab="sidecars">Sidecars <span class="badge" id="sidecarBadge">-</span></div>
+    <div class="tab" data-tab="gps">GPS Jumps <span class="badge" id="gpsBadge">-</span></div>
     <div class="tab" data-tab="clocks">Camera Clocks <span class="badge" id="clockBadge">-</span></div>
     <div class="tab" data-tab="subjects">Subject Evidence</div>
     <div class="tab" data-tab="integrity">Integrity <span class="badge" id="integrityBadge">-</span></div>
@@ -184,6 +185,15 @@
         <span class="status-msg" id="sidecarStatus"></span>
       </div>
       <div id="sidecarContent"><div class="empty-msg">Click "Check for Stray Sidecars" to find .xmp files whose photo is gone.</div></div>
+    </div>
+  </div>
+
+  <div class="tab-panel" id="panel-gps">
+    <div class="section">
+      <div class="action-bar"><button id="btnGps" type="button" class="btn btn-primary">Check GPS jumps</button>
+        <span id="gpsStatus" class="status-msg"></span></div>
+      <p>Check rapid camera movements of at least a kilometer. A return near the starting point within five minutes can support a correction. Approved coordinates are stored in this catalog and used for photo exports.</p>
+      <div id="gpsContent"></div>
     </div>
   </div>
 

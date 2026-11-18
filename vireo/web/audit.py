@@ -217,6 +217,42 @@ def create_audit_blueprint(
             db.audit.record_run("clocks", len(result["findings"]))
         return jsonify(result)
 
+    @blueprint.get("/api/audit/gps-jumps")
+    def api_gps_jumps() -> ResponseReturnValue:
+        from services.gps_jumps import check_gps_jumps
+
+        db = get_db()
+        findings = check_gps_jumps(db)
+        with db.transaction():
+            db.audit.record_run("gps", sum(not f["reviewed"] for f in findings))
+        return jsonify(findings)
+
+    @blueprint.post("/api/audit/gps-jumps")
+    def api_review_gps_jump() -> ResponseReturnValue:
+        from services.gps_jumps import check_gps_jumps
+
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict) or body.get("action") not in ("apply", "restore"):
+            return json_error("Choose a GPS correction to apply or restore.", 400)
+        if type(body.get("folder_id")) is not int or not isinstance(body.get("key"), str):
+            return json_error("Choose a finding from the GPS audit.", 400)
+        db = get_db()
+        with db.transaction(immediate=True):
+            findings = check_gps_jumps(db, body["folder_id"])
+            finding = next((f for f in findings if f.get("key") == body["key"]
+                            and f["reviewed"] == (body["action"] == "restore")), None)
+            if finding is None and body["action"] == "apply" and any(
+                f.get("key") == body["key"] and f["reviewed"] for f in findings
+            ):
+                return jsonify({"ok": True})
+            if finding is None or finding["conflict"]:
+                return json_error("The GPS evidence changed. Check again.", 409)
+            if body["action"] == "restore":
+                db.audit.remove_gps_review(finding["ids"], finding["key"])
+            elif not finding["reviewed"]:
+                db.audit.apply_gps_review(finding["ids"], finding["key"], **finding["suggested"])
+        return jsonify({"ok": True})
+
     @blueprint.route("/api/audit/accept-hash", methods=["POST"])
     def api_audit_accept_hash() -> ResponseReturnValue:
         db = get_db()
