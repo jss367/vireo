@@ -317,9 +317,10 @@
       "POST /api/workspaces/active/local-folders/preflight/cancel"
     ]
   },
-  "review_notes": {
-    "description": "Same-shot review notes preserve all photos and have an explicit Reopen review control.",
+  "reversible_reviews": {
+    "description": "Same-shot reviews can be reopened. GPS jump corrections preserve camera coordinates and can be reversed with Restore camera GPS.",
     "routes": [
+      "POST /api/audit/gps-jumps",
       "POST /api/duplicates/same-shot/review"
     ]
   },
