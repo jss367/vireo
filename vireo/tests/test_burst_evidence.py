@@ -630,16 +630,24 @@ def test_focus_crop_shades_outside_the_mask(app_and_db, center):
     assert right > 180
     assert left < 110
 
-    # An empty valid mask still renders an overlay; absence is a different state.
-    Image.new("L", (1024, 683), 0).save(mask_path)
-    empty = client.get(f"/photos/{pid}/focus-crop?size=256&mask=1{center}")
-    assert empty.status_code == 200
+    # Recenter so the boundary moves from crop x=128 to x=68.
+    url = f"/photos/{pid}/focus-crop?size=256&mask=1&center=.52,.5"
+    manual = client.get(url)
+    assert manual.headers["X-Vireo-Focus-Basis"] == "point"
+    for header in ("X-Vireo-Focus-Mask", "X-Vireo-Focus-Detection-Id", "X-Vireo-Focus-Source"):
+        assert manual.headers[header] == resp.headers[header]
+    img = Image.open(io.BytesIO(manual.data))
+    assert img.getpixel((50, 128))[0] < 110
+    assert img.getpixel((90, 128))[0] > 180
+
+    Image.new("L", mask.size, 0).save(mask_path)
+    empty = client.get(url)
     assert empty.headers["X-Vireo-Focus-Mask"] == "1"
-    assert Image.open(io.BytesIO(empty.data)).getpixel((128, 128))[0] < 110
+    assert Image.open(io.BytesIO(empty.data)).getextrema()[0][1] < 110
+    Image.new("L", mask.size[::-1], 255).save(mask_path)
+    assert client.get(url).status_code == 404
     os.unlink(mask_path)
-    missing = client.get(f"/photos/{pid}/focus-crop?size=256&mask=1{center}")
-    assert missing.status_code == 404
-    assert "mask is unavailable" in missing.get_json()["error"]
+    assert client.get(url).status_code == 404
 
     # A mask path outside the masks directory is never read.
     db.masks_features.upsert_mask(pid, "test", "/etc/hosts", "MDV6", (.4, .4, .2, .2))
