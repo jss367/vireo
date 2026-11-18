@@ -45,7 +45,10 @@ def _references(db: Database, floor: float) -> list[JsonDict]:
             photo = db.photos.get(pid, verify_workspace=True)
             if photo is None:
                 continue
-            subjects = retained(db, pid, floor)
+            policy = db.subjects.primary_state(pid)
+            subject_floor = policy["min_conf"] if policy is not None and policy["min_conf"] is not None else floor
+            subject_model = policy["detector_model"] if policy is not None else None
+            subjects = retained(db, pid, subject_floor, detector_model=subject_model)
             det = subjects[0]["id"] if subjects else None
             predictions = db.predictions.top_unrejected_by_detection([pid]).get(pid, [])
             name = next((p["species"] for p in predictions if p["detection_id"] == det), None)

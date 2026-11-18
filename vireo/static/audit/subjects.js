@@ -48,12 +48,21 @@ function section(title, rows) {
   return group;
 }
 
-export async function runSubjectCheck() {
+/** @type {Promise<void> | null} */
+let subjectCheck = null;
+
+export function runSubjectCheck() {
+  if (subjectCheck) return subjectCheck;
+  subjectCheck = checkSubjects().finally(() => { subjectCheck = null; });
+  return subjectCheck;
+}
+
+async function checkSubjects() {
   const button = /** @type {HTMLButtonElement} */ (byId('btnSubjects'));
-  if (button.disabled) return;
   button.disabled = true;
   const status = byId('subjectStatus');
   status.textContent = 'Checking workspace subject evidence…';
+  status.style.color = '';
   const content = byId('subjectContent');
   content.replaceChildren();
   try {

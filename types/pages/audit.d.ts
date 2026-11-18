@@ -48,7 +48,7 @@ interface Window {
   showToast?(message: string, kind?: string): void;
 }
 interface AuditSubjectPhoto {
-  id: number; filename: string; detection_id: number | null; species?: string;
+  id: number; filename: string; detection_id: number | null; species?: string | null;
   bucket_size?: number; weak?: boolean; whole_frame?: boolean;
   unnamed?: number; stale_mask?: number; stale_score?: number;
 }
