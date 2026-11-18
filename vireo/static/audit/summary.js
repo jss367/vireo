@@ -3,6 +3,7 @@
 // ES module.
 
 import { CHECK_LABELS } from './state.js';
+import { runSubjectCheck } from './subjects.js';
 import { byId, errorMessage } from './helpers.js';
 import { safeFetch, timeAgo } from './shared.js';
 import { runDriftCheck } from './drift.js';
@@ -113,6 +114,8 @@ export async function runAllChecks() {
     await runUntrackedCheck();
     note.textContent = 'Running sidecar check…';
     await runSidecarCheck();
+    note.textContent = 'Checking subject evidence…';
+    await runSubjectCheck();
     note.textContent = 'Checking camera clocks…';
     await runClockCheck();
     note.textContent = 'Verifying file hashes…';

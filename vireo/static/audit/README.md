@@ -19,6 +19,7 @@ conventions). The template loads one entry module after the shared navbar:
 | `untracked.js` | Files the catalog does not know: import, or send their folders to Process |
 | `sidecars.js` | Stray `.xmp` files, moved to the Trash |
 | `clocks.js` | Camera Clocks: folders whose camera clock or time zone was wrong, with the evidence and per-group fixes run through the capture-time job (preview first, then an in-page confirmation) |
+| `subjects.js` | Subject evidence counts and paired frame and crop sheets for Highlights suggestions and reference photos |
 | `integrity.js` | The verify-hashes job, the flagged files, and Accept Current File |
 | `boot.js` | The entry module: binds the tabs and buttons that used to carry inline handlers and the delegated row buttons, then loads the summary and the Integrity tab |
 

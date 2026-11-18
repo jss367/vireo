@@ -20,3 +20,18 @@ window.addEventListener('devmodechange', updateAdvancedPipelineOptions);
 document.addEventListener('DOMContentLoaded', function() { loadSavedProcesses(null); });
 
 bindSlotPolling();
+
+document.getElementById('subjectCounts')?.addEventListener('toggle', async function(event) {
+  if (!(event.target instanceof HTMLDetailsElement) || !event.target.open) return;
+  const result = document.getElementById('subjectCountsResult');
+  if (!result) return;
+  result.textContent = 'Checking workspace…';
+  try {
+    const counts = /** @type {{unnamed: number, stale_mask: number, stale_score: number}} */ (
+      await safeFetch('/api/audit/subjects/counts', {}, {toast: false}));
+    result.textContent = counts.unnamed + ' unclassified subjects with whole-frame predictions · ' +
+      counts.stale_mask + ' active mask mismatches · ' + counts.stale_score + ' quality score mismatches';
+  } catch (error) {
+    result.textContent = 'Could not load subject evidence counts: ' + String(error);
+  }
+});

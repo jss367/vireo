@@ -11,6 +11,7 @@
     "../vireo/static/audit/shared.js",
     "../vireo/static/audit/sidecars.js",
     "../vireo/static/audit/state.js",
+    "../vireo/static/audit/subjects.js",
     "../vireo/static/audit/summary.js",
     "../vireo/static/audit/untracked.js"
   ]

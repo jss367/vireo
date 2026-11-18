@@ -38,6 +38,9 @@
 .summary-chip .chip-time { color: var(--text-dim); margin-left: 4px; }
 .summary-note { margin-top: 10px; font-size: 12px; color: var(--text-muted); }
 
+.subject-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 8px; }
+.subject-cards figure { margin: 8px 0; }
+
 .tabs { display: flex; gap: 0; margin-bottom: 24px; }
 .tab {
   padding: 10px 20px; cursor: pointer; font-size: 13px; color: var(--text-muted);
@@ -130,6 +133,7 @@
     <div class="tab" data-tab="untracked">Untracked <span class="badge" id="untrackedBadge">-</span></div>
     <div class="tab" data-tab="sidecars">Sidecars <span class="badge" id="sidecarBadge">-</span></div>
     <div class="tab" data-tab="clocks">Camera Clocks <span class="badge" id="clockBadge">-</span></div>
+    <div class="tab" data-tab="subjects">Subject Evidence</div>
     <div class="tab" data-tab="integrity">Integrity <span class="badge" id="integrityBadge">-</span></div>
   </div>
 
@@ -194,6 +198,14 @@
         <span class="status-msg" id="clockStatus"></span>
       </div>
       <div id="clockContent"><div class="empty-msg">Click "Check Camera Clocks" to find photos whose camera clock or time zone was wrong: capture times that run backwards in shot order, time-zone settings changed mid-shoot, and clocks that disagree with GPS time or with local time at the GPS position.</div></div>
+    </div>
+  </div>
+
+  <div class="tab-panel" id="panel-subjects">
+    <div class="section">
+      <button class="btn btn-primary" id="btnSubjects" type="button">Check Subject Evidence</button>
+      <p id="subjectStatus" role="status">Compare selected subjects with saved analysis and review the regions behind suggested species.</p>
+      <div id="subjectContent"></div>
     </div>
   </div>
 

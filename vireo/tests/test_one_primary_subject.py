@@ -392,3 +392,39 @@ def test_legacy_successor_waits_for_its_own_policy(db):
     db.commit()
     state = db.subjects.primary_state(second)
     assert (state["detection_id"], state["refresh_pending"]) == (overlap, 0)
+
+
+def test_audit_compares_active_evidence_with_retained_region(app_and_db):
+    app, db = app_and_db
+    fid = _folder(db)
+    pid, hawk, strip, _ = _hawk_frame(db, fid)
+    db.subjects.set_primary_state(pid, strip)
+    db.commit()
+    client = app.test_client()
+    report = client.get('/api/audit/subjects').get_json()
+    assert report['findings'] == [dict(id=pid, filename='DSC_8166.jpg', detection_id=hawk,
+                                      unnamed=0, stale_score=1, stale_mask=0)]
+    assert [(r['species'], r['detection_id'], r['bucket_size']) for r in report['review']] == [
+        ('Red-shouldered Hawk', hawk, 1)]
+    assert client.get('/api/audit/subjects/counts').get_json() == dict(
+        unnamed=0, stale_score=1, stale_mask=0)
+
+
+def test_subject_audit_checks_only_active_mask_and_visible_workspace(app_and_db):
+    app, db = app_and_db
+    fid = _folder(db)
+    pid, hawk, strip, _ = _hawk_frame(db, fid)
+    db.conn.execute("DELETE FROM predictions WHERE detection_id=?", (hawk,))
+    anchor = db.detections.save(pid, [{"box": dict(x=0, y=0, w=1, h=1),
+                                      "confidence": 1, "category": "animal"}], detector_model="full-image")[0]
+    db.predictions.add(anchor, "Whole frame guess", 0.9, "BioCLIP-2.5")
+    db.conn.execute("""INSERT INTO photo_masks(photo_id,variant,path,created_at,detector_model,
+                    prompt_x,prompt_y,prompt_w,prompt_h) SELECT photo_id,'test','test.png',1,
+                    detector_model,box_x,box_y,box_w,box_h FROM detections WHERE id=?""", (strip,))
+    db.commit()
+    assert db.audit.subject_findings(.2)[0]['unnamed'] == 1
+    assert db.audit.subject_findings(.2)[0]['stale_mask'] == 0
+    db.conn.execute("UPDATE photos SET active_mask_variant='test' WHERE id=?", (pid,))
+    assert db.audit.subject_findings(.2)[0]['stale_mask'] == 1
+    db.conn.execute("DELETE FROM workspace_folders WHERE folder_id=?", (fid,))
+    assert db.audit.subject_findings(.2) == []
