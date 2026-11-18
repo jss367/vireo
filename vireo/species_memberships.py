@@ -147,6 +147,8 @@ def subject_from_row(row):
         "score_kind": row["score_kind"],
         "subject_rank": row["subject_rank"],
         "subject_chosen": bool(row["subject_chosen"]),
+        "box_x": row["box_x"],
+        "box_y": row["box_y"],
         "box_w": row["box_w"],
         "box_h": row["box_h"],
     }
@@ -173,7 +175,7 @@ def candidate_subjects(row):
     }]
 
 
-def _primary_subject(subjects):
+def primary_subject(subjects):
     """Use the retained-region rank even when the primary has no prediction."""
     if any(_field(s, "subject_rank") is not None for s in subjects):
         return next((s for s in subjects if _field(s, "subject_rank") == 1), None)
@@ -197,7 +199,7 @@ def bucket_opening_subjects(subjects):
     ]
     localized = [s for s in eligible if not subject_is_whole_frame(s)]
     if localized:
-        primary = _primary_subject(localized)
+        primary = primary_subject(localized)
         return [
             s for s in localized
             if s is primary or (
@@ -205,7 +207,7 @@ def bucket_opening_subjects(subjects):
                 and not subject_spans_frame(s)
             )
         ]
-    primary = _primary_subject(eligible)
+    primary = primary_subject(eligible)
     return [primary] if primary is not None and subject_is_whole_frame(primary) else []
 
 
@@ -302,7 +304,7 @@ def explain_subject_roles(row, canonicalize_species=None):
     opening = {id(s) for s in bucket_opening_subjects(subjects)}
     tags_disagree = bool(tag_keys) and not any(k in tag_keys for _, k in keys)
     localized = [s for s in subjects if not subject_is_whole_frame(s)]
-    primary = _primary_subject(localized)
+    primary = primary_subject(localized)
     roles = {}
     for subject, key in keys:
         species = canonical(subject["species"])

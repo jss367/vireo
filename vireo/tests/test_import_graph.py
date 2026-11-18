@@ -87,6 +87,7 @@ FOUNDATION = frozenset({
     "species_identity",
     "species_memberships",
     "species_preference",
+    "species_presence",
     "sql_chunks",
 })
 

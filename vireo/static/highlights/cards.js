@@ -26,6 +26,53 @@ export function predictionChip(p) {
   return '<span class="card-chip conf">ID ' + pct + '</span>';
 }
 
+// A photo's pick flag is a pick of the bird it is a picture of. In the row
+// of a species that is only in frame, or cropped out, the photo is not that
+// species' pick (the server orders it after the row's own photos), so the
+// badge names the species it is a pick of instead of claiming this one.
+/** @param {HighlightsPhoto} p */
+export function speciesIsSubject(p) {
+  return !p.species_presence || p.species_presence === 'subject';
+}
+
+/** @param {HighlightsPhoto} p */
+function subjectSpeciesText(p) {
+  var bucket = p.bucket_species || null;
+  var names = (p.subject_species_list || []).filter(function(name) { return name !== bucket; });
+  return names.join(', ');
+}
+
+/** @param {HighlightsPhoto} p */
+export function pickBadge(p) {
+  if (p.flag !== 'flagged') return '';
+  if (speciesIsSubject(p)) return '<div class="pick-flag-badge" title="Flagged as pick">Pick</div>';
+  var subject = subjectSpeciesText(p);
+  var label = subject ? 'Pick for ' + subject : 'Pick of another bird';
+  return '<div class="pick-flag-badge other-subject" title="'
+    + escapeAttr('Flagged as pick. This photo\'s subject is ' + (subject || 'another bird')
+      + ', so the pick does not count for ' + (p.bucket_species || 'this species') + '.')
+    + '">' + escapeAttr(label) + '</div>';
+}
+
+// Says why a photo sits below the row's own photos: its subject is another
+// bird, or its crop leaves this species out.
+/** @param {HighlightsPhoto} p */
+export function presenceChip(p) {
+  if (speciesIsSubject(p)) return '';
+  var species = p.bucket_species || 'This species';
+  var subject = subjectSpeciesText(p);
+  if (p.species_presence === 'outside_crop') {
+    return '<span class="card-chip presence" title="'
+      + escapeAttr('Every ' + species + ' Vireo found in this photo is outside its crop.'
+        + (subject ? ' The crop shows ' + subject + '.' : ''))
+      + '">Outside crop</span>';
+  }
+  return '<span class="card-chip presence" title="'
+    + escapeAttr((subject ? subject + ' is' : 'Another bird is') + ' this photo\'s subject; '
+      + species + ' is elsewhere in the frame.')
+    + '">Not the subject</span>';
+}
+
 /** @param {HighlightsPhoto} p @param {number} idx */
 export function renderCard(p, idx) {
   var thumbSrc = photoThumbnailUrl(p);
@@ -45,9 +92,8 @@ export function renderCard(p, idx) {
     : (p.is_species_representative
       ? '<div class="best-ribbon">Representative</div>'
       : (advanced && idx === 0 ? '<div class="best-ribbon">Best</div>' : ''));
-  var flagBadge = p.flag === 'flagged'
-    ? '<div class="pick-flag-badge" title="Flagged as pick">Pick</div>'
-    : '';
+  var flagBadge = pickBadge(p);
+  var presence = presenceChip(p);
   var rep = p.is_species_representative
     ? '<span class="card-chip reason">Representative</span>'
     : '';
@@ -66,14 +112,15 @@ export function renderCard(p, idx) {
   return '<div class="highlights-card'
     + (p.is_highlighted ? ' highlight-card' : '')
     + (idx === 0 ? ' best-card' : '')
-    + (p.flag === 'flagged' ? ' pick-flag-card' : '')
+    + (p.flag === 'flagged' && speciesIsSubject(p) ? ' pick-flag-card' : '')
+    + (p.flag === 'flagged' && !speciesIsSubject(p) ? ' other-pick-card' : '')
     + '" data-photo-id="' + p.id + '" title="' + escapeAttr(title) + '">'
     + ribbon
     + flagBadge
     + order
     + '<img src="' + thumbSrc + '" alt="' + escapeAttr(p.filename) + '" loading="lazy">'
     + '<div class="card-filename" title="' + escapeAttr(p.filename) + '">' + escapeAttr(p.filename) + '</div>'
-    + '<div class="card-info">' + scoreChip + conf + rep + alsoTagged + reasons + '</div>'
+    + '<div class="card-info">' + scoreChip + conf + presence + rep + alsoTagged + reasons + '</div>'
     + '</div>';
 }
 
