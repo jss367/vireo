@@ -127,11 +127,15 @@ def _crop_to_detection(img: Image.Image, dets: list[Row], requested_detection: i
     return img
 
 
-def _focus_mask_bytes(db_path: str, db: Database, photo_id: int) -> bytes | None:
-    """Only read the recorded mask inside this catalog's mask directory."""
-    mask_path = db.masks_features.photo_mask_path(photo_id)
-    if not mask_path:
+def _focus_mask_bytes(db_path: str, db: Database, photo_id: int, boxes: Sequence[Row | JsonDict]) -> bytes | None:
+    """Read a mask whose path and owner were captured together, inside the catalog."""
+    record = db.masks_features.active_prompt_detection(photo_id, include_mask_path=True)
+    if record is None:
         return None
+    prompt = dict(record)
+    mask_path = prompt.pop("active_mask_path")
+    if [prompt] != [dict(box) for box in boxes]:
+        raise ValueError("Subject association changed while reading the mask; refresh the inspection")
     masks_dir = os.path.realpath(os.path.join(os.path.dirname(db_path), "masks"))
     abs_mask = os.path.realpath(mask_path)
     inside = abs_mask == masks_dir or abs_mask.startswith(masks_dir + os.sep)
@@ -147,10 +151,11 @@ def _needs_primary_focus_subject(args: Mapping[str, str], basis: str) -> bool:
 
 def _requested_focus_mask(
     db_path: str, db: Database, photo_id: int, selected_analysis: JsonDict | None,
+    boxes: Sequence[Row | JsonDict],
 ) -> bytes | None:
     if request.args.get("mask") != "1":
         return None
-    mask = selected_analysis["mask_png"] if selected_analysis else _focus_mask_bytes(db_path, db, photo_id)
+    mask = selected_analysis["mask_png"] if selected_analysis else _focus_mask_bytes(db_path, db, photo_id, boxes)
     if mask is None:
         raise ValueError("Subject mask is unavailable; analyze the subject or inspect without a mask")
     return mask
@@ -338,7 +343,7 @@ class CropRoutes:
         try:
             center, used = focus_point(photo, boxes, basis, eye_enabled=eye_enabled, point=point)
             img, source = _validated_focus_source(self._config, db, photo, request.args, effective, source_choice, boxes, basis)
-            mask_bytes = _requested_focus_mask(self._db_path, db, photo_id, selected_analysis)
+            mask_bytes = _requested_focus_mask(self._db_path, db, photo_id, selected_analysis, boxes)
         except ValueError as exc:
             if img is not None:
                 img.close()

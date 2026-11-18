@@ -278,3 +278,57 @@ def test_mask_changed_during_decode_never_serves_captured_bytes(app_and_db, monk
         crop = Image.open(io.BytesIO(response.data))
         assert crop.getpixel((10, 128))[0] > 180
         assert crop.getpixel((245, 128))[0] < 110
+
+
+@pytest.mark.parametrize('center', ['', '&center=.52,.35'])
+@pytest.mark.parametrize('boundary', ['before_snapshot', 'after_snapshot'])
+def test_mask_owner_changed_after_source_validation_stays_bound(app_and_db, monkeypatch, center, boundary):
+    from pathlib import Path
+
+    import web.media_crops as media
+    app, db = app_and_db
+    pid = db.photos.list_page()[0]['id']
+    _working_copy(app, db, pid, color=(200, 200, 200))
+    masks = Path(app.config['DB_PATH']).parent / 'masks'
+    masks.mkdir(exist_ok=True)
+    boxes = [{'x': .1, 'y': .2, 'w': .2, 'h': .2}, {'x': .6, 'y': .2, 'w': .2, 'h': .2}]
+    db.detections.save(pid, [{'box': box, 'confidence': .9, 'category': 'animal'} for box in boxes],
+                       detector_model='test')
+    for variant, box in zip(['original', 'replacement'], boxes, strict=True):
+        path = masks / f'{pid}.{variant}.png'
+        Image.new('L', (1024, 683), 255 if variant == 'original' else 0).save(path)
+        db.masks_features.upsert_mask(pid, variant, str(path), 'test', tuple(box.values()))
+    db.conn.execute('UPDATE photos SET mask_path=?, active_mask_variant=? WHERE id=?',
+                    (str(masks / f'{pid}.original.png'), 'original', pid))
+    db.commit()
+    def replace_mask():
+        db.conn.execute('UPDATE photos SET mask_path=?, active_mask_variant=? WHERE id=?',
+                        (str(masks / f'{pid}.replacement.png'), 'replacement', pid))
+        db.commit()
+    if boundary == 'before_snapshot':
+        validate = media._validated_focus_source
+        def replace_after_validation(*args):
+            result = validate(*args)
+            replace_mask()
+            return result
+        monkeypatch.setattr(media, '_validated_focus_source', replace_after_validation)
+    else:
+        repository = type(db.masks_features)
+        capture = repository.active_prompt_detection
+        def replace_after_snapshot(self, photo_id, **kwargs):
+            record = capture(self, photo_id, **kwargs)
+            if kwargs.get('include_mask_path'):
+                replace_mask()
+            return record
+        monkeypatch.setattr(repository, 'active_prompt_detection', replace_after_snapshot)
+    response = app.test_client().get(f'/photos/{pid}/focus-crop?size=256&mask=1{center}')
+    if boundary == 'before_snapshot':
+        assert response.status_code == 404
+        assert 'Subject association changed' in response.get_json()['error']
+    else:
+        assert response.status_code == 200
+        assert response.headers['X-Vireo-Focus-Subject-Box'] == '0.1,0.2,0.2,0.2'
+        assert response.headers['X-Vireo-Focus-Mask'] == '1'
+        # The captured original path still belongs to the subject in the headers.
+        crop = Image.open(io.BytesIO(response.data))
+        assert crop.getpixel((128, 128))[0] > 180

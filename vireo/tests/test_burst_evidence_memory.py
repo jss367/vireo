@@ -295,7 +295,11 @@ def focus(photo=None, args=None, size=(3000, 2000), enabled=True, mask_path=None
         folders=types.SimpleNamespace(get=lambda fid: {"path": "/invented"}),
         get_effective_config=lambda cfg: cfg,
         masks_features=types.SimpleNamespace(
-            photo_mask_path=lambda pid: mask_path, active_prompt_detection=lambda pid: active_prompt or (boxes[0] if mask_path else None)
+            photo_mask_path=lambda pid: mask_path,
+            active_prompt_detection=lambda pid, include_mask_path=False: (
+                {**(active_prompt or boxes[0]), **({"active_mask_path": mask_path} if include_mask_path else {})}
+                if mask_path or active_prompt else None
+            ),
         ),
     )
     ns["get_db"] = lambda: db
@@ -624,6 +628,7 @@ def test_active_prompt_requires_current_variant_path_model_and_geometry():
         repo = ns["MasksFeaturesRepository"]()
         repo.conn = c
         assert repo.active_prompt_detection(1)["id"] == 7
+        assert repo.active_prompt_detection(1, include_mask_path=True)["active_mask_path"] == '/invented/mask'
         assert repo.active_prompt_detection(999) is None
         for sql in [
             "UPDATE photos SET active_mask_variant='old'",
@@ -635,6 +640,7 @@ def test_active_prompt_requires_current_variant_path_model_and_geometry():
         ]:
             c.execute(sql)
             assert repo.active_prompt_detection(1) is None
+            assert repo.active_prompt_detection(1, include_mask_path=True) is None
             c.rollback()
     finally:
         c.close()
