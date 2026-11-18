@@ -215,6 +215,11 @@ def test_selected_mask_focus_and_measurements_share_generation(comparison_librar
     assert focus.headers["X-Vireo-Focus-Basis"] == "subject"
     assert focus.headers["X-Vireo-Focus-Detection-Id"] == str(ids[card["id"]][0])
     assert focus.headers["X-Vireo-Focus-Eye-Status"] == "disabled"
+    manual = client.get(card["focus_crop_mask_url"] + "&center=.5,.5")
+    assert manual.headers["X-Vireo-Analysis-Key"] == card["subject"]["analysis_key"]
+    assert manual.headers["X-Vireo-Focus-Mask"] == "1"
+    crop = Image.open(io.BytesIO(manual.data))
+    assert crop.getpixel((70, 80))[0] > 240 and crop.getpixel((240, 80))[0] < 100
     # Foreign detection ids and a different generation cannot borrow the primary mask.
     assert client.get(card["mask_url"].replace(card["subject"]["analysis_key"], "wrong")).status_code == 404
     assert client.get(card["focus_crop_url"].replace(f"detection_id={ids[card['id']][0]}", f"detection_id={ids[pids[0]][1]}&unused=1")).status_code == 404

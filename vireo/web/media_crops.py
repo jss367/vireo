@@ -127,9 +127,8 @@ def _crop_to_detection(img: Image.Image, dets: list[Row], requested_detection: i
     return img
 
 
-def _focus_mask_bytes(db_path: str, db: Database, photo_id: int) -> bytes | None:
+def _focus_mask_bytes(db_path: str, mask_path: str | None) -> bytes | None:
     """Only read the recorded mask inside this catalog's mask directory."""
-    mask_path = db.masks_features.photo_mask_path(photo_id)
     if not mask_path:
         return None
     masks_dir = os.path.realpath(os.path.join(os.path.dirname(db_path), "masks"))
@@ -140,7 +139,7 @@ def _focus_mask_bytes(db_path: str, db: Database, photo_id: int) -> bytes | None
 
 def _validated_focus_source(
     config: AppConfig, db: Database, photo: JsonDict, args: Mapping[str, str], effective: JsonDict,
-    source_choice: str, boxes: Sequence[Row | JsonDict] = (), basis: str = "auto",
+    source_choice: str, boxes: Sequence[Row | JsonDict], *, verify_primary: bool,
 ) -> tuple[Image.Image | None, str | None]:
     """Decoding may outlive a source replacement; revalidate pinned evidence."""
     img, source = _focus_source_image(config, photo, db.folders.get(photo["folder_id"]), source_choice)
@@ -150,7 +149,7 @@ def _validated_focus_source(
         except ValueError:
             img.close()
             raise
-    if img is not None and args.get("detection_id") is None and args.get("center") is None and basis != "frame":
+    if img is not None and verify_primary:
         from focus_crop import focus_subject_detections
         try:
             current = focus_subject_detections(db, photo["id"])
@@ -298,7 +297,9 @@ class CropRoutes:
         effective = db.get_effective_config(cfg.load())
         eye_enabled = bool(_normalize_scoring_config(effective).get("eye_detect_enabled", False))
         boxes = []
-        if point is None and basis != "frame" and request.args.get("detection_id") is None:
+        mask_requested = request.args.get("mask") == "1"
+        verify_primary = request.args.get("detection_id") is None and (mask_requested or (point is None and basis != "frame"))
+        if verify_primary:
             try:
                 boxes = focus_subject_detections(db, photo_id)
             except ValueError as exc:
@@ -318,7 +319,9 @@ class CropRoutes:
             photo = {**dict(photo), "eye_x": None, "eye_y": None, "eye_tenengrad": None}
         try:
             center, used = focus_point(photo, boxes, basis, eye_enabled=eye_enabled, point=point)
-            img, source = _validated_focus_source(self._config, db, photo, request.args, effective, source_choice, boxes, basis)
+            img, source = _validated_focus_source(
+                self._config, db, photo, request.args, effective, source_choice, boxes, verify_primary=verify_primary,
+            )
         except ValueError as exc:
             return self._json_error(str(exc), 404)
         if img is None:
@@ -331,10 +334,17 @@ class CropRoutes:
         window, center = focus_window(img.size, center, size)
         crop = img.crop(window).convert("RGB")
         mask_bytes = None
-        if request.args.get("mask") == "1" and (selected_analysis or (point is None and boxes)):
-            mask_bytes = selected_analysis["mask_png"] if selected_analysis else _focus_mask_bytes(self._db_path, db, photo_id)
-        if mask_bytes is not None:
-            crop = shade_focus_mask(crop, mask_bytes, img.size, window, Image)
+        if mask_requested:
+            if selected_analysis is not None:
+                mask_bytes = selected_analysis["mask_png"]
+            elif boxes:
+                mask_bytes = _focus_mask_bytes(self._db_path, dict(boxes[0]).get("focus_mask_path"))
+            if mask_bytes is None:
+                return self._json_error("Focus mask unavailable for the requested subject", 404)
+            try:
+                crop = shade_focus_mask(crop, mask_bytes, img.size, window, Image)
+            except (OSError, ValueError, Image.DecompressionBombError):
+                return self._json_error("Focus mask unavailable: unreadable or incompatible with the source raster", 404)
         buf = io.BytesIO()
         crop.save(buf, format="JPEG", quality=config_value(effective, "preview_quality"))
         response = Response(buf.getvalue(), mimetype="image/jpeg")

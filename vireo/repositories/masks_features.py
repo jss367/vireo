@@ -286,8 +286,8 @@ class MasksFeaturesRepository:
         the active variant, path, detector model and all prompt coordinates.
         The media caller has already checked workspace visibility.
         """
-        return self.conn.execute(
-            """SELECT d.* FROM photos p
+        matches = self.conn.execute(
+            """SELECT d.*, pm.path AS focus_mask_path FROM photos p
                JOIN photo_masks pm ON pm.photo_id = p.id
                 AND pm.variant = p.active_mask_variant AND pm.path = p.mask_path
                JOIN detections d ON d.photo_id = p.id
@@ -296,9 +296,10 @@ class MasksFeaturesRepository:
                 AND d.box_w = pm.prompt_w AND d.box_h = pm.prompt_h
                WHERE p.id = ? AND d.category = 'animal'
                  AND d.detector_model != 'full-image'
-               LIMIT 1""",
+               LIMIT 2""",
             (photo_id,),
-        ).fetchone()
+        ).fetchall()
+        return matches[0] if len(matches) == 1 else None
 
     def photo_mask_state(self, photo_id: int) -> sqlite3.Row | None:
         """Row (``active_mask_variant``, ``dino_embedding_variant``,

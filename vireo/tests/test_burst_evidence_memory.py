@@ -234,10 +234,11 @@ def focus(photo=None, args=None, size=(3000, 2000), enabled=True, mask_path=None
 
     pil = types.SimpleNamespace(
         NEAREST=0,
-        open=lambda buf: Image((100, 100), events, "mask"),
+        open=lambda buf: Image((150, 100), events, "mask"),
         composite=lambda crop, shaded, mask: events.append(("composite",)) or crop,
     )
     helpers = {
+        "ASPECT_TOLERANCE": 0.01,
         "math": math,
         "detection_store": types.SimpleNamespace(
             get_detections=lambda db, pid: db.get_detections(pid),
@@ -292,7 +293,7 @@ def focus(photo=None, args=None, size=(3000, 2000), enabled=True, mask_path=None
         folders=types.SimpleNamespace(get=lambda fid: {"path": "/invented"}),
         get_effective_config=lambda cfg: cfg,
         masks_features=types.SimpleNamespace(
-            photo_mask_path=lambda pid: mask_path, active_prompt_detection=lambda pid: active_prompt or (boxes[0] if mask_path else None)
+            photo_mask_path=lambda pid: mask_path, active_prompt_detection=lambda pid: active_prompt or (dict(boxes[0], focus_mask_path=mask_path) if mask_path else None)
         ),
     )
     ns["get_db"] = lambda: db
@@ -330,7 +331,7 @@ def focus_checks():
     assert ("point", "mask", 0, 255, 255) in events
     assert ("point", "image", 0, 44, 89) in events
     res, events = focus(args={"mask": "1"}, mask_path="/elsewhere/mask.png")
-    assert res.headers["X-Vireo-Focus-Mask"] == "0" and not any(e[0] == "mask-read" for e in events)
+    assert res[1] == 404 and not any(e[0] == "mask-read" for e in events)
     for args in [{"size": "12"}, {"basis": "nose"}]:
         res, events = focus(args=args)
         assert res[1] == 400 and not any(e[0] == "loader" for e in events)
@@ -620,6 +621,7 @@ def test_active_prompt_requires_current_variant_path_model_and_geometry():
         assert repo.active_prompt_detection(1)["id"] == 7
         assert repo.active_prompt_detection(999) is None
         for sql in [
+            "UPDATE detections SET detector_model='megadetector-v6' WHERE id=8",
             "UPDATE photos SET active_mask_variant='old'",
             "UPDATE photos SET mask_path='/invented/other-mask'",
             "UPDATE photo_masks SET detector_model='missing-model'",

@@ -40,10 +40,9 @@ def test_stale_mask_and_invalid_primary_require_explicit_inspection(app_and_db):
     assert client.get(f'/photos/{pid}/focus-crop').status_code == 404
     assert client.get(f'/photos/{pid}/focus-crop?basis=eye').status_code == 404
     manual = client.get(f'/photos/{pid}/focus-crop?center=.75,.25&size=128&mask=1')
-    assert manual.status_code == 200
-    assert manual.headers['X-Vireo-Focus-Basis'] == 'point'
-    assert manual.headers['X-Vireo-Focus-Mask'] == '0'
-    assert Image.open(io.BytesIO(manual.data)).size == (128, 128)
+    assert manual.status_code == 404
+    assert 'stale' in manual.get_json()['error']
+    assert client.get(f'/photos/{pid}/focus-crop?center=.75,.25').status_code == 200
     db.conn.execute('UPDATE photos SET mask_path=NULL WHERE id=?', (pid,))
     db.detections.save(pid, [{'box': {'x': .1, 'y': .2, 'w': -.1, 'h': .2}, 'confidence': .9, 'category': 'animal'}], detector_model='test')
     db.commit()
