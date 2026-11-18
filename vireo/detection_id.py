@@ -14,6 +14,19 @@ import hashlib
 
 ALIGNED_REVIEWER_RUNTIME = "reviewer-aligned-v1"
 REVIEWER_FRAME_PREFIX = "reviewer-frame-v2:"
+COMPANION_FRAME_RUNTIME = "unverified-companion-frame"
+
+
+class PromptFrameError(ValueError):
+    """The selected box has no proven mapping to the analysis frame."""
+
+
+def require_original_box(runtime):
+    if runtime == COMPANION_FRAME_RUNTIME:
+        raise PromptFrameError(
+            "The box may come from a differently cropped JPEG companion. "
+            "Re-classify the RAW or draw the subject on the original."
+        )
 
 
 def positive_int_hash(*parts: str) -> int:

@@ -215,7 +215,7 @@ def test_migration_retires_derived_box_scores_but_preserves_human_data(original_
                                   MaskQuality(subject_detail=123, subject_detail_px=40))
     db.conn.execute("INSERT INTO detection_subjects VALUES (?, 'old-alias', '{}', 90, 1, '{}')", (did,))
     db.conn.execute("UPDATE photos SET rating=5, quality_score=90, subject_sharpness=123, subject_detail=123 WHERE id=?", (pid,))
-    db.conn.execute("PRAGMA user_version=46")
+    db.conn.execute("PRAGMA user_version=48")
     db.commit()
     schema.ensure_schema(db.job_history.catalog_file())
     with sqlite3.connect(db.job_history.catalog_file()) as conn:

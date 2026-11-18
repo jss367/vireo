@@ -2,7 +2,9 @@
 
 The ``/api/audit/*`` routes back the Audit page: metadata drift between the
 database and XMP sidecars, orphaned catalog rows, untracked files, stray
-sidecars, hash integrity, and the actions that resolve each. Scans derive
+sidecars, hash integrity, camera clocks that were wrong when photos were
+taken, and the actions that resolve each (a camera-clock fix runs through the
+capture-time job). Scans derive
 their roots server-side from the active workspace so a client can never
 scope a run that is then recorded as a clean workspace-wide check.
 """
@@ -186,6 +188,16 @@ def create_audit_blueprint(
         from audit import check_integrity
 
         return jsonify(check_integrity(db))
+
+    @blueprint.route("/api/audit/camera-clocks")
+    def api_audit_camera_clocks() -> ResponseReturnValue:
+        db = get_db()
+        from services.camera_clocks import check_camera_clocks
+
+        result = check_camera_clocks(db)
+        with db.transaction():
+            db.audit.record_run("clocks", len(result["findings"]))
+        return jsonify(result)
 
     @blueprint.route("/api/audit/accept-hash", methods=["POST"])
     def api_audit_accept_hash() -> ResponseReturnValue:

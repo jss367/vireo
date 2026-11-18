@@ -82,14 +82,18 @@ recipe. Historical boxes may instead belong to a cropped preview or a
 larger tiled sensor read; no crop transform was stored. On a RAW with a
 rejected preview, subject analysis therefore requires the current detector
 runtime. Older or reviewed boxes stay intact and require an explicit
-detector rerun rather than an assumed coordinate mapping. Mask PNGs also
+detector rerun or a redraw on the original. A JPEG companion can have a
+different crop even when the RAW has a full-size embedded preview. Pairing
+preserves the JPEG box and its species predictions but marks its coordinates
+as unverified for the RAW. Migration 47 applies the same rule to legacy
+boxes of unknown origin on paired photos. Mask PNGs also
 record prompt provenance so an earlier camera-rendered mask made from an
 unverified box cannot be reused. Coordinate-bearing analysis uses the strict
 `aligned_camera_rendered` mode: if a full-sensor demosaic fails, a rejected
 preview is not substituted. Browsing keeps its usual preview fallback;
 analysis stays pending instead of silently changing its frame. The comparison
 analyses (`subject_ranking_analysis`) store the detail too; their key carries
-`subject_ranking.ANALYSIS_RECIPE_VERSION` (6), raised with this change, so an
+`subject_ranking.ANALYSIS_RECIPE_VERSION` (7), raised with this change, so an
 analysis made before it no longer matches and the subject is analysed again.
 
 `photos.subject_detail_px` is the subject box's longer side in native pixels,
@@ -221,3 +225,15 @@ stored.
   another encounter.
 * Best Batch and Compare cards carry it as `comparable_quality` and show
   "Subject detail N at 512 px, quality P/100 across encounters".
+
+Reviewer confirmation uses a server-issued token for the original frame actually
+shown by the subject editor. Its persisted identity includes source file identity,
+rendering choice and upright frame dimensions, and is checked during analysis and
+cache reuse. Legacy reviewer markers cannot establish this proof: the user must
+open the original and confirm/redraw the box. Undo/redo preserves the proof and
+revalidates it rather than upgrading old coordinates implicitly. Migration 49
+retires derived box scores and reviewer detail caches while retaining boxes,
+choices, predictions, ratings, history and mask files. All coordinate analysis
+resolves the catalog original, including JPEG originals, rather than a working-copy
+alias. Offline browsing still uses existing previews; analysis waits for the
+original. General working-copy provenance recovery remains outside this change.

@@ -749,6 +749,7 @@ export function reviewLocationsForSelection(/** @type {string} */ mode = '') {
 }
 
 var captureTimePreviewSeq = 0;
+var captureTimeExpectedState = '';
 
 function getCaptureTimeMode() {
   var selected = /** @type {HTMLInputElement | null} */ (document.querySelector('input[name="captureTimeMode"]:checked'));
@@ -847,6 +848,7 @@ export async function updateCaptureTimePreview() {
       body: JSON.stringify(payload),
     }, { toast: false });
     if (seq !== captureTimePreviewSeq) return;
+    captureTimeExpectedState = data.expected_state;
     renderCaptureTimePreview(data);
     applyBtn.disabled = false;
     applyBtn.textContent = 'Apply to ' + payload.photo_ids.length + ' photo' + (payload.photo_ids.length === 1 ? '' : 's');
@@ -882,7 +884,7 @@ export async function startCaptureTimeJob() {
     var data = await safeFetch('/api/jobs/capture-time', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(payload),
+      body: JSON.stringify({...payload, expected_state: captureTimeExpectedState}),
     });
     hideCaptureTimeModal();
     showToast(

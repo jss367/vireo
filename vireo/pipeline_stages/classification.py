@@ -18,6 +18,7 @@ from datetime import datetime as dt
 from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 import numpy as np
+from classify_job.classify_pass import PhotoSources, measure_seconds
 from config import config_value
 from pipeline_stages.context import PipelineRun
 from services import classify_preflight, detection_store
@@ -334,6 +335,11 @@ class _SpecPass:
     # seconds spent preparing images and inside ``_flush_batch`` here so
     # the ETA rate reflects inference throughput only.
     inference_seconds: float = 0.0
+    sources: PhotoSources | None = None
+    source_photo_id: int | None = None
+    source_probed: bool = False
+    timings: dict[str, float] = field(default_factory=lambda: {"image_load": 0.0, "inference": 0.0, "storage": 0.0})
+    work_started: float = field(default_factory=time.perf_counter)
     inference_batch: list[_InferenceEntry] = field(default_factory=list)
     has_flushed: bool = False
 
@@ -420,6 +426,7 @@ class _ClassifyPass:
         self.total = len(self.photos)
         self.contextual_weak_ids = self._find_contextual_weak_ids()
 
+        self.model_timings: dict[str, dict[str, float]] = {}
         self.total_predictions_stored = 0
         self.total_full_image_fallbacks = 0
         self.total_candidates_kept = 0
@@ -496,9 +503,15 @@ class _ClassifyPass:
         return contextual_weak_ids
 
     def _prepare_pipeline_image(
-        self, photo: sqlite3.Row, detection: DetectionDict | None,
+        self, spec: _SpecPass, photo: sqlite3.Row, detection: DetectionDict | None,
     ) -> tuple[Image.Image | None, str, str]:
         kwargs: dict[str, Any] = {"raw_analysis": self.raw_session} if self.raw_session is not None else {}
+        if spec.sources is not None:
+            if spec.source_photo_id != photo["id"]:
+                spec.sources.close()
+                spec.source_photo_id = photo["id"]
+                spec.source_probed = False
+            kwargs.update(sources=spec.sources, vireo_dir=self.run.effective_vireo_dir)
         img, folder_path, image_path = self.classify_job._prepare_image(
             photo, self.folders, detection, **kwargs,
         )
@@ -603,8 +616,23 @@ class _ClassifyPass:
             fp=self.loaded_models.get("labels_fingerprint", "legacy"),
             common_names_notice=common_names_notice,
         )
-        # Before the preflight, so its cached and unclassifiable estimates
-        # see a kept region as the animal target it now is.
+        if self.raw_session is None:
+            spec.sources = PhotoSources(getattr(clf, "_input_size", None))
+        try:
+            self._run_spec(spec)
+        finally:
+            self.model_timings[active_spec["id"]] = self._timing_breakdown(spec)
+            if spec.sources is not None:
+                spec.sources.close()
+
+    @staticmethod
+    def _timing_breakdown(spec: _SpecPass) -> dict[str, float]:
+        elapsed = time.perf_counter() - spec.work_started
+        return {**spec.timings, "other": max(0.0, elapsed - sum(spec.timings.values()))}
+
+    def _run_spec(self, spec: _SpecPass) -> None:
+        run, active_spec, step_id = self.run, spec.spec, spec.step_id
+        # Preflight must see candidate regions promoted by the classifier.
         self._keep_recognized_candidates(spec)
         self._preflight(spec)
         # Set total BEFORE the pre-flight event so the UI's
@@ -633,11 +661,13 @@ class _ClassifyPass:
             self._finish_cancelled_spec(spec)
             return
 
-        preds = self._store_results(spec)
+        with measure_seconds(spec.timings, "storage"):
+            preds = self._store_results(spec)
         spec_failed = self._tally_stored_spec(spec, preds)
 
         if run.params.reclassify and self.models_succeeded == 1:
-            self._purge_stale_detections()
+            with measure_seconds(spec.timings, "storage"):
+                self._purge_stale_detections()
 
         self._finish_spec_step(spec, preds, spec_failed)
 
@@ -784,6 +814,7 @@ class _ClassifyPass:
             )[0],
             should_stop=self._should_stop,
             recheck=not self._uses_cache(),
+            timings=spec.timings,
         )
         spec.candidates_kept = len(outcome.kept_photo_ids)
         self.total_candidates_kept += spec.candidates_kept
@@ -1364,12 +1395,29 @@ class _ClassifyPass:
         ``spec.inference_seconds`` only when an image loads, so the ETA rate
         includes decode time but not cache hits or failed decodes.
         """
+        retried = False
         prep_seconds = 0.0
-        prep_started = time.time()
-        img, folder_path, image_path = self._prepare_pipeline_image(photo, detection)
-        prep_seconds += max(time.time() - prep_started, 0.0)
-        while img is None:
-            offline = self.source_offline_reason(folder_path, image_path)
+        while True:
+            prep_started = time.perf_counter()
+            img, folder_path, image_path = self._prepare_pipeline_image(spec, photo, detection)
+            offline = None
+            # A local rendition can still decode after its NAS disappears.
+            if (img is not None and not spec.source_probed
+                    and getattr(img, "info", {}).get("_vireo_input_source") == "working_copy"):
+                offline = self.source_offline_reason(folder_path, image_path)
+                if offline:
+                    img.close()
+                    img = None
+                else:
+                    spec.source_probed = True
+            elapsed = time.perf_counter() - prep_started
+            prep_seconds += elapsed
+            spec.timings["image_load"] += elapsed
+            if img is not None:
+                if retried:
+                    self.offline_pauses = 0
+                break
+            offline = offline or self.source_offline_reason(folder_path, image_path)
             if offline is None:
                 # The source is reachable; this one file is genuinely
                 # broken.
@@ -1403,31 +1451,7 @@ class _ClassifyPass:
                 # prediction.
                 self._mark_source_skipped(spec, photo)
                 return None, folder_path, image_path, True
-            # Resumed. Retry the same read before advancing — silently
-            # skipping the paused-during photo would leave it
-            # unclassified even though the source came back, and on a
-            # reclassify run finalization would clear its old prediction
-            # with no replacement. If the retry also
-            # fails, the loop re-probes and either pauses again
-            # (bounded), degrades to folder-scope, or gives up.
-            prep_started = time.time()
-            img, folder_path, image_path = self._prepare_pipeline_image(
-                photo, detection,
-            )
-            prep_seconds += max(time.time() - prep_started, 0.0)
-            if img is not None:
-                # Successful recovery: refund the pause budget so an
-                # unrelated outage later in the run — a second share that
-                # drops, or the same share dropping again hours later —
-                # still gets its own bounded retry window. Without this,
-                # three separately-recovered outages exhaust the budget
-                # and the fourth outage immediately takes the give-up
-                # branch without ever offering Resume. The pause bound
-                # is meant to protect
-                # against a user who resumes WITHOUT actually remounting
-                # the share — a successful read is proof the share IS
-                # back, so the counter can honestly reset.
-                self.offline_pauses = 0
+            retried = True
         spec.inference_seconds += prep_seconds
         return img, folder_path, image_path, False
 
@@ -1608,7 +1632,7 @@ class _ClassifyPass:
         flush_started = time.time()
         n_batch_failed = self.classify_job._flush_batch(
             pending, spec.clf, spec.model_type, spec.model_name,
-            self.thread_db, raw_results,
+            self.thread_db, raw_results, timings=spec.timings,
         )
         spec.inference_seconds += max(time.time() - flush_started, 0.0)
         spec.failed += n_batch_failed
@@ -1621,16 +1645,17 @@ class _ClassifyPass:
                 if entry.get("detection_id") not in successful_det_ids:
                     self.failed_photo_ids.add(entry["photo"]["id"])
 
-        self.classify_job._record_batch_classifier_runs(
-            self.thread_db, pending, spec.model_name, spec.fp, raw_results,
-            pre_len,
-            labels_fingerprint_full=self.loaded_models.get(
-                "labels_fingerprint_full"
-            ),
-            model_identity=self.loaded_models.get(
-                "classifier_model_identity"
-            ),
-        )
+        with measure_seconds(spec.timings, "storage"):
+            self.classify_job._record_batch_classifier_runs(
+                self.thread_db, pending, spec.model_name, spec.fp, raw_results,
+                pre_len,
+                labels_fingerprint_full=self.loaded_models.get(
+                    "labels_fingerprint_full"
+                ),
+                model_identity=self.loaded_models.get(
+                    "classifier_model_identity"
+                ),
+            )
 
         # Photo-scoped ``count`` bookkeeping: each distinct photo whose
         # flush yielded at least one successful classification counts
@@ -1665,6 +1690,7 @@ class _ClassifyPass:
             progress={
                 "current": spec.processed,
                 "total": self.total,
+                "timings_seconds": self._timing_breakdown(spec),
                 **self.classification_eta_progress(
                     total=self.total,
                     seen=spec.processed,
@@ -1864,6 +1890,10 @@ class _ClassifyPass:
     def _finish_spec_step(self, spec: _SpecPass, preds: int, spec_failed: bool) -> None:
         total = self.total
         parts = [f"{preds} predictions"]
+        parts.extend(
+            f"{name.replace('_', ' ')} {seconds:.1f}s"
+            for name, seconds in self._timing_breakdown(spec).items()
+        )
         if spec.skipped_existing:
             parts.append(f"{spec.skipped_existing} cached")
         if spec.full_image_fallbacks:
@@ -1984,6 +2014,7 @@ class _ClassifyPass:
             "candidate_subjects_kept": self.total_candidates_kept,
             "model_count": len(self.specs),
             "models_succeeded": self.models_succeeded,
+            "timings_seconds_by_model": self.model_timings,
             "models_skipped": len(self.skipped_model_names),
             "skipped_model_names": self.skipped_model_names,
         }

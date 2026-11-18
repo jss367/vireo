@@ -1,5 +1,6 @@
 """Audit system: detect drift, orphans, untracked files, stray sidecars,
-and silent file corruption (bit rot)."""
+and silent file corruption (bit rot). The camera-clock check lives in
+``services.camera_clocks``; its run is recorded and summarized here."""
 
 import logging
 import os
@@ -23,7 +24,7 @@ log = logging.getLogger(__name__)
 # Every check the summary banner aggregates. The banner only shows the
 # green "archive intact" light when ALL of these have run and found
 # nothing — a check that never ran is reported as unverified, not clean.
-AUDIT_CHECKS = ("drift", "orphans", "untracked", "sidecars", "integrity")
+AUDIT_CHECKS = ("drift", "orphans", "untracked", "sidecars", "clocks", "integrity")
 
 
 # What each drift row may be resolved with. A readable sidecar takes either
@@ -653,7 +654,7 @@ def build_summary(db):
     missing_folders = db.folders.missing()
 
     checks = {}
-    for name in ("drift", "orphans", "untracked", "sidecars"):
+    for name in ("drift", "orphans", "untracked", "sidecars", "clocks"):
         checks[name] = runs.get(name)
 
     integrity_run = runs.get("integrity")

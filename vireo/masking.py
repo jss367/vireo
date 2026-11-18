@@ -13,6 +13,7 @@ import threading
 import numpy as np
 import onnx_runtime
 from app_paths import default_path
+from detection_id import PromptFrameError, require_original_box
 from PIL import Image, ImageFilter
 from resource_ledger import ResourceWaitCancelled
 from services.hf_cache_lock import cache_access
@@ -48,10 +49,6 @@ _sam2_variant_loaded = None
 
 _sam2_download_lock = threading.Lock()
 _sam2_session_lock = threading.Lock()
-
-
-class PromptFrameError(ValueError):
-    """The selected detector box has no proven mapping to the SAM frame."""
 
 
 def _sam2_model_dir(variant):
@@ -452,6 +449,7 @@ def require_aligned_detector_prompt(image, detector_runtime):
     pass; their boxes have no crop transform. Preserve those reviewed boxes
     and require an explicit detector rerun instead of guessing a mapping.
     """
+    require_original_box(detector_runtime)
     from computation_cache import megadetector_runtime_fingerprint
     from detection_id import ALIGNED_REVIEWER_RUNTIME, REVIEWER_FRAME_PREFIX
 

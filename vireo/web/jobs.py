@@ -441,6 +441,15 @@ def create_jobs_blueprint(
         shift_minutes = body.get("shift_minutes")
         keep_backups = bool(body.get("keep_backups", True))
 
+        from capture_time import capture_time_plan, guard_capture_time
+
+        try:
+            photo_ids, dependent_shifts, expected = capture_time_plan(get_db(), photo_ids, body)
+        except ValueError as exc:
+            return json_error(str(exc), 400)
+        except RuntimeError as exc:
+            return json_error(str(exc), 409)
+
         def work(job: JobDict) -> JsonDict:
             from capture_time import adjust_capture_time
 
@@ -464,16 +473,18 @@ def create_jobs_blueprint(
                     },
                 )
 
-            return adjust_capture_time(
-                thread_db,
-                photo_ids,
-                mode=mode,
-                target_offset=target_offset,
-                shift_minutes=shift_minutes,
-                keep_backups=keep_backups,
-                progress_callback=progress_cb,
-                cancel_check=lambda: ctx.runner.is_cancelled(job["id"]),
-            )
+            with guard_capture_time(thread_db, photo_ids, expected):
+                return adjust_capture_time(
+                    thread_db,
+                    photo_ids,
+                    mode=mode,
+                    target_offset=target_offset,
+                    shift_minutes=shift_minutes,
+                    dependent_shifts=dependent_shifts,
+                    keep_backups=keep_backups,
+                    progress_callback=progress_cb,
+                    cancel_check=lambda: ctx.runner.is_cancelled(job["id"]),
+                )
 
         return ctx.start(
             "capture-time",

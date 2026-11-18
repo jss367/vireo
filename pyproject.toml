@@ -28,6 +28,10 @@ dependencies = [
     "exifread>=3.0",
     "send2trash>=1.8.0",
     "tokenizers>=0.21.0",
+    # Camera-clock audit: the local time zone at a GPS position. tzdata gives
+    # zoneinfo its database on Windows, which has none of its own.
+    "tzfpy>=2.1.2",
+    "tzdata>=2025.2; sys_platform == 'win32'",
     "waitress>=3.0.2",
 ]
 

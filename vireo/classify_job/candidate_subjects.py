@@ -30,6 +30,7 @@ from classify_job.classify_pass import (
     ClassifierModel,
     _classify_batch_images,
     _match_stats,
+    measure_seconds,
 )
 from classify_job.common import log
 from resource_ledger import ResourceWaitCancelled
@@ -79,6 +80,7 @@ def examine_candidates(
     prepare_crop: PrepareCrop,
     should_stop: Callable[[], object] | None = None,
     recheck: bool = False,
+    timings: dict[str, float] | None = None,
 ) -> CandidateOutcome:
     """Classify each photo's pending candidate region and keep the recognized ones.
 
@@ -105,10 +107,11 @@ def examine_candidates(
             continue
         photo = by_id[row["photo_id"]]
         try:
-            results, _failed = _classify_batch_images(
-                [{"photo": photo, "img": img}], [img], model.clf, model.model_type,
-                propagate_cancel=True,
-            )
+            with measure_seconds(timings, "inference"):
+                results, _failed = _classify_batch_images(
+                    [{"photo": photo, "img": img}], [img], model.clf, model.model_type,
+                    propagate_cancel=True,
+                )
         except ResourceWaitCancelled:
             break
         finally:
@@ -122,7 +125,7 @@ def examine_candidates(
         kept = background_match.is_recognized_animal(
             stats["max_match_score"], stats["background_score"], stats["score_kind"],
         )
-        with db.transaction():
+        with measure_seconds(timings, "storage"), db.transaction():
             recorded = db.candidate_subjects.record(
                 row["id"],
                 {

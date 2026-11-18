@@ -10,7 +10,9 @@ and never resolves a workspace. So are the repair helpers the audit module
 runs: removing confirmed orphan rows (through ``photo_row_deletion``, never
 committing; ``audit.remove_orphans`` commits), the cataloged names in one
 folder that ``import_untracked`` compares before and after its scan, and one
-photo's filename and folder path for the orphan recheck.
+photo's filename and folder path for the orphan recheck. The Camera Clocks
+check's read (``camera_clock_rows``) is workspace-scoped like the integrity
+queries.
 
 Callers reach it as ``db.audit`` (a fresh repository per access, see
 ``Database.audit``); there are no forwarding wrappers on ``Database``.
@@ -23,6 +25,7 @@ from datetime import datetime
 from typing import Any
 
 from repositories.photo_row_deletion import photo_row_deletion
+from repositories.photo_sql import CAPTURE_TIME_STATE_SQL
 
 
 class AuditRepository:
@@ -168,6 +171,54 @@ class AuditRepository:
                 "WHERE id = ?",
                 (status, now, photo_id),
             )
+
+    # -- camera clocks ---------------------------------------------------------
+
+    def camera_clock_rows(self) -> list[sqlite3.Row]:
+        """Each workspace photo's clock evidence, read from its stored metadata.
+
+        One row per photo in a reachable folder whose metadata parses as JSON:
+        ``id``, ``filename``, ``folder_id``, ``folder_path`` and the EXIF
+        values the Camera Clocks check reads (capture time and its subseconds,
+        recorded offsets, camera make, model and serial number, shutter count,
+        GPS time and position). Values are as ExifTool stored them; the caller
+        parses them. The serial coalesces every body-identity tag
+        ``services/same_shot_duplicates.py`` recognizes in either group, so
+        two bodies of the same model do not merge when their serial lives in
+        ``BodySerialNumber`` or ``CameraSerialNumber``.
+        """
+        workspace_id = self.workspace_id_fn()
+        return self.conn.execute(
+            f"""SELECT p.id, p.filename, p.folder_id, f.path AS folder_path,
+                      p.timestamp, p.file_mtime, p.file_hash,
+                      {CAPTURE_TIME_STATE_SQL} AS clock_state,
+                      json_extract(p.exif_data, '$.EXIF.DateTimeOriginal') AS date_time_original,
+                      json_extract(p.exif_data, '$.EXIF.CreateDate') AS create_date,
+                      json_extract(p.exif_data, '$.EXIF.SubSecTimeOriginal') AS subsec,
+                      json_extract(p.exif_data, '$.EXIF.SubSecTime') AS subsec_fallback,
+                      json_extract(p.exif_data, '$.EXIF.OffsetTimeOriginal') AS offset_original,
+                      json_extract(p.exif_data, '$.EXIF.OffsetTime') AS offset_time,
+                      json_extract(p.exif_data, '$.EXIF.OffsetTimeDigitized') AS offset_digitized,
+                      json_extract(p.exif_data, '$.EXIF.Make') AS make,
+                      json_extract(p.exif_data, '$.EXIF.Model') AS model,
+                      COALESCE(json_extract(p.exif_data, '$.MakerNotes.SerialNumber'),
+                               json_extract(p.exif_data, '$.EXIF.SerialNumber'),
+                               json_extract(p.exif_data, '$.MakerNotes.BodySerialNumber'),
+                               json_extract(p.exif_data, '$.EXIF.BodySerialNumber'),
+                               json_extract(p.exif_data, '$.MakerNotes.CameraSerialNumber'),
+                               json_extract(p.exif_data, '$.EXIF.CameraSerialNumber')) AS serial,
+                      json_extract(p.exif_data, '$.MakerNotes.ShutterCount') AS shutter_count,
+                      json_extract(p.exif_data, '$.Composite.GPSDateTime') AS gps_date_time,
+                      json_extract(p.exif_data, '$.Composite.GPSLatitude') AS gps_latitude,
+                      json_extract(p.exif_data, '$.Composite.GPSLongitude') AS gps_longitude
+               FROM photos p
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
+                    AND wf.workspace_id = ?
+               JOIN folders f ON f.id = p.folder_id
+                    AND f.status IN ('ok', 'partial')
+               WHERE p.exif_data IS NOT NULL AND json_valid(p.exif_data)""",
+            (workspace_id,),
+        ).fetchall()
 
     # -- repairs ---------------------------------------------------------------
 

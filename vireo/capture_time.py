@@ -1,12 +1,16 @@
 """Capture-time and timezone repair helpers."""
 
+import hashlib
 import json
 import logging
 import os
 import re
 import shutil
 import subprocess
+from contextlib import contextmanager
 from datetime import datetime, timedelta
+
+from threading import Lock
 
 from metadata import extract_metadata
 try:
@@ -17,6 +21,70 @@ except ImportError:
 log = logging.getLogger(__name__)
 
 OFFSET_RE = re.compile(r"^([+-])(\d{2}):(\d{2})$")
+
+
+_active_corrections = set()
+_correction_lock = Lock()
+
+
+def capture_time_token(states):
+    """Fingerprint the selected catalog rows as they were when reviewed."""
+    encoded = json.dumps(sorted(states), separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def current_capture_time_token(db, ids):
+    return capture_time_token(db.photos.capture_time_states(ids))
+
+
+def capture_time_plan(db, photo_ids, body):
+    """Validate each disjoint step against one snapshot and guard their union."""
+    dependents = body.get("dependent_shifts", [])
+    if not isinstance(dependents, list):
+        raise ValueError("dependent_shifts must be a list")
+    if (dependents or "expected_state" in body) and not isinstance(body.get("expected_state"), str):
+        raise ValueError("A reviewed capture-time correction requires an expected_state token")
+    shifts = {}
+    selected = set(photo_ids)
+    groups = [(photo_ids, body.get("expected_state"))]
+    for step in dependents:
+        if not isinstance(step, dict) or type(step.get("shift_minutes")) is not int:
+            raise ValueError("Each dependent shift needs an integer minute shift")
+        ids = step.get("photo_ids")
+        if not isinstance(ids, list) or not ids or any(type(pid) is not int for pid in ids):
+            raise ValueError("Each dependent shift needs photo IDs")
+        if len(selected) + len(ids) > 50000 or selected.intersection(ids) or len(set(ids)) != len(ids):
+            raise ValueError("Correction steps must contain at most 50000 distinct photos in total")
+        if not isinstance(step.get("expected_state"), str):
+            raise ValueError("Dependent shifts require reviewed capture-time evidence")
+        selected.update(ids)
+        mode = step.get("mode", "manual")
+        if mode not in ("manual", "set_offset"):
+            raise ValueError("Dependent shifts must use manual or set_offset mode")
+        _, minutes, offset = _normalize_inputs(mode, step.get("target_offset"), step["shift_minutes"])
+        shifts.update(dict.fromkeys(ids, minutes if offset is None else (minutes, offset)))
+        groups.append((ids, step["expected_state"]))
+    states = {row[0]: row for row in db.photos.capture_time_states(list(selected))}
+    for ids, expected in groups:
+        if expected is not None and expected != capture_time_token(states[i] for i in ids if i in states):
+            raise RuntimeError("The capture-time evidence changed. Review the photos again.")
+    return [*photo_ids, *shifts], shifts, capture_time_token(states.values())
+
+
+@contextmanager
+def guard_capture_time(db, ids, expected):
+    keys = set(ids)
+    with _correction_lock:
+        if keys & _active_corrections:
+            raise ValueError("A capture-time correction is already running for these photos.")
+        _active_corrections.update(keys)
+    try:
+        if current_capture_time_token(db, ids) != expected:
+            raise ValueError("The capture-time evidence changed. Review the photos again.")
+        yield
+    finally:
+        with _correction_lock:
+            _active_corrections.difference_update(keys)
 
 
 def parse_offset_minutes(value):
@@ -109,17 +177,27 @@ def _normalize_subsec(subsec):
 def _normalize_inputs(mode, target_offset, shift_minutes):
     """Validate user inputs and return (target_minutes, manual_shift, target_offset_str).
 
-    In ``manual`` mode ``target_offset`` is intentionally ignored so a stale
-    or prefilled value can't silently overwrite ``OffsetTime*`` tags when the
-    user only asked for a minute shift.
+    ``preserve_instant`` sets the offset and moves the clock time by the
+    offset difference, so the moment of capture stays. ``set_offset`` sets the
+    offset and moves the clock time by ``shift_minutes`` (0 keeps it), for a
+    camera whose recorded time zone was wrong while its clock showed local
+    time, or whose clock was also off. In ``manual`` mode ``target_offset`` is
+    intentionally ignored so a stale or prefilled value can't silently
+    overwrite ``OffsetTime*`` tags when the user only asked for a minute shift.
     """
-    if mode == "manual":
+    if mode in ("manual", "set_offset"):
+        if isinstance(shift_minutes, bool):
+            raise ValueError("shift_minutes must be an integer")
         try:
             manual_shift = int(shift_minutes or 0)
         except (TypeError, ValueError) as exc:
             raise ValueError("shift_minutes must be an integer") from exc
         target_minutes = None
         target_offset_str = None
+        if mode == "set_offset":
+            if parse_offset_minutes(target_offset) is None:
+                raise ValueError("target_offset is required for set_offset")
+            target_offset_str = validate_offset(target_offset)
     elif mode == "preserve_instant":
         target_minutes = parse_offset_minutes(target_offset)
         if target_minutes is None:
@@ -127,13 +205,13 @@ def _normalize_inputs(mode, target_offset, shift_minutes):
         manual_shift = None
         target_offset_str = validate_offset(target_offset)
     else:
-        raise ValueError("mode must be preserve_instant or manual")
+        raise ValueError("mode must be preserve_instant, set_offset or manual")
     return target_minutes, manual_shift, target_offset_str
 
 
 def _photo_shift_minutes(mode, target_minutes, manual_shift, photo):
     """Return the signed minute shift for a single photo, or raise ValueError."""
-    if mode == "manual":
+    if mode in ("manual", "set_offset"):
         return manual_shift
     current_minutes = parse_offset_minutes(_capture_offset(photo))
     if current_minutes is None:
@@ -154,12 +232,8 @@ def _offset_tags_already_target(photo, target_offset):
     return all(value and str(value).strip() == target_offset for value in values)
 
 
-def _is_noop_adjustment(mode, target_offset, photo_shift, photo):
-    if photo_shift != 0:
-        return False
-    if mode == "manual":
-        return True
-    return _offset_tags_already_target(photo, target_offset)
+def _is_noop_adjustment(target_offset, photo_shift, photo):
+    return photo_shift == 0 and _offset_tags_already_target(photo, target_offset)
 
 
 def format_preview_timestamp(dt):
@@ -377,6 +451,17 @@ def _capture_time_summary(
     }
 
 
+def _selected_photos(db, photo_ids):
+    photos = []
+    for pid in photo_ids:
+        row = db.photos.get(pid, verify_workspace=True)
+        if row:
+            photos.append(row)
+    if not photos:
+        raise ValueError("no photos found")
+    return photos
+
+
 def adjust_capture_time(
     db,
     photo_ids,
@@ -387,6 +472,7 @@ def adjust_capture_time(
     keep_backups=True,
     progress_callback=None,
     cancel_check=None,
+    dependent_shifts=None,
 ):
     """Apply a capture-time correction to selected photos via ExifTool."""
     from metadata import find_exiftool
@@ -399,18 +485,10 @@ def adjust_capture_time(
         mode, target_offset, shift_minutes
     )
 
-    photos = []
-    for pid in photo_ids:
-        row = db.photos.get(pid, verify_workspace=True)
-        if row:
-            photos.append(row)
-    if not photos:
-        raise ValueError("no photos found")
+    photos = _selected_photos(db, photo_ids)
 
     log.info("Starting capture-time adjustment for %d photo(s)", len(photos))
-    written = 0
-    skipped = 0
-    failed = 0
+    written = skipped = failed = 0
     failures = []
     total = len(photos)
     shifts_used = []
@@ -427,7 +505,14 @@ def adjust_capture_time(
             continue
 
         try:
-            photo_shift = _photo_shift_minutes(mode, target_minutes, manual_shift, photo)
+            dependent_shift = (dependent_shifts or {}).get(photo["id"])
+            if dependent_shift is None:
+                output_offset = target_offset_str
+                photo_shift = _photo_shift_minutes(mode, target_minutes, manual_shift, photo)
+            elif isinstance(dependent_shift, int):
+                photo_shift, output_offset = dependent_shift, None
+            else:
+                photo_shift, output_offset = dependent_shift
         except ValueError as exc:
             failed += 1
             failures.append(
@@ -440,7 +525,7 @@ def adjust_capture_time(
         has_companion = _has_key(photo, "companion_path") and bool(photo["companion_path"])
         if (
             not has_companion
-            and _is_noop_adjustment(mode, target_offset_str, photo_shift, photo)
+            and _is_noop_adjustment(output_offset, photo_shift, photo)
         ):
             skipped += 1
             shifts_used.append(photo_shift)
@@ -449,7 +534,7 @@ def adjust_capture_time(
             continue
 
         cmd = _capture_time_command(
-            exiftool, paths, photo_shift, target_offset_str, keep_backups,
+            exiftool, paths, photo_shift, output_offset, keep_backups,
         )
 
         try:

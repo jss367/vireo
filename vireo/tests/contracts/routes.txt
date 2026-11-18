@@ -20,6 +20,7 @@ DELETE       /api/workspaces/<int:ws_id>
 DELETE       /api/workspaces/<int:ws_id>/folders/<int:folder_id>
 DELETE,GET,PUT /api/photos/<int:photo_id>/versions/<version_id>
 GET          /
+GET          /api/audit/camera-clocks
 GET          /api/audit/drift
 GET          /api/audit/integrity
 GET          /api/audit/orphans

@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
+from detection_id import require_original_box
 from repositories.masks_features import MaskQuality, PipelineFeatures
 from services import detection_store, subject_masks
 
@@ -341,6 +342,7 @@ class _MaskExtractionRun:
         if not self._refresh_primary(item):
             self.skipped += 1
             return False
+        require_original_box(photo.get("detector_runtime"))
         if self._reuse_cached_mask(item):
             return False
 

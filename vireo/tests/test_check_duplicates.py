@@ -1644,3 +1644,63 @@ def test_recovery_lists_each_folder_once_and_hashes_only_size_matches(
     assert len(hashes) == 6  # One matching candidate and one source per file.
     assert all(folder / source.name not in hashes for source in sources)
     assert guard_probes == [folder / f"{source.stem}_1.jpg" for source in sources]
+
+
+@pytest.mark.parametrize("verify_by_hash", [False, True])
+def test_duplicate_check_reports_a_camera_clock_change_on_the_card(
+        app_and_db, tmp_path, monkeypatch, verify_by_hash):
+    """The clock check uses only the capture times, offsets and file numbers
+    the metadata pass already read, and names the frames on each side."""
+    from datetime import datetime, timedelta
+
+    import import_dedup
+
+    app, _, _ = app_and_db
+    card = tmp_path / "card"
+    card.mkdir()
+    shots = []
+    for i in range(6):  # still on Central time, numbering about to wrap
+        shots.append((f"_D85{9996 + i if 9996 + i <= 9999 else 9996 + i - 9999:04d}.NEF",
+                      datetime(2026, 1, 25, 12, 53) + timedelta(seconds=30 * i), "-05:00"))
+    for i in range(8):  # switched to Pacific a few minutes later
+        shots.append((f"_D85{20 + i:04d}.NEF",
+                      datetime(2026, 1, 25, 11, 0) + timedelta(seconds=30 * i), "-07:00"))
+    times = {}
+    for name, captured, offset in shots:
+        (card / name).write_bytes(name.encode())
+        times[card / name] = (captured, offset)
+
+    # An older shoot has overlapping file numbers from the same camera.
+    # It must not add a reset or contribute frames to this shoot's fix.
+    older = card / "older"
+    older.mkdir()
+    for name, captured, offset in shots[-3:]:
+        path = older / name
+        path.write_bytes(name.encode())
+        times[path] = (captured.replace(year=2024), offset)
+
+    def capture_times(paths):
+        result = import_dedup.CaptureTimes()
+        for path in paths:
+            result[path], result.offsets[path] = times[path]
+            result.cameras[path] = "NIKON D850"
+        return result
+
+    monkeypatch.setattr(import_dedup, "source_capture_timestamps", capture_times)
+    response = app.test_client().post("/api/import/check-duplicates", json={
+        "paths": [str(path) for path in times],
+        "verify_by_hash": verify_by_hash,
+        "include_capture_dates": True,
+    })
+    events = parse_sse_events(response.data)
+    [frame] = [e for e in events if "clock_problems" in e]
+    [problem] = frame["clock_problems"]
+    assert problem["camera"] == "NIKON D850"
+    assert "time-zone setting changed" in problem["summary"]
+    [fix] = problem["fixes"]
+    assert (fix["recorded_offset"], fix["target_offset"], fix["shift_minutes"]) == ("-05:00", "-07:00", -120)
+    # Named in shot order, across the 9999 -> 0001 wrap.
+    assert (fix["first"], fix["last"]) == ("_D859996.NEF", "_D850002.NEF")
+    assert "refs" not in fix
+    # The check runs between the metadata pass and the per-file verdicts.
+    assert events.index(frame) < next(i for i, e in enumerate(events) if "checked" in e)

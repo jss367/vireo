@@ -253,3 +253,26 @@ def test_read_exif_timestamp_exifread_digitized_fallback(monkeypatch, tmp_path):
 
     result = read_exif_timestamp(str(raw_file))
     assert result == datetime(2024, 7, 20, 9, 15, 30)
+
+
+def test_read_exif_clock_reads_offset_and_camera_from_the_exif_ifd(tmp_path):
+    """Cameras put the capture time, its offset and the body serial in the Exif sub-IFD."""
+    from grouping import read_exif_clock
+    from PIL import Image
+    from PIL.ExifTags import IFD
+    from PIL.ExifTags import Base as ExifBase
+
+    path = tmp_path / "DSC_9227.jpg"
+    image = Image.new("RGB", (16, 16))
+    exif = image.getexif()
+    exif[ExifBase.Model] = "NIKON Z 8"
+    sub = exif.get_ifd(IFD.Exif)
+    sub[ExifBase.DateTimeOriginal] = "2026:05:30 09:25:31"
+    sub[ExifBase.OffsetTimeOriginal] = "-07:00"
+    sub[ExifBase.BodySerialNumber] = "9003007"
+    image.save(path, exif=exif)
+
+    clock = read_exif_clock(str(path))
+    assert clock.captured == datetime(2026, 5, 30, 9, 25, 31)
+    assert clock.offset == "-07:00"
+    assert clock.camera == "NIKON Z 8 #9003007"
