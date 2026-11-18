@@ -54,6 +54,7 @@ def preview(db: Database, confirmation: object, body: JsonDict) -> JsonDict:
         rows.append(row)
     order = {pid: i for i, pid in enumerate(source_ids)}
     rows.sort(key=lambda row: order[row["id"]])
+    refresh_ids = edit.target_enc["photo_ids"] if edit.target_enc is not None else source_ids
     state = {
         "workspace": db.require_workspace_id(), "encounter": edit.target_enc,
         "burst_index": edit.burst_index, "rows": rows, "species": edit.species,
@@ -67,8 +68,8 @@ def preview(db: Database, confirmation: object, body: JsonDict) -> JsonDict:
         # Bind their live species inputs without expanding the visible matrix
         # or invalidating on unrelated sibling flags/classifier measurements.
         "refresh_species": {
-            "keywords": db.photo_species.confirmation_species_evidence(edit.target_enc["photo_ids"]),
-            "identities": db.photo_species.get_species_for_photos(edit.target_enc["photo_ids"], include_identities=True),
+            "keywords": db.photo_species.confirmation_species_evidence(refresh_ids),
+            "identities": db.photo_species.get_species_for_photos(refresh_ids, include_identities=True),
         },
         "homonyms": db.photo_species.confirmation_homonym_evidence([
             name for name in (target["name"] if target else edit.species, edit.previous_species) if name

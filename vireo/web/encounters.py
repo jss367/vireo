@@ -311,13 +311,20 @@ def _review_preview(
     if error is not None:
         return error
     enc = confirmation.target_enc
-    if enc is None or not set(source) <= set(enc["photo_ids"]):
+    source_ids = set(source)
+    if enc is None:
+        # A photo-only preview is valid only while every source photo is ungrouped.
+        encounters = (confirmation.cached or {}).get("encounters", [])
+        if (body.get("split") or "group_changes" in body
+                or any(source_ids.intersection(group["photo_ids"]) for group in encounters)):
+            return json_error("Photo membership changed. Reload the review and preview again.", 409)
+    elif not source_ids <= set(enc["photo_ids"]):
         return json_error("Photo membership changed. Reload the review and preview again.", 409)
-    if confirmation.burst_index is not None:
+    if enc is not None and confirmation.burst_index is not None:
         burst = enc["bursts"][confirmation.burst_index]
         if not set(source) <= set(burst["photo_ids"]):
             return json_error("Burst membership changed. Preview again.", 409)
-    if body.get("split") and set(confirmation.photo_ids) == set(enc["photo_ids"]):
+    if enc is not None and body.get("split") and set(confirmation.photo_ids) == set(enc["photo_ids"]):
         return json_error("Select fewer than all encounter photos to separate a transition")
     if confirmation.is_replacement and confirmation.old_kid_row is not None:
         key = keyword_match_key(confirmation._replaced_species)
@@ -325,7 +332,8 @@ def _review_preview(
     from services.review_group_changes import InvalidGroupChanges, validate_group_changes
     try:
         # ``enc`` came from the loaded cache, so the cache is not None.
-        confirmation.group_plan = validate_group_changes(db, cast("JsonDict", confirmation.cached), enc, body)
+        if enc is not None:
+            confirmation.group_plan = validate_group_changes(db, cast("JsonDict", confirmation.cached), enc, body)
     except InvalidGroupChanges as exc:
         return json_error(str(exc), 409)
     result = preview(db, confirmation, body)
@@ -1220,6 +1228,13 @@ class _SpeciesConfirmation:
         """
         cached = self.cached
         if not (cached and self.target_enc is not None):
+            if self.preview_scope and self.photo_edit_id is not None:
+                from services.grouping_history import convert_to_grouping_edit
+                edit = self.db.edit_history.action_and_new_value(self.photo_edit_id)
+                assert edit is not None
+                convert_to_grouping_edit(self.db, self.photo_edit_id, {
+                    "photo_only": True, "saved_before_grouping": True, "photo_edit": dict(edit),
+                })
             return
         flag_items = []
         group_attribution: dict = {}

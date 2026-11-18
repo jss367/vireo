@@ -168,10 +168,12 @@ function renderResults() {
     html += '<span class="encounter-chevron' + (isCollapsed ? ' collapsed' : '') + '" id="encChev' + ei + '" onclick="toggleEncounter(' + ei + ')">&#9660;</span>';
     html += renderSpeciesWidget(enc, ei, 'encounter', null);
     html += '<span class="encounter-meta" onclick="toggleEncounter(' + ei + ')" style="cursor:pointer;flex:1;">';
+    if (timeRange) encMeta += '<span>' + escapeHtml(timeRange) + '</span>';
+    encMeta += missingTimestampBadge(enc);
+    var savedConflict = savedSpeciesConflict(visibleEncIds, photoMap);
+    if (savedConflict) encMeta += '<span>' + escapeHtml(savedConflict) + '</span>';
+    encMeta += renderEncounterSpeciesConflict(enc, speciesConflictEvidence, confirmedHiddenIds, inScope);
     html += encMeta;
-    if (timeRange) html += '<span>' + escapeHtml(timeRange) + '</span>';
-    html += missingTimestampBadge(enc);
-    html += renderEncounterSpeciesConflict(enc, speciesConflictEvidence, confirmedHiddenIds, inScope);
     html += '</span>';
     html += renderGroupRejectButton('encounter', ei, null, visibleEncIds, photoMap);
     html += '</div>';
@@ -234,9 +236,6 @@ function renderResults() {
     html += renderSpeciesWidget(enc, ei, 'encounter', null, 'bot');
     html += '<span class="encounter-meta" style="flex:1;">';
     html += encMeta;
-    if (timeRange) html += '<span>' + escapeHtml(timeRange) + '</span>';
-    html += missingTimestampBadge(enc);
-    html += renderEncounterSpeciesConflict(enc, speciesConflictEvidence, confirmedHiddenIds, inScope);
     html += '</span></div>';
 
     html += '</div></div>';
