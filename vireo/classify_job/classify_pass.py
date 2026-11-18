@@ -20,7 +20,7 @@ from services import detection_store
 
 if TYPE_CHECKING:
     import sqlite3
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Iterator, Mapping, Sequence
     from collections.abc import Set as AbstractSet
     from contextlib import AbstractContextManager
     from datetime import datetime
@@ -74,9 +74,55 @@ class ClassifierModel:
     """Predictions kept per detection."""
 
 
+def _crop_bounds(size: tuple[int, int], detection: DetectionDict) -> tuple[int, int, int, int]:
+    width, height = size
+    x, y = detection["box_x"], detection["box_y"]
+    w, h = detection["box_w"], detection["box_h"]
+    return (
+        max(0, int((x - w * 0.2) * width)),
+        max(0, int((y - h * 0.2) * height)),
+        min(width, int((x + w + w * 0.2) * width)),
+        min(height, int((y + h + h * 0.2) * height)),
+    )
+
+
+class PhotoSources:
+    """Own decoded pixels for one photo while its detections are prepared."""
+
+    def __init__(self, input_size: tuple[int, int] | None) -> None:
+        self.input_size = input_size
+        self.original: Image.Image | None = None
+        self.working: Image.Image | None = None
+        self.checked_working = False
+
+    def close(self) -> None:
+        for image in (self.original, self.working):
+            if image is not None:
+                image.close()
+        self.original = self.working = None
+        self.checked_working = False
+
+    def select(
+        self, photo: PhotoRecord, path: str, vireo_dir: str | None, detection: DetectionDict | None,
+    ) -> tuple[Image.Image | None, str]:
+        if not self.checked_working and vireo_dir and self.input_size and load_working_image:
+            self.working = cast("Image.Image | None", load_working_image(photo, vireo_dir, max_size=None))
+            self.checked_working = True
+        if self.working is not None and self.input_size is not None:
+            bounds = _crop_bounds(self.working.size, detection) if detection else (0, 0, *self.working.size)
+            x1, y1, x2, y2 = bounds
+            height, width = self.input_size
+            if x2 - x1 >= width and y2 - y1 >= height:
+                return self.working, "working_copy"
+        if self.original is None:
+            self.original = cast("Image.Image | None", load_image(path, max_size=None))
+        return self.original, "original"
+
+
 def _prepare_image(
     photo: PhotoRecord, folders: Mapping[int, str], detection: DetectionDict | None,
     vireo_dir: str | None = None, raw_analysis: RawAnalysisSession | None = None,
+    sources: PhotoSources | None = None,
 ) -> tuple[Image.Image | None, str, str]:
     """Load and crop a photo to a specific detection's bounding box.
 
@@ -90,6 +136,7 @@ def _prepare_image(
             original file via load_image().
         raw_analysis: optional stage-owned RawAnalysisSession for corrected
             subject crops. Unsupported inputs use the ordinary loading path.
+        sources: decoded frames owned by the current photo pass.
 
     Returns:
         (PIL.Image, folder_path, image_path) or (None, folder_path, image_path) on failure.
@@ -104,36 +151,30 @@ def _prepare_image(
     input_source = "original"
     if raw_analysis is not None:
         img, analysis_report = raw_analysis.prepare(image_path, detection)
-    # ``return_source=True`` returns ``(image, source kind)``, and
-    # ``image_loader`` yields a ``FloatImage`` only in RAW_DECODE_LINEAR
-    # mode, which neither load here requests.
-    if img is None and vireo_dir and load_working_image is not None:
-        img, input_source = cast("tuple[Image.Image | None, str]", load_working_image(
-            photo, vireo_dir, max_size=None, folders=folders,
-            return_source=True,
-        ))
-    if img is None:
-        img = cast("Image.Image | None", load_image(image_path, max_size=None))
-        input_source = "original"
+    borrowed = img is None and sources is not None
+    if borrowed and sources is not None:
+        img, input_source = sources.select(photo, image_path, vireo_dir, detection)
+    elif img is None:
+        if vireo_dir and load_working_image is not None:
+            img, input_source = cast("tuple[Image.Image | None, str]", load_working_image(
+                photo, vireo_dir, max_size=None, folders=folders, return_source=True,
+            ))
+        if img is None:
+            input_source = "original"
+            img = cast("Image.Image | None", load_image(image_path, max_size=None))
     if img is None:
         return None, folder_path, image_path
 
-    # Crop to detection bounding box with padding
     if detection and not img.info.get("_vireo_subject_crop"):
-        iw, ih = img.size
-        pad_w = detection["box_w"] * 0.2
-        pad_h = detection["box_h"] * 0.2
-        x1 = max(0, int((detection["box_x"] - pad_w) * iw))
-        y1 = max(0, int((detection["box_y"] - pad_h) * ih))
-        x2 = min(iw, int((detection["box_x"] + detection["box_w"] + pad_w) * iw))
-        y2 = min(ih, int((detection["box_y"] + detection["box_h"] + pad_h) * ih))
-        crop = img.crop((x1, y1, x2, y2))
-        if crop.size[0] >= 50 and crop.size[1] >= 50:
-            img.close()
+        bounds = _crop_bounds(img.size, detection)
+        if bounds[2] - bounds[0] >= 50 and bounds[3] - bounds[1] >= 50:
+            crop = img.crop(bounds)
+            if not borrowed:
+                img.close()
             img = crop
-        else:
-            crop.close()
-
+            borrowed = False
+    if borrowed:
+        img = img.copy()  # Thumbnailing and closing a batch entry must leave its source intact.
     img.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
     # Classification artifacts are published after predictions are persisted,
     # which may be long after this image was loaded. Carry the actual pixel
@@ -201,9 +242,20 @@ def _match_stats(all_preds: list[Prediction], model_type: str) -> dict[str, Any]
     }
 
 
+@contextlib.contextmanager
+def measure_seconds(timings: dict[str, float] | None, part: str) -> Iterator[None]:
+    started = time.perf_counter()
+    try:
+        yield
+    finally:
+        if timings is not None:
+            timings[part] = timings.get(part, 0.0) + time.perf_counter() - started
+
+
 def _flush_batch(
     batch: Sequence[BatchEntry], clf: AnyClassifier, model_type: str, model_name: str, db: Database,
     raw_results: list[RawResult], top_k: int = 1, propagate_cancel: bool = False,
+    timings: dict[str, float] | None = None,
 ) -> int:
     """Classify a batch of prepared images and append results.
 
@@ -218,28 +270,29 @@ def _flush_batch(
     failed = 0
 
     try:
-        batch_results, failed = _classify_batch_images(
-            batch, images, clf, model_type, propagate_cancel,
-        )
-
-        for entry, result in zip(batch, batch_results, strict=True):
-            if result is None:
-                continue
-            all_preds, embedding = result
-
-            valid = [entry]
-            with (
-                detection_store.guard_reviewer_results(db, valid),
-                db.transaction(immediate=entry.get("_reviewer_box") is not None),
-            ):
-                if not valid or not detection_store.reviewer_result_is_current(db, entry):
+        with measure_seconds(timings, "inference"):
+            batch_results, failed = _classify_batch_images(
+                batch, images, clf, model_type, propagate_cancel,
+            )
+        with measure_seconds(timings, "storage"):
+            for entry, result in zip(batch, batch_results, strict=True):
+                if result is None:
                     continue
-                if embedding is not None:
-                    _store_batch_embedding(db, entry, model_name, embedding)
-                if all_preds:
-                    raw_results.append(
-                        _batch_raw_result(entry, all_preds, embedding, model_type, top_k),
-                    )
+                all_preds, embedding = result
+
+                valid = [entry]
+                with (
+                    detection_store.guard_reviewer_results(db, valid),
+                    db.transaction(immediate=entry.get("_reviewer_box") is not None),
+                ):
+                    if not valid or not detection_store.reviewer_result_is_current(db, entry):
+                        continue
+                    if embedding is not None:
+                        _store_batch_embedding(db, entry, model_name, embedding)
+                    if all_preds:
+                        raw_results.append(
+                            _batch_raw_result(entry, all_preds, embedding, model_type, top_k),
+                        )
     finally:
         # Close all PIL images to avoid resource leaks
         for entry in batch:
@@ -957,10 +1010,13 @@ def _record_batch_classifier_runs(
     # synthesized rows) are ignored. For a per-detection batch this is
     # typically 0 or 1.
     counts: dict = {}
+    input_sources: dict[int, str] = {}
     for r in raw_results[raw_results_start:]:
         did = r.get("detection_id")
         if did is not None:
             counts[did] = counts.get(did, 0) + 1
+            if r.get("_input_source") in ("working_copy", "original"):
+                input_sources[did] = r["_input_source"]
     valid_batch = list(batch)
     with detection_store.guard_reviewer_results(db, valid_batch):
         seen: set = set()
@@ -986,6 +1042,7 @@ def _record_batch_classifier_runs(
                     runtime_fingerprint="incomplete",
                     labels_fingerprint_full=labels_fingerprint_full,
                     input_recipe=entry.get("input_recipe"),
+                    input_source=input_sources.get(did),
                 )
 
 

@@ -3,6 +3,7 @@
   "files": [
     "../types/pages/audit.d.ts",
     "../vireo/static/audit/boot.js",
+    "../vireo/static/audit/clocks.js",
     "../vireo/static/audit/drift.js",
     "../vireo/static/audit/helpers.js",
     "../vireo/static/audit/integrity.js",

@@ -3381,7 +3381,7 @@ def test_pipeline_classifies_full_image_when_only_raw_noise_boxes_exist(
 
     prepared_detections = []
 
-    def fake_prepare_image(photo, folders, detection, vireo_dir=None):
+    def fake_prepare_image(photo, folders, detection, vireo_dir=None, sources=None):
         prepared_detections.append(detection)
         return Image.new("RGB", (32, 32), "white"), folder_path, str(
             os.path.join(folder_path, photo["filename"])
@@ -3488,7 +3488,7 @@ def _run_person_only_pipeline(tmp_path, monkeypatch, top_prediction):
 
     prepared_detections = []
 
-    def fake_prepare_image(photo, folders, detection, vireo_dir=None):
+    def fake_prepare_image(photo, folders, detection, vireo_dir=None, sources=None):
         prepared_detections.append(detection)
         return Image.new("RGB", (32, 32), "white"), folder_path, str(
             os.path.join(folder_path, photo["filename"])
@@ -3676,7 +3676,7 @@ def test_pipeline_precreates_full_image_anchor_for_noise_only_photo(
 
     monkeypatch.setattr(cc, "materialize_local_store", spy_materialize)
 
-    def fake_prepare_image(photo, folders, detection, vireo_dir=None):
+    def fake_prepare_image(photo, folders, detection, vireo_dir=None, sources=None):
         return Image.new("RGB", (32, 32), "white"), folder_path, str(
             os.path.join(folder_path, photo["filename"])
         )
@@ -4184,7 +4184,7 @@ def test_pipeline_classify_passes_each_qualifying_detection_to_prepare_image(
 
     captured = []
 
-    def capturing_prepare_image(photo, folders, detection, vireo_dir=None, raw_analysis=None):
+    def capturing_prepare_image(photo, folders, detection, vireo_dir=None, raw_analysis=None, sources=None):
         assert (raw_analysis is not None) == raw_subject_analysis
         captured.append(detection)
         # Returning (None, ...) tells the caller this photo failed to load,
@@ -4271,7 +4271,7 @@ def test_raw_reinference_replaces_stored_predictions(tmp_path, monkeypatch, spec
 
     inferred = []
 
-    def infer(batch, clf, model_type, model_name, thread_db, results, top_k=1):
+    def infer(batch, clf, model_type, model_name, thread_db, results, top_k=1, timings=None):
         inferred.extend(entry["detection_id"] for entry in batch)
         for entry in batch:
             results.append({
@@ -4349,7 +4349,7 @@ def test_pipeline_classifies_bracketed_weak_detection_without_lowering_threshold
 
     captured = []
 
-    def capturing_prepare_image(photo, folders, detection, vireo_dir=None):
+    def capturing_prepare_image(photo, folders, detection, vireo_dir=None, sources=None):
         captured.append((photo["filename"], detection["confidence"]))
         return None, "", ""
 
@@ -5074,7 +5074,7 @@ def test_pipeline_classify_mid_batch_cancel_skips_storage(tmp_path, monkeypatch)
     # of the dummy 16x16 black JPEGs on disk.
     from PIL import Image as _PILImage
 
-    def fake_prepare_image(photo, folders, detection, vireo_dir=None):
+    def fake_prepare_image(photo, folders, detection, vireo_dir=None, sources=None):
         folder_path = folders.get(photo["folder_id"], "")
         image_path = os.path.join(folder_path, photo["filename"])
         return _PILImage.new("RGB", (16, 16), "black"), folder_path, image_path
@@ -5089,7 +5089,7 @@ def test_pipeline_classify_mid_batch_cancel_skips_storage(tmp_path, monkeypatch)
     flush_calls = [0]
 
     def spy_flush_batch(batch, clf, model_type, model_name, db_, raw_results,
-                        top_k=1):
+                        top_k=1, timings=None):
         flush_calls[0] += 1
         for entry in batch:
             raw_results.append({
@@ -5267,7 +5267,7 @@ def test_pipeline_reclassify_cancel_preserves_existing_predictions(
 
     from PIL import Image as _PILImage
 
-    def fake_prepare_image(photo, folders, detection, vireo_dir=None):
+    def fake_prepare_image(photo, folders, detection, vireo_dir=None, sources=None):
         folder_path = folders.get(photo["folder_id"], "")
         image_path = os.path.join(folder_path, photo["filename"])
         return _PILImage.new("RGB", (16, 16), "black"), folder_path, image_path
@@ -5277,7 +5277,7 @@ def test_pipeline_reclassify_cancel_preserves_existing_predictions(
     abort_after_classify = threading.Event()
 
     def spy_flush_batch(batch, clf, model_type, model_name, db_, raw_results,
-                        top_k=1):
+                        top_k=1, timings=None):
         for entry in batch:
             raw_results.append({
                 "photo": entry["photo"],
@@ -5403,7 +5403,7 @@ def test_pipeline_reclassify_success_preserves_classifier_run_keys(
 
     from PIL import Image as _PILImage
 
-    def fake_prepare_image(photo, folders, detection, vireo_dir=None):
+    def fake_prepare_image(photo, folders, detection, vireo_dir=None, sources=None):
         folder_path = folders.get(photo["folder_id"], "")
         image_path = os.path.join(folder_path, photo["filename"])
         return _PILImage.new("RGB", (16, 16), "black"), folder_path, image_path
@@ -5449,7 +5449,7 @@ def test_pipeline_reclassify_success_preserves_classifier_run_keys(
     monkeypatch.setattr(PredictionRepository, "clear", wrapped_clear)
 
     def fake_flush_batch(batch, clf, model_type, model_name, db_, raw_results,
-                        top_k=1):
+                        top_k=1, timings=None):
         for entry in batch:
             raw_results.append({
                 "photo": entry["photo"],
@@ -5566,7 +5566,7 @@ def test_pipeline_classify_cancel_does_not_raise_when_earlier_model_load_failed(
 
     from PIL import Image as _PILImage
 
-    def fake_prepare_image(photo, folders, detection, vireo_dir=None):
+    def fake_prepare_image(photo, folders, detection, vireo_dir=None, sources=None):
         folder_path = folders.get(photo["folder_id"], "")
         image_path = os.path.join(folder_path, photo["filename"])
         return _PILImage.new("RGB", (16, 16), "black"), folder_path, image_path
@@ -5576,7 +5576,7 @@ def test_pipeline_classify_cancel_does_not_raise_when_earlier_model_load_failed(
     abort_after_classify = threading.Event()
 
     def spy_flush_batch(batch, clf, model_type, model_name, db_, raw_results,
-                        top_k=1):
+                        top_k=1, timings=None):
         for entry in batch:
             raw_results.append({
                 "photo": entry["photo"],
@@ -5710,7 +5710,7 @@ def test_pipeline_later_model_load_cancel_marks_model_skipped(
 
     from PIL import Image as _PILImage
 
-    def fake_prepare_image(photo, folders, detection, vireo_dir=None):
+    def fake_prepare_image(photo, folders, detection, vireo_dir=None, sources=None):
         folder_path = folders.get(photo["folder_id"], "")
         image_path = os.path.join(folder_path, photo["filename"])
         return _PILImage.new("RGB", (16, 16), "black"), folder_path, image_path
@@ -5723,7 +5723,7 @@ def test_pipeline_later_model_load_cancel_marks_model_skipped(
     job = _make_job()
 
     def cancelling_flush(batch, clf, model_type, model_name, db_, raw_results,
-                         top_k=1):
+                         top_k=1, timings=None):
         for entry in batch:
             raw_results.append({
                 "photo": entry["photo"],
@@ -6191,7 +6191,7 @@ def test_pipeline_classify_stores_predictions_with_detection_id(
 
     monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
 
-    def fake_prepare_image(photo, folders, detection, vireo_dir=None):
+    def fake_prepare_image(photo, folders, detection, vireo_dir=None, sources=None):
         return (
             Image.new("RGB", (32, 32), "white"),
             folders.get(photo["folder_id"], ""),
@@ -6749,7 +6749,7 @@ def test_pipeline_rerun_with_existing_prediction_and_bursts_does_not_crash(
 
     monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
 
-    def fake_prepare_image(photo, folders, detection, vireo_dir=None):
+    def fake_prepare_image(photo, folders, detection, vireo_dir=None, sources=None):
         return (
             Image.new("RGB", (32, 32), "white"),
             folders.get(photo["folder_id"], ""),
@@ -7970,7 +7970,7 @@ def test_pipeline_snapshot_excludes_late_arriving_files(tmp_path, monkeypatch):
 
     monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
 
-    def fake_prepare_image(photo, folders, detection, vireo_dir=None):
+    def fake_prepare_image(photo, folders, detection, vireo_dir=None, sources=None):
         return (
             Image.new("RGB", (32, 32), "white"),
             folders.get(photo["folder_id"], ""),
@@ -15326,7 +15326,7 @@ def test_pipeline_classify_pauses_when_source_volume_disappears(
     gone_folder = "/Volumes/DefinitelyNotMounted12345/Raw Files"
     prepare_calls = []
 
-    def offline_prepare_image(photo, folders, detection, vireo_dir=None):
+    def offline_prepare_image(photo, folders, detection, vireo_dir=None, sources=None):
         prepare_calls.append(photo["id"])
         return None, gone_folder, os.path.join(gone_folder, photo["filename"])
 
@@ -15495,7 +15495,7 @@ def test_pipeline_classify_resumes_after_source_volume_reconnects(
     gone_folder = "/Volumes/DefinitelyNotMounted12345/Raw Files"
     state = {"mounted": True, "seen": 0}
 
-    def flaky_prepare_image(photo, folders, detection, vireo_dir=None):
+    def flaky_prepare_image(photo, folders, detection, vireo_dir=None, sources=None):
         state["seen"] += 1
         if state["seen"] == 2:
             # The share drops on the second photo.
@@ -15514,7 +15514,7 @@ def test_pipeline_classify_resumes_after_source_volume_reconnects(
     monkeypatch.setattr(classify_job, "_prepare_image", flaky_prepare_image)
 
     def fake_flush_batch(batch, clf, model_type, model_name, db_, raw_results,
-                         top_k=1):
+                         top_k=1, timings=None):
         for entry in batch:
             raw_results.append({
                 "photo": entry["photo"],
@@ -15691,7 +15691,7 @@ def test_pipeline_classify_resets_pause_budget_after_successful_recovery(
     # True to model the user remounting the share for the resume.
     state = {"mounted": True}
 
-    def flaky_prepare_image(photo, folders, detection, vireo_dir=None):
+    def flaky_prepare_image(photo, folders, detection, vireo_dir=None, sources=None):
         if not state["mounted"]:
             return None, gone_folder, os.path.join(
                 gone_folder, photo["filename"],
@@ -15710,7 +15710,7 @@ def test_pipeline_classify_resets_pause_budget_after_successful_recovery(
     monkeypatch.setattr(classify_job, "_prepare_image", flaky_prepare_image)
 
     def fake_flush_batch(batch, clf, model_type, model_name, db_, raw_results,
-                         top_k=1):
+                         top_k=1, timings=None):
         for entry in batch:
             raw_results.append({
                 "photo": entry["photo"],
@@ -15863,7 +15863,7 @@ def test_pipeline_classify_offline_source_is_not_a_clean_success(
 
     gone_folder = "/Volumes/DefinitelyNotMounted12345/Raw Files"
 
-    def offline_prepare_image(photo, folders, detection, vireo_dir=None):
+    def offline_prepare_image(photo, folders, detection, vireo_dir=None, sources=None):
         return None, gone_folder, os.path.join(gone_folder, photo["filename"])
 
     monkeypatch.setattr(classify_job, "_prepare_image", offline_prepare_image)
@@ -15895,8 +15895,9 @@ def test_pipeline_classify_offline_source_is_not_a_clean_success(
     )
 
 
+@pytest.mark.parametrize("working_copy_available", [False, True])
 def test_pipeline_classify_source_offline_publishes_pause_reason(
-    tmp_path, monkeypatch,
+    tmp_path, monkeypatch, working_copy_available,
 ):
     """A parked classify run must tell the UI *why* it paused, not just that
     it did.
@@ -15962,8 +15963,12 @@ def test_pipeline_classify_source_offline_publishes_pause_reason(
 
     gone_folder = "/Volumes/NamedShareForBanner/Raw Files"
 
-    def offline_prepare_image(photo, folders, detection, vireo_dir=None):
-        return None, gone_folder, os.path.join(gone_folder, photo["filename"])
+    def offline_prepare_image(photo, folders, detection, vireo_dir=None, sources=None):
+        from PIL import Image
+        img = Image.new("RGB", (224, 224)) if working_copy_available else None
+        if img is not None:
+            img.info["_vireo_input_source"] = "working_copy"
+        return img, gone_folder, os.path.join(gone_folder, photo["filename"])
 
     monkeypatch.setattr(classify_job, "_prepare_image", offline_prepare_image)
 
@@ -16117,7 +16122,7 @@ def test_pipeline_classify_source_offline_honors_prior_user_pause(
     holder = {"runner": None}
     state = {"mounted": True, "seen": 0}
 
-    def flaky_prepare_image(photo, folders, detection, vireo_dir=None):
+    def flaky_prepare_image(photo, folders, detection, vireo_dir=None, sources=None):
         state["seen"] += 1
         if state["seen"] == 2:
             state["mounted"] = False
@@ -16141,7 +16146,7 @@ def test_pipeline_classify_source_offline_honors_prior_user_pause(
     monkeypatch.setattr(classify_job, "_prepare_image", flaky_prepare_image)
 
     def fake_flush_batch(batch, clf, model_type, model_name, db_, raw_results,
-                         top_k=1):
+                         top_k=1, timings=None):
         for entry in batch:
             raw_results.append({
                 "photo": entry["photo"],
@@ -16332,7 +16337,7 @@ def test_pipeline_classify_missing_folder_does_not_stop_healthy_folders(
     # stored in the DB).
     fake_missing_root = str(tmp_path / "vanished_at_classify_time")
 
-    def selective_prepare_image(photo, folders, detection, vireo_dir=None):
+    def selective_prepare_image(photo, folders, detection, vireo_dir=None, sources=None):
         if photo["id"] in gone_photo_ids:
             image_path = os.path.join(fake_missing_root, photo["filename"])
             return None, fake_missing_root, image_path
@@ -16346,7 +16351,7 @@ def test_pipeline_classify_missing_folder_does_not_stop_healthy_folders(
     monkeypatch.setattr(classify_job, "_prepare_image", selective_prepare_image)
 
     def fake_flush_batch(batch, clf, model_type, model_name, db_, raw_results,
-                         top_k=1):
+                         top_k=1, timings=None):
         for entry in batch:
             raw_results.append({
                 "photo": entry["photo"],
@@ -16511,7 +16516,7 @@ def test_pipeline_classify_folder_outage_is_not_a_clean_success(
     # not) for every photo in the collection.
     fake_missing_folder = str(tmp_path / "vanished_folder")
 
-    def folder_missing_prepare_image(photo, folders, detection, vireo_dir=None):
+    def folder_missing_prepare_image(photo, folders, detection, vireo_dir=None, sources=None):
         return None, fake_missing_folder, os.path.join(
             fake_missing_folder, photo["filename"],
         )
@@ -16636,7 +16641,7 @@ def test_pipeline_classify_folder_outage_counts_each_photo_once(
     # one photo.
     fake_missing_folder = str(tmp_path / "vanished_folder")
 
-    def folder_missing_prepare_image(photo, folders, detection, vireo_dir=None):
+    def folder_missing_prepare_image(photo, folders, detection, vireo_dir=None, sources=None):
         return None, fake_missing_folder, os.path.join(
             fake_missing_folder, photo["filename"],
         )
@@ -16751,7 +16756,7 @@ def test_pipeline_classify_give_up_skips_downstream_stages(
     # The share is gone: every load fails.
     gone_folder = "/Volumes/DefinitelyNotMounted12345/Raw Files"
 
-    def offline_prepare_image(photo, folders, detection, vireo_dir=None):
+    def offline_prepare_image(photo, folders, detection, vireo_dir=None, sources=None):
         return None, gone_folder, os.path.join(gone_folder, photo["filename"])
 
     monkeypatch.setattr(classify_job, "_prepare_image", offline_prepare_image)
@@ -16952,7 +16957,7 @@ def test_pipeline_classify_reclassify_preserves_predictions_for_unreachable_phot
 
     fake_missing_root = str(tmp_path / "vanished_at_classify_time")
 
-    def selective_prepare_image(photo, folders, detection, vireo_dir=None):
+    def selective_prepare_image(photo, folders, detection, vireo_dir=None, sources=None):
         if photo["id"] in gone_photo_ids:
             image_path = os.path.join(fake_missing_root, photo["filename"])
             return None, fake_missing_root, image_path
@@ -16966,7 +16971,7 @@ def test_pipeline_classify_reclassify_preserves_predictions_for_unreachable_phot
     monkeypatch.setattr(classify_job, "_prepare_image", selective_prepare_image)
 
     def fake_flush_batch(batch, clf, model_type, model_name, db_, raw_results,
-                         top_k=1):
+                         top_k=1, timings=None):
         for entry in batch:
             raw_results.append({
                 "photo": entry["photo"],
@@ -17157,7 +17162,7 @@ def test_pipeline_classify_multimodel_reclassify_per_spec_source_skips(
     current_model = ["A"]
     fake_missing_root = str(tmp_path / "vanished_at_classify_time")
 
-    def selective_prepare_image(photo, folders, detection, vireo_dir=None):
+    def selective_prepare_image(photo, folders, detection, vireo_dir=None, sources=None):
         # gone_photo_id is unreachable ONLY during model A. When we're
         # on model B, its folder is back — matching the P2 scenario where
         # a transient outage clears before the next spec starts.
@@ -17177,7 +17182,7 @@ def test_pipeline_classify_multimodel_reclassify_per_spec_source_skips(
     monkeypatch.setattr(classify_job, "_prepare_image", selective_prepare_image)
 
     def fake_flush_batch(batch, clf, model_type, model_name, db_, raw_results,
-                         top_k=1):
+                         top_k=1, timings=None):
         # Fresh predictions carry the model in the species string so the
         # per-model assertions below can pull them apart.
         for entry in batch:
@@ -17390,7 +17395,7 @@ def test_pipeline_classify_stale_purge_preserves_source_skipped_photos(
 
     from PIL import Image as _PILImage
 
-    def selective_prepare_image(photo, folders, detection, vireo_dir=None):
+    def selective_prepare_image(photo, folders, detection, vireo_dir=None, sources=None):
         # The gone photo's folder vanished between detect and classify.
         if photo["id"] == gone_photo_id:
             image_path = os.path.join(
@@ -17408,7 +17413,7 @@ def test_pipeline_classify_stale_purge_preserves_source_skipped_photos(
     monkeypatch.setattr(classify_job, "_prepare_image", selective_prepare_image)
 
     def fake_flush_batch(batch, clf, model_type, model_name, db_, raw_results,
-                         top_k=1):
+                         top_k=1, timings=None):
         for entry in batch:
             raw_results.append({
                 "photo": entry["photo"],
@@ -17558,7 +17563,7 @@ def test_pipeline_classify_recovered_pause_leaves_no_terminal_classify_error(
     gone_folder = "/Volumes/DefinitelyNotMounted12345/Raw Files"
     state = {"mounted": True, "seen": 0}
 
-    def flaky_prepare_image(photo, folders, detection, vireo_dir=None):
+    def flaky_prepare_image(photo, folders, detection, vireo_dir=None, sources=None):
         state["seen"] += 1
         if state["seen"] == 2:
             state["mounted"] = False
@@ -17576,7 +17581,7 @@ def test_pipeline_classify_recovered_pause_leaves_no_terminal_classify_error(
     monkeypatch.setattr(classify_job, "_prepare_image", flaky_prepare_image)
 
     def fake_flush_batch(batch, clf, model_type, model_name, db_, raw_results,
-                         top_k=1):
+                         top_k=1, timings=None):
         for entry in batch:
             raw_results.append({
                 "photo": entry["photo"],
@@ -17741,7 +17746,7 @@ def test_pipeline_classify_failed_retry_on_last_photo_latches_source_offline(
     gone_folder = "/Volumes/DefinitelyNotMounted12345/Raw Files"
     prepare_calls: list = []
 
-    def offline_prepare_image(photo, folders, detection, vireo_dir=None):
+    def offline_prepare_image(photo, folders, detection, vireo_dir=None, sources=None):
         prepare_calls.append(photo["id"])
         return None, gone_folder, os.path.join(gone_folder, photo["filename"])
 
@@ -17957,7 +17962,7 @@ def test_pipeline_classify_folder_outage_skips_unreachable_photos_in_downstream_
 
     fake_missing_root = str(tmp_path / "vanished_at_classify_time")
 
-    def selective_prepare_image(photo, folders, detection, vireo_dir=None):
+    def selective_prepare_image(photo, folders, detection, vireo_dir=None, sources=None):
         if photo["id"] in gone_photo_ids:
             image_path = os.path.join(fake_missing_root, photo["filename"])
             return None, fake_missing_root, image_path
@@ -17971,7 +17976,7 @@ def test_pipeline_classify_folder_outage_skips_unreachable_photos_in_downstream_
     monkeypatch.setattr(classify_job, "_prepare_image", selective_prepare_image)
 
     def fake_flush_batch(batch, clf, model_type, model_name, db_, raw_results,
-                         top_k=1):
+                         top_k=1, timings=None):
         for entry in batch:
             raw_results.append({
                 "photo": entry["photo"],
@@ -18122,7 +18127,7 @@ def test_pipeline_classify_folder_outage_marks_per_model_step_failed(
     # Every photo lives in a folder that doesn't exist at classify time.
     fake_missing_folder = str(tmp_path / "vanished_folder")
 
-    def folder_missing_prepare_image(photo, folders, detection, vireo_dir=None):
+    def folder_missing_prepare_image(photo, folders, detection, vireo_dir=None, sources=None):
         return None, fake_missing_folder, os.path.join(
             fake_missing_folder, photo["filename"],
         )
@@ -18245,7 +18250,7 @@ def test_pipeline_classify_source_offline_give_up_marks_per_model_step_failed(
     # (folder scope wouldn't latch source_offline["reason"]).
     gone_mount = "/Volumes/DefinitelyNotMounted12345/Raw Files"
 
-    def offline_prepare_image(photo, folders, detection, vireo_dir=None):
+    def offline_prepare_image(photo, folders, detection, vireo_dir=None, sources=None):
         return None, gone_mount, os.path.join(gone_mount, photo["filename"])
 
     monkeypatch.setattr(classify_job, "_prepare_image", offline_prepare_image)
@@ -20028,3 +20033,62 @@ def test_detail_reread_outage_records_the_reason_for_the_fatal_message(tmp_path,
         f"Empty reason list produces a malformed fatal line; got "
         f"{outage_errors[0]!r}"
     )
+
+
+def test_classify_selects_and_records_source_per_crop(tmp_path, monkeypatch):
+    from collections import Counter
+
+    import classifier
+    import classify_job
+    from classify_job import classify_pass
+    from PIL import Image
+
+    db_path, db, workspace_id = _open_db(tmp_path)
+    folder_path = tmp_path / "photos"
+    folder_path.mkdir()
+    folder_id = workspace_folders.add_folder(db, str(folder_path))
+    original_path = folder_path / "bird.jpg"
+    Image.new("RGB", (2000, 1600), "blue").save(original_path)
+    stat = original_path.stat()
+    photo = photo_ingest.add_photo(
+        db, folder_id, "bird.jpg", ".jpg", stat.st_size, stat.st_mtime,
+        timestamp="2026:11:14 12:00:00", width=2000, height=1600,
+    )
+    (tmp_path / "working").mkdir()
+    rel = f"working/{photo}.jpg"
+    Image.new("RGB", (800, 600), "red").save(tmp_path / rel)
+    db.conn.execute("UPDATE photos SET working_copy_path=? WHERE id=?", (rel, photo))
+    # The padded .2 box clears 224px horizontally but falls short vertically.
+    detections = db.detections.save(photo, [
+        {"box": {"x": 0.1, "y": 0.1, "w": size, "h": size},
+         "confidence": 0.9, "category": "animal"}
+        for size in (0.5, 0.4, 0.2, 0.1)
+    ], detector_model="megadetector-v6")
+    collection = db.collections.add("Test", json.dumps([{"field": "photo_ids", "value": [photo]}]))
+    db.commit()
+    model = _setup_fake_downloaded_model(tmp_path, monkeypatch)
+    monkeypatch.setattr(classifier, "Classifier", _RobinClassifier)
+    monkeypatch.setattr(_RobinClassifier, "_input_size", (224, 224), raising=False)
+    monkeypatch.setattr(classify_job, "_detect_batch", lambda photos, *a, **k: (
+        {photo: [dict(d, confidence=d["detector_confidence"]) for d in detection_store.get_detections(db, photo)]},
+        1, {photo},
+    ))
+    reads = Counter()
+    for loader in ("load_working_image", "load_image"):
+        original = getattr(classify_pass, loader)
+
+        def count_read(*args, load=original, name=loader, **kwargs):
+            reads[name] += 1
+            return load(*args, **kwargs)
+
+        monkeypatch.setattr(classify_pass, loader, count_read)
+
+    result = run_pipeline_job(_make_job(), FakeRunner(), db_path, workspace_id, PipelineParams(
+        collection_id=collection, model_ids=[model], skip_extract_masks=True, skip_regroup=True,
+    ))
+    assert reads == {"load_working_image": 1, "load_image": 1}
+    sources = dict(db.conn.execute("SELECT detection_id, input_source FROM classifier_runs"))
+    assert [sources[d] for d in detections] == ["working_copy", "working_copy", "original", "original"]
+    timings = result["stages"]["classify"]["timings_seconds_by_model"][model]
+    assert all(timings[part] > 0 for part in ("image_load", "inference", "storage"))
+    db.close()

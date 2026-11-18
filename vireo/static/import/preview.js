@@ -115,6 +115,40 @@ function importDuplicateCheckBody(files, destination, skipDuplicates = true) {
   });
 }
 
+/**
+ * The summary line for one in-progress duplicate-check frame, or '' when the
+ * frame carries no progress.
+ * @param {ImportDuplicateFrame} d @param {number} fileCount
+ */
+function duplicateStreamProgressText(d, fileCount) {
+  const count = (/** @type {unknown} */ n) => Number(n).toLocaleString();
+  const finite = (/** @type {unknown} */ n) => Number.isFinite(Number(n));
+  const recovery = d.catalog_recovery;
+  if (recovery && finite(recovery.checked) && finite(recovery.total)) {
+    // The server is fingerprinting JPEGs already in the catalog (paired with
+    // a RAW) before it can compare this card against them — whole-file
+    // reads, slow on a NAS. Say so, with the count, rather than an idle
+    // "checking for duplicates…".
+    return fileCount + ' files found — fingerprinting paired JPEGs already in your catalog' +
+      ' so duplicates are recognized… ' + count(recovery.checked) + ' of ' + count(recovery.total);
+  }
+  if (d.done || !finite(d.total)) return '';
+  if (finite(d.checked)) {
+    return fileCount + ' files found — checking for duplicates… ' +
+      count(d.checked) + ' of ' + count(d.total);
+  }
+  if (finite(d.preparing)) {
+    // Heartbeat from the prep phase (batched EXIF/capture-time reads before
+    // per-file checks begin). Without it long cards sit on "Discovering
+    // files…" through all of prep — this shows the user work is happening
+    // AND surfaces a place the server pauses long enough to observe a
+    // client disconnect.
+    return fileCount + ' files found — preparing metadata… ' +
+      count(d.preparing) + ' of ' + count(d.total);
+  }
+  return '';
+}
+
 /** @param {{automatic?: boolean} | undefined} [opts] */
 async function previewImport(opts) {
   // Abort before advancing the sequence. abort() only schedules the rejected
@@ -340,14 +374,11 @@ async function previewImport(opts) {
             /** @type {ImportDuplicateFrame} */ const d = JSON.parse(m[1] || '');
             applyCaptureDates(d.capture_dates);
             if (d.recovered) recoveredPathsNoDedup.push(...d.recovered);
-            if (!d.done && requestSeq === importPreviewSeq &&
-                !importPreviewSignatureChanged(requestSignature) &&
-                Number.isFinite(Number(d.checked)) &&
-                Number.isFinite(Number(d.total))) {
-              summary.textContent = files.length +
-                ' files found — checking for interrupted-run leftovers… ' +
-                Number(d.checked).toLocaleString() + ' of ' +
-                Number(d.total).toLocaleString();
+            if (requestSeq !== importPreviewSeq || importPreviewSignatureChanged(requestSignature)) continue;
+            if (d.clock_problems) renderImportClockProblems(d.clock_problems);
+            if (!d.done && Number.isFinite(Number(d.checked)) && Number.isFinite(Number(d.total))) {
+              summary.textContent = files.length + ' files found — checking for interrupted-run leftovers… ' +
+                Number(d.checked).toLocaleString() + ' of ' + Number(d.total).toLocaleString();
             }
           } catch (e) { /* partial frame */ }
         }
@@ -421,42 +452,10 @@ async function previewImport(opts) {
           applyCaptureDates(d.capture_dates);
           if (d.duplicates) duplicatePaths.push(...d.duplicates);
           if (d.recovered) recoveredPaths.push(...d.recovered);
-          const catalogRecovery = d.catalog_recovery;
-          if (catalogRecovery && requestSeq === importPreviewSeq &&
-              !importPreviewSignatureChanged(requestSignature) &&
-              Number.isFinite(Number(catalogRecovery.checked)) &&
-              Number.isFinite(Number(catalogRecovery.total))) {
-            // The server is fingerprinting JPEGs already in the catalog
-            // (paired with a RAW) before it can compare this card against
-            // them — whole-file reads, slow on a NAS. Say so, with the
-            // count, rather than an idle "checking for duplicates…".
-            summary.textContent = files.length +
-              ' files found — fingerprinting paired JPEGs already in your catalog' +
-              ' so duplicates are recognized… ' +
-              Number(catalogRecovery.checked).toLocaleString() + ' of ' +
-              Number(catalogRecovery.total).toLocaleString();
-          } else if (!d.done && requestSeq === importPreviewSeq &&
-              !importPreviewSignatureChanged(requestSignature) &&
-              Number.isFinite(Number(d.checked)) &&
-              Number.isFinite(Number(d.total))) {
-            summary.textContent = files.length +
-              ' files found — checking for duplicates… ' +
-              Number(d.checked).toLocaleString() + ' of ' +
-              Number(d.total).toLocaleString();
-          } else if (!d.done && requestSeq === importPreviewSeq &&
-              !importPreviewSignatureChanged(requestSignature) &&
-              Number.isFinite(Number(d.preparing)) &&
-              Number.isFinite(Number(d.total))) {
-            // Heartbeat from the prep phase (batched EXIF/capture-time
-            // reads before per-file checks begin). Without it long cards
-            // sit on "Discovering files…" through all of prep — this
-            // shows the user work is happening AND surfaces a place the
-            // server pauses long enough to observe a client disconnect.
-            summary.textContent = files.length +
-              ' files found — preparing metadata… ' +
-              Number(d.preparing).toLocaleString() + ' of ' +
-              Number(d.total).toLocaleString();
-          }
+          if (requestSeq !== importPreviewSeq || importPreviewSignatureChanged(requestSignature)) continue;
+          if (d.clock_problems) renderImportClockProblems(d.clock_problems);
+          const progress = duplicateStreamProgressText(d, files.length);
+          if (progress) summary.textContent = progress;
         } catch (e) { /* partial frame */ }
       }
     }

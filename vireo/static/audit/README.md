@@ -18,12 +18,15 @@ conventions). The template loads one entry module after the shared navbar:
 | `orphans.js` | Catalog entries whose file is gone |
 | `untracked.js` | Files the catalog does not know: import, or send their folders to Process |
 | `sidecars.js` | Stray `.xmp` files, moved to the Trash |
+| `clocks.js` | Camera Clocks: folders whose camera clock or time zone was wrong, with the evidence and per-group fixes run through the capture-time job (preview first, then an in-page confirmation) |
 | `integrity.js` | The verify-hashes job, the flagged files, and Accept Current File |
 | `boot.js` | The entry module: binds the tabs and buttons that used to carry inline handlers and the delegated row buttons, then loads the summary and the Integrity tab |
 
 Every check refreshes the summary banner when it finishes. Rendered rows carry
 `data-photo-id` (Drift also `data-direction`) or a row index `data-idx`
 (Untracked, Sidecars: paths are looked up from state by index, never written
-into markup); one delegated listener per table reads them. The summary chips
+into markup); one delegated listener per table reads them. Camera Clocks fix
+rows carry `data-finding` and `data-fix` indexes into `state.clockData`, so the
+photo ids a fix rewrites never pass through markup. The summary chips
 carry `data-tab`. The page registers no page hooks and writes no `window`
 globals.

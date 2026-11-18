@@ -314,7 +314,8 @@ def _validate_subject_detail(conn):
 
 
 def _repair_alternate_branch_schemas(conn):
-    """Restore main's migrations skipped by alternate version 39 and 40 catalogs."""
+    """Repair main migrations skipped by branch catalogs stamped 39–47."""
+    _add_classifier_input_source(conn)
     _add_job_history_errors(conn)
     create_subject_focus(conn)
 
@@ -575,6 +576,14 @@ def _add_primary_projection_policy(conn):
             conn.execute(f"ALTER TABLE photo_subject_state ADD COLUMN {name} {definition}")
 
 
+def _add_classifier_input_source(conn):
+    """Converge alternate version-42 layouts while preserving both migrations."""
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(classifier_runs)")}
+    if "input_source" not in columns:
+        conn.execute("ALTER TABLE classifier_runs ADD COLUMN input_source TEXT")
+    _merge_species_highlights(conn)
+
+
 MIGRATIONS = (
     Migration(
         13, "companion_identities_file_mtime",
@@ -636,11 +645,12 @@ MIGRATIONS = (
         42, "merge_species_highlights",
         _merge_species_highlights, _validate_merged_species_highlights,
     ),
-    Migration(43, "repair_alternate_branch_schemas", _repair_alternate_branch_schemas),
+    Migration(43, "classifier_input_source", _add_classifier_input_source),
     Migration(44, "subject_detail_full_resolution", _clear_subject_detail_from_other_read_paths),
     Migration(45, "subject_detail_mask_alignment", _clear_subject_detail_from_other_read_paths),
     Migration(46, "reconcile_highlights_and_detail", _reconcile_highlights_and_detail, _validate_merged_species_highlights),
     Migration(47, "companion_box_frames", _invalidate_ambiguous_companion_boxes),
+    Migration(48, "repair_alternate_branch_schemas", _repair_alternate_branch_schemas),
 )
 
 

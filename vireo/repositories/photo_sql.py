@@ -11,6 +11,12 @@ here.
 
 from repositories.prediction_review import prediction_review_join, prediction_review_status
 
+# Capture-time preview and the Audit must fingerprint the same source tags.
+CAPTURE_TIME_STATE_SQL = """json_extract(p.exif_data,
+    '$.EXIF.DateTimeOriginal', '$.EXIF.CreateDate', '$.EXIF.SubSecTimeOriginal',
+    '$.EXIF.SubSecTime', '$.EXIF.OffsetTimeOriginal', '$.EXIF.OffsetTime',
+    '$.EXIF.OffsetTimeDigitized')"""
+
 # Columns to return in photo list queries (excludes large fields)
 PHOTO_COLS = """id, folder_id, filename, extension, file_size, file_mtime, xmp_mtime,
                 timestamp, width, height, rating, flag, thumb_path, sharpness,

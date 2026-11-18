@@ -43,7 +43,7 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
-from grouping import read_exif_timestamp
+from grouping import metadata_camera_label, read_exif_clock
 from scanner import EMPTY_FILE_SHA256, compute_file_hash
 
 log = logging.getLogger(__name__)
@@ -98,6 +98,41 @@ def metadata_capture_timestamp(metadata):
     return None
 
 
+class CaptureTimes(dict):
+    """``{path: datetime | None}`` plus each file's other clock evidence.
+
+    ``offsets`` maps a path to the UTC offset its camera recorded ('-07:00')
+    and ``cameras`` to its camera (model and body serial), both read in the
+    same header parse as the time. The import preview's camera-clock check
+    reads them; everything else uses the mapping as a plain dict, so a caller
+    (or a test double) that returns a plain dict simply has none.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.offsets = {}
+        self.cameras = {}
+
+
+def capture_offsets(times):
+    """The ``offsets`` a ``source_capture_timestamps`` result carries, or ``{}``."""
+    return getattr(times, "offsets", {})
+
+
+def capture_cameras(times):
+    """The ``cameras`` a ``source_capture_timestamps`` result carries, or ``{}``."""
+    return getattr(times, "cameras", {})
+
+
+def metadata_capture_offset(metadata):
+    """The recorded UTC offset in ExifTool metadata, or None."""
+    exif = metadata.get("EXIF")
+    if not isinstance(exif, dict):
+        return None
+    value = exif.get("OffsetTimeOriginal") or exif.get("OffsetTime") or exif.get("OffsetTimeDigitized")
+    return str(value).strip() if value else None
+
+
 def source_capture_timestamps(files):
     """Resolve EXIF capture timestamps for source files. No mtime fallback.
 
@@ -107,18 +142,22 @@ def source_capture_timestamps(files):
     because mtime is a property of the copy, not of the photo, and this
     map feeds duplicate identity. Callers that want mtime for folder
     planning apply their own fallback (see ingest._source_file_timestamps).
+    The result is a ``CaptureTimes``: its ``offsets`` hold each file's
+    recorded UTC offset.
     """
-    timestamps = {}
+    timestamps = CaptureTimes()
     missing = []
 
     for source_file in files:
-        exif_dt = None
+        clock = None
         with contextlib.suppress(OSError, ValueError):
-            exif_dt = read_exif_timestamp(str(source_file))
-        if exif_dt is None:
+            clock = read_exif_clock(str(source_file))
+        if clock is None or clock.captured is None:
             missing.append(source_file)
         else:
-            timestamps[source_file] = exif_dt
+            timestamps[source_file] = clock.captured
+            timestamps.offsets[source_file] = clock.offset
+            timestamps.cameras[source_file] = clock.camera
 
     if missing:
         try:
@@ -133,6 +172,13 @@ def source_capture_timestamps(files):
                     "-SubSecDateTimeOriginal",
                     "-MediaCreateDate",
                     "-TrackCreateDate",
+                    "-OffsetTimeOriginal",
+                    "-OffsetTime",
+                    "-OffsetTimeDigitized",
+                    "-Model",
+                    "-SerialNumber",
+                    "-BodySerialNumber",
+                    "-CameraSerialNumber",
                 ],
             )
         except Exception:  # broad: ExifTool failures leave capture times unknown, which falls back to hashing
@@ -145,6 +191,8 @@ def source_capture_timestamps(files):
         for source_file in missing:
             metadata = metadata_by_path.get(str(source_file), {})
             timestamps[source_file] = metadata_capture_timestamp(metadata)
+            timestamps.offsets[source_file] = metadata_capture_offset(metadata)
+            timestamps.cameras[source_file] = metadata_camera_label(metadata)
 
     return timestamps
 
@@ -393,6 +441,10 @@ class DuplicateChecker:
         self._seen_unhashed = {}
         # str(path) -> datetime|None; EXIF-only capture times.
         self._times = times_cache if times_cache is not None else {}
+        # str(path) -> recorded UTC offset ('-07:00') / camera, or None, for
+        # the files prepare() resolved; the import preview's camera-clock check.
+        self._offsets = {}
+        self._cameras = {}
         # str(path) -> str|None; content hash (None for zero-byte files,
         # which carry no duplicate identity anywhere in Vireo).
         self._hashes = {}
@@ -416,6 +468,18 @@ class DuplicateChecker:
         resolved = source_capture_timestamps(pending)
         for source_file, dt in resolved.items():
             self._times[str(source_file)] = dt
+        for source_file, offset in capture_offsets(resolved).items():
+            self._offsets[str(source_file)] = offset
+        for source_file, camera in capture_cameras(resolved).items():
+            self._cameras[str(source_file)] = camera
+
+    def capture_offset(self, source_file):
+        """The UTC offset recorded with the capture time, if prepare() read it."""
+        return self._offsets.get(str(source_file))
+
+    def capture_camera(self, source_file):
+        """The camera (model and body serial) prepare() read, or None."""
+        return self._cameras.get(str(source_file))
 
     def capture_time(self, source_file):
         """EXIF capture time (or None), resolving lazily if not prepared."""

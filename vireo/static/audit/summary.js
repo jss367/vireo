@@ -9,6 +9,7 @@ import { runDriftCheck } from './drift.js';
 import { runOrphanCheck } from './orphans.js';
 import { runUntrackedCheck } from './untracked.js';
 import { runSidecarCheck } from './sidecars.js';
+import { runClockCheck } from './clocks.js';
 import { runHashVerify } from './integrity.js';
 
 /** @param {string} name */
@@ -112,6 +113,8 @@ export async function runAllChecks() {
     await runUntrackedCheck();
     note.textContent = 'Running sidecar check…';
     await runSidecarCheck();
+    note.textContent = 'Checking camera clocks…';
+    await runClockCheck();
     note.textContent = 'Verifying file hashes…';
     await runHashVerify();
   } finally {
