@@ -88,6 +88,7 @@ def create_history_blueprint(
         including when the entry had nothing to refresh.
         """
         action = entry.get("action_type") if entry else None
+        saved_before_grouping = False
         if action == "pipeline_grouping":
             # A species edit whose cache write changed the encounter
             # structure is recorded as a grouping edit wrapping the photo
@@ -97,7 +98,8 @@ def create_history_blueprint(
                 payload = json.loads(entry.get("new_value") or "{}")
             except (TypeError, ValueError):
                 payload = {}
-            if payload.get("photo_only"):
+            saved_before_grouping = bool(payload.get("saved_before_grouping"))
+            if payload.get("photo_only") and not saved_before_grouping:
                 # Retired after its cache snapshot went stale: the newer
                 # cache belongs to a later analysis and must stay untouched;
                 # only the photo edit was reversed.
@@ -117,7 +119,7 @@ def create_history_blueprint(
             # cached evidence (not its confirmed species) is what to redo.
             return subject_verdicts.refresh_pipeline_cache(db, db_path, photo_ids)
         try:
-            if action in ("identity_alternatives", "assignment_review"):
+            if saved_before_grouping or action in ("identity_alternatives", "assignment_review"):
                 from services.identity_alternatives import refresh_species_caches
                 return not refresh_species_caches(db, os.path.dirname(db_path), photo_ids)
             species_by_photo = db.photo_species.get_species_for_photos(photo_ids)

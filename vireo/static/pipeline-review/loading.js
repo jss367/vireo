@@ -37,10 +37,11 @@ function renderEmptyState(readiness) {
     return;
   }
 
+  var pendingNotice = ' Species saved now will be attached to encounters when grouping finishes.';
   if (requireReviewValue(readiness).state === 'insufficient') {
     heading.textContent = 'Not enough features to compute results yet';
     body.textContent = 'Run mask extraction on the Process page first '
-      + '— the review page needs masks to score photo quality.';
+      + '— the review page needs masks to score photo quality.' + pendingNotice;
     actions.innerHTML = '<a href="/pipeline" class="compute-btn" '
       + 'style="text-decoration:none;display:inline-block;">Open Process</a>';
     return;
@@ -62,6 +63,7 @@ function renderEmptyState(readiness) {
     body.textContent = 'You can compute results now. Quality will be lower without: '
       + labels.join(', ') + '. Re-run those stages on the Process page later to improve.';
   }
+  body.textContent += pendingNotice;
   actions.innerHTML = '<button class="compute-btn" onclick="computeReviewNow()">'
     + 'Compute results now</button>';
 }
