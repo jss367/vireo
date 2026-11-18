@@ -5,6 +5,7 @@ from __future__ import annotations
 import functools
 import os
 import posixpath
+import re
 from typing import TYPE_CHECKING, Any, cast
 
 from import_dedup import compute_file_hash
@@ -65,6 +66,24 @@ def _book_copied(state: _ImportRunState, rel: str, attests_bytes: bool) -> None:
         state.verified += 1
 
 
+_RSYNC_ESCAPE = re.compile(rb"\\#([0-7]{3})")
+
+
+def _unescape_rsync_name(name: str) -> str:
+    """The file name behind one of rsync's ``--out-format=%n`` lines.
+
+    rsync prints a byte it considers unprintable (a control character, or a
+    byte that is not valid in its locale) as a backslash, a hash sign and
+    the byte's value as three octal digits, and escapes a backslash the same
+    way where it would otherwise read as the start of such a sequence.
+    Undoing that gives back the name on disk, which is what the batch is
+    keyed by.
+    """
+    raw = name.encode("utf-8", "surrogateescape")
+    decoded = _RSYNC_ESCAPE.sub(lambda m: bytes([int(m.group(1), 8) & 0xFF]), raw)
+    return decoded.decode("utf-8", "surrogateescape")
+
+
 class _SentBytes:
     """Counts the bytes of the files rsync reports sending.
 
@@ -83,7 +102,7 @@ class _SentBytes:
     def named(self, name: str) -> None:
         """rsync reported ``name`` from the flat batch."""
         self._state.transferred_bytes += self._unsent.pop(
-            os.path.basename(name.rstrip("/")), 0)
+            os.path.basename(_unescape_rsync_name(name).rstrip("/")), 0)
 
     def once(self, size: int | None) -> Callable[..., None]:
         """A progress callback for one renamed file's own rsync.

@@ -314,3 +314,32 @@ def test_a_file_rsync_skipped_as_already_there_is_not_counted(tmp_path, monkeypa
 
     assert result["copied"] == 2
     assert result["timing"]["transferred_bytes"] == sizes["DSC_0002.jpg"]
+
+
+@pytest.mark.parametrize(("reported", "on_disk"), [
+    ("DSC_0001.jpg", "DSC_0001.jpg"),
+    ("foo\\#012bar.jpg", "foo\nbar.jpg"),
+    ("caf\\#303\\#251.jpg", "café.jpg"),
+    ("back\\#134#012slash.jpg", "back\\#012slash.jpg"),
+    ("plain\\backslash.jpg", "plain\\backslash.jpg"),
+])
+def test_rsyncs_escaped_names_decode_to_the_names_on_disk(reported, on_disk):
+    from import_job.transports import _unescape_rsync_name
+
+    assert _unescape_rsync_name(reported) == on_disk
+
+
+def test_a_file_whose_name_rsync_escapes_is_still_counted():
+    """rsync prints a newline in a name as ``\\#012``; the batch is keyed by
+    the name on disk."""
+    from pathlib import Path
+
+    from import_job.transports import _SentBytes
+
+    state = _state()
+    sent = _SentBytes(state, [(Path("/card/foo\nbar.jpg"), "foo\nbar.jpg", None, 1234, 0)])
+
+    sent.named("foo\\#012bar.jpg")
+    sent.named("foo\\#012bar.jpg")
+
+    assert state.transferred_bytes == 1234
