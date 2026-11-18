@@ -344,6 +344,10 @@ def _publish_features(db: Database, pid: int, detection: JsonDict, analysis: Jso
                 previous = db.masks_features.get_mask(pid, variant)
                 if previous is None or previous["path"] != existing_mask_path:
                     raise ValueError("Subject mask changed before quality publication; retry the current mask")
+                inputs = analysis.get("comparison_inputs")
+                if (not inputs or previous["comparison_inputs"] != inputs
+                        or not json.loads(inputs).get("sam_generation")):
+                    analysis["comparison_inputs"] = None
             db.masks_features.upsert_mask(pid, variant, mask_path, detection["detector_model"],
                 tuple(detection["box_" + key] for key in "xywh"),
                 MaskQuality(comparison_inputs=analysis.get("comparison_inputs"),

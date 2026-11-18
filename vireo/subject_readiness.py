@@ -151,5 +151,5 @@ def usable_selected_analysis(analysis):
                 return False
             pixels = np.asarray(image)
             return pixels.ndim == 2 and bool(np.any(pixels))
-    except (OSError, ValueError, TypeError):
+    except (OSError, ValueError, TypeError, SyntaxError, Image.DecompressionBombError):
         return False

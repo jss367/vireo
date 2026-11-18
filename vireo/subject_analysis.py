@@ -76,10 +76,8 @@ def analyze_detection(db, photo, detection, effective_cfg, checkpoint, *, force=
                 else:
                     existing_mask_path = None
         variant = effective_cfg.get("pipeline", {}).get("sam2_variant") or "sam2-small"
-        # Record provenance for both new and reused masks: when a reused mask
-        # matches the current proxy frame, its measurements belong to this same
-        # raster, so publishing without ``comparison_inputs`` would overwrite a
-        # valid record with NULL and downgrade it to ``primary_unverified``.
+        # For a reused mask this describes the requested inputs. Publication
+        # checks them against the original mask generation under the writer lock.
         inputs = (measurement_inputs(image, detection["id"], detection_prompt_runtime(detection), variant)
                   if defer_publication else None)
         if not existing_mask_path:
@@ -137,6 +135,8 @@ def publish_analysis(db, photo, detection, analysis, effective_cfg):
         raise ValueError("Subject analysis inputs changed; retry this frame")
     if not usable_selected_analysis(analysis):
         raise ValueError("Required subject measurements are still incomplete")
+    if analysis.get("existing_mask_path") and not analysis.get("comparison_inputs"):
+        return  # Quality-only work can refresh primary scores without proving selected-cache compatibility.
     # Retire only unusable cache entries, after fresh work and input validation.
     # Valid bytes are immutable, and a failed outer publication rolls this back.
     if not usable_selected_analysis(db.subjects.ranking_analysis(detection["id"], key)):
