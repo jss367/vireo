@@ -118,6 +118,7 @@ GET          /api/photos/<int:photo_id>/best-batch
 GET          /api/photos/<int:photo_id>/burst-evidence
 GET          /api/photos/<int:photo_id>/edit-history
 GET          /api/photos/<int:photo_id>/edit-recipe
+GET          /api/photos/<int:photo_id>/mask-reviews/<int:review_id>.png
 GET          /api/photos/<int:photo_id>/pipeline
 GET          /api/photos/<int:photo_id>/similar
 GET          /api/photos/<int:photo_id>/subjects
@@ -501,8 +502,10 @@ PUT          /api/collections/<int:collection_id>
 PUT          /api/color-label-descriptions/<color>
 PUT          /api/keywords/<int:keyword_id>
 PUT          /api/move-rules/<int:rule_id>
+PUT          /api/photos/<int:photo_id>/mask-review
 PUT          /api/photos/<int:photo_id>/primary-subject
 PUT          /api/photos/<int:photo_id>/subjects/reviewer-box
 PUT          /api/processes/<int:process_id>
+PUT          /api/v1/photos/<int:photo_id>/mask-review
 PUT          /api/workspaces/<int:ws_id>
 PUT          /api/workspaces/<int:ws_id>/subject-types
