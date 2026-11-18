@@ -62,6 +62,7 @@ def run_import_job(job: JobDict, runner: JobRunner, db_path: str, workspace_id: 
     runner.update_step(job["id"], "import", status="running")
 
     state = _ImportRunState(log_label=transport.log_label)
+    state.paused_seconds = lambda: runner.pause_elapsed_seconds(job["id"])
     eta = _ImportEtaEstimator(
         expected_new=(params.checked_count if params.skip_duplicates else None),
     )

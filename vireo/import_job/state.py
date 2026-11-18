@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 from scanner.keywords import SidecarFailures
 
 if TYPE_CHECKING:
-    from collections.abc import Collection
+    from collections.abc import Callable, Collection
     from pathlib import Path
 
     from import_dedup import DuplicateChecker
@@ -26,6 +26,11 @@ if TYPE_CHECKING:
     )
 
 log = logging.getLogger(__name__)
+
+
+def _never_paused() -> float:
+    """The paused-seconds reading of a run nothing can pause."""
+    return 0.0
 
 
 @dataclass
@@ -165,9 +170,14 @@ class _ImportRunState:
     # transport landed, for the result's timing (``import_job.timing``).
     # A file whose copy fails verification, or whose landing is later
     # reclassified as failed, keeps its bytes here: they were transferred,
-    # which is what the copy phase's rate measures.
+    # which is what the copy phase's rate measures. A file rsync skipped
+    # because it already existed at the destination was not, and is not
+    # counted.
     phase_seconds: dict[str, float] = field(default_factory=dict)
     transferred_bytes: int = 0
+    # The runner's cumulative paused seconds for this job; a phase's time
+    # leaves out whatever a Pause added while it ran.
+    paused_seconds: Callable[[], float] = field(default=_never_paused)
     # One line per sidecar whose keywords a batch scan could not import
     # (``ScanHooks.sidecar_error``). The photo was imported but is missing
     # those keywords: a failed item for the job's verdict, not for the card

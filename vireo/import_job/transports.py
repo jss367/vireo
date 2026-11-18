@@ -16,7 +16,7 @@ from job_contract import progress_event
 from scanner import EMPTY_FILE_SHA256
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
     from pathlib import Path
 
     from import_dedup import DuplicateChecker
@@ -63,6 +63,39 @@ def _book_copied(state: _ImportRunState, rel: str, attests_bytes: bool) -> None:
     _counts(state, rel)["copied"] += 1
     if attests_bytes:
         state.verified += 1
+
+
+class _SentBytes:
+    """Counts the bytes of the files rsync reports sending.
+
+    Counted from the names rsync prints as it transfers them, not from its
+    exit code: ``--ignore-existing`` lets it succeed without sending a file
+    another writer already put there, and a batch that fails partway still
+    sent the files it named. Each file counts once.
+    """
+
+    def __init__(self, state: _ImportRunState, flat: Sequence[tuple[Path, str, str | None, int, int]]) -> None:
+        self._state = state
+        # A flat batch's files land under their own, distinct basenames,
+        # so the reported name identifies the file.
+        self._unsent = {sf.name: sz or 0 for sf, _bn, _sh, sz, _mt in flat}
+
+    def named(self, name: str) -> None:
+        """rsync reported ``name`` from the flat batch."""
+        self._state.transferred_bytes += self._unsent.pop(
+            os.path.basename(name.rstrip("/")), 0)
+
+    def once(self, size: int | None) -> Callable[..., None]:
+        """A progress callback for one renamed file's own rsync.
+
+        That rsync has a single source, so any name it reports means the
+        file was sent.
+        """
+        pending = [size or 0]
+
+        def _sent(*_args: object) -> None:
+            self._state.transferred_bytes += pending.pop() if pending else 0
+        return _sent
 
 
 def _landed_copied(source_file: Path, *, dest_path: str, verified_hash: str, src_size: int,
@@ -588,6 +621,14 @@ class _RsyncTransport:
         except OSError as exc:
             return 1, str(exc), False
 
+    def _flat_progress(
+        self, state: _ImportRunState, sent: _SentBytes, rel: str, batch_size: int,
+        done: int, _total: int, name: str, _label: object,
+    ) -> None:
+        """rsync named a file of the flat batch as it transferred it."""
+        sent.named(name)
+        self._emit_transfer(state, rel, done, batch_size, name)
+
     def _rsync_cancelled(self, rc: int) -> bool:
         # A Stop mid-transfer kills the subprocess via the
         # cancel_check in ``_do_rsync`` and surfaces as a nonzero exit.
@@ -631,6 +672,7 @@ class _RsyncTransport:
         ]
         transferred = []   # (sf, dest_basename, src_hash, src_size, src_mtime_ns, nas_full_path)
         batch_size = len(batch_st.to_transfer)
+        sent = _SentBytes(state, flat)
         # Flat batch: one rsync into the dir. rsync names each file
         # as it lands; forward that as the batch's honest
         # actually-crossed-the-network counter next to the
@@ -640,9 +682,8 @@ class _RsyncTransport:
                 [str(sf) for sf, _bn, _sh, _sz, _mt in flat],
                 rsync_target, True,
                 extra_args,
-                progress_cb=lambda done, _tot, name, _label,
-                _rel=rel, _bs=batch_size:
-                    _emit_transfer(_rel, done, _bs, name))
+                progress_cb=functools.partial(
+                    self._flat_progress, state, sent, rel, batch_size))
             if timed_out:
                 for sf, _bn, _sh, _sz, _mt in flat:
                     _fail(state, rel, sf, "rsync stalled (no progress)")
@@ -666,7 +707,10 @@ class _RsyncTransport:
             rc, stderr, timed_out = self._do_rsync(
                 [str(sf)],
                 self._move_mod.rsync_dest_spec(remote, nas_full), False,
-                extra_args)
+                extra_args,
+                # A single source: whatever name rsync reports, it sent
+                # this file.
+                progress_cb=sent.once(sz))
             if timed_out:
                 _fail(state, rel, sf, "rsync stalled (no progress)")
             elif self._rsync_cancelled(rc):
@@ -694,10 +738,6 @@ class _RsyncTransport:
         dest_folder = batch_st.dest_folder
         for sf, bn, src_hash, sz, mt, nas_full in transferred:
             dest_path = os.path.join(dest_folder, bn)
-            # rsync landed this file; its bytes crossed the network during
-            # the copy phase whether or not the verification below lets it
-            # into the copied ledger.
-            state.transferred_bytes += sz or 0
             # Independent verification (Task 2.7 FIX 1): card -> NAS,
             # opt-in behind ``verify_by_hash`` (it reads every NAS
             # byte; same knob the local path uses). This compares the

@@ -8,7 +8,8 @@ again), and building working copies after the last batch. The job has one
 step, so without these numbers a slow import reads as one long "Copy &
 catalog" with no way to tell which part was slow.
 
-``timed`` adds a phase's wall-clock seconds to ``state.phase_seconds``.
+``timed`` adds a phase's working seconds (wall-clock time less any time the
+job was paused) to ``state.phase_seconds``.
 Copying and cataloging alternate per batch, so each phase is a sum over the
 run, not one interval. ``state.transferred_bytes`` counts the bytes of every
 file the transport landed, verified or not, so the copy phase has a rate
@@ -49,13 +50,23 @@ _PHASES = (
 
 @contextmanager
 def timed(state: _ImportRunState, phase: str) -> Iterator[None]:
-    """Add the block's wall-clock time to ``phase``, however it exits."""
+    """Add the block's working time to ``phase``, however it exits.
+
+    Time the job spent paused inside the block is left out
+    (``state.paused_seconds``, the runner's cumulative count): a Pause parks
+    the worker at its next cancellation probe, which is inside these blocks,
+    and an hour's pause would otherwise read as an hour of copying at a
+    fraction of the real rate.
+    """
     started = time.monotonic()
+    paused_before = state.paused_seconds()
     try:
         yield
     finally:
+        elapsed = time.monotonic() - started
+        paused = max(0.0, state.paused_seconds() - paused_before)
         state.phase_seconds[phase] = (
-            state.phase_seconds.get(phase, 0.0) + time.monotonic() - started
+            state.phase_seconds.get(phase, 0.0) + max(0.0, elapsed - paused)
         )
 
 

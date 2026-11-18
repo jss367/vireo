@@ -197,28 +197,93 @@ def test_a_copy_that_fails_verification_still_counts_its_bytes(tmp_path, monkeyp
 def test_an_rsync_landing_that_fails_remote_verification_still_counts_its_bytes(
     tmp_path, monkeypatch,
 ):
+    """rsync sent the file; the remote check then refused it. Its bytes
+    crossed the network during the copy phase either way."""
+    result, sizes = _remote_import(
+        tmp_path, monkeypatch, ["DSC_0001.jpg"], rsync_reports={"DSC_0001.jpg"},
+        verify=("DSC_0001.jpg", "checksum differs"),
+    )
+
+    assert (result["copied"], result["failed"]) == (0, 1)
+    assert result["timing"]["transferred_bytes"] == sizes["DSC_0001.jpg"]
+
+
+def test_time_spent_paused_inside_a_phase_is_left_out(monkeypatch):
+    """A Pause parks the worker at a cancellation probe inside the block.
+    Counting it would report an hour's pause as an hour of slow copying."""
+    import import_job.timing as timing
+
+    clock = iter([100.0, 4000.0])
+    monkeypatch.setattr(timing.time, "monotonic", lambda: next(clock))
+    paused = iter([50.0, 3650.0])
+    state = _state()
+    state.paused_seconds = lambda: next(paused)
+
+    with timed(state, COPY):
+        pass
+
+    assert state.phase_seconds == {COPY: pytest.approx(300.0)}
+
+
+def test_the_import_reads_paused_time_from_its_runner(tmp_path):
+    from import_job import ImportParams
+    from test_import_job import FakeRunner
+
+    class PausedRunner(FakeRunner):
+        """Reports a day of paused time accruing across every phase."""
+
+        def __init__(self):
+            super().__init__()
+            self.paused = 0.0
+
+        def pause_elapsed_seconds(self, job_id):
+            self.paused += 86_400.0
+            return self.paused
+
+    _db, _ws, result = _run_import(
+        tmp_path,
+        ImportParams(sources=[str(_card(tmp_path))], destination=str(tmp_path / "archive")),
+        runner=PausedRunner(),
+    )
+
+    assert result["copied"] == 3
+    assert result["timing"]["seconds"] == {FIND: 0.0, COPY: 0.0, CATALOG: 0.0}
+
+
+def _remote_import(tmp_path, monkeypatch, names, *, rsync_reports, verify=None):
+    """A remote import of ``names`` whose fake rsync lands every file at the
+    mount but reports only ``rsync_reports`` as transferred."""
+    import move as _move
     from db import Database
     from import_job import ImportParams, run_import_job
-    from test_import_job import (
-        FakeRunner,
-        _install_fake_remote_rsync,
-        _make_job,
-        _remote_archive_for,
-        _remote_calls,
-    )
+    from test_import_job import FakeRunner, _make_job, _remote_archive_for
 
     remote_archive = _remote_archive_for(tmp_path)
-    calls = _remote_calls(remote_archive)
-    _install_fake_remote_rsync(
-        monkeypatch, calls, verify=("DSC_0001.jpg", "checksum differs"),
-    )
+
+    def fake_rsync(src_path, dest_spec, rsync_flags, total_files, progress_cb,
+                   rsync_bin="rsync", extra_args=None, src_specs=None,
+                   src_specs_dest_is_dir=True, **kwargs):
+        import os
+        import shutil
+
+        rel = os.path.relpath(dest_spec.split(":", 1)[1], remote_archive["ssh_base"])
+        mount_dir = os.path.join(remote_archive["mount_base"], rel)
+        os.makedirs(mount_dir, exist_ok=True)
+        for done, source in enumerate(src_specs, start=1):
+            shutil.copy2(source, os.path.join(mount_dir, os.path.basename(source)))
+            if os.path.basename(source) in rsync_reports and progress_cb:
+                progress_cb(done, len(src_specs), os.path.basename(source), "")
+        return (0, "", False)
+
+    monkeypatch.setattr(_move, "_run_rsync_streamed", fake_rsync)
+    monkeypatch.setattr(_move, "_remote_mkdir_p", lambda remote, path: (True, ""))
+    monkeypatch.setattr(_move, "remote_verify_files", lambda *args, **kwargs: verify)
     card = _make_card(tmp_path, [
-        ("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
+        (name, datetime(2026, 7, 3, 10, minute, 0), color)
+        for minute, (name, color) in enumerate(zip(names, ("red", "green", "blue"), strict=False))
     ])
-    card_bytes = (card / "DSC_0001.jpg").stat().st_size
     db_path = str(tmp_path / "test.db")
     workspace_id = Database(db_path)._active_workspace_id
-
     result = run_import_job(
         _make_job(), FakeRunner(), db_path, workspace_id,
         ImportParams(
@@ -226,7 +291,26 @@ def test_an_rsync_landing_that_fails_remote_verification_still_counts_its_bytes(
             remote_target=remote_archive, verify_by_hash=True,
         ),
     )
+    return result, {name: (card / name).stat().st_size for name in names}
 
-    assert (result["copied"], result["failed"]) == (0, 1)
-    assert calls["verify"] == 1
-    assert result["timing"]["transferred_bytes"] == card_bytes
+
+def test_an_rsync_import_counts_the_files_rsync_reports_sending(tmp_path, monkeypatch):
+    names = ["DSC_0001.jpg", "DSC_0002.jpg"]
+
+    result, sizes = _remote_import(tmp_path, monkeypatch, names, rsync_reports=set(names))
+
+    assert result["copied"] == 2
+    assert result["timing"]["transferred_bytes"] == sum(sizes.values())
+
+
+def test_a_file_rsync_skipped_as_already_there_is_not_counted(tmp_path, monkeypatch):
+    """``--ignore-existing`` lets rsync succeed without sending a file
+    another writer put at the destination first; it names only what it sent."""
+    names = ["DSC_0001.jpg", "DSC_0002.jpg"]
+
+    result, sizes = _remote_import(
+        tmp_path, monkeypatch, names, rsync_reports={"DSC_0002.jpg"},
+    )
+
+    assert result["copied"] == 2
+    assert result["timing"]["transferred_bytes"] == sizes["DSC_0002.jpg"]
