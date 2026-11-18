@@ -119,6 +119,19 @@ def test_a_species_with_no_region_is_in_frame_when_the_main_bird_is_another():
     assert presence["Black-bellied plover"].frame_share is None
 
 
+def test_a_co_subject_the_classifier_named_something_else_keeps_a_tag_the_subject():
+    """A plover-sized bird beside the dunlin reads as a lookalike. It may be
+    the plover the user tagged, so the plover tag is not demoted."""
+    dunlin = _subject("Dunlin", (0.2, 0.3, 0.3, 0.3), rank=1)
+    lookalike = _subject("American Golden-Plover", (0.6, 0.3, 0.3, 0.3), rank=2, detector_confidence=0.3)
+    small = _subject("Black-bellied Plover", (0.9, 0.05, 0.05, 0.05), rank=3)
+    presence = _presence(
+        ["Black-bellied plover", "Dunlin"], [dunlin, lookalike, small],
+    )
+    assert _kinds(presence)["Black-bellied plover"] == SUBJECT
+    assert _kinds(presence)["Dunlin"] == SUBJECT
+
+
 @pytest.mark.parametrize("subjects, crop", [
     # The main bird's prediction matches neither tag: the user identified it
     # against the model, so which bird is which is unknown.

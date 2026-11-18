@@ -41,7 +41,9 @@ def _seed_two_species_photo(db, data):
     db.conn.commit()
     hawk_det, coopers_det = db.detections.save(
         pid,
-        [{"box": {"x": x, "y": 0.1, "w": 0.3, "h": 0.3}, "confidence": 0.9,
+        # About the size of the seeded hawk region (0.5 x 0.5), so both
+        # birds are subjects of the photo and a pick counts for each.
+        [{"box": {"x": x, "y": 0.1, "w": 0.4, "h": 0.4}, "confidence": 0.9,
           "category": "animal"} for x in (0.1, 0.6)],
         detector_model="MDV6",
     )
@@ -159,27 +161,28 @@ def test_picking_promotes_photo_into_unloaded_second_bucket(live_server, page, r
     db.conn.execute(
         "UPDATE photos SET quality_score = 0.65 WHERE id = ?", (pid,),
     )
+    # Tagged Red-tailed Hawk, with a second subject that reads as a robin
+    # and is about the size of the hawk, so the photo is a picture of both
+    # and a pick counts in each bucket. The robin is a second tag
+    # ("keyword") or an unconfirmed candidate ("prediction").
+    db.conn.execute(
+        "INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (pid, hawk_kid),
+    )
     if robin_by == "keyword":
         db.conn.execute(
             "INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
             (pid, robin_kid),
         )
-    else:
-        # Tagged Red-tailed Hawk, with a second subject predicted as a robin:
-        # the photo is an unconfirmed candidate in the Robin bucket.
-        db.conn.execute(
-            "INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
-            (pid, hawk_kid),
-        )
-        hawk_det, robin_det = db.detections.save(
-            pid,
-            [{"box": {"x": x, "y": 0.1, "w": 0.3, "h": 0.3}, "confidence": 0.9,
-              "category": "animal"} for x in (0.1, 0.6)],
-            detector_model="MDV6",
-        )
-        db.predictions.add(hawk_det, "Red-tailed Hawk", 0.92, "m")
-        db.predictions.add(robin_det, "American Robin", 0.9, "m")
-        db.commit()
+    hawk_det, robin_det = db.detections.save(
+        pid,
+        [{"box": {"x": x, "y": 0.1, "w": 0.4, "h": 0.4}, "confidence": 0.9,
+          "category": "animal"} for x in (0.1, 0.6)],
+        detector_model="MDV6",
+    )
+    db.predictions.add(hawk_det, "Red-tailed Hawk", 0.92, "m")
+    db.predictions.add(robin_det, "American Robin", 0.9, "m")
+    db.commit()
 
     folder_id = data["folders"][1]
     for i in range(21):
@@ -249,3 +252,83 @@ def test_picking_promotes_photo_into_unloaded_second_bucket(live_server, page, r
         arg=pid,
         timeout=5000,
     )
+
+
+def test_a_pick_is_labeled_for_the_species_the_photo_is_of(live_server, page):
+    """A picked hawk photo with a small robin behind it leads the hawk row
+    as a pick. In the robin row it sits below the robin's own photo, under
+    a divider, and its badge says the pick is for the hawk."""
+    db = live_server["db"]
+    data = live_server["data"]
+    flock, portrait = data["photos"][0], data["photos"][3]
+    kids = {
+        name: db.conn.execute(
+            "SELECT id FROM keywords WHERE name = ?", (name,)
+        ).fetchone()["id"]
+        for name in ("Red-tailed Hawk", "American Robin")
+    }
+    db.conn.execute(
+        "UPDATE photos SET quality_score = 0.9, flag = 'flagged' WHERE id = ?",
+        (flock,),
+    )
+    db.conn.execute(
+        "UPDATE photos SET quality_score = 0.4 WHERE id = ?", (portrait,),
+    )
+    for pid, name in (
+        (flock, "Red-tailed Hawk"), (flock, "American Robin"),
+        (portrait, "American Robin"),
+    ):
+        db.conn.execute(
+            "INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (pid, kids[name]),
+        )
+    db.conn.commit()
+    hawk_det, robin_det = db.detections.save(
+        flock,
+        [{"box": {"x": 0.3, "y": 0.3, "w": 0.4, "h": 0.4}, "confidence": 0.9,
+          "category": "animal"},
+         {"box": {"x": 0.8, "y": 0.1, "w": 0.1, "h": 0.1}, "confidence": 0.6,
+          "category": "animal"}],
+        detector_model="MDV6",
+    )
+    db.predictions.add(hawk_det, "Red-tailed Hawk", 0.92, "m")
+    db.predictions.add(robin_det, "American Robin", 0.9, "m")
+    db.commit()
+
+    _goto_highlights(page, live_server["url"])
+
+    flock_card = f'.highlights-card[data-photo-id="{flock}"]'
+    hawk = page.locator("section.bucket").filter(
+        has=page.locator(".bucket-title", has_text="Red-tailed Hawk"),
+    )
+    expect(hawk.locator(flock_card)).to_have_class(
+        re.compile(r"\bpick-flag-card\b"), timeout=5000,
+    )
+    expect(hawk.locator(flock_card).locator(".pick-flag-badge")).to_have_text(
+        "Pick", ignore_case=True,
+    )
+    expect(hawk.locator(".bucket-decision")).to_contain_text("a pick")
+
+    robin = page.locator("section.bucket").filter(
+        has=page.locator(".bucket-title", has_text="American Robin"),
+    )
+    # The row: the robin's own photos (the scored one, then the seeded robin
+    # photo nothing has analyzed), then the hawk photo under its divider.
+    unscored = data["photos"][4]
+    strip = robin.locator(".bucket-strip > *")
+    expect(strip).to_have_count(5)
+    expect(strip.nth(0)).to_have_attribute("data-photo-id", str(portrait))
+    expect(strip.nth(1)).to_contain_text("Not yet analyzed", ignore_case=True)
+    expect(strip.nth(2)).to_have_attribute("data-photo-id", str(unscored))
+    expect(strip.nth(3)).to_have_class(re.compile(r"\bother-subject-divider\b"))
+    expect(strip.nth(3)).to_contain_text(
+        "Another bird is the subject", ignore_case=True,
+    )
+    expect(strip.nth(4)).to_have_attribute("data-photo-id", str(flock))
+    behind = robin.locator(flock_card)
+    expect(behind).not_to_have_class(re.compile(r"\bpick-flag-card\b"))
+    expect(behind.locator(".pick-flag-badge.other-subject")).to_have_text(
+        "Pick for Red-tailed Hawk", ignore_case=True,
+    )
+    expect(behind.locator(".card-chip.presence")).to_have_text("Not the subject")
+    expect(robin.locator(".bucket-decision")).to_contain_text("ranked by Vireo's score")

@@ -32,7 +32,10 @@ prediction matches none of its species (the user identified it against the
 model, so Vireo cannot tell which bird is which), or is cropped and a
 region's position is unknown. A species the user tagged is demoted only when
 the main bird matches another species they tagged: an unconfirmed prediction
-for the main bird is the model's guess, and it does not outrank a tag.
+for the main bird is the model's guess, and it does not outrank a tag. It
+also stays the subject while a co-subject-sized region in view matches none
+of the photo's species: the classifier often names a lookalike, so that
+region may be the tagged species.
 
 Pure: no database, config or I/O.
 """
@@ -196,9 +199,14 @@ def species_presence(row, memberships, canonicalize_species=None):
 
     viewed = {id(s) for s in in_view}
     floor = CO_SUBJECT_AREA_RATIO * _area(main)
+    bucket_keys = {keyword_match_key(n) for n in names}
+    unnamed_co_subject = any(
+        key_of(s) not in bucket_keys and floor > 0 and _area(s) >= floor
+        for s in in_view
+    )
     for name in names:
         key = keyword_match_key(name)
-        if key in tagged and main_key not in tagged:
+        if key in tagged and (main_key not in tagged or unnamed_co_subject):
             continue
         located = [s for s in subjects if key_of(s) == key]
         shown = [s for s in located if id(s) in viewed]
