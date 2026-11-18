@@ -160,3 +160,34 @@ def test_exifread_numeric_dng_serial(tmp_path, monkeypatch):
     clock = grouping.read_exif_clock(path)
     assert clock.captured == datetime(2026, 5, 30, 12)
     assert clock.camera == "Synthetic Camera #body-A"
+
+
+@pytest.mark.parametrize("reader", ["pillow", "exifread", "exiftool"])
+def test_import_keeps_digitized_capture_time_and_offset(tmp_path, monkeypatch, reader):
+    path = tmp_path / "DSC_0001.jpg"
+    image = Image.new("RGB", (16, 16))
+    exif = image.getexif()
+    sub = exif.get_ifd(IFD.Exif)
+    sub[ExifBase.DateTimeDigitized] = "2026:05:30 12:00:00"
+    sub[ExifBase.OffsetTimeDigitized] = "-07:00"
+    image.save(path, exif=exif)
+
+    if reader == "exifread":
+        def unreadable(*_args):
+            raise OSError("Exercise the ExifRead path")
+
+        monkeypatch.setattr(Image, "open", unreadable)
+    elif reader == "exiftool":
+        import metadata
+
+        monkeypatch.setattr(import_dedup, "read_exif_clock", lambda _: grouping.ExifClock(None, None, None))
+
+        def extract(paths, restricted_tags):
+            assert "-OffsetTimeDigitized" in restricted_tags
+            return {paths[0]: {"EXIF": {"CreateDate": "2026:05:30 12:00:00", "OffsetTimeDigitized": "-07:00"}}}
+
+        monkeypatch.setattr(metadata, "extract_metadata", extract)
+
+    times = import_dedup.source_capture_timestamps([path])
+    assert times[path] == datetime(2026, 5, 30, 12)
+    assert times.offsets[path] == "-07:00"

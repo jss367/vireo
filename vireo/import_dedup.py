@@ -129,7 +129,7 @@ def metadata_capture_offset(metadata):
     exif = metadata.get("EXIF")
     if not isinstance(exif, dict):
         return None
-    value = exif.get("OffsetTimeOriginal") or exif.get("OffsetTime")
+    value = exif.get("OffsetTimeOriginal") or exif.get("OffsetTime") or exif.get("OffsetTimeDigitized")
     return str(value).strip() if value else None
 
 
@@ -174,6 +174,7 @@ def source_capture_timestamps(files):
                     "-TrackCreateDate",
                     "-OffsetTimeOriginal",
                     "-OffsetTime",
+                    "-OffsetTimeDigitized",
                     "-Model",
                     "-SerialNumber",
                     "-BodySerialNumber",

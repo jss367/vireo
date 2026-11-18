@@ -245,8 +245,8 @@ def read_exif_clock(image_path):
     """Read the capture time, recorded UTC offset and camera of an image file.
 
     Same readers and order as ``read_exif_timestamp``, returning an
-    ``ExifClock``. The offset (``OffsetTimeOriginal``, else ``OffsetTime``)
-    and the camera's supported body serials come from the header metadata.
+    ``ExifClock``. Offsets prefer ``OffsetTimeOriginal``, then ``OffsetTime``,
+    then ``OffsetTimeDigitized``, as in the catalog clock audit.
     A Pillow header with MakerNotes but no standard serial falls through to
     exifread for its camera-specific tags while preserving the captured time.
     """
@@ -263,9 +263,9 @@ def read_exif_clock(image_path):
                 dt_str = (exif.get(ExifBase.DateTimeOriginal) or exif.get(ExifBase.DateTimeDigitized)
                           or exif_ifd.get(ExifBase.DateTimeOriginal) or exif_ifd.get(ExifBase.DateTimeDigitized))
                 if dt_str:
-                    offset = exif_ifd.get(ExifBase.OffsetTimeOriginal) or exif_ifd.get(
-                        ExifBase.OffsetTime
-                    )
+                    offset = (exif_ifd.get(ExifBase.OffsetTimeOriginal)
+                              or exif_ifd.get(ExifBase.OffsetTime)
+                              or exif_ifd.get(ExifBase.OffsetTimeDigitized))
                     serial = _camera_serial([exif_ifd, exif], _PILLOW_CAMERA_SERIAL_TAGS)
                     pillow_clock = ExifClock(
                         datetime.strptime(dt_str, "%Y:%m:%d %H:%M:%S"),
@@ -292,10 +292,13 @@ def read_exif_clock(image_path):
                 or tags.get("Image DateTime")
             )
             if tag or pillow_clock is not None:
-                offset = tags.get("EXIF OffsetTimeOriginal") or tags.get("EXIF OffsetTime")
+                offset = (tags.get("EXIF OffsetTimeOriginal") or tags.get("EXIF OffsetTime")
+                          or tags.get("EXIF OffsetTimeDigitized"))
+                if pillow_clock and pillow_clock.offset:
+                    offset = pillow_clock.offset
                 return ExifClock(
                     pillow_clock.captured if pillow_clock else datetime.strptime(str(tag), "%Y:%m:%d %H:%M:%S"),
-                    pillow_clock.offset if pillow_clock else str(offset).strip() if offset else None,
+                    str(offset).strip() if offset else None,
                     _camera_label(tags.get("Image Model") or (pillow_clock.camera if pillow_clock else None),
                                   _camera_serial([tags], _EXIFREAD_CAMERA_SERIAL_TAGS)),
                 )
