@@ -39,7 +39,10 @@ def test_stale_mask_and_invalid_primary_require_explicit_inspection(app_and_db):
     db.commit()
     assert client.get(f'/photos/{pid}/focus-crop').status_code == 404
     assert client.get(f'/photos/{pid}/focus-crop?basis=eye').status_code == 404
-    manual = client.get(f'/photos/{pid}/focus-crop?center=.75,.25&size=128&mask=1')
+    masked = client.get(f'/photos/{pid}/focus-crop?center=.75,.25&size=128&mask=1')
+    assert masked.status_code == 404
+    assert 'stale' in masked.get_json()['error']
+    manual = client.get(f'/photos/{pid}/focus-crop?center=.75,.25&size=128')
     assert manual.status_code == 200
     assert manual.headers['X-Vireo-Focus-Basis'] == 'point'
     assert manual.headers['X-Vireo-Focus-Mask'] == '0'
@@ -128,13 +131,15 @@ def test_focus_evidence_reports_missing_eye_reason_and_exact_subject(status):
     assert focus_evidence_headers(photo, [box], bound=True)['X-Vireo-Focus-Eye-Status'] == 'not_located'
 
 
-def test_primary_changed_while_decoding_does_not_serve_old_association(app_and_db, monkeypatch):
+@pytest.mark.parametrize("query", ["", "?center=.75,.25&mask=1"])
+def test_primary_changed_while_decoding_does_not_serve_old_association(app_and_db, monkeypatch, query):
     import web.media_crops as media
     app, db = app_and_db
     pid = db.photos.list_page()[0]['id']
     _working_copy(app, db, pid)
     db.detections.save(pid, [{'box': {'x': .1, 'y': .2, 'w': .2, 'h': .2}, 'confidence': .9, 'category': 'animal'}], detector_model='test')
     db.commit()
+    monkeypatch.setattr(media, '_focus_mask_bytes', lambda *args: b'mask-not-rendered')
     original = media._focus_source_image
     def changed(*args):
         result = original(*args)
@@ -142,7 +147,7 @@ def test_primary_changed_while_decoding_does_not_serve_old_association(app_and_d
         db.commit()
         return result
     monkeypatch.setattr(media, '_focus_source_image', changed)
-    response = app.test_client().get(f'/photos/{pid}/focus-crop')
+    response = app.test_client().get(f'/photos/{pid}/focus-crop{query}')
     assert response.status_code == 404
     assert 'changed while decoding' in response.get_json()['error']
 
@@ -229,3 +234,101 @@ def test_focus_crop_reports_when_the_window_cuts_off_part_of_the_subject(app_and
     db.conn.execute('DELETE FROM detections WHERE photo_id=?', (pid,))
     db.commit()
     assert client.get(f'/photos/{pid}/focus-crop?size=512').headers['X-Vireo-Focus-Subject-Clipped'] == 'unknown'
+
+
+@pytest.mark.parametrize('change', ['clear', 'replace'])
+@pytest.mark.parametrize('center', ['', '&center=.52,.35'])
+def test_mask_changed_during_decode_never_serves_captured_bytes(app_and_db, monkeypatch, change, center):
+    from pathlib import Path
+
+    import web.media_crops as media
+    app, db = app_and_db
+    pid = db.photos.list_page()[0]['id']
+    _working_copy(app, db, pid, color=(200, 200, 200))
+    masks = Path(app.config['DB_PATH']).parent / 'masks'
+    masks.mkdir(exist_ok=True)
+    original_mask = masks / f'{pid}.original.png'
+    replacement = masks / f'{pid}.replacement.png'
+    Image.new('L', (1024, 683), 255).save(original_mask)
+    new_mask = Image.new('L', (1024, 683), 0)
+    new_mask.paste(255, (0, 0, 512, 683))
+    new_mask.save(replacement)
+    box = {'x': .4, 'y': .4, 'w': .2, 'h': .2}
+    db.detections.save(pid, [{'box': box, 'confidence': .9, 'category': 'animal'}], detector_model='test')
+    for variant, path in [('original', original_mask), ('replacement', replacement)]:
+        db.masks_features.upsert_mask(pid, variant, str(path), 'test', tuple(box.values()))
+    db.conn.execute('UPDATE photos SET mask_path=?, active_mask_variant=? WHERE id=?',
+                    (str(original_mask), 'original', pid))
+    db.commit()
+    decode = media._focus_source_image
+    def change_mask(*args):
+        result = decode(*args)
+        path, variant = (None, None) if change == 'clear' else (str(replacement), 'replacement')
+        db.conn.execute('UPDATE photos SET mask_path=?, active_mask_variant=? WHERE id=?', (path, variant, pid))
+        db.commit()
+        return result
+    monkeypatch.setattr(media, '_focus_source_image', change_mask)
+    response = app.test_client().get(f'/photos/{pid}/focus-crop?size=256&mask=1{center}')
+    if change == 'clear':
+        assert response.status_code == 404
+        assert 'mask is unavailable' in response.get_json()['error']
+    else:
+        assert response.status_code == 200
+        assert response.headers['X-Vireo-Focus-Mask'] == '1'
+        crop = Image.open(io.BytesIO(response.data))
+        assert crop.getpixel((10, 128))[0] > 180
+        assert crop.getpixel((245, 128))[0] < 110
+
+
+@pytest.mark.parametrize('center', ['', '&center=.52,.35'])
+@pytest.mark.parametrize('boundary', ['before_snapshot', 'after_snapshot'])
+def test_mask_owner_changed_after_source_validation_stays_bound(app_and_db, monkeypatch, center, boundary):
+    from pathlib import Path
+
+    import web.media_crops as media
+    app, db = app_and_db
+    pid = db.photos.list_page()[0]['id']
+    _working_copy(app, db, pid, color=(200, 200, 200))
+    masks = Path(app.config['DB_PATH']).parent / 'masks'
+    masks.mkdir(exist_ok=True)
+    boxes = [{'x': .1, 'y': .2, 'w': .2, 'h': .2}, {'x': .6, 'y': .2, 'w': .2, 'h': .2}]
+    db.detections.save(pid, [{'box': box, 'confidence': .9, 'category': 'animal'} for box in boxes],
+                       detector_model='test')
+    for variant, box in zip(['original', 'replacement'], boxes, strict=True):
+        path = masks / f'{pid}.{variant}.png'
+        Image.new('L', (1024, 683), 255 if variant == 'original' else 0).save(path)
+        db.masks_features.upsert_mask(pid, variant, str(path), 'test', tuple(box.values()))
+    db.conn.execute('UPDATE photos SET mask_path=?, active_mask_variant=? WHERE id=?',
+                    (str(masks / f'{pid}.original.png'), 'original', pid))
+    db.commit()
+    def replace_mask():
+        db.conn.execute('UPDATE photos SET mask_path=?, active_mask_variant=? WHERE id=?',
+                        (str(masks / f'{pid}.replacement.png'), 'replacement', pid))
+        db.commit()
+    if boundary == 'before_snapshot':
+        validate = media._validated_focus_source
+        def replace_after_validation(*args):
+            result = validate(*args)
+            replace_mask()
+            return result
+        monkeypatch.setattr(media, '_validated_focus_source', replace_after_validation)
+    else:
+        repository = type(db.masks_features)
+        capture = repository.active_prompt_detection
+        def replace_after_snapshot(self, photo_id, **kwargs):
+            record = capture(self, photo_id, **kwargs)
+            if kwargs.get('include_mask_path'):
+                replace_mask()
+            return record
+        monkeypatch.setattr(repository, 'active_prompt_detection', replace_after_snapshot)
+    response = app.test_client().get(f'/photos/{pid}/focus-crop?size=256&mask=1{center}')
+    if boundary == 'before_snapshot':
+        assert response.status_code == 404
+        assert 'Subject association changed' in response.get_json()['error']
+    else:
+        assert response.status_code == 200
+        assert response.headers['X-Vireo-Focus-Subject-Box'] == '0.1,0.2,0.2,0.2'
+        assert response.headers['X-Vireo-Focus-Mask'] == '1'
+        # The captured original path still belongs to the subject in the headers.
+        crop = Image.open(io.BytesIO(response.data))
+        assert crop.getpixel((128, 128))[0] > 180

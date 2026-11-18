@@ -88,7 +88,11 @@ saying why its first photo leads: chosen (someone chose it and no other chosen
 photo there beats it), tie (several chosen photos nobody has compared, listed in
 tied_photo_ids; the newest choice is shown meanwhile), highlight or pick (the
 user's ranked highlight or flagged pick), score or unanalyzed (nobody chose;
-Vireo ordered it). To settle a tie or replace a guess, list more of that
+Vireo ordered it), in_frame or outside_crop (no photo there has the species as
+its subject: another bird is, or the crop leaves the species out). Each photo's
+species_presence says which of subject, in_frame or outside_crop it is for that
+species, and subject_species names what the photo is a picture of; a flagged
+pick counts only where the species is the subject. To settle a tie or replace a guess, list more of that
 species (species=..., per_species=N), compare the candidates with
 view_photo(view="subject") and view_photo(view="preview"), then call
 choose_best_photo with the photos it beat in over and a reason. A choice

@@ -179,6 +179,7 @@ function renderResult(res, status) {
 function renderResultNotes(res) {
   renderChainInfo(res);
   renderTaggingInfo(res);
+  renderTiming(res);
   renderModelWarning(res);
   renderWorkingCopyNotice(res);
   renderSidecarFailures(res);
@@ -245,6 +246,14 @@ function renderWorkingCopyNotice(res) {
   }
   list.style.display = failures.length ? '' : 'none';
   box.style.display = res.working_copy_notice ? '' : 'none';
+}
+
+// Where the import's time went (finding, copying, cataloging, working
+// copies), in the server's words. Empty for a run that never started a phase.
+/** @param {ImportResult} res */
+function renderTiming(res) {
+  /** @type {HTMLElement} */ (document.getElementById('importTiming')).textContent =
+    res.timing_notice || '';
 }
 
 /** @param {ImportResult} res */

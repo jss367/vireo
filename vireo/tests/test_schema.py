@@ -635,6 +635,25 @@ def test_version_34_catalog_gains_subject_detail_columns(tmp_path):
         assert conn.execute("SELECT COUNT(*) FROM photos WHERE subject_detail IS NOT NULL").fetchone()[0] == 0
 
 
+@pytest.mark.parametrize("version", [38, 39, 40])
+def test_catalog_without_error_details_preserves_historical_job_on_upgrade(tmp_path, version):
+    path = str(tmp_path / "vireo.db")
+    schema.ensure_schema(path)
+    with sqlite3.connect(path) as conn:
+        conn.execute("ALTER TABLE job_history DROP COLUMN errors")
+        conn.execute(f"PRAGMA user_version={version}")
+        conn.execute(
+            "INSERT INTO job_history (id, type, status, result, error_count) "
+            """VALUES ('old-job', 'scan', 'failed', '{"error":"old failure"}', 1)"""
+        )
+    schema.ensure_schema(path)
+    with sqlite3.connect(path) as conn:
+        row = conn.execute(
+            "SELECT status, result, error_count, errors FROM job_history WHERE id='old-job'"
+        ).fetchone()
+        assert row == ("failed", '{"error":"old failure"}', 1, None)
+
+
 def test_primary_policy_migration_preserves_projected_subject(tmp_path):
     path = str(tmp_path / "vireo.db")
     schema.ensure_schema(path)

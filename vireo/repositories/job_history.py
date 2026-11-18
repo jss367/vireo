@@ -68,7 +68,7 @@ class JobHistoryRepository:
 
     def terminal(
         self, workspace_id: int | None, statuses: Sequence[str], limit: int,
-        origin: str | None = None,
+        origin: str | None = None, *, job_id: str | None = None,
     ) -> list[sqlite3.Row]:
         """Up to ``limit`` newest-first rows in ``statuses``.
 
@@ -89,6 +89,9 @@ class JobHistoryRepository:
         if workspace_id is not None:
             clauses.append("(workspace_id = ? OR workspace_id IS NULL)")
             params.append(workspace_id)
+        if job_id is not None:
+            clauses.append("id = ?")
+            params.append(job_id)
         if origin is not None:
             clauses.append("origin = ?")
             params.append(origin)

@@ -20,7 +20,7 @@ This module must not import ``db``: ``schema.py`` imports ``db``, and
 # database it creates from nothing. It is the newest registry migration in
 # ``schema.MIGRATIONS``: ``create_tables`` builds every migration's end state,
 # so a fresh database has nothing to migrate.
-SCHEMA_VERSION = 40
+SCHEMA_VERSION = 41
 
 # Promoted EXIF summary columns in the ``photos`` table — the canonical
 # list the scanner uses to clear absent fields on rescan (a metadata write
@@ -65,7 +65,8 @@ FORMERLY_LAZY_OBJECTS = (
         reason      TEXT,
         repeat_count INTEGER NOT NULL DEFAULT 1,
         repeat_since TEXT,
-        task_scope  TEXT
+        task_scope  TEXT,
+        errors      TEXT
     )""",
     # The durable "do not adopt this preview" marker consulted by
     # web.media_previews._PreviewServer._serve_preview:
