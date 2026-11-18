@@ -5,7 +5,7 @@ interface BrowsePhoto {
   flag?: 'none' | 'flagged' | 'rejected' | null;
   width?: number | null; height?: number | null; extension?: string;
   companion_path?: string | null; file_size?: number; timestamp?: string | null;
-  folder_id?: number; folder_status?: string; location_status?: 'exif' | 'assigned' | 'none';
+  folder_id?: number; folder_status?: string; location_status?: 'reviewed_gps' | 'exif' | 'assigned' | 'none';
   sharpness?: number | null; quality_score?: number | null;
   prediction_confidence?: number | null; prediction_confidence_is_stack_lead?: boolean;
   species?: string[]; keywords?: BrowseKeyword[]; xmp_keywords?: string[];

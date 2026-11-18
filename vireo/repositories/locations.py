@@ -44,7 +44,7 @@ class LocationRepository:
     # -- location status and map queries -------------------------------------
 
     def get_photo_statuses(self, photo_ids):
-        """Return ``{photo_id: exif|assigned|none}`` for the requested photos."""
+        """Return each photo's coordinate source: reviewed_gps, exif, assigned or none."""
         if not photo_ids:
             return {}
         result = {}
@@ -54,6 +54,8 @@ class LocationRepository:
                 f"""
                 SELECT p.id,
                        CASE
+                         WHEN EXISTS (SELECT 1 FROM reviewed_gps g WHERE g.photo_id = p.id)
+                           THEN 'reviewed_gps'
                          WHEN p.latitude IS NOT NULL AND p.longitude IS NOT NULL
                            THEN 'exif'
                          WHEN EXISTS (
@@ -79,10 +81,10 @@ class LocationRepository:
 
         ``rules`` (a universal-filter rule tree) restricts the plottable set
         exactly like Browse's grid; it is the Map page's only metadata filter.
-        Returns photos that have either non-null EXIF latitude/longitude OR a
+        Returns photos that have reviewed GPS, complete EXIF GPS OR a
         ``type='location'`` keyword link whose keyword has non-null coords,
         unpaginated, each with its species keyword (or NULL), plus
-        ``coord_source`` (``'exif'`` or ``'keyword'``) and
+        ``coord_source`` (``reviewed_gps``, ``exif`` or ``keyword``) and
         ``keyword_location_name`` (the location keyword's name when EXIF is
         absent, NULL otherwise) so the map can show provenance.
         """
@@ -474,7 +476,7 @@ class LocationRepository:
     def count_photos_without_coordinates(self):
         """Count photos in the active workspace that the map can't plot.
 
-        A photo IS plottable when either its EXIF lat/lng are both present
+        A photo IS plottable when it has reviewed GPS, a complete EXIF pair,
         OR it carries a ``type='location'`` keyword whose lat/lng are both
         present (matches :meth:`get_geolocated_photos`'s paired-fallback
         semantics). This counter excludes those.
@@ -490,6 +492,7 @@ class LocationRepository:
             JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
             WHERE wf.workspace_id = ?
               AND (p.latitude IS NULL OR p.longitude IS NULL)
+              AND NOT EXISTS (SELECT 1 FROM reviewed_gps g WHERE g.photo_id = p.id)
               AND NOT EXISTS (
                 SELECT 1 FROM photo_keywords pk
                 JOIN keywords k ON k.id = pk.keyword_id
@@ -506,7 +509,7 @@ class LocationRepository:
     def get_plottable_photo_ids(self, folder_id=None):
         """Return ids of every photo the Map endpoint could render.
 
-        A photo is plottable when either its EXIF lat/lng are both present
+        A photo is plottable when it has reviewed GPS or a complete EXIF pair
         OR it carries a ``type='location'`` keyword whose lat/lng are both
         present — the same paired-fallback semantics
         :meth:`get_geolocated_photos` and
@@ -538,6 +541,7 @@ class LocationRepository:
               {folder_clause}
               AND (
                 (p.latitude IS NOT NULL AND p.longitude IS NOT NULL)
+                OR EXISTS (SELECT 1 FROM reviewed_gps g WHERE g.photo_id = p.id)
                 OR EXISTS (
                   SELECT 1 FROM photo_keywords pk
                   JOIN keywords k ON k.id = pk.keyword_id

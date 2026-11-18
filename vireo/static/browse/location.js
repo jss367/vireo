@@ -439,7 +439,9 @@ export function renderCoordinateStatus(/** @type {BrowsePhoto | null | undefined
   if (!el) return;
   var status = photo && photo.location_status ? photo.location_status : 'none';
   var text;
-  if (status === 'exif') {
+  if (status === 'reviewed_gps') {
+    text = '📍 Reviewed GPS correction — used for the map and exports. Original photo GPS is unchanged.';
+  } else if (status === 'exif') {
     text = '📍 EXIF GPS — ' + formatCoordinatePair(photo?.latitude, photo?.longitude) +
       '. Embedded in the original photo and used on the map.';
   } else if (status === 'assigned') {
@@ -448,7 +450,7 @@ export function renderCoordinateStatus(/** @type {BrowsePhoto | null | undefined
     text = '● Assigned map location' + (coords ? ' — ' + coords : '') +
       '. The original photo does not contain a complete EXIF GPS pair.';
   } else {
-    text = '⊘ No coordinates — this photo has no complete EXIF GPS pair or assigned map location.';
+    text = '⊘ No coordinates — this photo has no reviewed GPS, complete EXIF GPS pair or assigned map location.';
   }
   el.className = 'coordinate-status ' + status;
   el.textContent = text;
