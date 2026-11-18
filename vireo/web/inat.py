@@ -921,39 +921,30 @@ def create_inat_blueprint(
             )
         )
 
-    def prepare_upload(db: Database, photo: Row):
-        photo_path = os.path.join(photo["folder_path"], photo["filename"])
-        if not os.path.isfile(photo_path) and not (
-            _offline_original_has_render_source(db, photo)
-        ):
-            return None, json_error("Photo file not found on disk", 404)
-
-        upload_path, upload_error = _inat_upload_photo_path(db, photo, photo_path)
-        if upload_error:
-            return None, json_error(upload_error, 500)
-
-        return upload_path, None
-
-    def prepare_views(db: Database, photo: Row, extra_ids: Any):
-        photo_id = photo["id"]
+    def prepare_views(
+        db: Database, photo: Row, extra_ids: Any,
+    ) -> tuple[list[tuple[int, str]], ResponseReturnValue | None]:
+        """Resolve every selected view before creating the remote observation."""
         if (not isinstance(extra_ids, list) or len(extra_ids) > 19
                 or any(type(pid) is not int or pid <= 0 for pid in extra_ids)
-                or len(set(extra_ids)) != len(extra_ids) or photo_id in extra_ids):
-            return None, [], json_error("Select up to 20 distinct photos for one observation.")
-        upload_path, error = prepare_upload(db, photo)
-        if error:
-            return None, [], error
-        additional = []
+                or len(set(extra_ids)) != len(extra_ids) or photo["id"] in extra_ids):
+            return [], json_error("Select up to 20 distinct photos for one observation.")
+        views = [photo]
         for pid in extra_ids:
             extra = db.photos.get_with_folder_path(pid)
             if not extra or not db.workspace_folders.photo_in_workspace(pid, db.require_workspace_id()):
-                return None, [], json_error("Additional photo unavailable in this workspace", 404)
-            path, error = prepare_upload(db, extra)
-            if error:
-                return None, [], error
-            additional.append((pid, path))
-
-        return upload_path, additional, None
+                return [], json_error("Additional photo unavailable in this workspace", 404)
+            views.append(extra)
+        uploads = []
+        for view in views:
+            source = os.path.join(view["folder_path"], view["filename"])
+            if not os.path.isfile(source) and not _offline_original_has_render_source(db, view):
+                return [], json_error("Photo file not found on disk", 404)
+            path, error = _inat_upload_photo_path(db, view, source)
+            if path is None:
+                return [], json_error(error or "Photo could not be prepared", 500)
+            uploads.append((view["id"], path))
+        return uploads, None
 
     @blueprint.route("/api/inat/submit", methods=["POST"])
     @guarded_reader("inat-uploads")
@@ -989,7 +980,7 @@ def create_inat_blueprint(
                 f"Photo {photo_id} does not belong to the active workspace", 403,
             )
 
-        upload_path, additional, error = prepare_views(db, photo, data.get("additional_photo_ids", []))
+        uploads, error = prepare_views(db, photo, data.get("additional_photo_ids", []))
         if error:
             return error
 
@@ -1024,7 +1015,7 @@ def create_inat_blueprint(
             obs_id, obs_url = inat.submit_observation(
                 token=token,
                 taxon_id=data.get("taxon_id"),
-                photo_path=upload_path,
+                photo_path=uploads[0][1],
                 taxon_name=taxon,
                 observed_on=observed_on,
                 latitude=lat,
@@ -1046,7 +1037,7 @@ def create_inat_blueprint(
 
         with db.transaction():
             db.inat.record_submission(photo_id, obs_id, obs_url)
-        for pid, path in additional:
+        for pid, path in uploads[1:]:
             try:
                 inat.upload_photo(token, obs_id, path)
             except (inat.InatApiError, inat.InatAuthError, OSError, ValueError) as exc:

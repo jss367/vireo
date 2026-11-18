@@ -1647,3 +1647,15 @@ def test_multiple_views_render_an_unedited_offline_raw_as_jpeg(app_and_db):
     assert response.status_code == 200, response.get_json()
     with Image.open(attach.call_args.args[2]) as image:
         assert image.format == "JPEG"
+
+
+def test_grouped_upload_checks_every_view_before_creating_observation(app_and_db):
+    import config as cfg
+
+    app, db, pid = app_and_db
+    cfg.save({"inat_token": "fake"})
+    hidden = _add_out_of_workspace_photo(db)
+    with patch("inat.submit_observation") as create:
+        response = app.test_client().post("/api/inat/submit", json={"photo_id": pid, "additional_photo_ids": [hidden]})
+    assert response.status_code == 404
+    create.assert_not_called()
