@@ -52,7 +52,8 @@ function fixHtml(fix, findingIndex, fixIndex, pick) {
   return '<div class="clock-fix" data-finding="' + findingIndex + '" data-fix="' + fixIndex + '">' +
     '<div class="clock-fix-label">' + escapeHtml(fix.label) +
     (pick && fix.recommended ? ' <span class="clock-suggested">Suggested</span>' : '') + '</div>' +
-    '<div class="clock-fix-why">' + escapeHtml(fix.explanation) + '</div>' +
+    '<div class="clock-fix-why">' + escapeHtml(fix.explanation) + (fix.dependent_fixes || []).map(
+      step => '<br>' + escapeHtml(fixRange(step) + ': ' + step.label)).join('') + '</div>' +
     '<div class="clock-fix-actions">' +
       '<button type="button" class="btn btn-secondary" data-action="preview">Preview</button>' +
       '<button type="button" class="btn btn-primary" data-action="apply">Apply…</button>' +
@@ -126,25 +127,32 @@ async function previewFix(row) {
   var out = /** @type {HTMLElement} */ (row.querySelector('.clock-fix-preview'));
   out.textContent = 'Loading preview…';
   try {
-    var preview = /** @type {AuditCaptureTimePreview} */ (await safeFetch('/api/capture-time/preview', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(captureTimeBody(fixFor(row))),
-    }, { toast: false }));
-    var html = '<table class="audit-table"><thead><tr><th>File</th><th>Now</th><th>After</th></tr></thead><tbody>';
-    preview.samples.forEach(function(sample) {
-      html += '<tr><td>' + escapeHtml(sample.filename) + '</td>' +
-        '<td>' + escapeHtml((sample.before_time || 'No capture time') + ' ' + (sample.before_offset || '')) + '</td>' +
-        '<td>' + escapeHtml((sample.after_time || 'No capture time') + ' ' + (sample.after_offset || '')) + '</td></tr>';
-    });
-    html += '</tbody></table>';
-    if (preview.count > preview.samples.length) {
-      html += '<div class="clock-note">First ' + preview.samples.length + ' of ' + preview.count + ' photos.</div>';
-    }
-    out.innerHTML = html;
+    const fix = fixFor(row);
+    const tables = await Promise.all([fix, ...(fix.dependent_fixes || [])].map(previewStep));
+    out.innerHTML = tables.join('');
   } catch(e) {
     out.textContent = 'Preview failed: ' + errorMessage(e);
   }
+}
+
+/** @param {AuditClockFix} step */
+async function previewStep(step) {
+  var preview = /** @type {AuditCaptureTimePreview} */ (await safeFetch('/api/capture-time/preview', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(captureTimeBody(step)),
+  }, { toast: false }));
+  var html = '<table class="audit-table"><thead><tr><th>File</th><th>Now</th><th>After</th></tr></thead><tbody>';
+  preview.samples.forEach(function(sample) {
+    html += '<tr><td>' + escapeHtml(sample.filename) + '</td>' +
+      '<td>' + escapeHtml((sample.before_time || 'No capture time') + ' ' + (sample.before_offset || '')) + '</td>' +
+      '<td>' + escapeHtml((sample.after_time || 'No capture time') + ' ' + (sample.after_offset || '')) + '</td></tr>';
+  });
+  html += '</tbody></table>';
+  if (preview.count > preview.samples.length) {
+    html += '<div class="clock-note">First ' + preview.samples.length + ' of ' + preview.count + ' photos.</div>';
+  }
+  return html;
 }
 
 /** Swap Apply… for an in-page confirmation (native dialogs do nothing in the desktop app). @param {HTMLElement} row */
@@ -153,7 +161,8 @@ function confirmFix(row) {
   var actions = /** @type {HTMLElement} */ (row.querySelector('.clock-fix-actions'));
   var keep = /** @type {HTMLInputElement} */ (byId('clockKeepBackups')).checked;
   row.dataset.keepBackups = String(keep);
-  actions.innerHTML = '<span class="clock-confirm-text">Rewrite the capture time in ' + fix.count +
+  var count = (fix.dependent_fixes || []).reduce((n, step) => n + step.count, fix.count);
+  actions.innerHTML = '<span class="clock-confirm-text">Rewrite the capture time in ' + count +
     ' original file(s)' + (keep ? ', keeping an ExifTool backup of each' : ' without backups') + '?</span>' +
     '<button type="button" class="btn btn-primary" data-action="confirm">Rewrite</button>' +
     '<button type="button" class="btn btn-secondary" data-action="cancel">Cancel</button>' +
@@ -181,8 +190,10 @@ async function waitForCaptureTimeJob(jobId, status) {
 
 /** @param {HTMLElement} row */
 async function applyFix(row) {
-  var body = Object.assign(captureTimeBody(fixFor(row)), {
+  var fix = fixFor(row);
+  var body = Object.assign(captureTimeBody(fix), {
     keep_backups: row.dataset.keepBackups === 'true',
+    dependent_shifts: (fix.dependent_fixes || []).map(captureTimeBody),
   });
   var actions = /** @type {HTMLElement} */ (row.querySelector('.clock-fix-actions'));
   actions.innerHTML = '<span class="clock-fix-status">Starting…</span>';
