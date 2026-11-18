@@ -1510,7 +1510,7 @@ def test_visual_merge_requires_two_matches_across_the_boundary():
     pattern = 'abcd12345678abcd'
     other = '5432edcba9875432'
     left = [frame(1, pattern, True), frame(2, pattern, True)]
-    right = [frame(3, other, False), frame(4, pattern, False), frame(5, pattern, False)]
+    right = [frame(3, other, True), frame(4, pattern, False), frame(5, pattern, False)]
     assert merge_microsegments([left, right]) == [left + right]
     right[2]['phash_crop'] = other
     assert merge_microsegments([left, right]) == [left, right]
@@ -1534,3 +1534,31 @@ def test_single_missed_frame_uses_detected_support_pairs():
     frames[0]['phash_crop'] = pattern
     frames[2]['subject_absent'] = False
     assert _visual_boundary_support(left, right, DEFAULTS) == []
+
+
+def test_missing_boundary_cannot_skip_detected_species_conflict():
+    from encounters import DEFAULTS, _visual_boundary_support
+
+    for absent_left in (True, False):
+        frames = [dict(id=i, timestamp=f'2026-11-14T08:40:00.{i}',
+                       subject_present=True, phash_crop='abcd12345678abcd',
+                       species_top5=[['Robin', .99]]) for i in range(1, 7)]
+        left, right = frames[:3], frames[3:]
+        missing, conflicting = (left[-1], right[0]) if absent_left else (right[0], left[-1])
+        missing.update(subject_absent=True, subject_present=False)
+        conflicting['phash_crop'] = '5432edcba9875432'
+        conflicting['species_top5'] = [['Mallard', .99]]
+        assert _visual_boundary_support(left, right, DEFAULTS) == []
+
+
+def test_visual_support_can_skip_either_absent_boundary():
+    from encounters import DEFAULTS, _visual_boundary_support
+
+    for absent_left in (True, False):
+        frames = [dict(id=i, timestamp=f'2026-11-14T08:40:00.{i}',
+                       subject_present=True, phash_crop='abcd12345678abcd',
+                       species_top5=[['Robin', .99]]) for i in range(1, 7)]
+        left, right = frames[:3], frames[3:]
+        missing = left[-1] if absent_left else right[0]
+        missing.update(subject_absent=True, subject_present=False, phash_crop='5432edcba9875432')
+        assert _visual_boundary_support(left, right, DEFAULTS) == [missing]

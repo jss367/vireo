@@ -891,7 +891,12 @@ def _visual_boundary_support(left, right, cfg):
     """
     if not (left[-1].get("subject_absent") or right[0].get("subject_absent")):
         return []
-    for tail, head in ((left[-2:], right[:2]), (left[-3:-1], right[:2]), (left[-2:], right[1:3])):
+    candidates = [(left[-2:], right[:2])]
+    if left[-1].get("subject_absent"):
+        candidates.append((left[-3:-1], right[:2]))
+    if right[0].get("subject_absent"):
+        candidates.append((left[-2:], right[1:3]))
+    for tail, head in candidates:
         if len(tail) != 2 or len(head) != 2:
             continue
         pairs = list(zip(tail, head, strict=True))
