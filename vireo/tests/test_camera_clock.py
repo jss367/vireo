@@ -232,3 +232,35 @@ def test_reset_needs_no_fix_before_it_when_gps_fixes_the_rest_exactly():
     [fix] = problem.fixes
     assert [f.ref for f in fix.frames] == list(range(7, 13))
     assert fix.shift_minutes == 60
+
+
+def test_repeated_resets_accumulate_so_every_stretch_ends_in_order():
+    """12:00 -> 10:00 -> 08:00 by shot order: the first stretch moves past both resets."""
+    starts = [datetime(2026, 4, 1, 12, 0), datetime(2026, 4, 1, 10, 0), datetime(2026, 4, 1, 8, 0)]
+    frames = [
+        ClockFrame(ref=n, filename=f"DSC_{n:04d}.JPG", captured=start + timedelta(minutes=k))
+        for s, start in enumerate(starts) for k in range(2) for n in [s * 2 + k + 1]
+    ]
+    [problem] = find_clock_problems(frames, use_gps=False)
+    corrected = {f.ref: f.captured for f in frames}
+    for fix in problem.fixes:
+        for f in fix.frames:
+            corrected[f.ref] = f.captured + timedelta(minutes=fix.shift_minutes)
+    in_shot_order = [corrected[n] for n in range(1, 7)]
+    assert in_shot_order == sorted(in_shot_order)
+    assert len(set(in_shot_order)) == 6
+
+
+def test_one_offset_across_two_real_zones_gets_a_fix_per_zone():
+    """-05:00 recorded all day: correct in New York, wrong in Los Angeles."""
+    def zone(_lat, lon, _utc):
+        return ("America/New_York", -300) if lon > -100 else ("America/Los_Angeles", -480)
+
+    morning = frames_at(datetime(2026, 1, 10, 8, 0), 10, offset=-300, first_count=1, gps_error=0)
+    evening = frames_at(datetime(2026, 1, 10, 20, 0), 20, offset=-300, first_count=11, gps_error=0)
+    morning = [ClockFrame(**{**f.__dict__, "longitude": -74.0}) for f in morning]
+    problem = analyze_camera(morning + evening, zone_lookup=zone)
+
+    [fix] = problem.fixes
+    assert {f.ref for f in fix.frames} == {f.ref for f in evening}
+    assert fix.target_offset == -480

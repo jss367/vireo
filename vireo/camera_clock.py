@@ -493,6 +493,29 @@ class _CameraClock:
                 return zone, other
         return None
 
+    def zone_groups(self, offset: int, group: list[ClockFrame]
+                    ) -> list[tuple[list[ClockFrame], tuple[str, int] | None, int | None]]:
+        """Split one recorded offset's frames by the local zone each was taken in.
+
+        One offset can cover photos from more than one real time zone (a camera
+        left alone across a flight), and each needs its own fix. A frame without
+        a GPS position takes the zone of the positioned frame of this group
+        nearest to it in time. With no positioned frame at all, the whole group
+        takes ``group_zone`` (possibly borrowed from another offset shot in the
+        same place). Returns ``(frames, zone, borrowed_from)`` triples.
+        """
+        positioned = [(f, self.zones[f.ref]) for f in group if f.ref in self.zones]
+        if not positioned:
+            found = self.group_zone(offset)
+            return [(group, *found)] if found is not None else [(group, None, None)]
+        by_zone: dict[tuple[str, int], list[ClockFrame]] = defaultdict(list)
+        for frame in group:
+            zone = self.zones.get(frame.ref)
+            if zone is None:
+                zone = min(positioned, key=lambda p: abs((p[0].captured - frame.captured).total_seconds()))[1]
+            by_zone[zone].append(frame)
+        return [(frames, zone, None) for zone, frames in sorted(by_zone.items())]
+
     def component_majority(self, offset: int) -> int:
         """The offset most frames in this same-place group recorded.
 
@@ -665,40 +688,56 @@ def _fixes_across_resets(clock: _CameraClock, nearby_error: tuple[int, str] | No
         if part.clock_error is not None or part_fixes:
             settled.update(f.ref for f in epoch)
         stretch_of.update({f.ref: epoch for f in epoch})
-    for jump in clock.jumps:
-        if jump.kind != "reset":
-            continue
+    resets = [j for j in clock.jumps if j.kind == "reset"]
+    # Last reset first, so a stretch before several resets moves by all of
+    # them: each backward fix composes with the shift already chosen for the
+    # stretch after it. Then first reset first for stretches that move
+    # forward past a stretch GPS shows was right.
+    for jump in reversed(resets):
         before = [f for f in stretch_of[jump.before.ref] if f.ref not in settled]
-        after = [f for f in stretch_of[jump.after.ref] if f.ref not in settled]
         if before:
-            fix = _reset_fix(jump, before, shifts.get(jump.after.ref, 0), move_before=True)
-        elif after:
-            fix = _reset_fix(jump, after, shifts.get(jump.before.ref, 0), move_before=False)
-        else:
-            continue
-        # Zero means the other side's fix alone restores the order.
-        if fix.shift_minutes:
-            fixes.append(fix)
-        settled.update(f.ref for f in fix.frames)
+            _add_reset_fix(fixes, shifts, settled,
+                           _reset_fix(jump, before, shifts.get(jump.after.ref, 0), move_before=True))
+    for jump in resets:
+        after = [f for f in stretch_of[jump.after.ref] if f.ref not in settled]
+        if after:
+            _add_reset_fix(fixes, shifts, settled,
+                           _reset_fix(jump, after, shifts.get(jump.before.ref, 0), move_before=False))
     return fixes
+
+
+def _add_reset_fix(fixes: list[ClockFix], shifts: dict[Hashable, int], settled: set[Hashable],
+                   fix: ClockFix) -> None:
+    """Record a reset fix's shift for the fixes composed with it; offer it unless it is zero.
+
+    Zero means the other side's fix alone restores the order.
+    """
+    shifts.update({f.ref: fix.shift_minutes for f in fix.frames})
+    settled.update(f.ref for f in fix.frames)
+    if fix.shift_minutes:
+        fixes.append(fix)
 
 
 def _fixes(clock: _CameraClock, nearby_error: tuple[int, str] | None) -> list[ClockFix]:
     fixes: list[ClockFix] = []
-    for recorded, group in clock.offset_groups():
-        found = clock.group_zone(recorded)
-        zone, borrowed = found if found is not None else (None, None)
-        if clock.clock_error is not None and (zone is not None or clock.clock_error):
-            fix = _measured_fix(clock, recorded, group, zone, borrowed)
-            if fix is not None:
-                fixes.append(fix)
-        elif zone is not None:
-            if zone[1] != recorded:
-                fixes.extend(_unmeasured_fixes(clock, recorded, group, zone, borrowed, nearby_error))
-        elif clock.same_place(recorded):
-            fix = _restate_fix(clock, recorded, group)
-            if fix is not None:
-                fixes.append(fix)
+    for recorded, offset_group in clock.offset_groups():
+        parts = clock.zone_groups(recorded, offset_group)
+        for group, zone, borrowed in parts:
+            found: list[ClockFix] = []
+            if clock.clock_error is not None and (zone is not None or clock.clock_error):
+                fix = _measured_fix(clock, recorded, group, zone, borrowed)
+                found = [fix] if fix is not None else []
+            elif zone is not None:
+                if zone[1] != recorded:
+                    found = _unmeasured_fixes(clock, recorded, group, zone, borrowed, nearby_error)
+            elif clock.same_place(recorded):
+                fix = _restate_fix(clock, recorded, group)
+                found = [fix] if fix is not None else []
+            if len(parts) > 1 and zone is not None:
+                # Alternatives are grouped by this key; keep each zone's apart.
+                for fix in found:
+                    fix.group = f"{fix.group} in {zone[0]}"
+            fixes.extend(found)
     return fixes
 
 
