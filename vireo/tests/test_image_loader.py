@@ -180,6 +180,33 @@ def test_raw_camera_rendered_mode_uses_near_full_embedded_jpeg(
     assert fake.postprocess_calls == 0
 
 
+def test_subject_detail_source_is_the_embedded_jpeg_whatever_the_subject_size(
+    tmp_path, monkeypatch,
+):
+    """The detail of a subject under the scale needs more than the frame
+    holds. Read JPEG-first, that request falls through to the demosaic, a
+    different rendering from the one larger subjects are measured on."""
+    from image_loader import load_image
+    from quality import load_detail_source
+
+    nef = tmp_path / "test.nef"
+    nef.write_bytes(b"fake NEF content")
+    fake = _install_fake_raw(monkeypatch, _FakeRaw(
+        embedded_jpeg=_jpeg_bytes((5392, 3592)),
+        sensor_size=(5408, 3608),
+        postprocess_size=(5408, 3608),
+    ))
+
+    small = load_detail_source(str(nef), 11284, (5408, 3608))
+    assert small.size == (5392, 3592)
+    large = load_detail_source(str(nef), 2731, (5408, 3608))
+    assert max(large.size) == 2731
+    assert fake.postprocess_calls == 0
+
+    assert load_image(str(nef), max_size=11284).size == (5408, 3608)
+    assert fake.postprocess_calls == 1
+
+
 def test_raw_camera_rendered_mode_rejects_cropped_embedded_jpeg(
     tmp_path, monkeypatch,
 ):

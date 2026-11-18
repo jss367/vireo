@@ -616,6 +616,38 @@ def test_subject_comparison_cache_migrates_without_changing_photographer_choices
             "detection_id", "source_key", "features", "mask_png"]
 
 
+def test_version_37_catalog_unmeasures_the_detail_of_subjects_under_the_scale(tmp_path):
+    """Subjects under 512 px were read from a rendering the larger ones never
+    use, so their detail returns to "not measured" and the rest is kept."""
+    path = str(tmp_path / "vireo.db")
+    schema.ensure_schema(path)
+    rows = {1: (19413.16, 259.2), 2: (708.37, 517.9), 3: (9026.48, 518.0), 4: (24410.87, 1015.7), 5: (0.0, None)}
+    with sqlite3.connect(path) as conn:
+        conn.execute("INSERT INTO folders (id, path) VALUES (1, '/photos')")
+        for photo_id, (detail, px) in rows.items():
+            conn.execute(
+                "INSERT INTO photos (id, folder_id, filename, subject_detail, subject_detail_px) VALUES (?, 1, ?, ?, ?)",
+                (photo_id, f"{photo_id}.nef", detail, px),
+            )
+            conn.execute(
+                "INSERT INTO photo_masks (photo_id, variant, path, created_at, detector_model, prompt_x, prompt_y, "
+                "prompt_w, prompt_h, subject_detail, subject_detail_px) VALUES (?, 'sam2-large', ?, 0, 'md', 0, 0, 1, 1, ?, ?)",
+                (photo_id, f"/masks/{photo_id}.png", detail, px),
+            )
+        conn.execute("PRAGMA user_version=37")
+    schema.ensure_schema(path)
+    schema.ensure_schema(path)
+    kept = {3: (9026.48, 518.0), 4: (24410.87, 1015.7), 5: (0.0, None)}
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        for table, key in (("photos", "id"), ("photo_masks", "photo_id")):
+            got = {row[0]: (row[1], row[2]) for row in conn.execute(
+                f"SELECT {key}, subject_detail, subject_detail_px FROM {table}")}
+            assert got == {1: (None, None), 2: (None, None), **kept}, table
+        # The masks themselves stay: only the measurement is pending again.
+        assert conn.execute("SELECT COUNT(*) FROM photo_masks WHERE path IS NOT NULL").fetchone()[0] == 5
+
+
 def test_version_34_catalog_gains_subject_detail_columns(tmp_path):
     path = str(tmp_path / "vireo.db")
     schema.ensure_schema(path)

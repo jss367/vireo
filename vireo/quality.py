@@ -372,9 +372,10 @@ def detail_decode_edge(mask):
 
     A frame decoded smaller than this is upsampled to the detail scale, so
     the measurement would read interpolated pixels rather than the detail
-    the source holds. Callers cap it at the source's native size: a subject
-    too small for the scale even at native resolution is measured upsampled,
-    and the low value honestly reports how little detail the frame has.
+    the source holds. It exceeds the native size for a subject too small for
+    the scale even at native resolution; ``load_detail_source`` reads the
+    whole frame for those, the subject is measured upsampled, and the low
+    value honestly reports how little detail the frame has.
     Returns None for an empty mask.
     """
     bbox = mask_bbox_fractions(mask)
@@ -437,23 +438,46 @@ def compute_subject_detail(image, mask, frame_size=None):
     }
 
 
+def load_detail_source(source_path, needed, frame_size=None):
+    """The frame the detail is measured on: the camera's own rendering, at ``needed`` or whole.
+
+    A RAW holds two renderings, the camera's embedded JPEG and a libraw
+    demosaic, and their gradients differ by a factor that varies from file
+    to file (the demosaic is auto-brightened and unsharpened), so values
+    read from one cannot be compared with values read from the other. The
+    loader hands back the embedded JPEG only when it covers the size asked
+    for. A subject smaller than DETAIL_SCALE_PX asks for more than the frame
+    holds, which no preview covers, so that request is made for the whole
+    camera rendering instead: every subject of a camera with a full-size
+    preview is then measured on the same rendering, whatever its size.
+
+    ``frame_size`` is the source's native ``(width, height)``; without it
+    the whole rendering is read, since a sized request cannot be told from
+    one that exceeds the frame. A RAW with no full-size preview is still
+    demosaiced when its preview is smaller than the request.
+    """
+    from image_loader import NEAR_FULL_PREVIEW, RAW_DECODE_CAMERA_RENDERED, load_image
+
+    native = max(frame_size) if frame_size else None
+    whole = native is None or needed >= native * NEAR_FULL_PREVIEW
+    return load_image(source_path, max_size=None if whole else needed, raw_decode=RAW_DECODE_CAMERA_RENDERED)
+
+
 def measure_subject_detail(proxy, mask, *, source_path, frame_size=None):
     """Subject detail from the proxy, or from a larger decode of the source.
 
     The proxy serves when the subject already spans DETAIL_SCALE_PX in it;
-    a smaller subject reads ``source_path`` again at the edge the scale
-    needs (the loader caps it at the native size). Returns the
-    ``compute_subject_detail`` dict, or {} when the source cannot be read,
-    so the measurement stays unmade rather than interpolated.
+    a smaller subject reads ``source_path`` again through
+    ``load_detail_source``. Returns the ``compute_subject_detail`` dict, or
+    {} when the source cannot be read, so the measurement stays unmade
+    rather than interpolated.
     """
-    from image_loader import load_image
-
     needed = detail_decode_edge(mask)
     if needed is None:
         return {"subject_detail": 0.0, "subject_detail_px": None}
     if needed <= max(proxy.size):
         return compute_subject_detail(proxy, mask, frame_size=frame_size)
-    image = load_image(source_path, max_size=needed)
+    image = load_detail_source(source_path, needed, frame_size)
     if image is None:
         return {}
     try:
@@ -465,14 +489,12 @@ def measure_subject_detail(proxy, mask, *, source_path, frame_size=None):
 def measure_cached_subject_detail(mask_path, source_path, frame_size=None):
     """Subject detail for a saved mask PNG whose row predates the measurement.
 
-    Reads the mask from disk and the source at the edge the detail scale
-    needs; SAM does not run. Returns the ``compute_subject_detail`` dict on
+    Reads the mask from disk and the source through ``load_detail_source``;
+    SAM does not run. Returns the ``compute_subject_detail`` dict on
     success, ``MASK_CACHE_INVALID`` when the mask PNG cannot be decoded (the
     cached mask is lost; the caller should drop it so the next run
     regenerates), or None when the source cannot be read.
     """
-    from image_loader import load_image
-
     try:
         with Image.open(mask_path) as mask_image:
             mask = np.asarray(mask_image.convert("L")) > 127
@@ -492,7 +514,7 @@ def measure_cached_subject_detail(mask_path, source_path, frame_size=None):
     needed = detail_decode_edge(mask)
     if needed is None:
         return {"subject_detail": 0.0, "subject_detail_px": None}
-    image = load_image(source_path, max_size=needed)
+    image = load_detail_source(source_path, needed, frame_size)
     if image is None:
         return None
     try:

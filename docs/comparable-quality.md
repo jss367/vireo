@@ -20,12 +20,52 @@ edge reads real pixels, the image is resampled with LANCZOS and the mask with
 NEAREST, and the mean squared gradient is taken over the resampled mask.
 
 The frame is decoded at whatever size puts the subject at that scale
-(`quality.detail_decode_edge`, capped at the native size). The 1536 px proxy
+(`quality.detail_decode_edge`; `quality.load_detail_source` reads the whole
+frame once that size reaches the native one). The 1536 px proxy
 the mask stage already holds serves when the subject spans 512 px in it; in
 this catalog the median subject covers 1.25% of the frame, about 170 px in
 the proxy, so most photos are read again from the working copy or original.
 A subject smaller than 512 px even at native resolution is upsampled and
 reads low, which is the honest answer: that frame holds little detail.
+
+### One rendering per file
+
+A RAW file holds two renderings of the frame: the JPEG the camera embedded,
+with its sharpening and tone curve, and whatever libraw demosaics from the
+sensor data, which is auto-brightened and unsharpened. Their gradients differ
+by a factor that changes from file to file. On 976 RAW files of this catalog
+the demosaic measured between 0.41 and 1.06 times the embedded JPEG on a Z 8
+(10th to 90th percentile, median 0.67) and between 0.59 and 1.16 times on a
+D850, so no constant converts one into the other and the detail compares only
+between photos read from the same rendering.
+
+The loader's default (`RAW_DECODE_JPEG_FIRST`) returns the embedded JPEG only
+when it covers the size asked for. A subject under 512 px asks for more than
+the frame holds, which no preview covers, so that default demosaiced every
+small subject and read every larger one from the JPEG; and where libraw
+could not decode the file (Nikon HE* on a published rawpy wheel) the small
+subject came from the JPEG after all. One 259 px subject measured 19,413
+from the JPEG and 9,773 from the demosaic.
+
+`load_detail_source` therefore asks for the camera's rendering
+(`RAW_DECODE_CAMERA_RENDERED`), sized while the request stays inside the
+frame and whole (`max_size=None`) once it reaches `NEAR_FULL_PREVIEW` of the
+native edge, which is the one request a full-size preview answers at any
+subject size. Scored against 59 bursts holding both a flagged and a rejected
+frame (285 pairs) and 250 flagged against 250 rejected photos across the
+catalog:
+
+| Rendering read | Within-burst AUC | Top frame is a pick | Catalog AUC |
+| --- | --- | --- | --- |
+| JPEG for large subjects, demosaic for small | 0.877 | 52 of 59 | 0.821 |
+| Camera JPEG for every subject | 0.905 | 54 of 59 | 0.846 |
+
+Nine of those bursts had frames on both sides of the 512 px line, so frames
+of one burst were being ranked on two renderings. A RAW without a full-size
+preview is still demosaiced when its preview is smaller than the request;
+none of this catalog's cameras (D7200, D850, Z 8) is one. Migration 38
+returns every stored value with `subject_detail_px` under 518 to "not
+measured", and the mask stage measures those cached masks again.
 
 `photos.subject_detail_px` is the subject box's longer side in native pixels,
 kept so a reader can see what the value came from ("measured at 512 px from
@@ -69,6 +109,16 @@ calibrated sharpness scale.
   divided by the subject's luminance variance plus a floor) was tried and
   separated picks from rejects less well (see below), so the plain
   measurement ships.
+* Not free of the subject's outline. The mask edge is part of the region,
+  so a dark bird against bright sky gains from the contrast of its
+  silhouette: across the catalog a median 41% of the full-scale gradient
+  energy lies within 8 px of the mask edge, and 61% for one small backlit
+  flycatcher. Leaving the edge out was tried (the mask eroded by 2 to 24 px
+  at the detail scale, or by 1 to 4 px at each pyramid level) and did not
+  separate picks from rejects better: within bursts 0.905 fell to 0.902 at
+  2 px per level and 0.891 at 8 px, across the catalog 0.846 to 0.835 and
+  0.827. The outline of a sharp subject is itself sharp, so the edge carries
+  focus evidence along with the contrast, and the whole mask ships.
 * Not a defocus classifier. `docs/relative-focus-evidence.md` still holds:
   no validated absolute focus threshold exists, and no automatic rejection
   reads this value.

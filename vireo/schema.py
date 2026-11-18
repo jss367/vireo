@@ -310,6 +310,33 @@ def _validate_subject_detail(conn):
             raise RuntimeError(f"{table} is missing {', '.join(missing)}")
 
 
+# ``subject_detail_px`` below which a stored subject detail may have been read
+# from a libraw demosaic rather than the camera's embedded JPEG. A subject
+# under the 512 px detail scale asked the loader for more than the frame
+# holds, and a full-size preview (down to 99% of the sensor on each axis)
+# does not cover such a request, so 512 / 0.99 rounded up bounds the rows.
+SUBJECT_DETAIL_MIXED_RENDERING_PX = 518
+
+
+def _clear_small_subject_detail(conn):
+    """Unmeasure the subject detail of subjects smaller than the detail scale.
+
+    Those rows were read from whichever rendering the loader fell through
+    to (a demosaic where libraw could decode the file, the embedded JPEG
+    where it could not), so they compare with neither each other nor the
+    larger subjects, which were always read from the embedded JPEG. NULL
+    means "not measured": the mask stage counts the cached masks as pending
+    and the next Process run measures them from the camera's rendering
+    without rerunning SAM. Larger subjects keep their values.
+    """
+    for table in ("photo_masks", "photos"):
+        conn.execute(
+            f"UPDATE {table} SET subject_detail=NULL, subject_detail_px=NULL "
+            "WHERE subject_detail_px < ?",
+            (SUBJECT_DETAIL_MIXED_RENDERING_PX,),
+        )
+
+
 # Job types only Vireo itself started before ``origin`` was recorded: the
 # hourly storage maintenance and the two recurring discovery checks.
 _HISTORICAL_SYSTEM_JOB_TYPES = (
@@ -435,6 +462,7 @@ MIGRATIONS = (
     Migration(35, "subject_detail", _add_subject_detail, _validate_subject_detail),
     Migration(36, "species_choices", create_species_choices),
     Migration(37, "subject_candidates", create_subject_candidates),
+    Migration(38, "subject_detail_camera_rendering", _clear_small_subject_detail),
 )
 
 

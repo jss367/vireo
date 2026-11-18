@@ -68,6 +68,11 @@ RAW_DECODE_JPEG_FIRST: Final = "jpeg_first"
 RAW_DECODE_CAMERA_RENDERED: Final = "camera_rendered"
 RAW_DECODE_PRESERVE_HIGHLIGHTS: Final = "preserve_highlights"
 RAW_DECODE_LINEAR: Final = "linear"
+
+# An embedded JPEG whose two axes both reach this share of the sensor's
+# active area is the camera's full output: many cameras omit a narrow border
+# (8256x5504 against 8288x5520), so an exact match would reject them.
+NEAR_FULL_PREVIEW: Final = 0.99
 _RAW_DECODE_MODES = {
     RAW_DECODE_JPEG_FIRST,
     RAW_DECODE_CAMERA_RENDERED,
@@ -1125,8 +1130,8 @@ def _embedded_preview_suffices(raw, embedded, max_size, raw_decode):
         embedded_dims
         and sensor_dims[0]
         and sensor_dims[1]
-        and embedded_dims[0] >= sensor_dims[0] * 0.99
-        and embedded_dims[1] >= sensor_dims[1] * 0.99
+        and embedded_dims[0] >= sensor_dims[0] * NEAR_FULL_PREVIEW
+        and embedded_dims[1] >= sensor_dims[1] * NEAR_FULL_PREVIEW
     )
     embedded_covers_request = bool(
         embedded is not None
