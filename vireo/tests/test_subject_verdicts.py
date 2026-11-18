@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 from PIL import Image
 from pipeline import load_photo_features, refresh_cache_predictions_for_photos
+from reviewer_helpers import original_frame_detections
 from services import detection_store, photo_ingest, subject_verdicts, workspace_folders
 from services.edit_history import redo_last_undo, undo_last_edit
 from subjects import analyze_photo, payload, sync_primary
@@ -31,7 +32,8 @@ def scene(db, tmp_path):
     Image.fromarray(pixels).save(path)
     photo_id = photo_ingest.add_photo(db, folder_id=folder, filename=path.name, extension=".jpg",
                                       file_size=path.stat().st_size, file_mtime=1)
-    stump, bird = detection_store.write_detection_batch(db, photo_id, "megadetector-v6", [STUMP, BIRD])
+    boxes = original_frame_detections(path, [STUMP, BIRD])
+    stump, bird = detection_store.write_detection_batch(db, photo_id, "megadetector-v6", boxes)
     db.predictions.add(stump, "Mule Deer", .93, "bioclip")
     db.predictions.add(bird, "Hairy Woodpecker", .61, "bioclip")
     db.commit()
