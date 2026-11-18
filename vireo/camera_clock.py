@@ -39,9 +39,9 @@ import re
 from bisect import bisect_left
 from collections import Counter, defaultdict
 from collections.abc import Callable, Hashable, Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
-from itertools import pairwise
+from itertools import pairwise, product
 from typing import Any
 
 # A backward step smaller than this is not reported: clock changes that move
@@ -412,6 +412,7 @@ class _CameraClock:
     # One entry per stretch between clock resets, when there are resets:
     # (first frame, last frame, clock error or None, GPS fixes it rests on).
     epoch_errors: list[tuple[ClockFrame, ClockFrame, int | None, int]] = field(default_factory=list)
+    correction_warnings: list[str] = field(default_factory=list)
     _groups: dict[int | None, list[ClockFrame]] = field(default_factory=dict)
     _parent: dict[int, int] = field(default_factory=dict)
     _position: dict[Hashable, tuple[int, int]] = field(default_factory=dict)
@@ -714,12 +715,17 @@ def _fixes_across_resets(clock: _CameraClock, nearby_error: tuple[int, str] | No
             else:
                 shifts.update({f.ref: fix.shift_minutes for f in fix.frames})
             fix.group = f"epoch {index}: {fix.group}"
-        if part.clock_error is not None or part_fixes:
+            settled.update(f.ref for f in fix.frames)
+        if part.clock_error is not None:
             settled.update(f.ref for f in epoch)
         stretch_of.update({f.ref: epoch for f in epoch})
     # Propagate known shifts forward from an anchored stretch first. For
     # the remaining unanchored prefix, work backward from its final epoch.
     for jump in resets:
+        if jump.before.ref in choices and jump.after.ref in choices:
+            _join_reset_options(jump, choices, fixes)
+        if jump.after.ref in settled:
+            continue
         after = [f for f in stretch_of[jump.after.ref] if f.ref not in settled]
         if jump.before.ref in choices and after:
             _pair_reset_choices(jump, after, choices, move_before=False)
@@ -728,6 +734,8 @@ def _fixes_across_resets(clock: _CameraClock, nearby_error: tuple[int, str] | No
             _add_reset_fix(fixes, shifts, settled,
                            _reset_fix(jump, after, shifts.get(jump.before.ref, 0), move_before=False))
     for jump in reversed(resets):
+        if jump.before.ref in settled:
+            continue
         before = [f for f in stretch_of[jump.before.ref] if f.ref not in settled]
         if jump.after.ref in choices and before:
             _pair_reset_choices(jump, before, choices, move_before=True)
@@ -735,7 +743,105 @@ def _fixes_across_resets(clock: _CameraClock, nearby_error: tuple[int, str] | No
         elif before:
             _add_reset_fix(fixes, shifts, settled,
                            _reset_fix(jump, before, shifts.get(jump.after.ref, 0), move_before=True))
-    return fixes
+    return _withhold_unsafe_reset_fixes(clock, fixes)
+
+
+def _withhold_unsafe_reset_fixes(clock: _CameraClock, fixes: list[ClockFix]) -> list[ClockFix]:
+    """Keep unsupported mixed-epoch plans read-only, scoped to their shot sequence."""
+    groups: dict[str, set[Hashable]] = defaultdict(set)
+    for root in fixes:
+        for step in [root, *root.dependent_fixes]:
+            groups[root.group].update(frame.ref for frame in step.frames)
+    unmeasured = [
+        {frame.ref for frame in epoch}
+        for epoch, (_first, _last, error, _count) in zip(clock.epochs(), clock.epoch_errors, strict=True)
+        if error is None
+    ]
+    reset_refs = {jump.after.ref for jump in clock.jumps if jump.kind == "reset"}
+    withheld: set[Hashable] = set()
+    for sequence in clock.sequences:
+        refs = {frame.ref for frame in sequence}
+        if not refs & reset_refs:
+            continue
+        if not any(epoch <= refs and sum(bool(epoch & members) for members in groups.values()) > 1
+                   for epoch in unmeasured):
+            continue
+        relevant = [root for root in fixes if groups[root.group] & refs]
+        if not _options_create_reset(sequence, relevant):
+            continue
+        withheld.update(refs)
+        clock.correction_warnings.append(
+            f"Automatic corrections are unavailable for {sequence[0].filename}-{sequence[-1].filename}: "
+            "combining these reset and time-zone choices can put photos out of shot order. "
+            "Review these timestamps manually."
+        )
+    return [root for root in fixes if not any(
+        frame.ref in withheld for step in [root, *root.dependent_fixes] for frame in step.frames
+    )]
+
+
+def _options_create_reset(sequence: list[ClockFrame], fixes: list[ClockFix]) -> bool:
+    """Check independent options without choosing a clock reading or pairing groups."""
+    refs = {frame.ref for frame in sequence}
+    plans: dict[str, list[dict[Hashable, ClockFrame]]] = defaultdict(list)
+    owners: dict[Hashable, str] = {}
+    for root in fixes:
+        projection = {}
+        for step in [root, *root.dependent_fixes]:
+            for frame in step.frames:
+                if frame.ref not in refs:
+                    continue
+                if frame.ref in owners and owners[frame.ref] != root.group:
+                    return True
+                owners[frame.ref] = root.group
+                projection[frame.ref] = replace(
+                    frame, captured=frame.captured + timedelta(minutes=step.shift_minutes),
+                    offset_minutes=step.target_offset if step.target_offset is not None else frame.offset_minutes,
+                )
+        plans[root.group].append(projection)
+    threshold = timedelta(minutes=JUMP_THRESHOLD_MINUTES)
+    for before, after in pairwise(sequence):
+        left, right = owners.get(before.ref), owners.get(after.ref)
+        if left is not None and left == right:
+            pairs = {(plan.get(before.ref, before), plan.get(after.ref, after)) for plan in plans[left]}
+        else:
+            pairs = product(
+                {plan.get(before.ref, before) for plan in (plans[left] if left is not None else [{}])},
+                {plan.get(after.ref, after) for plan in (plans[right] if right is not None else [{}])},
+            )
+        for earlier, later in pairs:
+            if earlier.captured - later.captured <= threshold:
+                continue
+            first, second = earlier.instant(), later.instant()
+            if first is None or second is None or first - second > threshold:
+                return True
+    return False
+
+
+def _join_reset_options(jump: ClockJump, choices: dict[Hashable, list[tuple[ClockFix, int]]],
+                        fixes: list[ClockFix]) -> None:
+    """Extend each earlier plan with each distinct compatible write on the later group."""
+    earlier = choices[jump.before.ref]
+    later = [fix for fix, _ in choices[jump.after.ref]]
+    extensions: dict[int, list[ClockFix]] = defaultdict(list)
+    later_choices = []
+    for parent, anchor_shift in earlier:
+        for step in _order_post_reset_options(later, jump, anchor_shift):
+            plan = replace(parent, dependent_fixes=[*parent.dependent_fixes, step],
+                           recommended=parent.recommended and step.recommended)
+            extensions[id(parent)].append(plan)
+            later_choices.append((plan, step.shift_minutes))
+
+    # All frames belonging to a plan, including those reached across an earlier
+    # reset, must use its extended alternatives on subsequent boundaries.
+    for ref, variants in choices.items():
+        if id(variants[0][0]) in extensions:
+            choices[ref] = [(plan, shift) for parent, shift in variants for plan in extensions[id(parent)]]
+    for frame in later[0].frames:
+        choices[frame.ref] = later_choices
+    replaced_groups = {earlier[0][0].group, later[0].group}
+    fixes[:] = [fix for fix in fixes if fix.group not in replaced_groups]
+    fixes.extend(plan for plan, _ in later_choices)
 
 
 def _pair_reset_choices(jump: ClockJump, frames: list[ClockFrame],
@@ -771,13 +877,11 @@ def _order_post_reset_options(options: list[ClockFix], jump: ClockJump, anchor_s
     distinct: dict[int, ClockFix] = {}
     for option in options:
         if option.shift_minutes < minimum:
-            option.shift_minutes = minimum
-            option.recommended = False
-            option.explanation = (
+            option = replace(option, shift_minutes=minimum, recommended=False, explanation=(
                 f"The local time zone at the GPS position is {format_offset(option.target_offset)}. "
                 f"This is the smallest whole-minute shift that puts {jump.after.filename} after "
                 f"{jump.before.filename} in corrected clock time. The actual gap is unknown.{anchor_note}"
-            )
+            ))
         # An unchanged reading may have independent evidence from a nearby day.
         if option.shift_minutes not in distinct or option.recommended:
             distinct[option.shift_minutes] = option
@@ -853,7 +957,7 @@ def _evidence(clock: _CameraClock) -> list[str]:
     if zone_counts:
         (name, offset), _ = zone_counts.most_common(1)[0]
         lines.append(f"Local time at the GPS position was {format_offset(offset)} ({name}).")
-    return lines
+    return [*lines, *clock.correction_warnings]
 
 
 def _epoch_error_lines(clock: _CameraClock) -> list[str]:

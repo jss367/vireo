@@ -2,6 +2,7 @@ import json
 import os
 from types import SimpleNamespace
 
+import pytest
 from services import photo_ingest
 from wait import wait_for_job_via_client
 
@@ -837,7 +838,6 @@ def test_capture_time_rejects_a_stale_preview(app_and_db):
 
 
 def test_capture_time_overlap_is_rejected_before_writing(app_and_db):
-    import pytest
     from capture_time import current_capture_time_token, guard_capture_time
 
     _, db = app_and_db
@@ -867,7 +867,8 @@ def test_capture_time_fallback_changes_invalidate_preview(app_and_db):
         assert result.status_code == 409, tag
 
 
-def test_dependent_reset_shift_is_guarded_and_preserves_its_offset(client_with_photo, monkeypatch, tmp_path):
+@pytest.mark.parametrize("shift,offset", [(60, None), (60, "-06:00"), (0, "-06:00")])
+def test_dependent_reset_write_matches_reviewed_shift_and_offset(client_with_photo, monkeypatch, tmp_path, shift, offset):
     import capture_time
     import metadata
 
@@ -879,7 +880,8 @@ def test_dependent_reset_shift_is_guarded_and_preserves_its_offset(client_with_p
     client = app.test_client()
     body = {"photo_ids": [first], "mode": "set_offset", "target_offset": "-08:00", "shift_minutes": 0}
     body["expected_state"] = client.post("/api/capture-time/preview", json=body).get_json()["expected_state"]
-    step = {"photo_ids": [second], "mode": "manual", "shift_minutes": 60}
+    step = {"photo_ids": [second], "mode": "set_offset" if offset else "manual",
+            "target_offset": offset, "shift_minutes": shift}
     step["expected_state"] = client.post("/api/capture-time/preview", json=step).get_json()["expected_state"]
     body["dependent_shifts"] = [step]
     db.conn.execute("UPDATE photos SET timestamp='2026-01-25T13:07:00' WHERE id=?", (second,))
@@ -895,5 +897,8 @@ def test_dependent_reset_shift_is_guarded_and_preserves_its_offset(client_with_p
     assert job["result"]["updated"] == 2
     assert "-OffsetTimeOriginal=-08:00" in commands[first]
     assert not any(arg.startswith("-AllDates") for arg in commands[first])
-    assert "-AllDates+=0:0:0 1:0:0" in commands[second]
-    assert not any(arg.startswith("-OffsetTime") for arg in commands[second])
+    shifts = [arg for arg in commands[second] if arg.startswith("-AllDates")]
+    assert shifts == (["-AllDates+=0:0:0 1:0:0"] if shift else [])
+    offsets = [arg for arg in commands[second] if arg.startswith("-OffsetTime")]
+    assert offsets == ([f"-OffsetTime={offset}", f"-OffsetTimeOriginal={offset}", f"-OffsetTimeDigitized={offset}"]
+                       if offset else [])
