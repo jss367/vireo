@@ -208,15 +208,30 @@ def sync_primary(db, photo_id, *, min_conf=None, detector_model=None):
     Mask snapshots referenced by manual edits are immutable and untouched.
     Existing photo_masks remain cached, and prompt matching decides reuse.
     """
+    from services.subject_verdicts import _photo_free_of_analysis
+
+    changed = _project_primary(db, photo_id, min_conf, detector_model)
+    while changed:
+        successor = db.subjects.burst_neighbor(photo_id, following=True)
+        if successor is None or db.subjects.primary_state(successor) is None:
+            break
+        # Writer transactions may already hold SQLite's writer lock. Never
+        # wait on a mask worker that needs that same lock to finish.
+        with _photo_free_of_analysis(successor):
+            changed = _project_primary(db, successor, min_conf, None)
+        photo_id = successor
+
+
+def _project_primary(db, photo_id, min_conf, detector_model):
     _refresh_focus(db, photo_id)
     detections = retained(db, photo_id, min_conf, detector_model=detector_model)
+    previous = db.subjects.primary_state(photo_id)
     if not detections:
         db.subjects.clear_primary_features(photo_id)
         db.subjects.clear_primary_state(photo_id)
-        return
+        return previous is not None
     primary = detections[0]
     analysis = db.subjects.analysis(primary["id"])
-    previous = db.subjects.primary_state(photo_id)
     active_mask = db.subjects.active_mask(photo_id)
     mask_matches = active_mask and active_mask["detector_model"] == primary["detector_model"] and all(
         active_mask["prompt_" + k] == primary["box_" + k] for k in "xywh")
@@ -229,6 +244,7 @@ def sync_primary(db, photo_id, *, min_conf=None, detector_model=None):
         if changed or not mask_matches:
             db.subjects.set_primary_box_features(photo_id, features)
     db.subjects.set_primary_state(photo_id, primary["id"])
+    return previous is None or changed
 
 
 def resync_after_classification(db, photo_ids, min_conf):

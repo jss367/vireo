@@ -263,13 +263,39 @@ def test_burst_overlap_breaks_weak_switch_and_af_explains_real_switch(db):
     assert result["possible_subject_switch"]
 
 
-def test_nikon_focus_area_maps_sensor_crop_and_orientation():
+@pytest.mark.parametrize("group", ["EXIF", "IFD0", "TIFF", "File", None])
+def test_nikon_focus_area_maps_sensor_crop_and_orientation(group):
     from focus_point import focus_point
     meta = json.loads(_af_metadata(550, 400))
     meta["MakerNotes"]["CropHiSpeed"] = "2 1000 1000 500 500 250 250"
-    meta["EXIF"] = {"Orientation": 6}
+    if group:
+        meta[group] = {"Orientation": 6}
+    else:
+        meta["Orientation"] = 6
     focus = focus_point(meta)
     assert tuple(focus) == pytest.approx((.7,.6,.12,.12))
     meta["MakerNotes"]["AFCoordinatesAvailable"] = 0
     assert focus_point(meta) is None
     assert focus_point("broken json") is None
+
+def test_manual_choice_and_history_refresh_an_already_projected_burst(db):
+    from services.subject_selections import replay_history, set_selection
+
+    fid = _folder(db)
+    frames = []
+    for i, timestamp in enumerate(("2026-11-14T09:00:17.000", "2026-11-14T09:00:17.100",
+                                   "2026-11-14T09:00:17.200", "2026-11-15T09:00:17.300")):
+        pid = db.conn.execute("INSERT INTO photos(folder_id,filename,timestamp,burst_id) VALUES (?,?,?,?)",
+                              (fid, f"bird{i}.NEF", timestamp, "reused-id")).lastrowid
+        left, right = _regions(db, pid, ((.1,.1,.2,.2), .8), ((.6,.6,.2,.2), .7))
+        sync_primary(db, pid)
+        frames.append((pid, left, right))
+    db.commit()
+    pid, _, right = frames[0]
+    assert db.subjects.previous_burst_subject(frames[-1][0]) is None
+    set_selection(db, pid, {"detection_id": right})
+    assert [db.subjects.primary_state(p)["detection_id"] for p, _, _ in frames] == [
+        frames[0][2], frames[1][2], frames[2][2], frames[3][1]]
+    with db.transaction():
+        replay_history(db, [{"photo_id": pid, "old_value": json.dumps({"choice": None, "boxes": []})}], undo=True)
+    assert all(db.subjects.primary_state(p)["detection_id"] == left for p, left, _ in frames)

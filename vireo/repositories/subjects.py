@@ -43,17 +43,23 @@ class SubjectsRepository:
                 f"SELECT timestamp, id FROM photos WHERE id IN ({placeholders})", chunk))
         return [photo_id for _, photo_id in sorted(captures)]
 
-    def previous_burst_subject(self, photo_id):
-        # Sequence metadata is optional. A subsecond adjacent capture in the
-        # same folder is a conservative fallback for cameras without burst IDs.
-        return self.conn.execute("""SELECT d.* FROM photos p JOIN photos prev ON prev.id=(
+    def burst_neighbor(self, photo_id, *, following=False):
+        """Adjacent capture within half a second; ImageUniqueID can repeat for years."""
+        comparison, direction = (">", "ASC") if following else ("<", "DESC")
+        row = self.conn.execute(f"""SELECT adjacent.id FROM photos p JOIN photos adjacent ON adjacent.id=(
             SELECT q.id FROM photos q WHERE q.folder_id=p.folder_id AND q.burst_id IS p.burst_id
-            AND (q.timestamp, q.id) < (p.timestamp, p.id)
-            ORDER BY q.timestamp DESC, q.id DESC LIMIT 1)
-            JOIN photo_subject_state st ON st.photo_id=prev.id JOIN detections d ON d.id=st.detection_id
-            WHERE p.id=? AND (p.burst_id IS NOT NULL OR
-                (julianday(p.timestamp)-julianday(prev.timestamp))*86400 BETWEEN 0 AND 0.5)""",
+            AND (q.timestamp, q.id) {comparison} (p.timestamp, p.id)
+            ORDER BY q.timestamp {direction}, q.id {direction} LIMIT 1)
+            WHERE p.id=? AND ROUND(ABS(julianday(p.timestamp) - julianday(adjacent.timestamp))*86400000) <= 500""",
             (photo_id,)).fetchone()
+        return row[0] if row else None
+
+    def previous_burst_subject(self, photo_id):
+        previous = self.burst_neighbor(photo_id)
+        if previous is None:
+            return None
+        return self.conn.execute("""SELECT d.* FROM photo_subject_state st
+            JOIN detections d ON d.id=st.detection_id WHERE st.photo_id=?""", (previous,)).fetchone()
 
     def focus_candidates(self, photo_id):
         return self.conn.execute("""SELECT d.id, d.box_x, d.box_y, d.box_w, d.box_h, d.category,

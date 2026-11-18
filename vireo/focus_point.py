@@ -60,7 +60,8 @@ def focus_point(metadata):
                 w, h = w * sw / cw, h * sh / ch
         if not (0 <= x <= 1 and 0 <= y <= 1 and 0 <= w <= 1 and 0 <= h <= 1):
             return None
-        orientation = int(metadata.get("EXIF", {}).get("Orientation", 1))
+        from render_source import exif_orientation
+        orientation = int(exif_orientation(metadata) or 1)
         center = {1: (x, y), 2: (1-x, y), 3: (1-x, 1-y), 4: (x, 1-y),
                   5: (y, x), 6: (1-y, x), 7: (1-y, 1-x), 8: (y, 1-x)}.get(orientation)
         if center:
