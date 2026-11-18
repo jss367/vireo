@@ -319,7 +319,7 @@ def test_explorer_root_and_taxon_lookup(db, cur):
     assert db.species_curation.get_explorer_root("Mammalia")["id"] == 7
     assert db.species_curation.get_explorer_root("Mammalia", rank="order") is None
     assert db.species_curation.get_taxon_by_id(3) == {
-        "id": 3, "name": "Turdus", "common_name": None, "rank": "genus",
+        "id": 3, "inat_id": None, "name": "Turdus", "common_name": None, "rank": "genus",
         "parent_id": 2,
     }
     assert db.species_curation.get_taxon_by_id(999) is None

@@ -10,3 +10,12 @@ def confirmed_reviewer_box(db, photo_id, box):
     token = issue_frame_token(db, photo_id, identity)
     runtime = verified_reviewer_runtime(db, photo_id, token)
     return select_reviewer_box(db, photo_id, box, frame_runtime=runtime)
+
+
+def original_frame_detections(path, detections):
+    """Stand in for detection on a generated original, retaining actual frame proof."""
+    from image_loader import RAW_DECODE_ALIGNED, load_image
+
+    with load_image(path, max_size=1280, raw_decode=RAW_DECODE_ALIGNED) as image:
+        identity = image.info["vireo_subject_frame_id"]
+    return [{**detection, "frame_id": identity} for detection in detections]

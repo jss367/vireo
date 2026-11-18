@@ -46,18 +46,21 @@ export function renderSpeciesBadges(/** @type {string[] | undefined} */ species,
   return html + '</div>';
 }
 
+/** @type {Record<'reviewed_gps' | 'exif' | 'assigned' | 'none', [string, string, string]>} */
+const LOCATION_STATUS_LABELS = {
+  reviewed_gps: ['📍', 'Reviewed GPS', 'Catalog GPS correction used for the map and exports'],
+  exif: ['📍', 'EXIF GPS', 'Embedded GPS coordinates from the photo'],
+  assigned: ['●', 'Assigned map location', 'Map coordinates from an assigned Vireo location'],
+  none: ['⊘', 'No coordinates', 'No reviewed GPS, EXIF GPS or assigned map coordinates']
+};
+
 function renderCardField(/** @type {string} */ field, /** @type {BrowsePhoto} */ p) {
   switch (field) {
     case 'filename':
       return '<div class="grid-card-name" title="' + escapeAttr(p.filename) + '">' + escapeHtml(p.filename) + '</div>';
     case 'location_status':
       var locationStatus = p.location_status || 'none';
-      /** @type {Record<'exif' | 'assigned' | 'none', [string, string, string]>} */ var locationLabels = {
-        exif: ['📍', 'EXIF GPS', 'Embedded GPS coordinates from the photo'],
-        assigned: ['●', 'Assigned map location', 'Map coordinates from an assigned Vireo location'],
-        none: ['⊘', 'No coordinates', 'No EXIF GPS or assigned map coordinates']
-      };
-      var locationLabel = locationStatus === 'exif' ? locationLabels.exif : locationStatus === 'assigned' ? locationLabels.assigned : locationLabels.none;
+      var locationLabel = LOCATION_STATUS_LABELS[locationStatus] || LOCATION_STATUS_LABELS.none;
       return '<span class="grid-location-status ' + locationStatus + '" title="' + escapeAttr(locationLabel[2]) + '">' +
         locationLabel[0] + ' ' + locationLabel[1] + '</span>';
     case 'rating':

@@ -420,6 +420,16 @@ class _DetectBatchRun:
             with db.transaction():
                 db.photos.update_quality(photo["id"])
             return
+        from detection_id import detection_prompt_runtime
+        from image_loader import subject_box_image_path
+        from masking import require_original_reviewer_frame
+
+        folder = db.folders.get(photo["folder_id"])
+        if folder is None:
+            raise ValueError("Original subject frame unavailable")
+        image_path = subject_box_image_path(photo, None, {photo["folder_id"]: folder["path"]})
+        require_original_reviewer_frame(image_path, detection_prompt_runtime(regions[0]),
+                                        detector_model=regions[0].get("detector_model"))
         det_box = {k: regions[0]["box_" + k] for k in "xywh"}
         subject_size = det_box["w"] * det_box["h"]
 

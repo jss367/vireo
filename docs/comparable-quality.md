@@ -93,7 +93,7 @@ unverified box cannot be reused. Coordinate-bearing analysis uses the strict
 preview is not substituted. Browsing keeps its usual preview fallback;
 analysis stays pending instead of silently changing its frame. The comparison
 analyses (`subject_ranking_analysis`) store the detail too; their key carries
-`subject_ranking.ANALYSIS_RECIPE_VERSION` (8), raised with this change, so an
+`subject_ranking.ANALYSIS_RECIPE_VERSION` (9), raised with this change, so an
 analysis made before it no longer matches and the subject is analysed again.
 
 `photos.subject_detail_px` is the subject box's longer side in native pixels,
@@ -245,3 +245,17 @@ reviewer mask/analysis caches that older history replay may have mixed, while
 keeping immutable PNGs and human decisions. Recipe 8 prevents reuse of old
 comparison generations. Migration 50 separately repairs companion provenance
 for alternate-version catalogs already upgraded through versions 48 or 49.
+
+Detector rows now retain a separate `frame_id` for the rendition actually used
+by the final detector pass, including a tiled reload. Prompt validation and
+cached-mask use compare that proof with a fresh aligned original read; a
+transient thumbnail failure cannot silently switch preview boxes to sensor
+coordinates. Detail reloads must match that same frame identity. Fresh bound
+detection writes retire prior detector mask rows, including when a runtime
+replacement deleted the old detection first. Migration 53 retires unproven
+detector measurements and adds the nullable frame field without fabricating
+proof for historical boxes. Those boxes/predictions remain browsable and require
+Re-classify on the original before coordinate analysis. Portable detector
+imports without original-frame proof follow the same rule. Recipe 9 includes
+the detector frame in comparison keys. Migration 52 preserves main's reviewed
+GPS migration across branch catalogs whose version 44 had another meaning.

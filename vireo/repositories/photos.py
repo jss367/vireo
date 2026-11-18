@@ -25,34 +25,34 @@ import os
 from repositories.collections import CollectionRepository
 from repositories.folder_subtrees import folder_subtree_ids
 from repositories.photo_row_deletion import photo_row_deletion
-from repositories.photo_sql import CAPTURE_TIME_STATE_SQL, location_keyword_exists_sql
+from repositories.photo_sql import CAPTURE_TIME_STATE_SQL, REVIEWED_GPS_EXISTS, location_keyword_exists_sql
 from repositories.top_species import TOP_SPECIES_RANKING_SQL
 from sql_chunks import chunked
 
 
 def append_location_status_filter(conditions: list[str], location_status: str | None) -> None:
-    """Add a Browse coordinate-source predicate using the photo alias ``p``.
+    """Filter by the coordinate source reported on Browse cards.
 
-    ``exif`` means the original photo has a complete EXIF coordinate pair.
-    ``assigned`` means EXIF GPS is absent or incomplete but a linked,
-    structured location supplies a complete pair. ``none`` means neither
-    source can place the photo on the map.
+    Reviewed GPS takes precedence over EXIF, followed by an assigned location.
+    These source categories do not alter raw numeric GPS rule predicates.
     """
     if location_status is None:
         return
     assigned_exists = location_keyword_exists_sql(with_coordinates=True)
     no_exif = "(p.latitude IS NULL OR p.longitude IS NULL)"
-    if location_status == "exif":
+    if location_status == "reviewed_gps":
+        conditions.append(REVIEWED_GPS_EXISTS)
+    elif location_status == "exif":
         conditions.append(
-            "p.latitude IS NOT NULL AND p.longitude IS NOT NULL"
+            f"p.latitude IS NOT NULL AND p.longitude IS NOT NULL AND NOT {REVIEWED_GPS_EXISTS}"
         )
     elif location_status == "assigned":
-        conditions.append(f"{no_exif} AND {assigned_exists}")
+        conditions.append(f"{no_exif} AND NOT {REVIEWED_GPS_EXISTS} AND {assigned_exists}")
     elif location_status == "none":
-        conditions.append(f"{no_exif} AND NOT {assigned_exists}")
+        conditions.append(f"{no_exif} AND NOT {REVIEWED_GPS_EXISTS} AND NOT {assigned_exists}")
     else:
         raise ValueError(
-            "location_status must be 'exif', 'assigned', or 'none'"
+            "location_status must be 'reviewed_gps', 'exif', 'assigned', or 'none'"
         )
 
 

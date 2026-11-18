@@ -441,7 +441,7 @@ def write_mask_png(mask, destination):
     Image.fromarray(mask.astype(np.uint8) * 255).save(destination, format="PNG", pnginfo=metadata)
 
 
-def require_aligned_detector_prompt(image, detector_runtime):
+def require_aligned_detector_prompt(image, detector_runtime, *, detector_model=None):
     """Refuse unproven old boxes when RAW preview and sensor frames differ.
 
     The current detector runtime uses the same camera-rendered frame as SAM.
@@ -451,12 +451,17 @@ def require_aligned_detector_prompt(image, detector_runtime):
     """
     require_original_box(detector_runtime)
     from computation_cache import megadetector_runtime_fingerprint
-    from detection_id import ALIGNED_REVIEWER_RUNTIME, REVIEWER_FRAME_PREFIX
+    from detection_id import ALIGNED_REVIEWER_RUNTIME, prompt_frame_id
 
-    if isinstance(detector_runtime, str) and detector_runtime.startswith(REVIEWER_FRAME_PREFIX):
-        if detector_runtime == REVIEWER_FRAME_PREFIX + getattr(image, "info", {}).get("vireo_subject_frame_id", ""):
+    frame_id = prompt_frame_id(detector_runtime)
+    if frame_id is not None:
+        if frame_id == getattr(image, "info", {}).get("vireo_subject_frame_id"):
             return
-        raise PromptFrameError("Original reviewer frame changed or is unavailable; open Subjects and confirm the box again on the original.")
+        raise PromptFrameError("Original reviewer/detector frame changed or is unavailable; re-detect or confirm the reviewer box on the original.")
+    if detector_model == "full-image":
+        return  # Whole-frame regions are invariant to the normalized coordinate frame.
+    if detector_model == "megadetector-v6":
+        raise PromptFrameError("Detector coordinates lack original-frame proof; enable Re-classify to rerun detection on the original")
     if detector_runtime in ("reviewer-v1", ALIGNED_REVIEWER_RUNTIME):
         raise PromptFrameError("This reviewer box uses an unverified original frame. Open Subjects and draw the box again on the original.")
     if not getattr(image, "info", {}).get("vireo_rejected_preview_edge"):
@@ -466,17 +471,19 @@ def require_aligned_detector_prompt(image, detector_runtime):
         raise PromptFrameError("Detector coordinates use an unverified RAW frame; enable Re-classify to rerun detection before subject analysis")
 
 
-def require_original_reviewer_frame(image_path, runtime):
-    """Cached measurements cannot bypass a reviewer's original-frame proof."""
-    if not isinstance(runtime, str) or not runtime.startswith("reviewer"):
+def require_original_reviewer_frame(image_path, runtime, *, detector_model=None):
+    """Cached measurements cannot bypass a prompt's original-frame proof."""
+    from detection_id import prompt_frame_id
+
+    if prompt_frame_id(runtime) is None and detector_model != "megadetector-v6" and (not isinstance(runtime, str) or not runtime.startswith("reviewer")):
         return
     from image_loader import RAW_DECODE_ALIGNED, load_image
 
     image = load_image(image_path, max_size=1024, raw_decode=RAW_DECODE_ALIGNED)
     if image is None:
-        raise PromptFrameError("Original reviewer frame unavailable; reconnect the original before analysis")
+        raise PromptFrameError("Original prompt frame unavailable; reconnect the original before analysis")
     with image:
-        require_aligned_detector_prompt(image, runtime)
+        require_aligned_detector_prompt(image, runtime, detector_model=detector_model)
 
 
 def load_mask(masks_dir, photo_id, variant):

@@ -312,7 +312,7 @@ export function renderBatchInspector(/** @type {number[]} */ ids, /** @type {{pr
       coordinateEl.className = 'coordinate-status none';
       coordinateEl.textContent = 'Coordinate sources are mixed or still loading for this selection.';
     } else {
-      var counts = {exif: 0, assigned: 0, none: 0};
+      var counts = {reviewed_gps: 0, exif: 0, assigned: 0, none: 0};
       ids.forEach(function(id) {
         var p = findBrowsePhoto(id);
         var status = p?.location_status || 'none';
@@ -320,7 +320,7 @@ export function renderBatchInspector(/** @type {number[]} */ ids, /** @type {{pr
       });
       coordinateEl.className = 'coordinate-status';
       coordinateEl.textContent = [
-        counts.exif + ' EXIF GPS',
+        counts.reviewed_gps + ' reviewed GPS · ' + counts.exif + ' EXIF GPS',
         counts.assigned + ' assigned map location' + (counts.assigned === 1 ? '' : 's'),
         counts.none + ' without coordinates'
       ].join(' · ');

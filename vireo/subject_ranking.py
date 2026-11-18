@@ -132,7 +132,8 @@ def source_path(db, photo):
 # 6: detector boxes and SAM prompts share a verified camera-rendered frame.
 # 7: reviewer coordinates are bound to the actual original frame generation.
 # 8: retire analyses that may have reused masks across reviewer history frames.
-ANALYSIS_RECIPE_VERSION = 8
+# 9: detector prompts are bound to their actual decoded rendition.
+ANALYSIS_RECIPE_VERSION = 9
 
 
 def analysis_key(path, detection, effective_cfg):
@@ -160,7 +161,7 @@ def analysis_key(path, detection, effective_cfg):
         except FileNotFoundError:
             weights.append((weight, None))
     inputs = [ANALYSIS_RECIPE_VERSION, EYE_KP_FINGERPRINT_VERSION, detection.get("prediction_fingerprint"), os.path.realpath(path), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_ino, detection["id"],
-              detection["detector_model"], dict(detection).get("runtime_fingerprint"), [detection["box_" + k] for k in "xywh"], 1024,
+              detection["detector_model"], dict(detection).get("runtime_fingerprint"), dict(detection).get("frame_id"), [detection["box_" + k] for k in "xywh"], 1024,
               {k: pipeline.get(k, default) for k, default in (
                   ("sam2_variant", "sam2-small"), ("eye_detect_enabled", False),
                   ("eye_classifier_conf_gate", .5), ("eye_detection_conf_gate", .5), ("eye_window_k", .08))}, weights]

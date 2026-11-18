@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 from PIL import Image
-from reviewer_helpers import confirmed_reviewer_box
+from reviewer_helpers import confirmed_reviewer_box, original_frame_detections
 from services import detection_store, photo_ingest, stage_counts, subject_masks, workspace_folders
 from subjects import analyze_photo, payload, select_primary
 
@@ -15,12 +15,12 @@ def subject_photo(db, tmp_path):
     pixels[:, 160:] = np.where((np.indices((160, 160)).sum(axis=0) // 4 % 2)[..., None], 160, 60)
     Image.fromarray(pixels).save(path)
     photo_id = photo_ingest.add_photo(db, folder_id=folder, filename=path.name, extension=".jpg", file_size=path.stat().st_size, file_mtime=1)
-    ids = detection_store.write_detection_batch(db, photo_id, "megadetector-v6", [
+    ids = detection_store.write_detection_batch(db, photo_id, "megadetector-v6", original_frame_detections(path, [
         {"box": {"x": .05, "y": .1, "w": .35, "h": .8}, "confidence": .95, "category": "animal"},
         {"box": {"x": .6, "y": .1, "w": .35, "h": .8}, "confidence": .7, "category": "animal"},
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": .05, "category": "animal"},
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": .99, "category": "person"},
-    ])
+    ]))
     # The sharp animal's crop matches its species label better than the
     # blurry one's, which is what makes it the primary subject.
     _match_score(db, ids[0], 0.40)
@@ -79,6 +79,12 @@ def test_analysis_invalidated_by_source_change(db, subject_photo):
     photo_id, ids, path = subject_photo
     analyze_photo(db, photo_id, path)
     Image.new("RGB", (320, 160), (240, 240, 240)).save(path)
+    with pytest.raises(ValueError, match="frame changed"):
+        analyze_photo(db, photo_id, path)
+    rows = detection_store.get_detections(db, photo_id, min_conf=0)
+    detection_store.write_detection_batch(db, photo_id, "megadetector-v6", original_frame_detections(path, [
+        {"box": {k: row["box_" + k] for k in "xywh"}, "confidence": row["detector_confidence"], "category": row["category"]}
+        for row in rows]))
     assert analyze_photo(db, photo_id, path) == 2
     assert all(s["analysis"]["exposure_ev"] < 0 for s in payload(db, photo_id)["subjects"])
 

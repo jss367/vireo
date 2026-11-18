@@ -83,6 +83,7 @@ def analyze_image(image, detections):
 def analyze_photo(db, photo_id, image_path, *, min_conf=None, force=False, checkpoint=None, detection_id=None,
                   validate_publication=None):
     """Backfill on cached detection runs too; failed/offline reads remain retryable."""
+    from detection_id import detection_prompt_runtime
     from image_loader import RAW_DECODE_ALIGNED, aligned_source_state, load_image, subject_box_image_path
     from masking import require_aligned_detector_prompt, require_original_reviewer_frame
     from pipeline_locks import acquire_photo_mask
@@ -120,7 +121,7 @@ def analyze_photo(db, photo_id, image_path, *, min_conf=None, force=False, check
     pending = [d for d in detections if force or d["id"] not in cached]
     if not pending:
         for detection in detections:
-            require_original_reviewer_frame(image_path, detection.get("runtime_fingerprint"))
+            require_original_reviewer_frame(image_path, detection_prompt_runtime(detection), detector_model=detection.get("detector_model"))
         with acquire_photo_mask(photo_id):
             if checkpoint:
                 checkpoint()
@@ -132,7 +133,7 @@ def analyze_photo(db, photo_id, image_path, *, min_conf=None, force=False, check
         raise ValueError("Could not load photo for subject analysis")
     try:
         for detection in pending:
-            require_aligned_detector_prompt(image, detection.get("runtime_fingerprint"))
+            require_aligned_detector_prompt(image, detection_prompt_runtime(detection), detector_model=detection.get("detector_model"))
         results = analyze_image(image, pending)
     finally:
         image.close()
@@ -157,6 +158,7 @@ def _current_analysis_results(db, photo_id, pending, results, detection_id, min_
     # the exact geometry, including edits that retain the same detection ID.
     valid = {d["id"] for d in pending if d["id"] in current
              and current[d["id"]].get("runtime_fingerprint") == d.get("runtime_fingerprint")
+             and current[d["id"]].get("frame_id") == d.get("frame_id")
              and all(current[d["id"]]["box_" + k] == d["box_" + k] for k in "xywh")}
     if detection_id is not None and detection_id not in valid:
         raise ValueError("Chosen subject changed during analysis; select it again")

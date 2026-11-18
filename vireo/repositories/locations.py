@@ -44,7 +44,7 @@ class LocationRepository:
     # -- location status and map queries -------------------------------------
 
     def get_photo_statuses(self, photo_ids):
-        """Return ``{photo_id: exif|assigned|none}`` for the requested photos."""
+        """Return each photo's coordinate source: reviewed_gps, exif, assigned or none."""
         if not photo_ids:
             return {}
         result = {}
@@ -54,6 +54,8 @@ class LocationRepository:
                 f"""
                 SELECT p.id,
                        CASE
+                         WHEN EXISTS (SELECT 1 FROM reviewed_gps g WHERE g.photo_id = p.id)
+                           THEN 'reviewed_gps'
                          WHEN p.latitude IS NOT NULL AND p.longitude IS NOT NULL
                            THEN 'exif'
                          WHEN EXISTS (
@@ -79,10 +81,10 @@ class LocationRepository:
 
         ``rules`` (a universal-filter rule tree) restricts the plottable set
         exactly like Browse's grid; it is the Map page's only metadata filter.
-        Returns photos that have either non-null EXIF latitude/longitude OR a
+        Returns photos that have reviewed GPS, complete EXIF GPS OR a
         ``type='location'`` keyword link whose keyword has non-null coords,
         unpaginated, each with its species keyword (or NULL), plus
-        ``coord_source`` (``'exif'`` or ``'keyword'``) and
+        ``coord_source`` (``reviewed_gps``, ``exif`` or ``keyword``) and
         ``keyword_location_name`` (the location keyword's name when EXIF is
         absent, NULL otherwise) so the map can show provenance.
         """
@@ -92,7 +94,7 @@ class LocationRepository:
         conditions = [
             "wf.workspace_id = ?",
             "((p.latitude IS NOT NULL AND p.longitude IS NOT NULL) "
-            " OR (kl.latitude IS NOT NULL AND kl.longitude IS NOT NULL))",
+            " OR g.photo_id IS NOT NULL OR (kl.latitude IS NOT NULL AND kl.longitude IS NOT NULL))",
         ]
         params = [self.workspace_id_fn()]
 
@@ -133,6 +135,7 @@ class LocationRepository:
         join_clause = (
             "JOIN photo_workspace_visibility wf ON wf.photo_id = p.id"
             "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')"
+            "\nLEFT JOIN reviewed_gps g ON g.photo_id = p.id"
             f"\n{location_subquery}"
         )
         where = "WHERE " + " AND ".join(conditions)
@@ -150,11 +153,14 @@ class LocationRepository:
 
         query = f"""
             SELECT p.id,
-                   CASE WHEN p.latitude IS NOT NULL AND p.longitude IS NOT NULL
+                   CASE WHEN g.photo_id IS NOT NULL THEN g.latitude
+                        WHEN p.latitude IS NOT NULL AND p.longitude IS NOT NULL
                         THEN p.latitude ELSE kl.latitude END AS latitude,
-                   CASE WHEN p.latitude IS NOT NULL AND p.longitude IS NOT NULL
+                   CASE WHEN g.photo_id IS NOT NULL THEN g.longitude
+                        WHEN p.latitude IS NOT NULL AND p.longitude IS NOT NULL
                         THEN p.longitude ELSE kl.longitude END AS longitude,
-                   CASE WHEN p.latitude IS NOT NULL AND p.longitude IS NOT NULL
+                   CASE WHEN g.photo_id IS NOT NULL THEN 'reviewed_gps'
+                        WHEN p.latitude IS NOT NULL AND p.longitude IS NOT NULL
                         THEN 'exif' ELSE 'keyword' END AS coord_source,
                    CASE WHEN p.latitude IS NOT NULL AND p.longitude IS NOT NULL
                         THEN NULL ELSE kl.name END AS keyword_location_name,
@@ -414,8 +420,9 @@ class LocationRepository:
                       AND k_loc.longitude IS NOT NULL
                 )
                 SELECT p.id,
-                       p.latitude AS photo_latitude,
-                       p.longitude AS photo_longitude,
+                       COALESCE(g.latitude, p.latitude) AS photo_latitude,
+                       COALESCE(g.longitude, p.longitude) AS photo_longitude,
+                       g.photo_id AS reviewed_id,
                        kl.latitude AS keyword_latitude,
                        kl.longitude AS keyword_longitude,
                        kl.name AS keyword_location_name,
@@ -423,6 +430,7 @@ class LocationRepository:
                 FROM selected s
                 JOIN photos p ON p.id = s.id
                 {workspace_join}
+                LEFT JOIN reviewed_gps g ON g.photo_id = p.id
                 LEFT JOIN ranked_locations kl
                   ON kl.photo_id = p.id AND kl.rn = 1
                 """,
@@ -438,7 +446,7 @@ class LocationRepository:
                         "photo_id": row["id"],
                         "latitude": row["photo_latitude"],
                         "longitude": row["photo_longitude"],
-                        "source": "exif",
+                        "source": "reviewed_gps" if row["reviewed_id"] else "exif",
                         "keyword_location_name": None,
                         "place_id": None,
                     }
@@ -468,7 +476,7 @@ class LocationRepository:
     def count_photos_without_coordinates(self):
         """Count photos in the active workspace that the map can't plot.
 
-        A photo IS plottable when either its EXIF lat/lng are both present
+        A photo IS plottable when it has reviewed GPS, a complete EXIF pair,
         OR it carries a ``type='location'`` keyword whose lat/lng are both
         present (matches :meth:`get_geolocated_photos`'s paired-fallback
         semantics). This counter excludes those.
@@ -484,6 +492,7 @@ class LocationRepository:
             JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
             WHERE wf.workspace_id = ?
               AND (p.latitude IS NULL OR p.longitude IS NULL)
+              AND NOT EXISTS (SELECT 1 FROM reviewed_gps g WHERE g.photo_id = p.id)
               AND NOT EXISTS (
                 SELECT 1 FROM photo_keywords pk
                 JOIN keywords k ON k.id = pk.keyword_id
@@ -500,7 +509,7 @@ class LocationRepository:
     def get_plottable_photo_ids(self, folder_id=None):
         """Return ids of every photo the Map endpoint could render.
 
-        A photo is plottable when either its EXIF lat/lng are both present
+        A photo is plottable when it has reviewed GPS or a complete EXIF pair
         OR it carries a ``type='location'`` keyword whose lat/lng are both
         present — the same paired-fallback semantics
         :meth:`get_geolocated_photos` and
@@ -532,6 +541,7 @@ class LocationRepository:
               {folder_clause}
               AND (
                 (p.latitude IS NOT NULL AND p.longitude IS NOT NULL)
+                OR EXISTS (SELECT 1 FROM reviewed_gps g WHERE g.photo_id = p.id)
                 OR EXISTS (
                   SELECT 1 FROM photo_keywords pk
                   JOIN keywords k ON k.id = pk.keyword_id
@@ -671,7 +681,7 @@ class LocationRepository:
             (photo_id,),
         ).fetchone()
 
-    def located_keywords_in_workspace(self):
+    def located_keywords_in_workspace(self, *, include_unlocated=False):
         """Location keywords with coordinates tagged on active-workspace photos.
 
         Rows (``id``, ``name``, ``place_id``, ``latitude``, ``longitude``,
@@ -686,9 +696,9 @@ class LocationRepository:
                JOIN photos p ON p.id = pk.photo_id
                JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                WHERE wf.workspace_id = ? AND k.type = 'location'
-                 AND k.latitude IS NOT NULL AND k.longitude IS NOT NULL
+                 AND (? OR (k.latitude IS NOT NULL AND k.longitude IS NOT NULL))
                GROUP BY k.id""",
-            (self.workspace_id_fn(),),
+            (self.workspace_id_fn(), include_unlocated),
         ).fetchall()
 
     def tagged_location_points(self, min_lat, max_lat, min_lng, max_lng):

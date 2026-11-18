@@ -4,6 +4,7 @@ import io
 import numpy as np
 import pytest
 from PIL import Image
+from reviewer_helpers import original_frame_detections
 from services import detection_store, keyword_tagging, photo_ingest, review_decisions, workspace_folders
 from subject_analysis import analyze_detection
 from subject_ranking import SubjectComparison, parse_comparison, resolve_subject
@@ -28,10 +29,10 @@ def comparison_library(app_and_db, tmp_path, monkeypatch):
         Image.fromarray(pixels).save(path)
         photo_id = photo_ingest.add_photo(db, folder_id=folder, filename=path.name, extension=".png",
                                          file_size=path.stat().st_size, file_mtime=path.stat().st_mtime)
-        ids = detection_store.write_detection_batch(db, photo_id, "megadetector-v6", [
+        ids = detection_store.write_detection_batch(db, photo_id, "megadetector-v6", original_frame_detections(path, [
             {"box": {"x": .06, "y": .12, "w": .32, "h": .76}, "confidence": .9, "category": "animal"},
             {"box": {"x": .62, "y": .12, "w": .32, "h": .76}, "confidence": .95, "category": "animal"},
-        ])
+        ]))
         for did, species in zip(ids, (TARGET, OTHER), strict=True):
             db.predictions.add(did, species, .95, "test", status="accepted")
             db.commit()

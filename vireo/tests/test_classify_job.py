@@ -1381,7 +1381,7 @@ def test_detect_batch_scores_normally_when_primary_at_threshold(
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    folder_id = workspace_folders.add_folder(db, "/tmp/p")
+    folder_id = workspace_folders.add_folder(db, str(tmp_path))
     ws = db.create_workspace("A")
     db.commit()
     db._active_workspace_id = ws
@@ -1399,6 +1399,9 @@ def test_detect_batch_scores_normally_when_primary_at_threshold(
          "confidence": 0.85, "category": "animal"},
     ]
 
+    from reviewer_helpers import original_frame_detections
+
+    fake_detections = original_frame_detections(tmp_path / "bird.jpg", fake_detections)
     photos = [{"id": photo_id, "folder_id": folder_id, "filename": "bird.jpg"}]
     folders = {folder_id: str(tmp_path)}
 
@@ -1420,15 +1423,13 @@ def test_detect_batch_scores_normally_when_primary_at_threshold(
     assert row["subject_size"] is not None
 
 
-def test_detect_batch_subject_analysis_uses_working_copy_when_source_offline(
+def test_detect_batch_subject_analysis_requires_original_when_source_offline(
     tmp_path, monkeypatch
 ):
-    """When ``vireo_dir`` is supplied and a cached-detection photo's source
-    folder is offline, the subject-analysis loop must resolve the image
-    through the working-copy JPEG rather than the source path. Without
-    this the automatic backfill fails at ``os.stat`` and the photo never
-    gets subject quality, crop, or exposure data — even though the
-    on-demand Analyze route can process it just fine.
+    """Cached detections cannot authorize new coordinates on an offline alias.
+
+    Working copies remain available for browsing; coordinate analysis receives
+    the original path and can explicitly fail while it is offline.
     """
     from unittest.mock import patch
 
@@ -1461,7 +1462,7 @@ def test_detect_batch_subject_analysis_uses_working_copy_when_source_offline(
 
     # Seed a cached detector run so this photo goes through the
     # already-detected branch — the exact case where the source is
-    # offline but subject analysis should still succeed.
+    # offline and new coordinate analysis must require the original.
     detection_store.write_detection_batch(
         db, photo_id, "megadetector-v6",
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
@@ -1488,14 +1489,11 @@ def test_detect_batch_subject_analysis_uses_working_copy_when_source_offline(
         )
 
     assert seen_paths, "subject analysis loop did not run"
-    # Compare as paths, not strings: the DB stores ``working_copy_path``
-    # POSIX-style and product code joins it with ``os.path.join``, which on
-    # Windows yields a valid mixed-separator path (``...\vireo\working/bird.jpg``)
-    # that a string compare against ``str(vireo_dir / wc_rel)`` would reject.
-    assert Path(seen_paths[0]) == vireo_dir / wc_rel, (
-        "subject analysis must resolve through the working-copy JPEG "
-        "when the source folder is offline"
-    )
+    assert Path(seen_paths[0]) == Path(offline_dir) / "bird.jpg"
+    from image_loader import get_canonical_image_path
+
+    assert Path(get_canonical_image_path(photo, str(vireo_dir), folders)) == vireo_dir / wc_rel
+    assert db.detections.get(photo_id, 0), "Historical detections must remain browsable"
 
 
 def test_classify_photos_reclassifies_when_gate_has_no_cached_rows(tmp_path):

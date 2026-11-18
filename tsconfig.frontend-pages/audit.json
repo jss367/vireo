@@ -5,6 +5,7 @@
     "../vireo/static/audit/boot.js",
     "../vireo/static/audit/clocks.js",
     "../vireo/static/audit/drift.js",
+    "../vireo/static/audit/gps.js",
     "../vireo/static/audit/helpers.js",
     "../vireo/static/audit/integrity.js",
     "../vireo/static/audit/orphans.js",

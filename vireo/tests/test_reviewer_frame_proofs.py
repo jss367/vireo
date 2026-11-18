@@ -218,7 +218,7 @@ def test_migration_retires_derived_box_scores_but_preserves_human_data(original_
     db.conn.execute("INSERT INTO subject_ranking_analysis VALUES (?, 'old-frame', '{}', ?)", (did, b"synthetic"))
     db.conn.execute("INSERT INTO subject_raw_analysis VALUES (?, 'old-frame', '{}', 0)", (did,))
     db.predictions.add(did, "Synthetic bird", .9, "synthetic-classifier", status="accepted")
-    other, = db.detections.upsert_rows(pid, "megadetector-v6", [{"box": {"x": .1, "y": .1, "w": .1, "h": .1}, "confidence": .9}], "current")
+    other, = db.detections.upsert_rows(pid, "full-image", [{"box": {"x": .1, "y": .1, "w": .1, "h": .1}, "confidence": .9}], "current")
     db.conn.execute("INSERT INTO subject_ranking_analysis VALUES (?, 'unrelated', '{}', ?)", (other, b"unrelated"))
 
     db.conn.execute("UPDATE photos SET rating=5, quality_score=90, subject_sharpness=123, subject_detail=123 WHERE id=?", (pid,))
@@ -293,3 +293,34 @@ def test_history_retires_masks_from_a_different_verified_rendition(original_phot
     assert client.post("/api/redo").status_code == 200
     assert db.masks_features.get_mask(pid, "sam2-small") is None
     assert mask.exists()
+
+
+@pytest.mark.parametrize("version", [51, 52])
+def test_detector_frame_upgrade_preserves_choices_but_requires_original_redetection(original_photo, version):
+    import schema
+    from reviewer_helpers import original_frame_detections
+    from services.detection_store import write_detection_batch
+    from subjects import analyze_photo
+
+    _app, db, pid, source = original_photo
+    rows = [{"box": dict(x=.2, y=.2, w=.4, h=.4), "confidence": .9}]
+    did, = write_detection_batch(db, pid, "megadetector-v6", rows)
+    db.subjects.set_choice(pid, did)
+    db.subjects.set_primary_state(pid, did)
+    db.predictions.add(did, "Synthetic bird", .9, "synthetic-classifier")
+    db.conn.execute("INSERT INTO detection_subjects VALUES (?, 'legacy', '{}', 90, 1, '{}')", (did,))
+    db.conn.execute("UPDATE photos SET rating=5, quality_score=90 WHERE id=?", (pid,))
+    db.conn.execute("ALTER TABLE detections DROP COLUMN frame_id")
+    db.conn.execute(f"PRAGMA user_version={version}")
+    db.commit()
+    schema._apply_pending(db.conn)
+    assert db.detections.row(did)["frame_id"] is None
+    assert db.subjects.choice(pid)["detection_id"] == did
+    assert db.photos.get(pid)["rating"] == 5
+    assert db.photos.get(pid)["quality_score"] is None
+    assert db.subjects.analysis(did) is None
+    with pytest.raises(ValueError, match="lack original-frame proof"):
+        analyze_photo(db, pid, str(source))
+    assert write_detection_batch(db, pid, "megadetector-v6", original_frame_detections(source, rows)) == [did]
+    assert db.conn.execute("SELECT species FROM predictions WHERE detection_id=?", (did,)).fetchone()[0] == "Synthetic bird"
+    assert analyze_photo(db, pid, str(source)) == 1

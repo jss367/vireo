@@ -625,7 +625,7 @@ class SpeciesCurationRepository:
             subjects.setdefault(row["photo_id"], []).append(subject_from_row(row))
         return subjects
 
-    def get_life_list_candidates(self, species=None):
+    def get_life_list_candidates(self, species=None, *, trip=None):
         """Return (photo x accepted-identification-keyword) life-list rows.
 
         Every non-rejected photo in a workspace-visible folder carrying an
@@ -681,6 +681,17 @@ class SpeciesCurationRepository:
         else:
             species_filter = ""
             params = (ws,)
+        if trip:
+            if trip.get("folder_ids") is not None:
+                species_filter += " AND p.folder_id IN (SELECT value FROM json_each(?))"
+                params += (json.dumps(trip["folder_ids"]),)
+            for key, operator in (("date_from", ">="), ("date_to", "<=")):
+                if trip.get(key):
+                    species_filter += f" AND substr(p.timestamp, 1, 10) {operator} ?"
+                    params += (trip[key],)
+            if trip.get("location_id"):
+                species_filter += " AND EXISTS (SELECT 1 FROM photo_keywords loc WHERE loc.photo_id=p.id AND loc.keyword_id=?)"
+                params += (trip["location_id"],)
         return self.conn.execute(
             f"""SELECT p.id, p.folder_id, p.filename, p.timestamp,
                       p.rating, p.flag, p.quality_score,
@@ -972,7 +983,7 @@ class SpeciesCurationRepository:
     def get_taxon_by_id(self, taxon_id):
         """Thin getter for a single taxon row (for non-default explorer roots)."""
         row = self.conn.execute(
-            "SELECT id, name, common_name, rank, parent_id FROM taxa WHERE id = ?",
+            "SELECT id, inat_id, name, common_name, rank, parent_id FROM taxa WHERE id = ?",
             (taxon_id,),
         ).fetchone()
         return dict(row) if row else None

@@ -1280,3 +1280,33 @@ def test_snapshot_excludes_only_requested_model_in_nullable_legacy_storage():
         repo = DetectionsRepository(conn)
         assert repo.get_ids_for_photos([1]) == {1: {1, 2, 3}}
         assert repo.get_ids_for_photos([1], exclude_model='reviewer-selected') == {1: {1, 2}}
+
+
+@pytest.mark.parametrize("replace_runtime", [False, True])
+def test_bound_detector_runtime_retires_changed_frame_masks_and_old_run_rows(db, tmp_path, replace_runtime):
+    from repositories.masks_features import MaskQuality
+    from services.detection_store import write_detection_batch
+
+    pid = _photo(db)
+    boxes = [{"box": dict(x=x, y=.1, w=.2, h=.2), "confidence": .9, "frame_id": "a" * 64} for x in (.1, .6)]
+    kept, stale = write_detection_batch(db, pid, "megadetector-v6", boxes, "synthetic-runtime")
+    assert db.model_runs.detector_runtime_fingerprint(pid, "megadetector-v6") == "synthetic-runtime"
+    assert db.detections.row(kept)["frame_id"] == "a" * 64
+    db.predictions.add(kept, "Synthetic bird", .9, "synthetic-classifier", status="accepted")
+    png = tmp_path / "immutable.png"
+    png.write_bytes(b"synthetic immutable artifact, never decoded")
+    db.masks_features.upsert_mask(pid, "sam2-small", str(png), "megadetector-v6", (.1, .1, .2, .2),
+                                  MaskQuality(subject_detail=123, subject_detail_px=100))
+    db.subjects.set_choice(pid, kept)
+    db.photo_review.set_rating(pid, 5)
+    boxes[0]["frame_id"] = "b" * 64
+    assert write_detection_batch(db, pid, "megadetector-v6", boxes[:1],
+                                 "replacement-runtime" if replace_runtime else "synthetic-runtime",
+                                 force_runtime_replace=True) == [kept]
+    assert db.detections.row(stale) is None
+    assert db.masks_features.get_mask(pid, "sam2-small") is None
+    assert png.exists()
+    assert db.subjects.choice(pid)["detection_id"] == kept
+    assert db.photos.get(pid)["rating"] == 5
+    if not replace_runtime:
+        assert db.conn.execute("SELECT species FROM predictions WHERE detection_id=?", (kept,)).fetchone()[0] == "Synthetic bird"

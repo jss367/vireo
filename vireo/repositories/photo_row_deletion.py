@@ -21,13 +21,42 @@ import contextlib
 import logging
 
 from repositories.collections import remap_collection_photo_ids
-from repositories.identity_alternatives import remap_photo_identities
+from repositories.identity_alternatives import IdentityMergeConflict, remap_photo_identities
 from repositories.photo_review import remap_flag_attribution_keepers
 from repositories.photo_versions import remap_photo_versions
 from repositories.species_choices import SpeciesChoiceRepository
 from sql_chunks import chunked
 
 log = logging.getLogger(__name__)
+
+
+def _remap_reviewed_gps(conn, mapping):
+    """Carry reviewed coordinates; distinct decisions require reconciliation.
+
+    There is no review timestamp that can select a winner. Keep both photos
+    on a conflict instead of implicitly discarding a correction or its evidence.
+    The caller owns the transaction, including rollback of earlier carries.
+    """
+    for losing, survivor in mapping.items():
+        if survivor is None or losing == survivor:
+            continue
+        source = conn.execute(
+            "SELECT latitude, longitude, evidence FROM reviewed_gps WHERE photo_id = ?",
+            (losing,),
+        ).fetchone()
+        if source is None:
+            continue
+        target = conn.execute(
+            "SELECT latitude, longitude, evidence FROM reviewed_gps WHERE photo_id = ?",
+            (survivor,),
+        ).fetchone()
+        if target is not None and tuple(source) != tuple(target):
+            raise IdentityMergeConflict(
+                f"Photos {losing} and {survivor} have conflicting reviewed GPS decisions. "
+                "Reconcile their corrections and evidence before merging these photo rows."
+            )
+        if target is None:
+            conn.execute("UPDATE reviewed_gps SET photo_id = ? WHERE photo_id = ?", (survivor, losing))
 
 
 class PhotoRowDeletion:
@@ -46,6 +75,7 @@ class PhotoRowDeletion:
         collection's rules, so doing it per row would make a loop of N merges
         cost N passes over every collection.
         """
+        _remap_reviewed_gps(self.conn, mapping)
         remap_photo_identities(self.conn, mapping)
         for losing, survivor in mapping.items():
             if survivor is not None and survivor != losing:

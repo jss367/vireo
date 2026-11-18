@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Protocol, TypedDict
 
 import numpy as np
 from config import config_value
-from detection_id import require_original_box
+from detection_id import detection_prompt_runtime, require_original_box
 from pipeline_locks import (
     acquire_photo_mask,
 )
@@ -1012,7 +1012,7 @@ class _MaskPass:
             self.skipped += 1
             return _NEXT_PHOTO
         selected = current[0]
-        item.detector_runtime = selected["runtime_fingerprint"]
+        item.detector_runtime = detection_prompt_runtime(selected)
         item.det_box = {k: selected["box_" + k] for k in "xywh"}
         item.entry["detector_model"] = selected["detector_model"]
         item.entry["prompt"] = tuple(selected["box_" + k] for k in "xywh")
@@ -1136,7 +1136,7 @@ class _MaskPass:
         )
         if existing is None:
             return False
-        self.require_original_reviewer_frame(item.image_path, item.detector_runtime)
+        self.require_original_reviewer_frame(item.image_path, item.detector_runtime, detector_model=item.entry.get("detector_model"))
         cached_prompt = (
             existing["prompt_x"], existing["prompt_y"],
             existing["prompt_w"], existing["prompt_h"],
@@ -1221,7 +1221,7 @@ class _MaskPass:
     def _generate_aligned_mask(self, item: _MaskPhoto, proxy: Image.Image) -> np.ndarray | None:
         with self._timed("segment"):
             item.frame_id = getattr(proxy, "info", {}).get("vireo_subject_frame_id")
-            self.require_aligned_detector_prompt(proxy, item.detector_runtime)
+            self.require_aligned_detector_prompt(proxy, item.detector_runtime, detector_model=item.entry.get("detector_model"))
             return self.generate_mask(proxy, item.det_box, variant=self.sam2_variant)
 
     def _analyze_and_embed(
@@ -1332,10 +1332,10 @@ class _MaskPass:
             self.detail_unreadable += 1
             return False
         with self._timed("detail"):
-            from detection_id import REVIEWER_FRAME_PREFIX
+            from detection_id import prompt_frame_id
 
-            proof = ({"expected_frame_id": item.detector_runtime.removeprefix(REVIEWER_FRAME_PREFIX)}
-                     if item.detector_runtime and item.detector_runtime.startswith(REVIEWER_FRAME_PREFIX) else {})
+            frame_id = prompt_frame_id(item.detector_runtime)
+            proof = {"expected_frame_id": frame_id} if frame_id is not None else {}
             measured = self.measure_cached_subject_detail(
                 existing["path"], item.image_path, self.frame_size(item.photo),
                 **proof,

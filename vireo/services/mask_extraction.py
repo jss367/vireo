@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
-from detection_id import require_original_box
+from detection_id import detection_prompt_runtime, require_original_box
 from repositories.masks_features import MaskQuality, PipelineFeatures
 from services import detection_store, subject_masks
 
@@ -360,7 +360,7 @@ class _MaskExtractionRun:
             det_box = json.loads(det_box)
 
         # Generate mask via SAM2
-        deps.require_aligned_detector_prompt(proxy, photo.get("detector_runtime"))
+        deps.require_aligned_detector_prompt(proxy, photo.get("detector_runtime"), detector_model=photo.get("detector_model"))
         mask = deps.generate_mask(proxy, det_box, variant=self.sam2_variant)
         if mask is None:
             self.skipped += 1
@@ -418,7 +418,7 @@ class _MaskExtractionRun:
         if not current:
             return False
         selected = current[0]
-        photo["detector_runtime"] = selected["runtime_fingerprint"]
+        photo["detector_runtime"] = detection_prompt_runtime(dict(selected))
         photo["detector_model"] = selected["detector_model"]
         photo["prompt"] = tuple(selected["box_" + k] for k in "xywh")
         photo["detection_box"] = {k: selected["box_" + k] for k in "xywh"}
@@ -448,7 +448,7 @@ class _MaskExtractionRun:
         )
         if existing is None:
             return False
-        self.deps.require_original_reviewer_frame(item.image_path, photo.get("detector_runtime"))
+        self.deps.require_original_reviewer_frame(item.image_path, photo.get("detector_runtime"), detector_model=photo.get("detector_model"))
         cached_prompt = (
             existing["prompt_x"], existing["prompt_y"],
             existing["prompt_w"], existing["prompt_h"],
@@ -503,11 +503,10 @@ class _MaskExtractionRun:
         existing = item.existing
         if existing is None:
             return False
-        from detection_id import REVIEWER_FRAME_PREFIX
+        from detection_id import prompt_frame_id
 
-        runtime = item.photo.get("detector_runtime")
-        proof = ({"expected_frame_id": runtime.removeprefix(REVIEWER_FRAME_PREFIX)}
-                 if runtime and runtime.startswith(REVIEWER_FRAME_PREFIX) else {})
+        frame_id = prompt_frame_id(item.photo.get("detector_runtime"))
+        proof = {"expected_frame_id": frame_id} if frame_id is not None else {}
         measured = self.deps.measure_cached_subject_detail(
             existing["path"], item.image_path, self.deps.frame_size(item.photo),
             **proof,

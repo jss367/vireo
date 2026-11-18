@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from PIL import Image
-from reviewer_helpers import confirmed_reviewer_box
+from reviewer_helpers import confirmed_reviewer_box, original_frame_detections
 from services import photo_ingest, review_decisions, workspace_folders
 from services.analysis_retry import explain_selected, run_retry
 from testing.waits import synchronization_timeout
@@ -26,7 +26,7 @@ def retry_library(app_and_db, tmp_path, monkeypatch):
 
     def detect(path):
         calls["detection"].append(Path(path).name)
-        return [{"box": {"x": .1, "y": .1, "w": .7, "h": .7}, "confidence": .9, "category": "animal"}]
+        return original_frame_detections(path, [{"box": {"x": .1, "y": .1, "w": .7, "h": .7}, "confidence": .9, "category": "animal"}])
 
     def mask(image, box, variant):
         calls["segmentation"].append(variant)
@@ -277,8 +277,8 @@ def test_weak_context_anchors_are_read_without_becoming_retry_targets(retry_libr
     _, db, ids, calls = retry_library
     for index, pid in enumerate(ids):
         db.conn.execute("UPDATE photos SET timestamp=? WHERE id=?", (f"2026-10-21T10:00:0{index}", pid))
-        did = detection_store.write_detection_batch(db, pid, "megadetector-v6", [
-            {"box": {"x": .1, "y": .1, "w": .7, "h": .7}, "confidence": .15 if index == 1 else .9, "category": "animal"}])[0]
+        did = detection_store.write_detection_batch(db, pid, "megadetector-v6", original_frame_detections(tmp_path / db.photos.get(pid)["filename"], [
+            {"box": {"x": .1, "y": .1, "w": .7, "h": .7}, "confidence": .15 if index == 1 else .9, "category": "animal"}]))[0]
         if index != 1:
             db.predictions.add(did, "Mandarin Duck", .95, "inat21", category="match")
     db.commit()
@@ -320,8 +320,8 @@ def test_readiness_is_the_same_alone_and_within_its_encounter(retry_library, tmp
     box = {"x": .1, "y": .1, "w": .7, "h": .7}
     for index, pid in enumerate(ids):
         db.conn.execute("UPDATE photos SET timestamp=? WHERE id=?", (f"2026-10-21T10:00:0{index}", pid))
-        did = detection_store.write_detection_batch(db, pid, "megadetector-v6", [
-            {"box": box, "confidence": .05 if index == 1 else .9, "category": "animal"}])[0]
+        did = detection_store.write_detection_batch(db, pid, "megadetector-v6", original_frame_detections(tmp_path / db.photos.get(pid)["filename"], [
+            {"box": box, "confidence": .05 if index == 1 else .9, "category": "animal"}]))[0]
         if index == 1:
             did = db.detections.save(pid, [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.0,
                                             "category": "animal"}], "full-image")[0]
@@ -630,8 +630,8 @@ def test_eye_fingerprint_records_model_attempts_without_stamping_skips(retry_lib
     from services.detection_store import write_detection_batch
     _, db, ids, _ = retry_library
     pid = ids[0]
-    did = write_detection_batch(db, pid, "megadetector-v6", [
-        {"box": {"x": .1, "y": .1, "w": .7, "h": .7}, "confidence": .9, "category": "animal"}], "legacy")[0]
+    did = write_detection_batch(db, pid, "megadetector-v6", original_frame_detections(tmp_path / db.photos.get(pid)["filename"], [
+        {"box": {"x": .1, "y": .1, "w": .7, "h": .7}, "confidence": .9, "category": "animal"}]), "legacy")[0]
     db.predictions.add(did, "Mandarin Duck", .95, "inat21", category="match", taxonomy={"class": "Aves"})
     db.commit()
     eye = {"eye_status": eye_status, "eye_x": None, "eye_y": None, "eye_conf": None, "eye_tenengrad": None}
@@ -907,10 +907,10 @@ def test_wrong_trunk_correction_reanalyzes_only_corrected_animal_and_is_undoable
     pid, sibling = ids[:2]
     trunk_box = dict(x=.00049, y=.35610, w=.36484, h=.64185)
     bird_box = dict(x=.43, y=.34, w=.09, h=.12)
-    trunk, weak_bird = detection_store.write_detection_batch(db, pid, "megadetector-v6", [
+    trunk, weak_bird = detection_store.write_detection_batch(db, pid, "megadetector-v6", original_frame_detections(tmp_path / db.photos.get(pid)["filename"], [
         {"box": trunk_box, "confidence": .2207, "category": "animal"},
         {"box": bird_box, "confidence": .05, "category": "animal"},
-    ])
+    ]))
     assert payload(db, pid)["primary_detection_id"] == trunk
     execute(db, [pid], tmp_path)
     original = dict(db.conn.execute('SELECT * FROM photos WHERE id=?', (pid,)).fetchone())

@@ -143,7 +143,7 @@ class CompanionPairingRepository:
 
     def move_detection(self, detection_id: int, photo_id: int) -> None:
         self.conn.execute(
-            "UPDATE detections SET photo_id = ?, runtime_fingerprint = ? WHERE id = ?",
+            "UPDATE detections SET photo_id = ?, runtime_fingerprint = ?, frame_id = NULL WHERE id = ?",
             (photo_id, COMPANION_FRAME_RUNTIME, detection_id),
         )
 

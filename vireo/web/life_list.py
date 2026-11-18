@@ -291,11 +291,23 @@ def create_life_list_blueprint(get_db: GetDb, json_error: JsonError) -> Blueprin
     """
     blueprint = Blueprint("life_list", __name__)
 
+    def trip_scope(db: Database) -> JsonDict | None:
+        if request.args.get("trip") != "1":
+            return None
+        folder = request.args.get("folder_id", type=int)
+        return {
+            "folder_ids": db.folders.subtree_ids(folder) if folder else None,
+            "date_from": request.args.get("date_from"),
+            "date_to": request.args.get("date_to"),
+            "location_id": request.args.get("location_id", type=int),
+        }
+
     @blueprint.route("/api/life-list")
     def api_life_list() -> ResponseReturnValue:
         db = get_db()
         payload = build_life_list_payload(
             db,
+            trip=trip_scope(db),
             photos_per_species=request.args.get("photos_per_species", 100, type=int),
         )
         return jsonify(payload)
@@ -324,6 +336,7 @@ def create_life_list_blueprint(get_db: GetDb, json_error: JsonError) -> Blueprin
             species_filter=species,
             taxon_id=taxon_id,
             unlinked_only=taxon_arg == "none",
+            trip=trip_scope(db),
         )
         if not payload["species"]:
             return json_error("species not found", 404)

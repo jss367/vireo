@@ -5,7 +5,7 @@ import os
 
 import numpy as np
 from config import config_value
-from detection_id import require_original_box
+from detection_id import detection_prompt_runtime, require_original_box
 from PIL import Image
 from subject_ranking import analysis_key, resolve_subject, source_path
 
@@ -59,14 +59,14 @@ def analyze_detection(db, photo, detection, effective_cfg, checkpoint, *, force=
     require_original_box(dict(detection).get("runtime_fingerprint"))
     key = analysis_key(path, detection, effective_cfg)
     if not force and _usable_analysis(_existing_analysis(db, detection["id"], key)):
-        require_original_reviewer_frame(path, dict(detection).get("runtime_fingerprint"))
+        require_original_reviewer_frame(path, detection_prompt_runtime(detection), detector_model=detection["detector_model"])
         return False
     checkpoint()
     image = render_proxy(path, longest_edge=1024)
     if image is None:
         raise ValueError("Could not decode original for subject analysis")
     try:
-        require_aligned_detector_prompt(image, dict(detection).get("runtime_fingerprint"))
+        require_aligned_detector_prompt(image, detection_prompt_runtime(detection), detector_model=detection["detector_model"])
         if existing_mask_path:
             with Image.open(existing_mask_path) as saved_mask:
                 if saved_mask_matches_frame(saved_mask.size, saved_mask.info.get("vireo_mask_frame"), image,

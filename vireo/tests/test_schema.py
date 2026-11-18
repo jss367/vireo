@@ -857,3 +857,38 @@ def test_branch_catalog_gains_classifier_input_source(tmp_path, version):
         schema._apply_pending(conn)
         assert "input_source" in {row[1] for row in conn.execute("PRAGMA table_info(classifier_runs)")}
         assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+
+
+@pytest.mark.parametrize("layout", ["main", "gps_branch"])
+def test_version_43_layouts_preserve_reviewed_gps_and_classifier_source(tmp_path, layout):
+    path = str(tmp_path / "catalog.db")
+    schema.ensure_schema(path)
+    with sqlite3.connect(path) as conn:
+        folder = conn.execute("INSERT INTO folders(path, name) VALUES ('test', 'test')").lastrowid
+        photo = conn.execute("INSERT INTO photos(folder_id, filename) VALUES (?, 'bird.jpg')", (folder,)).lastrowid
+        if layout == "gps_branch":
+            conn.execute("ALTER TABLE classifier_runs DROP COLUMN input_source")
+            conn.execute("INSERT INTO reviewed_gps VALUES (?, 12, 34, 'nearby frames')", (photo,))
+        else:
+            conn.execute("DROP TABLE reviewed_gps")
+        conn.execute("PRAGMA user_version=43")
+
+    schema.ensure_schema(path)
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone() == (SCHEMA_VERSION,)
+        assert "input_source" in {row[1] for row in conn.execute("PRAGMA table_info(classifier_runs)")}
+        expected = [(photo, 12, 34, "nearby frames")] if layout == "gps_branch" else []
+        assert conn.execute("SELECT photo_id, latitude, longitude, evidence FROM reviewed_gps").fetchall() == expected
+
+
+@pytest.mark.parametrize("version", range(44, 52))
+def test_branch_versions_reconcile_reviewed_gps(tmp_path, version):
+    path = str(tmp_path / "alternate.db")
+    schema.ensure_schema(path)
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP TABLE reviewed_gps")
+        conn.execute(f"PRAGMA user_version={version}")
+    schema.ensure_schema(path)
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM reviewed_gps").fetchone() == (0,)
+        assert conn.execute("PRAGMA user_version").fetchone() == (SCHEMA_VERSION,)

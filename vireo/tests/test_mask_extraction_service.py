@@ -47,9 +47,9 @@ def extraction(db, tmp_path, monkeypatch):
     deps.generate_mask = generate
     deps.crop_completeness = lambda mask: 0.9
     deps.compute_all_quality_features = lambda proxy, mask: {"subject_tenengrad": 1.5}
-    deps.measure_subject_detail = lambda mask, *, source_path, frame_size=None: {
+    deps.measure_subject_detail = lambda mask, *, source_path, frame_size=None, **kwargs: {
         "subject_detail": 100.0, "subject_detail_px": 40.0}
-    deps.measure_cached_subject_detail = lambda mask_path, source_path, frame_size=None: {
+    deps.measure_cached_subject_detail = lambda mask_path, source_path, frame_size=None, **kwargs: {
         "subject_detail": 100.0, "subject_detail_px": 40.0}
     deps.crop_subject = lambda proxy, mask, margin: None
     deps.embed = lambda proxy, variant: np.zeros(384, dtype=np.float32)
@@ -225,7 +225,7 @@ def test_fresh_mask_whose_detail_reread_fails_credits_detail_unreadable(db, tmp_
     # with planned work left behind.
     first = seed_photo(db, tmp_path, "source-lost-midrun")
     extraction.deps.measure_subject_detail = (
-        lambda mask, *, source_path, frame_size=None: {}
+        lambda mask, *, source_path, frame_size=None, **kwargs: {}
     )
 
     result = run(extraction)
@@ -259,7 +259,7 @@ def test_cached_mask_whose_png_will_not_decode_is_dropped_so_extract_rebuilds_it
     )
     db.commit()
     extraction.deps.measure_cached_subject_detail = (
-        lambda mask_path, source_path, frame_size=None: quality.MASK_CACHE_INVALID
+        lambda mask_path, source_path, frame_size=None, **kwargs: quality.MASK_CACHE_INVALID
     )
 
     result = run(extraction)
@@ -298,7 +298,7 @@ def test_cache_invalidation_drops_the_row_when_the_unlink_is_refused(
     )
     db.commit()
     extraction.deps.measure_cached_subject_detail = (
-        lambda mask_path, source_path, frame_size=None: quality.MASK_CACHE_INVALID
+        lambda mask_path, source_path, frame_size=None, **kwargs: quality.MASK_CACHE_INVALID
     )
     monkeypatch.setattr(
         masks_features, "safe_remove_mask_file",
@@ -329,6 +329,7 @@ def test_companion_box_cannot_prompt_raw_even_without_a_rejected_preview(
     preview = Image.new("RGB", (120, 68))
     preview.save(tmp_path / "frame.jpg")
     source = Image.new("RGB", (120, 80))
+    source.info["vireo_subject_frame_id"] = "a" * 64
     extraction.deps.render_proxy = lambda *args, **kwargs: source
     box = {"x": .1, "y": .6, "w": .2, "h": .15}
     did, = db.detections.upsert_rows(jpeg, "megadetector-v6", [{"box": box, "confidence": .95}], "current")
@@ -358,7 +359,7 @@ def test_companion_box_cannot_prompt_raw_even_without_a_rejected_preview(
     assert not extraction.generated
     # A detector pass on the original can verify the same region without
     # discarding the content-addressed row or the prediction it carries.
-    verified, = db.detections.upsert_rows(raw, "megadetector-v6", [{"box": box, "confidence": .95}], "current")
+    verified, = db.detections.upsert_rows(raw, "megadetector-v6", [{"box": box, "confidence": .95, "frame_id": "a" * 64}], "current")
     assert verified == row["id"]
     db.commit()
     assert run(extraction)["masked"] == 1

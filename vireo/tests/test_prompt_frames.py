@@ -109,7 +109,7 @@ def test_historical_cropped_preview_prompt_is_refused_before_sam(db, cropped_raw
     selected = dict(detection_store.get_detections(db, pid, min_conf=0)[0])
     monkeypatch.setattr(computation_cache, "megadetector_runtime_fingerprint", lambda: "canonical-runtime")
     monkeypatch.setattr(masking, "generate_mask", lambda *_args, **_kwargs: pytest.fail("SAM must not run"))
-    with pytest.raises(ValueError, match="unverified RAW frame"):
+    with pytest.raises(ValueError, match="original-frame proof"):
         analyze_detection(db, db.photos.get(pid), selected, {}, lambda: None, defer_publication=True)
     assert dict(detection_store.get_detections(db, pid, min_conf=0)[0]) == selected
 
@@ -187,3 +187,62 @@ def test_redrawing_on_aligned_original_repairs_legacy_reviewer_box(app_and_db, c
         analyze_photo(db, pid, path, detection_id=previous, force=True)
     assert client.post("/api/redo").status_code == 200
     assert analyze_photo(db, pid, path, detection_id=previous, force=True) == 1
+
+
+@pytest.mark.parametrize("tiled_switch", [False, True])
+def test_detector_frame_proof_tracks_transient_thumbnail_failures(db, tmp_path, monkeypatch, tiled_switch):
+    import detector
+    import image_loader
+    import masking
+    import quality
+    from detection_id import detection_prompt_runtime
+    from test_image_loader import _FakeRaw, _install_fake_raw, _jpeg_bytes
+
+    source = tmp_path / "fake.nef"
+    source.write_bytes(b"synthetic fake RAW; never opened by libraw")
+    raw = _install_fake_raw(monkeypatch, _FakeRaw(
+        embedded_jpeg=_jpeg_bytes((600, 400)), sensor_size=(600, 400), postprocess_size=(600, 400)))
+    import rawpy
+
+    thumb_available = [True]
+    extract = raw.extract_thumb
+
+    def extract_thumb():
+        if not thumb_available[0]:
+            raise rawpy.LibRawIOError(b"synthetic transient thumbnail failure")
+        return extract()
+
+    monkeypatch.setattr(raw, "extract_thumb", extract_thumb)
+    monkeypatch.setattr(detector, "_get_session", lambda: SimpleNamespace(get_inputs=lambda: [SimpleNamespace(name="pixels")]))
+    calls = []
+
+    def infer(*args):
+        calls.append(1)
+        if tiled_switch and len(calls) == 1:
+            # The first pass reads the preview; the tiled read loses it.
+            thumb_available[0] = False
+            confidence = .01
+        else:
+            confidence = .95
+        return [{"box": {"x": .2, "y": .2, "w": .4, "h": .4}, "confidence": confidence, "category": "animal"}]
+
+    monkeypatch.setattr(detector, "_infer_array", infer)
+    monkeypatch.setattr(detector, "_tiled_fallback", lambda *args: [])
+    detections = detector.detect_animals(source)
+    folder = workspace_folders.add_folder(db, str(tmp_path))
+    pid = photo_ingest.add_photo(db, folder, source.name, ".nef", 100, 1)
+    did, = detection_store.write_detection_batch(db, pid, "megadetector-v6", detections, "synthetic-model")
+    selected = dict(db.detections.row(did))
+    assert selected["frame_id"] == detections[0]["frame_id"]
+    thumb_available[0] = False
+    with image_loader.load_image(source, raw_decode=image_loader.RAW_DECODE_ALIGNED) as sensor:
+        assert "vireo_rejected_preview_edge" not in sensor.info
+        if tiled_switch:
+            masking.require_aligned_detector_prompt(sensor, detection_prompt_runtime(selected), detector_model="megadetector-v6")
+        else:
+            with pytest.raises(masking.PromptFrameError, match="frame changed"):
+                masking.require_aligned_detector_prompt(sensor, detection_prompt_runtime(selected), detector_model="megadetector-v6")
+            with pytest.raises(masking.PromptFrameError, match="frame changed"):
+                masking.require_original_reviewer_frame(source, detection_prompt_runtime(selected), detector_model="megadetector-v6")
+            assert quality.measure_subject_detail(np.ones((400, 600), bool), source_path=source,
+                                                  expected_frame_id=detections[0]["frame_id"]) == {}
