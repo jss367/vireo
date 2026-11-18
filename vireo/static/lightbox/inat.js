@@ -269,6 +269,14 @@ export async function submitToInatBatch(/** @type {number[]} */ photoIds) {
   openInatModal(failures);
 }
 
+function _inatAlreadySubmittedWarning(/** @type {InatQueueItem} */ item) {
+  if (!item.already_submitted) return '';
+  var linkOrText = item.existing_url
+    ? '<a href="' + escapeAttr(item.existing_url || '') + '" target="_blank" rel="noopener" data-external-link style="color:var(--warning);">' + escapeHtml(item.existing_url || '') + '</a>'
+    : 'no observation URL recorded';
+  return '<div class="inat-card-status warning" style="margin-top:6px;">&#9888; Already submitted to iNaturalist: ' + linkOrText + '. Opening a new upload will create a duplicate observation.</div>';
+}
+
 export async function openInatQuickModal(/** @type {InatQueueItem[]} */ items, /** @type {InatPreparationFailure[]} */ failures) {
   _inatModalGeneration++;
   _closeInatExportStream();
@@ -289,14 +297,6 @@ export async function openInatQuickModal(/** @type {InatQueueItem[]} */ items, /
   var cancelBtn = document.querySelector('#inatActions .modal-btn-cancel');
   if (cancelBtn) cancelBtn.textContent = 'Close';
 
-  function _inatAlreadySubmittedWarning(/** @type {InatQueueItem} */ item) {
-    if (!item.already_submitted) return '';
-    var linkOrText = item.existing_url
-      ? '<a href="' + escapeAttr(item.existing_url || '') + '" target="_blank" rel="noopener" data-external-link style="color:var(--warning);">' + escapeHtml(item.existing_url || '') + '</a>'
-      : 'no observation URL recorded';
-    return '<div class="inat-card-status warning" style="margin-top:6px;">&#9888; Already submitted to iNaturalist: ' + linkOrText + '. Opening a new upload will create a duplicate observation.</div>';
-  }
-
   var html = '<div class="inat-card" id="inatTokenSetup">' +
     '<div style="font-size:13px;color:var(--text-primary);font-weight:600;margin-bottom:5px;">Direct submission needs an iNaturalist token</div>' +
     '<div style="font-size:12px;line-height:1.5;color:var(--text-secondary);margin-bottom:9px;">' +
@@ -309,6 +309,11 @@ export async function openInatQuickModal(/** @type {InatQueueItem[]} */ items, /
     '</div>' +
     '<div class="inat-card-status" id="inatQuickTokenStatus">The Send button will be enabled after validation.</div>' +
   '</div>';
+  if (items[0]?.comparison?.additionalPhotoIds?.length) {
+    _inatRenderQuickCards(html);
+    document.getElementById('inatModal')?.classList.add('open');
+    return;
+  }
   if (items.length === 1 && items[0]) {
     html += '<div class="inat-card">' +
       '<div class="inat-card-header">' +
@@ -416,7 +421,7 @@ async function validateAndSaveInatToken() {
     ) return;
     status.className = 'inat-card-status success';
     status.textContent = '\u2713 Valid token' + (data.login ? ' for ' + data.login : '') + '. Opening direct submission\u2026';
-    _inatApplyQuickChoicesToQueue();
+    if (!inatQueue[0]?.comparison?.additionalPhotoIds?.length) _inatApplyQuickChoicesToQueue();
     openInatModal(_inatQuickFailures);
   } catch(e) { const failure = /** @type {Error & {body?: {partial?: boolean, observation_url?: string}}} */ (e instanceof Error ? e : new Error(String(e)));
     if (generation !== _inatModalGeneration) return;
@@ -607,9 +612,9 @@ function openInatModal(/** @type {InatPreparationFailure[]} */ failures) {
 
   var html = '';
   inatQueue.forEach(function(item, idx) {
-    var warn = '';
+    var warn = item.comparison?.additionalPhotoIds?.length ? '<div>' + (1 + item.comparison.additionalPhotoIds.length) + ' views of one individual</div>' : '';
     if (item.already_submitted) {
-      warn = '<div class="inat-card-status warning">&#9888; Already submitted: <a href="' + escapeAttr(item.existing_url || '') + '" target="_blank" data-external-link style="color:var(--warning);">' + escapeHtml(item.existing_url || '') + '</a></div>';
+      warn += '<div class="inat-card-status warning">&#9888; Already submitted: <a href="' + escapeAttr(item.existing_url || '') + '" target="_blank" data-external-link style="color:var(--warning);">' + escapeHtml(item.existing_url || '') + '</a></div>';
     }
     var thumbUrl = vireoThumbnailUrl ? vireoThumbnailUrl({id: item.photo_id, edit_recipe: item.edit_recipe}) : '/thumbnails/' + item.photo_id + '.jpg';
     html += '<div class="inat-card" id="inatCard' + idx + '">' +
@@ -673,6 +678,7 @@ function readInatSubmission(item, i) {
     taxon_name: taxon,
     taxon_id: item.comparison?.name === taxon ? item.comparison.id : undefined,
     expected_login: item.comparison?.login,
+    additional_photo_ids: item.comparison?.additionalPhotoIds,
     observed_on: field('inatDate'),
     latitude: lat === '' ? null : parseFloat(lat),
     longitude: lng === '' ? null : parseFloat(lng),

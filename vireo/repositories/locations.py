@@ -671,7 +671,7 @@ class LocationRepository:
             (photo_id,),
         ).fetchone()
 
-    def located_keywords_in_workspace(self):
+    def located_keywords_in_workspace(self, *, include_unlocated=False):
         """Location keywords with coordinates tagged on active-workspace photos.
 
         Rows (``id``, ``name``, ``place_id``, ``latitude``, ``longitude``,
@@ -686,9 +686,9 @@ class LocationRepository:
                JOIN photos p ON p.id = pk.photo_id
                JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
                WHERE wf.workspace_id = ? AND k.type = 'location'
-                 AND k.latitude IS NOT NULL AND k.longitude IS NOT NULL
+                 AND (? OR (k.latitude IS NOT NULL AND k.longitude IS NOT NULL))
                GROUP BY k.id""",
-            (self.workspace_id_fn(),),
+            (self.workspace_id_fn(), include_unlocated),
         ).fetchall()
 
     def tagged_location_points(self, min_lat, max_lat, min_lng, max_lng):

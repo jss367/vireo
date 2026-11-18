@@ -1,9 +1,9 @@
 export const thumbnail = window.photoThumbnailUrl;
 export const openExternalLink = window.openExternalLink;
 
-/** @template T @param {string} url @returns {Promise<T>} */
-export function safeFetch(url) {
-  return window.safeFetch(url);
+/** @template T @param {string} url @param {RequestInit} [options] @returns {Promise<T>} */
+export function safeFetch(url, options) {
+  return window.safeFetch(url, options);
 }
 
 /** @type {Window['submitToInat']} */
