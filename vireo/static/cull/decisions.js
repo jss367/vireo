@@ -116,7 +116,10 @@ function unappliedPinCount() {
 // it came from so the card can show it.
 /** @param {CullSourcePhoto} photo @returns {CullDecision} */
 function resolveCullDecision(photo) {
-  var suggested = actionForLabel(photo.label);
+  // A cached KEEP can outlive the manual flag that produced it. Only the
+  // server's current eligibility assessment can admit an automatic favorite.
+  var suggested = photo.label === 'KEEP' && photo.automatic_keep_eligible !== true
+    ? 'review' : actionForLabel(photo.label);
   var manual = cullManualDecisions[photo.id];
   if (manual) return {action: manual, source: 'manual', suggested: suggested};
   // A confirmed clear is an explicit Review; a bare none is still undecided.

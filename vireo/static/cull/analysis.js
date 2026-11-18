@@ -6,7 +6,8 @@
 /** @param {CullSourceResults} data @param {string=} statusText @param {boolean=} scoped */
 function setPipelineResults(data, statusText, scoped) {
   pipelineResults = data;
-  if (!scoped) cullSourceResults = data;
+  if (scoped) syncCullSourceFlags(data);
+  else cullSourceResults = data;
   renderCullSpeciesOptions();
   rebuildCullDataFromPipeline();
   cullDirty = unappliedPinCount() > 0;

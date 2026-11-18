@@ -13,9 +13,9 @@ from playwright.sync_api import expect
 
 def _results(photo_overrides=None):
     photos = [
-        {"id": 1, "filename": "enc1-a.jpg", "label": "KEEP", "quality_composite": 0.91},
+        {"id": 1, "filename": "enc1-a.jpg", "label": "KEEP", "automatic_keep_eligible": True, "quality_composite": 0.91},
         {"id": 2, "filename": "enc1-b.jpg", "label": "REVIEW", "quality_composite": 0.67},
-        {"id": 3, "filename": "enc2-a.jpg", "label": "KEEP", "quality_composite": 0.88},
+        {"id": 3, "filename": "enc2-a.jpg", "label": "KEEP", "automatic_keep_eligible": True, "quality_composite": 0.88},
     ]
     for photo in photos:
         photo.update((photo_overrides or {}).get(photo["id"], {}))
@@ -91,7 +91,7 @@ def test_manual_decision_survives_recompute(live_server, page):
 
     # Recompute with a payload that promotes photo 2 to KEEP: the fresh label
     # lands on photo 2, the hand decision on photo 1 stays put.
-    _nudge_scoring_slider(page, _results({2: {"label": "KEEP"}}))
+    _nudge_scoring_slider(page, _results({2: {"label": "KEEP", "automatic_keep_eligible": True}}))
 
     expect(_card(page, 2)).to_have_class(re.compile(r"\bkeep\b"))
     expect(_card(page, 1)).to_have_class(re.compile(r"\breview\b"))
@@ -141,7 +141,7 @@ def test_applied_flags_survive_recompute(live_server, page):
 
     _nudge_scoring_slider(page, _results({
         1: {"flag": "rejected", "flag_confirmation_status": "confirmed"},
-        2: {"label": "KEEP"},
+        2: {"label": "KEEP", "automatic_keep_eligible": True},
     }))
 
     expect(_card(page, 2)).to_have_class(re.compile(r"\bkeep\b"))

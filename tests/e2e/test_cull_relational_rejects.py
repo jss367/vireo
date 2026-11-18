@@ -14,11 +14,11 @@ from playwright.sync_api import expect
 def _results():
     return {
         "photos": [
-            {"id": 1, "filename": "enc1-a.jpg", "label": "KEEP", "quality_composite": 0.91,
+            {"id": 1, "filename": "enc1-a.jpg", "label": "KEEP", "automatic_keep_eligible": True, "quality_composite": 0.91,
              "focus_evidence": {"basis": "eye", "measurement": 1840.2, "measurement_name": "Tenengrad"}},
             {"id": 2, "filename": "enc1-b.jpg", "label": "REVIEW", "quality_composite": 0.67,
              "focus_evidence": {"basis": "eye", "measurement": 610.4, "measurement_name": "Tenengrad"}},
-            {"id": 3, "filename": "enc2-a.jpg", "label": "KEEP", "quality_composite": 0.88},
+            {"id": 3, "filename": "enc2-a.jpg", "label": "KEEP", "automatic_keep_eligible": True, "quality_composite": 0.88},
         ],
         "encounters": [
             {"photo_ids": [1, 2], "photo_count": 2, "burst_count": 1, "species": ["Test bird"],
