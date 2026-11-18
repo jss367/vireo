@@ -22,6 +22,7 @@ DELETE,GET,PUT /api/photos/<int:photo_id>/versions/<version_id>
 GET          /
 GET          /api/audit/camera-clocks
 GET          /api/audit/drift
+GET          /api/audit/gps-jumps
 GET          /api/audit/integrity
 GET          /api/audit/orphans
 GET          /api/audit/sidecars
@@ -242,6 +243,7 @@ PATCH        /api/settings/workspace
 PATCH,POST   /api/species-highlights/order
 POST         /api/audit/accept-hash
 POST         /api/audit/delete-sidecars
+POST         /api/audit/gps-jumps
 POST         /api/audit/import-untracked
 POST         /api/audit/remove-orphans
 POST         /api/audit/resolve
