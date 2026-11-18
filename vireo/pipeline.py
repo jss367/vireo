@@ -2525,21 +2525,25 @@ def _eye_candidates_in_mask(kps, mask, T):
     ``T`` uses the decoder's raw model units. Scores above one are valid;
     NaN/inf scores or coordinates must never reach focus measurement/storage.
     """
-    eye_candidates = []
+    return _keypoints_in_mask(kps, mask, T, {"left_eye", "right_eye"})
+
+
+def _keypoints_in_mask(kps, mask, threshold, names):
+    candidates = []
     for k_point in kps:
-        if k_point["name"] not in ("left_eye", "right_eye"):
+        if k_point["name"] not in names:
             continue
         if not np.isfinite([k_point["conf"], k_point["x"], k_point["y"]]).all():
             continue
-        if k_point["conf"] < T:
+        if k_point["conf"] < threshold:
             continue
         if not (0 <= k_point["x"] < mask.shape[1] and 0 <= k_point["y"] < mask.shape[0]):
             continue
         mx, my = int(k_point["x"]), int(k_point["y"])
         if not mask[my, mx]:
             continue
-        eye_candidates.append(k_point)
-    return eye_candidates
+        candidates.append(k_point)
+    return candidates
 
 
 def _best_eye_by_tenengrad(image, eye_candidates, bbox, k_window):
