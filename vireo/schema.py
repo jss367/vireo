@@ -642,7 +642,8 @@ def _add_classifier_input_source(conn):
 
 def _add_reviewed_gps(conn):
     # Catalogs stamped 43 on the GPS branch already have reviewed locations
-    # but still need the classifier input source migration from main.
+    # but still need the classifier input source migration from main. Main's
+    # catalogs stamped 44 already ran this; branch catalogs at 44–51 did not.
     _add_classifier_input_source(conn)
     create_reviewed_gps(conn)
 
@@ -709,6 +710,7 @@ MIGRATIONS = (
         _merge_species_highlights, _validate_merged_species_highlights,
     ),
     Migration(43, "classifier_input_source", _add_classifier_input_source),
+    # Main's catalogs at 44 ran reviewed_gps instead; 45 repeats this one for them.
     Migration(44, "subject_detail_full_resolution", _clear_subject_detail_from_other_read_paths),
     Migration(45, "subject_detail_mask_alignment", _clear_subject_detail_from_other_read_paths),
     Migration(46, "reconcile_highlights_and_detail", _reconcile_highlights_and_detail, _validate_merged_species_highlights),
@@ -718,7 +720,7 @@ MIGRATIONS = (
     # Alternate v47 catalogs used that slot for reviewer frames and can already be at v49.
     Migration(50, "reconcile_companion_box_frames", _invalidate_ambiguous_companion_boxes),
     Migration(51, "reviewer_history_mask_frames", _retire_reviewer_frame_caches),
-    Migration(52, "reconcile_reviewed_gps", _add_reviewed_gps),
+    Migration(52, "reviewed_gps", _add_reviewed_gps),
     Migration(53, "detector_decoded_frames", _retire_unbound_detector_caches),
 )
 

@@ -506,13 +506,7 @@ def _detect_batch(
             entries are used instead of detection_store.get_detections() so that
             model 2+ binds to the exact detection rows from this run,
             not stale rows from a previous pipeline pass.
-        vireo_dir: optional path to ~/.vireo/; when set, the subject
-            analysis loop resolves each photo through the working-copy
-            JPEG when its source folder is offline, matching the
-            on-demand ``/api/photos/<id>/subjects/analyze`` route.
-            Without this, an offline NAS would leave cached-detection
-            photos permanently missing their subject quality, crop and
-            exposure data.
+        vireo_dir: optional Vireo data directory. Subject boxes use the original image.
 
     Returns:
         (detection_map, detected_count, processed_ids) where detection_map
@@ -595,8 +589,6 @@ def _analyze_subjects(
     """Subject-analysis pass of ``_detect_batch`` (see its comments)."""
     from subjects import analyze_photo
 
-    # RAW coordinates require the original. For other formats an available
-    # working copy still supports box analysis when the source is offline.
     if vireo_dir:
         from image_loader import subject_box_image_path
 

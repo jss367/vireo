@@ -1423,77 +1423,62 @@ def test_detect_batch_scores_normally_when_primary_at_threshold(
     assert row["subject_size"] is not None
 
 
-def test_detect_batch_subject_analysis_requires_original_when_source_offline(
-    tmp_path, monkeypatch
-):
-    """Cached detections cannot authorize new coordinates on an offline alias.
-
-    Working copies remain available for browsing; coordinate analysis receives
-    the original path and can explicitly fail while it is offline.
-    """
-    from unittest.mock import patch
-
+def test_detect_batch_retries_cached_box_analysis_when_original_reconnects(tmp_path, monkeypatch):
+    import subjects
     from classify_job import _detect_batch
     from db import Database
+    from image_loader import get_canonical_image_path
+    from reviewer_helpers import original_frame_detections
 
     db = Database(str(tmp_path / "test.db"))
-    offline_dir = "/mnt/offline-nas/photos"
-    folder_id = workspace_folders.add_folder(db, offline_dir)
+    source_dir = tmp_path / "originals"
+    source_dir.mkdir()
+    Image.new("RGB", (400, 300), "blue").save(source_dir / "bird.jpg")
+    folder_id = workspace_folders.add_folder(db, str(source_dir))
     ws = db.create_workspace("A")
     db.commit()
     db._active_workspace_id = ws
     workspace_folders.add_workspace_folder(db, ws, folder_id)
 
-    # Working copy lives under vireo_dir. Source folder does NOT exist.
-    vireo_dir = tmp_path / "vireo"
-    wc_dir = vireo_dir / "working"
-    wc_dir.mkdir(parents=True)
-    wc_rel = "working/bird.jpg"
-    Image.new("RGB", (200, 200), color="green").save(str(vireo_dir / wc_rel))
-
-    photo_id = photo_ingest.add_photo(
-        db, folder_id, "bird.jpg", extension=".jpg",
-        file_size=100, file_mtime=1.0,
-    )
-    db.conn.execute(
-        "UPDATE photos SET working_copy_path=? WHERE id=?", (wc_rel, photo_id),
-    )
-    db.conn.commit()
-
-    # Seed a cached detector run so this photo goes through the
-    # already-detected branch — the exact case where the source is
-    # offline and new coordinate analysis must require the original.
-    detection_store.write_detection_batch(
+    working_copy = tmp_path / "working" / "bird.jpg"
+    working_copy.parent.mkdir()
+    Image.new("RGB", (200, 200), "green").save(working_copy)
+    photo_id = photo_ingest.add_photo(db, folder_id, "bird.jpg", ".jpg", 100, 1.0)
+    db.conn.execute("UPDATE photos SET working_copy_path=? WHERE id=?", ("working/bird.jpg", photo_id))
+    det_id, = detection_store.write_detection_batch(
         db, photo_id, "megadetector-v6",
-        [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
-          "confidence": 0.9, "category": "animal"}],
+        original_frame_detections(source_dir / "bird.jpg", [
+            {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9, "category": "animal"}]),
     )
+    db.commit()
 
-    photo = dict(db.photos.get(photo_id))
-    photos = [photo]
-    folders = {folder_id: offline_dir}
-    already_detected_ids = db.model_runs.get_detector_run_photo_ids("megadetector-v6")
+    folders = {folder_id: str(source_dir)}
+    assert Path(get_canonical_image_path(db.photos.get(photo_id), str(tmp_path), folders)) == working_copy
+    original_analysis = subjects.analyze_photo
+    analysis_paths = []
 
-    seen_paths = []
-    def fake_analyze_photo(db_arg, photo_arg, image_path, **kwargs):
-        seen_paths.append(image_path)
-        return 0
+    def record_analysis(db_arg, pid, path, **kwargs):
+        analysis_paths.append(Path(path))
+        return original_analysis(db_arg, pid, path, **kwargs)
 
-    with patch("subjects.analyze_photo", side_effect=fake_analyze_photo):
+    monkeypatch.setattr(subjects, "analyze_photo", record_analysis)
+
+    def run_cached_batch():
         _detect_batch(
-            photos=photos, folders=folders, runner=None, job={"id": 0},
-            reclassify=False, db=db,
-            det_conf_threshold=0.2,
-            already_detected_ids=already_detected_ids,
-            vireo_dir=str(vireo_dir),
+            photos=[dict(db.photos.get(photo_id))], folders=folders,
+            runner=None, job={"id": 0}, reclassify=False, db=db, det_conf_threshold=0.2,
+            already_detected_ids={photo_id}, vireo_dir=str(tmp_path),
         )
 
-    assert seen_paths, "subject analysis loop did not run"
-    assert Path(seen_paths[0]) == Path(offline_dir) / "bird.jpg"
-    from image_loader import get_canonical_image_path
+    offline_dir = tmp_path / "offline-originals"
+    source_dir.rename(offline_dir)
+    run_cached_batch()
+    assert db.subjects.analysis(det_id) is None
 
-    assert Path(get_canonical_image_path(photo, str(vireo_dir), folders)) == vireo_dir / wc_rel
-    assert db.detections.get(photo_id, 0), "Historical detections must remain browsable"
+    offline_dir.rename(source_dir)
+    run_cached_batch()
+    assert db.subjects.analysis(det_id) is not None
+    assert analysis_paths == [source_dir / "bird.jpg"] * 2
 
 
 def test_classify_photos_reclassifies_when_gate_has_no_cached_rows(tmp_path):
