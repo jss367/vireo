@@ -46,6 +46,8 @@ def comparison_library(app_and_db, tmp_path, monkeypatch):
     db.commit()
 
     def mask_for_box(image, box, variant):
+        from masking import sam_generation
+        image.info["vireo_sam_generation"] = sam_generation(variant)
         mask = np.zeros((image.height, image.width), bool)
         x, y, w, h = (box[k] for k in "xywh")
         mask[int(y * image.height):int((y + h) * image.height),
@@ -272,6 +274,7 @@ def test_an_analysis_made_under_an_earlier_recipe_is_analysed_again(comparison_l
     monkeypatch.setattr(subject_ranking, "ANALYSIS_RECIPE_VERSION", current)
     stale = {c["id"]: c for c in _pack(app, pids, requested_species=TARGET)["cards"]}
     assert {c["evidence_status"] for c in stale.values()} == {"subject_analysis_missing"}
+    assert all(c["comparison_evidence"]["selected_cache"] == "stale" for c in stale.values())
     assert app.test_client().get(earlier[pids[0]]["mask_url"]).status_code == 404
 
     _analyze(db, pids, SubjectComparison(TARGET), cfg.load())
@@ -743,6 +746,67 @@ def test_cached_subject_changed_during_readback_is_reported_failed(comparison_li
     assert result["photos"][0]["status"] == "failed"
     assert "changed" in result["errors"][0]["error"]
     assert _pack(app, [pid], **scope)["cards"][0]["evidence_status"] == "subject_analysis_missing"
+
+
+def test_primary_measurements_shared_only_with_the_measured_animal(comparison_library, monkeypatch, tmp_path):
+    import json
+    from pathlib import Path
+
+    from vireo.tests.wait import wait_for_job_via_client
+
+    app, db, pids, ids = comparison_library
+    client = app.test_client()
+    for model_file in ("image_encoder.onnx", "mask_decoder.onnx"):
+        (tmp_path / model_file).write_bytes(b"test generation")
+    monkeypatch.setattr("masking._sam2_model_dir", lambda variant: str(tmp_path))
+    monkeypatch.setattr("dino_embed.embed_batch", lambda images, **kw: np.zeros((len(images), 384), np.float32))
+    launched = client.post("/api/jobs/extract-masks", json={}).get_json()
+    job = wait_for_job_via_client(client, launched["job_id"])
+    assert job["status"] == "completed", job
+    default = {c["id"]: c for c in _pack(app, pids)["cards"]}
+    selected = _pack(app, pids, compare_subjects=True)
+    for card in selected["cards"]:
+        pid = card["id"]
+        assert card["evidence_status"] == "ready", card["evidence_reason"]
+        assert card["evidence_owner"] == default[pid]["evidence_owner"]
+        assert card["evidence_owner"]["detection_id"] == ids[pid][1]
+        assert card["sharpness"] == default[pid]["sharpness"]
+        assert card["eye_tenengrad"] is None
+        assert client.get(card["mask_url"]).status_code == 200
+        focus = client.get(card["focus_crop_url"])
+        assert focus.status_code == 200, focus.get_json()
+        assert focus.headers["X-Vireo-Analysis-Key"] == card["subject"]["analysis_key"]
+    monkeypatch.setattr("masking.generate_mask", lambda *a, **kw: pytest.fail("compatible primary recomputed"))
+    reused = _pack(app, pids, compare_subjects=True, analyze=True)
+    assert wait_for_job_via_client(client, reused["job_id"])["result"]["cached"] == len(pids)
+    assert db.conn.execute("SELECT COUNT(*) FROM subject_ranking_analysis").fetchone()[0] == 0
+
+    target = _pack(app, pids, requested_species=TARGET)
+    assert not target["scored"]
+    assert all("another animal" in c["evidence_reason"] and c["sharpness"] is None for c in target["cards"])
+    assert all(db.subjects.choice(pid)["detection_id"] == ids[pid][1] for pid in pids)
+    pid = pids[0]
+    row = db.masks_features.active_measurements([pid])[pid]
+    proof = json.loads(row["comparison_inputs"])
+    for replacement, status in [
+        (None, "primary_unverified"),
+        (json.dumps({**proof, "size": [80, 40]}), "scale_mismatch"),
+        (json.dumps({**proof, "sam_generation": "old"}), "model_config_changed"),
+    ]:
+        db.conn.execute("UPDATE photo_masks SET comparison_inputs=? WHERE photo_id=?", (replacement, pid))
+        db.commit()
+        pending, = _pack(app, [pid], compare_subjects=True)["cards"]
+        assert pending["comparison_evidence"]["status"] == status
+        assert pending["sharpness"] is None
+    db.conn.execute("UPDATE photo_masks SET comparison_inputs=? WHERE photo_id=?", (row["comparison_inputs"], pid))
+    db.commit()
+    photo = db.photos.get(pid)
+    Path(db.folders.get(photo["folder_id"])["path"], photo["filename"]).touch()
+    changed, = _pack(app, [pid], compare_subjects=True)["cards"]
+    assert "original has changed" in changed["evidence_reason"]
+    assert changed["sharpness"] is None
+    original = next(c for c in selected["cards"] if c["id"] == pid)
+    assert client.get(original["mask_url"]).status_code == 404
 
 
 def test_head_inspection_uses_only_current_selected_subject_and_rendition(comparison_library, monkeypatch):

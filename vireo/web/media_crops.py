@@ -241,7 +241,7 @@ def _focus_response(img: Image.Image, source: str | None, photo: JsonDict, boxes
 
 def _head_selection(db: Database, photo: JsonDict, effective: JsonDict) -> tuple[JsonDict | None, str | None, JsonDict | None]:
     from focus_crop import focus_subject_detections
-    from subject_ranking import SubjectComparison, cached_analysis, resolve_subject
+    from subject_ranking import SubjectComparison, comparison_analysis, resolve_subject
 
     requested = request.args.get("detection_id")
     if requested is None:
@@ -258,7 +258,7 @@ def _head_selection(db: Database, photo: JsonDict, effective: JsonDict) -> tuple
     detection, _ = resolve_subject(db, photo["id"], SubjectComparison(subject_overrides={photo["id"]: detection_id}))
     if detection is None:
         raise ValueError("Selected subject identity is unresolved; choose a manual center")
-    key, analysis = cached_analysis(db, photo, detection, effective)
+    key, analysis, _ = comparison_analysis(db, photo, detection, effective)
     if "analysis_key" in request.args and (analysis is None or key != request.args["analysis_key"]):
         raise ValueError("Selected subject analysis is unavailable or stale; refresh the inspection")
     return detection, key, analysis

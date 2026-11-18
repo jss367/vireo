@@ -234,7 +234,7 @@ def retry_features(db: Database, pid: int, effective: JsonDict, cache_dir: str,
             raise ValueError("Primary subject changed before analysis started; retry the chosen subject")
         mask_path = db.masks_features.get_mask(pid, effective.get("pipeline", {}).get("sam2_variant") or "sam2-small")
         existing_path = None
-        if (quality_only and mask_path and mask_path["detector_model"] == detection["detector_model"]
+        if (quality_only and expected_primary_detection_id is None and mask_path and mask_path["detector_model"] == detection["detector_model"]
                 and all(mask_path["prompt_" + k] == detection["box_" + k] for k in "xywh")
                 and os.path.isfile(mask_path["path"])):
             existing_path = mask_path["path"]
@@ -348,9 +348,15 @@ def _publish_features(db: Database, pid: int, detection: JsonDict, analysis: Jso
                 previous = db.masks_features.get_mask(pid, variant)
                 if previous is None or previous["path"] != existing_mask_path:
                     raise ValueError("Subject mask changed before quality publication; retry the current mask")
+                inputs = analysis.get("comparison_inputs")
+                if (not inputs or previous["comparison_inputs"] != inputs
+                        or not json.loads(inputs).get("sam_generation")):
+                    analysis["comparison_inputs"] = None
             db.masks_features.upsert_mask(pid, variant, mask_path, detection["detector_model"],
                 tuple(detection["box_" + key] for key in "xywh"),
-                MaskQuality(**{field: features.get(field) for field in MaskQuality.__dataclass_fields__}))
+                MaskQuality(comparison_inputs=analysis.get("comparison_inputs"),
+                            **{field: features.get(field) for field in MaskQuality.__dataclass_fields__
+                               if field != "comparison_inputs"}))
             current = _current_photo(db, pid, effective)
             min_conf = config_value(effective, "detector_confidence")
             weak_floor = (rescue_floor(current, config_value(effective.get("pipeline", {}), "weak_detection_confidence", section="pipeline"))

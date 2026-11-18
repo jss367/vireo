@@ -138,7 +138,7 @@ def _stub_models(monkeypatch, *, fail_decode_on=None, fail_save=None):
             handle.write(b"png")
         return path
 
-    monkeypatch.setattr(masking, "_get_sam2_sessions", lambda variant: (_FakeSession(), _FakeSession()))
+    monkeypatch.setattr(masking, "_get_sam2_sessions", lambda variant: (_FakeSession(), _FakeSession(), None))
     monkeypatch.setattr(dino_embed, "_get_dinov2_session", lambda variant: None)
     monkeypatch.setattr(masking, "render_proxy", render_proxy)
     monkeypatch.setattr(onnx_runtime, "preprocess_image", lambda *a, **k: np.zeros((1, 3, 8, 8)))

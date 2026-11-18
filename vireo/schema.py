@@ -666,6 +666,11 @@ def _add_reviewed_gps(conn):
     create_reviewed_gps(conn)
 
 
+def _add_primary_comparison_inputs(conn):
+    if "comparison_inputs" not in {row[1] for row in conn.execute("PRAGMA table_info(photo_masks)")}:
+        conn.execute("ALTER TABLE photo_masks ADD COLUMN comparison_inputs TEXT")
+
+
 MIGRATIONS = (
     Migration(
         13, "companion_identities_file_mtime",
@@ -741,6 +746,7 @@ MIGRATIONS = (
     Migration(52, "reviewed_gps", _add_reviewed_gps),
     Migration(53, "orphaned_companion_masks", _clear_orphaned_companion_mask_projections),
     Migration(54, "detector_decoded_frames", _retire_unbound_detector_caches),
+    Migration(55, "primary_comparison_inputs", _add_primary_comparison_inputs),
 )
 
 

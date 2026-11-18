@@ -59,6 +59,7 @@ class MaskQuality:
     noise_estimate: float | None = None
     subject_detail: float | None = None
     subject_detail_px: float | None = None
+    comparison_inputs: str | None = None
 
 
 @dataclass(frozen=True)
@@ -260,6 +261,16 @@ class MasksFeaturesRepository:
             (photo_id, variant),
         ).fetchone()
         return dict(row) if row else None
+
+    def active_measurements(self, photo_ids: Sequence[int]) -> dict[int, dict[str, Any]]:
+        """Read active per-mask measurements for a comparison (at most 500 photos)."""
+        placeholders = ",".join("?" for _ in photo_ids)
+        rows = self.conn.execute(
+            f"""SELECT pm.* FROM photos p JOIN photo_masks pm
+                ON pm.photo_id=p.id AND pm.variant=p.active_mask_variant AND pm.path=p.mask_path
+                WHERE p.id IN ({placeholders})""", photo_ids,
+        )
+        return {row["photo_id"]: dict(row) for row in rows}
 
     def list_masks_for_photo(self, photo_id: int) -> list[dict[str, Any]]:
         """Every ``photo_masks`` row of one photo as dicts, newest first."""
@@ -749,9 +760,9 @@ class MasksFeaturesRepository:
                 detector_model, prompt_x, prompt_y, prompt_w, prompt_h,
                 subject_size, subject_tenengrad, bg_tenengrad, crop_complete, quality_input_recipe,
                 subject_clip_high, subject_clip_low, subject_y_median, bg_separation, phash_crop, noise_estimate,
-                subject_detail, subject_detail_px
+                subject_detail, subject_detail_px, comparison_inputs
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(photo_id, variant) DO UPDATE SET
                 path=excluded.path,
                 created_at=excluded.created_at,
@@ -772,13 +783,14 @@ class MasksFeaturesRepository:
                 phash_crop=excluded.phash_crop,
                 noise_estimate=excluded.noise_estimate,
                 subject_detail=excluded.subject_detail,
-                subject_detail_px=excluded.subject_detail_px
+                subject_detail_px=excluded.subject_detail_px,
+                comparison_inputs=excluded.comparison_inputs
             """,
             (photo_id, variant, path, int(time.time()),
              detector_model, prompt_x, prompt_y, prompt_w, prompt_h,
              q.subject_size, q.subject_tenengrad, q.bg_tenengrad, q.crop_complete, q.quality_input_recipe,
              q.subject_clip_high, q.subject_clip_low, q.subject_y_median, q.bg_separation, q.phash_crop,
-             q.noise_estimate, q.subject_detail, q.subject_detail_px),
+             q.noise_estimate, q.subject_detail, q.subject_detail_px, q.comparison_inputs),
         )
 
     def save_subject_raw_analysis(self, detection_id: int, report: dict[str, Any]) -> None:
