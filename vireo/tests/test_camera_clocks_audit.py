@@ -257,3 +257,27 @@ def test_reset_folder_does_not_rank_next_days_zone_choices(clocks_db, monkeypatc
     options = findings[next_folder]["fixes"]
     assert {option["shift_minutes"] for option in options} == {-60, 0}
     assert not any(option["recommended"] for option in options)
+
+
+@pytest.mark.parametrize("primary,offset_time,minutes", [(True, "-09:00", -420), (False, "-09:00", -540), (False, "", -360)])
+def test_clock_audit_uses_capture_time_tag_precedence(clocks_db, primary, offset_time, minutes):
+    from services.camera_clocks import frame_from_row
+
+    db, _, ids = clocks_db
+    pid = next(iter(ids.values()))
+    exif = {
+        "CreateDate": "2026:01:25 13:20:10",
+        "SubSecTime": "042",
+        "OffsetTimeDigitized": "-06:00",
+        "OffsetTime": offset_time,
+    }
+    if primary:
+        exif.update(DateTimeOriginal="2026:01:25 12:20:10", SubSecTimeOriginal="15", OffsetTimeOriginal="-07:00")
+    db.conn.execute("UPDATE photos SET exif_data=? WHERE id=?", (json.dumps({"EXIF": exif}), pid))
+    db.commit()
+    row = next(row for row in db.audit.camera_clock_rows() if row["id"] == pid)
+    frame = frame_from_row(row)
+    assert frame is not None
+    assert frame.captured == (datetime(2026, 1, 25, 12, 20, 10, 150000) if primary
+                              else datetime(2026, 1, 25, 13, 20, 10, 42000))
+    assert frame.offset_minutes == minutes
