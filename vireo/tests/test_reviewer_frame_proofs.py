@@ -113,6 +113,47 @@ def test_cached_reviewer_proof_checked_when_another_box_needs_analysis(original_
     assert db.subjects.analysis(other) is None
 
 
+@pytest.mark.parametrize("target_cached", [False, True])
+def test_scoped_analysis_checks_the_frame_of_the_primary_it_projects(original_photo, monkeypatch, target_cached):
+    import image_loader
+    from masking import PromptFrameError
+    from reviewer_helpers import original_frame_detections
+    from subjects import analyze_photo, select_primary
+
+    app, db, pid, source = original_photo
+    box = {"x": .1, "y": .1, "w": .2, "h": .2}
+    other, = db.detections.upsert_rows(pid, "megadetector-v6", original_frame_detections(
+        source, [{"box": box, "confidence": .95}]))
+    db.commit()
+    if target_cached:
+        assert analyze_photo(db, pid, source, detection_id=other) == 1
+
+    original_load = image_loader.load_image
+
+    def reviewer_rendition(*args, **kwargs):
+        image = original_load(*args, **kwargs)
+        image.info["vireo_subject_frame_id"] = "a" * 64
+        return image
+
+    client = app.test_client()
+    with monkeypatch.context() as patch:
+        patch.setattr(image_loader, "load_image", reviewer_rendition)
+        reviewer = _save(client, pid, _token(client, pid)).get_json()["primary_detection_id"]
+        assert analyze_photo(db, pid, source, detection_id=reviewer) == 1
+
+    db.conn.execute("UPDATE photos SET quality_score=NULL WHERE id=?", (pid,))
+    db.commit()
+    with pytest.raises(PromptFrameError, match="frame changed"):
+        analyze_photo(db, pid, source, detection_id=other)
+    assert db.photos.get(pid)["quality_score"] is None
+    assert (db.subjects.analysis(other) is not None) == target_cached
+
+    select_primary(db, pid, other)
+    db.commit()
+    assert analyze_photo(db, pid, source, detection_id=other) == (0 if target_cached else 1)
+    assert db.photos.get(pid)["quality_score"] == db.subjects.analysis(other)["quality_score"]
+
+
 def test_confirmed_frame_is_checked_again_during_analysis_and_history_replay(original_photo):
     from masking import PromptFrameError
     from subjects import analyze_photo

@@ -8,6 +8,7 @@ import json
 import logging
 import math
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from functools import partial
 
 import numpy as np
@@ -119,7 +120,7 @@ def analyze_photo(db, photo_id, image_path, *, min_conf=None, force=False, check
     source_key = hashlib.sha256(json.dumps([source_state, ANALYSIS_VERSION]).encode()).hexdigest()
     cached = db.subjects.cached_detection_ids(photo_id, source_key)
     pending = [d for d in detections if force or d["id"] not in cached]
-    if not pending:
+    if not pending and detection_id is None:
         for detection in detections:
             require_original_reviewer_frame(image_path, detection_prompt_runtime(detection), detector_model=detection.get("detector_model"))
         with acquire_photo_mask(photo_id):
@@ -131,23 +132,21 @@ def analyze_photo(db, photo_id, image_path, *, min_conf=None, force=False, check
     image = load_image(image_path, max_size=1024, raw_decode=RAW_DECODE_ALIGNED)
     if image is None:
         raise ValueError("Could not load photo for subject analysis")
-    try:
+    with closing(image):
         for detection in detections:
             require_aligned_detector_prompt(image, detection_prompt_runtime(detection), detector_model=detection.get("detector_model"))
-        results = analyze_image(image, pending)
-    finally:
-        image.close()
-    with acquire_photo_mask(photo_id):
-        if checkpoint:
-            checkpoint()
-        with db.transaction(immediate=True):
-            if db.photos.get(photo_id, verify_workspace=True) is None:
-                raise ValueError("Photo is no longer visible in this workspace")
-            if validate_publication:
-                validate_publication()
-            results = _current_analysis_results(db, photo_id, pending, results, detection_id, min_conf)
-            db.subjects.save_analyses(source_key, results)
-            sync_primary(db, photo_id, min_conf=min_conf)
+        results = analyze_image(image, pending) if pending else []
+        with acquire_photo_mask(photo_id):
+            if checkpoint:
+                checkpoint()
+            with db.transaction(immediate=True):
+                if db.photos.get(photo_id, verify_workspace=True) is None:
+                    raise ValueError("Photo is no longer visible in this workspace")
+                if validate_publication:
+                    validate_publication()
+                results = _current_analysis_results(db, photo_id, pending or detections, results, detection_id, min_conf)
+                db.subjects.save_analyses(source_key, results)
+                sync_primary(db, photo_id, min_conf=min_conf, analysis_image=image)
     return len(results)
 
 
@@ -224,13 +223,15 @@ def selection_evidence(db, photo_id, detections):
             "selection_explanation": explanation.strip()}
 
 
-def sync_primary(db, photo_id, *, min_conf=None, detector_model=None):
+def sync_primary(db, photo_id, *, min_conf=None, detector_model=None, analysis_image=None):
     """Project primary quality; clear stale subject-dependent outputs on a switch.
 
     Mask snapshots referenced by manual edits are immutable and untouched.
     Existing photo_masks remain cached, and prompt matching decides reuse.
+    When analysis supplies its decoded image, validate the winning box
+    against that frame before copying its measurements onto the photo.
     """
-    changed = _project_primary(db, photo_id, min_conf, detector_model)
+    changed = _project_primary(db, photo_id, min_conf, detector_model, analysis_image=analysis_image)
     if changed:
         _refresh_successors(db, photo_id)
 
@@ -284,7 +285,7 @@ def _log_refresh_failure(photo_id, job):
         logging.getLogger(__name__).error("Failed to refresh burst subject for photo %s", photo_id, exc_info=error)
 
 
-def _project_primary(db, photo_id, min_conf, detector_model):
+def _project_primary(db, photo_id, min_conf, detector_model, *, analysis_image=None):
     _refresh_focus(db, photo_id)
     min_conf = detection_store.detector_floor(db, min_conf)
     detections = retained(db, photo_id, min_conf, detector_model=detector_model)
@@ -302,6 +303,13 @@ def _project_primary(db, photo_id, min_conf, detector_model):
     if changed or (active_mask and not mask_matches):
         db.subjects.clear_primary_features(photo_id)
     if analysis:
+        if analysis_image is not None:
+            from detection_id import detection_prompt_runtime
+            from masking import require_aligned_detector_prompt
+
+            # A scoped analysis can refresh a different primary from cached measurements.
+            require_aligned_detector_prompt(analysis_image, detection_prompt_runtime(primary),
+                                            detector_model=primary["detector_model"])
         features = json.loads(analysis["features"])
         db.subjects.set_primary_quality(photo_id, analysis["quality_score"], features["subject_sharpness"])
         if changed or not mask_matches:
