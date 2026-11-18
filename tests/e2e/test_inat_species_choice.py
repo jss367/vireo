@@ -133,3 +133,46 @@ def test_submission_preserves_pending_account_switch(live_server, page):
     pending[0].fulfill(json=snapshot("second"))
     expect(page.locator("#summary")).to_contain_text("second ·")
     expect(page.locator("#status")).to_be_empty()
+
+
+def test_new_places_reviews_two_views_as_one_observation(live_server, page):
+    page.route("**/api/inat/locations", lambda r: r.fulfill(json=[
+        {"id": 5, "name": "Marsh", "located": True},
+    ]))
+    species = [
+        {"species": name, "scientific_name": name, "inat_id": tid, "taxon_id": tid,
+         "taxon_rank": "species", "photo_count": 2, "best": {"id": 1, "filename": "front.jpg"}}
+        for tid, name in [(10, "Local species"), (20, "New here"), (30, "Never posted")]
+    ]
+    page.route("**/api/life-list?*", lambda r: r.fulfill(json={"species": species}))
+    page.route("**/api/inat/account-species?*", lambda r: r.fulfill(json={
+        "login": "birder", "refreshed_at": "2026-11-01", "taxon_ids": (
+            [10] if "location_id=5" in r.request.url else [10, 20]
+        ),
+    }))
+    page.route("**/api/life-list/species?*", lambda r: r.fulfill(json={
+        "photos": [{"id": 2, "filename": "side.jpg"}], "photo_count": 2,
+    }))
+    page.route("**/api/inat/prepare/1", lambda r: r.fulfill(json=_prepared("direct", [])))
+    submissions = []
+
+    def accept(route):
+        submissions.append(route.request.post_data_json)
+        route.fulfill(json={"observation_url": "https://www.inaturalist.org/observations/42"})
+
+    page.route("**/api/inat/submit", accept)
+    page.goto(f"{live_server['url']}/inaturalist")
+    page.get_by_label("Location", exact=True).select_option("5")
+    page.get_by_label("Show", exact=True).select_option("places")
+    page.get_by_label("iNaturalist username").fill("birder")
+    page.get_by_role("button", name="Refresh").click()
+    expect(page.locator("article")).to_have_count(1)
+    expect(page.locator("article h2")).to_have_text("New here")
+    page.get_by_text("Select views of the same individual").click()
+    page.get_by_label("front.jpg").check()
+    page.get_by_label("side.jpg").check()
+    page.get_by_role("button", name="Review observation").click()
+    expect(page.locator("#inatCards")).to_contain_text("2 views of one individual")
+    page.locator("#inatSubmitBtn").click()
+    expect(page.locator("#receipt a")).to_have_text("View observation on iNaturalist")
+    assert [(s["photo_id"], s["additional_photo_ids"], s["taxon_id"]) for s in submissions] == [(1, [2], 20)]

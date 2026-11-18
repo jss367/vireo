@@ -1278,13 +1278,14 @@ def build_life_list_payload(
     species_filter=None,
     taxon_id=None,
     unlinked_only=False,
+    trip=None,
 ):
-    rows = db.species_curation.get_life_list_candidates(species=species_filter)
+    rows = db.species_curation.get_life_list_candidates(species=species_filter, trip=trip)
     if unlinked_only:
         rows = [row for row in rows if row["taxon_id"] is None]
     elif taxon_id is not None:
         rows = [row for row in rows if row["taxon_id"] == taxon_id]
-    location_rows = db.species_curation.get_life_list_location_rows(species=species_filter)
+    location_rows = [] if trip is not None else db.species_curation.get_life_list_location_rows(species=species_filter)
     class_by_taxon = db.species_curation.get_class_ancestors({
         row["taxon_id"] for row in rows if row["taxon_id"] is not None
     })
@@ -1339,6 +1340,11 @@ def build_life_list_payload(
         if entry.get("best"):
             life_list_photos.append(entry["best"])
         life_list_photos.extend(entry.get("photos") or [])
+    if trip is not None:
+        places = db.locations.get_photo_leaves([photo["id"] for photo in life_list_photos])
+        for photo in life_list_photos:
+            place = places.get(photo["id"])
+            photo["location_name"] = place["name"] if place else None
     attach_edit_recipes(db, life_list_photos)
 
     return {

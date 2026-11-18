@@ -533,6 +533,23 @@ def create_inat_blueprint(
     blueprint = Blueprint("inat", __name__)
     background_job = make_background_job(get_runner, get_db, db_path, Database)
 
+    @blueprint.get("/api/inat/species-match")
+    def api_inat_species_match() -> ResponseReturnValue:
+        db = get_db()
+        name = request.args.get("name", "").strip()
+        taxon_id = db.keyword_taxa.lookup_taxon_id(name, prefer_species=True, species_only=True)
+        row = db.species_curation.get_taxon_by_id(taxon_id) if taxon_id else None
+        if not row or not row["inat_id"]:
+            return json_error("No linked species found. Try the scientific name.", 404)
+        return jsonify({"name": row["name"], "common_name": row["common_name"], "id": row["inat_id"]})
+
+    @blueprint.get("/api/inat/locations")
+    def api_inat_locations() -> ResponseReturnValue:
+        places = get_db().locations.located_keywords_in_workspace(include_unlocated=True)
+        return jsonify([{"id": row["id"], "name": row["name"],
+                         "located": row["latitude"] is not None and row["longitude"] is not None}
+                        for row in sorted(places, key=lambda row: row["name"].casefold())])
+
     @blueprint.get("/api/inat/account-species")
     def api_inat_account_species() -> ResponseReturnValue:
         import inat
@@ -541,6 +558,15 @@ def create_inat_blueprint(
         if not login or len(login) > 100 or not all(c.isalnum() or c in "_-" for c in login):
             return json_error("Enter an iNaturalist username.")
         try:
+            if "location_id" in request.args:
+                location_id = request.args.get("location_id", type=int)
+                places = get_db().locations.located_keywords_in_workspace()
+                place = next((row for row in places if row["id"] == location_id), None)
+                if place is None:
+                    return json_error("Select a workspace location with coordinates.")
+                return jsonify(inat.account_species(login, {
+                    "lat": place["latitude"], "lng": place["longitude"], "radius": 10,
+                }))
             return jsonify(inat.account_species(login))
         except inat.InatApiError as exc:
             return json_error(str(exc), 502)
@@ -764,10 +790,18 @@ def create_inat_blueprint(
                 return companion, False
         return fallback_path, False
 
+    def upload_recipe(db: Database, photo: Row) -> JsonDict | None:
+        from image_loader import RAW_EXTENSIONS
+
+        recipe = db.get_photo_edit_recipe(photo["id"])
+        if recipe or os.path.splitext(photo["filename"])[1].lower() not in RAW_EXTENSIONS:
+            return recipe
+        return {}
+
     def _inat_upload_photo_path(db: Database, photo: Row, fallback_path: str) -> tuple[str, None] | tuple[None, str]:
         vireo_dir = media_root(config["THUMB_CACHE_DIR"])
-        recipe = db.get_photo_edit_recipe(photo["id"])
-        if not recipe:
+        recipe = upload_recipe(db, photo)
+        if recipe is None:
             return fallback_path, None
 
         from edit_recipe import recipe_to_json
@@ -864,9 +898,9 @@ def create_inat_blueprint(
         )
         return out_path, None
 
-    def _offline_original_has_render_source(db: Database, photo: Row, photo_id: int) -> bool:
+    def _offline_original_has_render_source(db: Database, photo: Row) -> bool:
         """Whether an edit recipe can render from a local copy of ``photo``."""
-        recipe = db.get_photo_edit_recipe(photo_id)
+        recipe = upload_recipe(db, photo)
         wc_rel = photo["working_copy_path"]
         wc_abs = (
             wc_rel if wc_rel and os.path.isabs(wc_rel)
@@ -880,12 +914,46 @@ def create_inat_blueprint(
             if photo["companion_path"] else None
         )
         return bool(
-            recipe
+            recipe is not None
             and (
                 (wc_abs and os.path.isfile(wc_abs))
                 or (companion_abs and os.path.isfile(companion_abs))
             )
         )
+
+    def prepare_upload(db: Database, photo: Row):
+        photo_path = os.path.join(photo["folder_path"], photo["filename"])
+        if not os.path.isfile(photo_path) and not (
+            _offline_original_has_render_source(db, photo)
+        ):
+            return None, json_error("Photo file not found on disk", 404)
+
+        upload_path, upload_error = _inat_upload_photo_path(db, photo, photo_path)
+        if upload_error:
+            return None, json_error(upload_error, 500)
+
+        return upload_path, None
+
+    def prepare_views(db: Database, photo: Row, extra_ids: Any):
+        photo_id = photo["id"]
+        if (not isinstance(extra_ids, list) or len(extra_ids) > 19
+                or any(type(pid) is not int or pid <= 0 for pid in extra_ids)
+                or len(set(extra_ids)) != len(extra_ids) or photo_id in extra_ids):
+            return None, [], json_error("Select up to 20 distinct photos for one observation.")
+        upload_path, error = prepare_upload(db, photo)
+        if error:
+            return None, [], error
+        additional = []
+        for pid in extra_ids:
+            extra = db.photos.get_with_folder_path(pid)
+            if not extra or not db.workspace_folders.photo_in_workspace(pid, db.require_workspace_id()):
+                return None, [], json_error("Additional photo unavailable in this workspace", 404)
+            path, error = prepare_upload(db, extra)
+            if error:
+                return None, [], error
+            additional.append((pid, path))
+
+        return upload_path, additional, None
 
     @blueprint.route("/api/inat/submit", methods=["POST"])
     @guarded_reader("inat-uploads")
@@ -921,15 +989,9 @@ def create_inat_blueprint(
                 f"Photo {photo_id} does not belong to the active workspace", 403,
             )
 
-        photo_path = os.path.join(photo["folder_path"], photo["filename"])
-        if not os.path.isfile(photo_path) and not (
-            _offline_original_has_render_source(db, photo, photo_id)
-        ):
-            return json_error("Photo file not found on disk", 404)
-
-        upload_path, upload_error = _inat_upload_photo_path(db, photo, photo_path)
-        if upload_error:
-            return json_error(upload_error, 500)
+        upload_path, additional, error = prepare_views(db, photo, data.get("additional_photo_ids", []))
+        if error:
+            return error
 
         # Use overrides from request, or fall back to DB data. The helper
         # picks the highest-confidence prediction from the CURRENT
@@ -984,6 +1046,14 @@ def create_inat_blueprint(
 
         with db.transaction():
             db.inat.record_submission(photo_id, obs_id, obs_url)
+        for pid, path in additional:
+            try:
+                inat.upload_photo(token, obs_id, path)
+            except (inat.InatApiError, inat.InatAuthError, OSError, ValueError) as exc:
+                return jsonify({"error": f"Observation created. Could not attach photo {pid}: {exc}",
+                                "partial": True, "observation_id": obs_id, "observation_url": obs_url}), 502
+            with db.transaction():
+                db.inat.record_submission(pid, obs_id, obs_url)
         return jsonify({"observation_id": obs_id, "observation_url": obs_url})
 
     def _submit_batch_item(db: Database, inat: ModuleType, token: str, min_conf: float, sub: JsonDict) -> JsonDict:

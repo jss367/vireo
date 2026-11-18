@@ -21,6 +21,14 @@
   .candidate .preview { padding: 0; }
   .info { flex: 1 1 200px; }
   .controls { display: flex; align-items: center; gap: 8px; }
+  .filters, .sheet { display: flex; flex-wrap: wrap; gap: 10px; margin: 12px 0; }
+  .filters > div { display: grid; gap: 4px; }
+  .filters select { max-width: 230px; }
+  main select, main input { font: inherit; color: var(--text-primary); background: var(--bg-secondary); }
+  .candidate details { flex-basis: 100%; }
+  .candidate summary { cursor: pointer; }
+  .sheet label { width: 130px; overflow-wrap: anywhere; }
+  .controls { flex-wrap: wrap; }
   #receipt a { color: var(--accent); }
 </style>
 </head>
@@ -33,10 +41,18 @@
     <input id="login" required maxlength="100" autocomplete="off" autocapitalize="none" spellcheck="false">
     <button>Refresh</button>
   </form>
+  <div class="filters">
+    <div><label for="folder">Folder</label><select id="folder"><option value="">All folders</option></select></div>
+    <div><label for="date-from">From</label><input id="date-from" type="date"></div>
+    <div><label for="date-to">Through</label><input id="date-to" type="date"></div>
+    <div><label for="location">Location</label><select id="location"><option value="">All locations</option></select></div>
+    <div><label for="view">Show</label><select id="view"><option value="missing">Missing species</option>
+      <option value="places">New places</option><option value="unmatched">Unmatched labels</option></select></div>
+  </div>
   <p id="status" role="status">Enter your username to compare your Life List with your iNaturalist observations.</p>
   <p id="summary"></p>
   <p id="receipt" aria-live="polite"></p>
-  <section id="queue" aria-label="Missing species"></section>
+  <section id="queue" aria-label="Species comparison"></section>
 </main>
 <script type="module" src="/static/inaturalist/boot.js"></script>
 </body>

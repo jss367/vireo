@@ -1542,3 +1542,108 @@ def test_account_species_rejects_replacement_with_unchanged_total():
         page(102), page(103),
     ]), pytest.raises(inat.InatApiError, match="changed"):
         inat.account_species("birder")
+
+
+def _another_view(db, pid):
+    photo = db.photos.get_with_folder_path(pid)
+    Image.new("RGB", (10, 10)).save(os.path.join(photo["folder_path"], "side.jpg"))
+    result = photo_ingest.add_photo(db, folder_id=photo["folder_id"], filename="side.jpg",
+                                    extension=".jpg", file_size=100, file_mtime=1.0,
+                                    timestamp="2024-06-02T10:00:00")
+    db.commit()
+    return result
+
+
+@pytest.mark.parametrize("attach_fails", [False, True])
+def test_grouped_views_share_one_observation(app_and_db, attach_fails):
+    import config as cfg
+    import inat
+
+    app, db, pid = app_and_db
+    cfg.save({"inat_token": "fake"})
+    other = _another_view(db, pid)
+    url = "https://www.inaturalist.org/observations/42"
+    with patch("inat.submit_observation", return_value=(42, url)) as create, patch(
+        "inat.upload_photo", side_effect=inat.InatApiError("offline") if attach_fails else None,
+    ) as attach:
+        response = app.test_client().post("/api/inat/submit", json={
+            "photo_id": pid, "additional_photo_ids": [other],
+        })
+    create.assert_called_once()
+    assert attach.call_args.args[:2] == ("fake", 42)
+    assert response.get_json()["observation_url"] == url
+    assert response.status_code == (502 if attach_fails else 200)
+    recorded = db.inat.get_submissions([pid, other])
+    assert set(recorded) == ({pid} if attach_fails else {pid, other})
+    assert all(row["observation_id"] == 42 for row in recorded.values())
+
+
+def test_trip_ranks_and_pages_only_photos_in_scope(app_and_db):
+    app, db, pid = app_and_db
+    other = _another_view(db, pid)
+    client = app.test_client()
+    for photo in (pid, other):
+        client.post(f"/api/photos/{photo}/keywords", json={"name": "Northern Cardinal", "type": "taxonomy"})
+    place = client.post(f"/api/photos/{other}/keywords", json={"name": "Lake", "type": "location"}).get_json()
+    fid = db.photos.get_with_folder_path(other)["folder_id"]
+    scope = {"trip": 1, "folder_id": fid, "location_id": place["keyword_id"], "date_from": "2024-06-02"}
+    entry, = client.get("/api/life-list", query_string=scope).get_json()["species"]
+    assert entry["photo_count"] == 1 and entry["best"]["id"] == other
+    assert entry["best"]["location_name"] == "Lake"
+    page = client.get("/api/life-list/species", query_string={**scope, "species": entry["species"]}).get_json()
+    assert [p["id"] for p in page["photos"]] == [other]
+    assert client.get("/api/life-list", query_string={**scope, "date_to": "2024-06-01"}).get_json()["species"] == []
+
+
+def test_match_review_resolves_linked_species_and_persists_for_one_photo(app_and_db):
+    app, db, pid = app_and_db
+    client = app.test_client()
+    client.post(f"/api/photos/{pid}/keywords", json={"name": "Red bird", "type": "taxonomy"})
+    match = client.get("/api/inat/species-match?name=Northern+Cardinal").get_json()
+    assert match["id"] == 9083
+    response = client.post("/api/highlights/relabel", json={"photo_ids": [pid],
+                           "species": match["name"], "from_species": "Red bird"})
+    assert response.status_code == 200
+    species, = client.get("/api/life-list").get_json()["species"]
+    assert species["inat_id"] == 9083
+
+
+def test_nearby_species_query_uses_selected_workspace_location(app_and_db):
+    app, db, pid = app_and_db
+    client = app.test_client()
+    place = client.post(f"/api/photos/{pid}/keywords", json={"name": "Marsh", "type": "location"}).get_json()
+    kid = place["keyword_id"]
+    db.conn.execute("UPDATE keywords SET latitude=0, longitude=-2 WHERE id=?", (kid,))
+    db.commit()
+    calls = []
+
+    def fetch(path, params=None):
+        if path == "users/birder":
+            return {"results": [{"login": "birder", "id": 42}]}
+        calls.append((path, params))
+        return {"total_results": 0, "per_page": 500, "results": []}
+
+    with patch("inat._public_page", side_effect=fetch):
+        res = client.get("/api/inat/account-species", query_string={"login": "birder", "location_id": kid})
+    assert res.status_code == 200
+    (path, params), = calls
+    assert path == "observations/species_counts"
+    assert (params["lat"], params["lng"], params["radius"], params["user_id"]) == (0, -2, 10, 42)
+
+
+def test_multiple_views_render_an_unedited_offline_raw_as_jpeg(app_and_db):
+    import config as cfg
+
+    app, db, primary = app_and_db
+    cfg.save({"inat_token": "fake"})
+    other = _another_view(db, primary)
+    db.conn.execute("UPDATE photos SET filename='side.NEF', extension='.nef', companion_path='side.jpg' WHERE id=?",
+                    (other,))
+    db.commit()
+    with patch("inat.submit_observation", return_value=(42, "https://www.inaturalist.org/observations/42")), patch(
+        "inat.upload_photo",
+    ) as attach:
+        response = app.test_client().post("/api/inat/submit", json={"photo_id": primary, "additional_photo_ids": [other]})
+    assert response.status_code == 200
+    with Image.open(attach.call_args.args[2]) as image:
+        assert image.format == "JPEG"
