@@ -62,7 +62,7 @@ function results() {
 }
 
 for (const eligibility of [false, null, undefined, true]) {
-  test(`scope reset retains refreshed keeper eligibility: ${eligibility}`, () => {
+  test(`scope reset retains refreshed keeper eligibility: ${eligibility}`, async () => {
     const {ctx} = page();
     const source = results();
     source.photos = source.photos.slice(0, 2);
@@ -72,8 +72,10 @@ for (const eligibility of [false, null, undefined, true]) {
     const refreshed = results();
     refreshed.photos = [photo(1, {label: 'KEEP'})];
     if (eligibility !== undefined) refreshed.photos[0].automatic_keep_eligible = eligibility;
-    ctx.syncCullSourceFlags(refreshed);
-    ctx.setPipelineResults(refreshed, '', true);
+    ctx.safeFetch = async () => refreshed;
+    ctx.getGroupingConfig = ctx.getScoringConfig = () => ({});
+    await ctx.recomputeCulling('/api/pipeline/reflow');
+    assert.equal(ctx.pipelineResults, refreshed);
     // Reset restores the retained source before its next analysis request.
     ctx.runCulling = () => {};
     ctx.clearCullFilters();
