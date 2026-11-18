@@ -12,7 +12,7 @@ from subject_ranking import analysis_key, resolve_subject, source_path
 
 def measure_eye(db, photo_id, detection, image, mask, effective_cfg):
     import keypoints as kp
-    from pipeline import _best_eye_by_tenengrad, _eye_candidates_in_mask, _resolve_keypoint_model
+    from pipeline import _best_eye_by_tenengrad, _eye_candidates_in_mask, _keypoints_in_mask, _resolve_keypoint_model
 
     settings = effective_cfg.get("pipeline", {})
     result = dict.fromkeys(("eye_x", "eye_y", "eye_conf", "eye_tenengrad"))
@@ -35,7 +35,12 @@ def measure_eye(db, photo_id, detection, image, mask, effective_cfg):
     x, y, w, h = (detection["box_" + k] for k in "xywh")
     bbox = tuple(int(round(v)) for v in (x * iw, y * ih, (x + w) * iw, (y + h) * ih))
     points = kp.detect_keypoints(image, bbox, model)
-    eyes = _eye_candidates_in_mask(points, mask, config_value(settings, "eye_detection_conf_gate", section="pipeline"))
+    threshold = config_value(settings, "eye_detection_conf_gate", section="pipeline")
+    eyes = _eye_candidates_in_mask(points, mask, threshold)
+    if model == "superanimal-bird":
+        head = _keypoints_in_mask(points, mask, threshold, {"bill", "crown", "forehead", "nape"})
+        result["head_landmarks"] = {p["name"]: [p["x"] / iw, p["y"] / ih] for p in head}
+
     result["eye_status"] = "not_located"
     if eyes:
         eye, score = _best_eye_by_tenengrad(image, eyes, bbox, config_value(settings, "eye_window_k", section="pipeline"))

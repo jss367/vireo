@@ -196,6 +196,9 @@ function bindReviewQueue() {
   });
   rqElement('rqResetCenter').addEventListener('click', function() {
     if (!reviewQueue.current) return;
+    reviewQueue.manual = false;
+    rqElement('rqManual').setAttribute('aria-pressed', 'false');
+    rqElement('rqFullStatus').textContent = 'Full frame for head inspection.';
     rqItem(reviewQueue.current.id).center = null; rqSave(); rqRenderSubjects(); rqLoadCrop();
   });
   rqElement('rqFull').addEventListener('click', rqPlaceCenter);
