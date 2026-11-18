@@ -74,6 +74,11 @@ def timing_result(state: _ImportRunState) -> JsonDict:
     }
 
 
+def _duration(seconds: float) -> str:
+    """A phase's time in words; a phase that took no measurable time says so."""
+    return "under 1 s" if seconds < 1 else format_duration(seconds)
+
+
 def _copy_rate(state: _ImportRunState) -> str:
     """The copy phase's size and rate, or '' when nothing was copied.
 
@@ -100,10 +105,10 @@ def timing_notice(state: _ImportRunState, *, verified: bool) -> str | None:
     for phase, words in _PHASES:
         if phase not in state.phase_seconds:
             continue
-        part = f"{words} {format_duration(state.phase_seconds[phase])}"
+        if phase == COPY and verified:
+            words = "copying and verifying"
+        part = f"{words} {_duration(state.phase_seconds[phase])}"
         if phase == COPY:
-            if verified:
-                part = f"copying and verifying {format_duration(state.phase_seconds[phase])}"
             part += _copy_rate(state)
         parts.append(part)
     if not parts:

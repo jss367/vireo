@@ -82,6 +82,14 @@ def test_a_copy_phase_that_copied_nothing_has_no_rate():
     )
 
 
+def test_a_phase_shorter_than_a_second_is_not_reported_as_zero():
+    state = _state(find=0.1, catalog=0.5)
+
+    assert timing_notice(state, verified=True) == (
+        "Time spent: finding photos under 1 s; cataloging under 1 s."
+    )
+
+
 def test_only_the_phases_a_run_entered_are_reported():
     state = _state(find=2.0)
 
