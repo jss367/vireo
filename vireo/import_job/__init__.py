@@ -74,6 +74,9 @@ re-exports the names callers outside the package import):
 - ``destination`` / ``state`` / ``progress`` / ``file_selection`` /
   ``result`` — destination context, run state and bookkeeping, ETA and
   progress, file selection, and the final result.
+- ``timing`` — seconds per phase (finding, copying, cataloging, working
+  copies) and the bytes copied, for the result's ``timing`` block and
+  ``timing_notice``.
 
 A test that patches a helper must patch it in the module that looks it up
 (``import_job.planning.IMPORT_BATCH_SIZE``, not ``import_job.IMPORT_BATCH_SIZE``).

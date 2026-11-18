@@ -84,17 +84,23 @@ identifications; model confidence is not a probability of correct identification
 
 Best photos: best_of_each_species lists one photo per species for a folder, a
 collection, a date range or the whole workspace. Each species has a decision
-saying why its first photo leads: chosen (someone chose it and no other chosen
-photo there beats it), tie (several chosen photos nobody has compared, listed in
-tied_photo_ids; the newest choice is shown meanwhile), highlight or pick (the
-user's ranked highlight or flagged pick), score or unanalyzed (nobody chose;
-Vireo ordered it). To settle a tie or replace a guess, list more of that
-species (species=..., per_species=N), compare the candidates with
-view_photo(view="subject") and view_photo(view="preview"), then call
-choose_best_photo with the photos it beat in over and a reason. A choice
-claims only what it names: the photos in over, or the other chosen photos in
-the scope you pass. Leave a decision whose source is the user's alone unless
-asked to revisit it.
+saying why its first photo leads: highlight (it is a highlight of the species
+and no other highlight there beats it), tie (several highlights nobody has
+compared, listed in tied_photo_ids; the newest is shown meanwhile), pick (a
+flagged pick, by Vireo's score), score or unanalyzed (nothing is highlighted
+there; Vireo ordered it). A species has one list of highlights, shown as
+Highlight 1, 2, ... on the Highlights page; the number is a photo's place
+among the highlights in the set being shown. To settle a tie or replace a
+guess, list more of that species (species=..., per_species=N), compare the
+candidates with view_photo(view="subject") and view_photo(view="preview"),
+then call choose_best_photo with the photos it beat in over and a reason. That
+makes the photo a highlight ahead of them. A choice claims only what it names:
+the photos in over, or the other highlights in the scope you pass. Leave a
+decision whose source is the user's alone unless asked to revisit it.
+When no highlight leads and no photo here has the species as its subject,
+the decision is in_frame or outside_crop. Each photo's species_presence names
+its role for this species; subject_species names the photo's subject. A pick
+and score describe that subject, not another species merely in the frame.
 """
 
 _QUALITY_METRIC_KEYS = ("quality_score", "sharpness", "subject_sharpness", "subject_size")
@@ -395,8 +401,7 @@ def photo_detail(photo, include_exif=False, readiness=None):
             _pick(note, ("flag", "source", "reason", "description", "at"))
             if isinstance(note, dict) else None
         )
-    if "species_assignments" in photo:
-        out["species_assignments"] = photo["species_assignments"]
+    out.update(_pick(photo, ("species_assignments", "review_workspace_id", "assignment_reviews")))
     out["keywords"] = [
         _pick(k, ("id", "name", "type", "display_name", "synonyms", "taxon_id",
                   "source_taxon_id", "scientific_name")) for k in photo.get("keywords") or []
@@ -699,6 +704,27 @@ def _register_species_tools(server, client):
         return client.post_json("/api/photos/species-evidence", {"photo_ids": photo_ids})
 
     @server.tool(annotations=mcp_types.ToolAnnotations(read_only_hint=True))
+    def list_assignment_conflicts() -> dict:
+        """List saved species assignments with outstanding conflicts in the active workspace."""
+        return client.get_json("/api/species/assignment-conflicts")
+
+    @server.tool(annotations=mcp_types.ToolAnnotations(read_only_hint=False, destructive_hint=True))
+    def review_species_assignment(photo_id: int, keyword_id: int, observed_workspace_id: int,
+                                  review_version: str, action: str, reviewer: str, reason: str,
+                                  evidence_source: str, species: str | None = None) -> dict:
+        """Report or resolve conflicting evidence on one saved assignment, with Undo.
+
+        Use the review_workspace_id and assignment review_version from get_photo.
+        Report with action='report'. Resolve with 'retain', 'remove', or 'amend'
+        and a replacement species. Attribute the decision to the actual reviewer.
+        """
+        return client.post_json(f"/api/photos/{photo_id}/species/{keyword_id}/review", {
+            "observed_workspace_id": observed_workspace_id, "review_version": review_version,
+            "action": action, "reviewer": reviewer, "reason": reason, "evidence_source": evidence_source,
+            "species": species,
+        })
+
+    @server.tool(annotations=mcp_types.ToolAnnotations(read_only_hint=True))
     def preview_species_assignment(photo_ids: list[int], species: str, provenance: dict) -> dict:
         """Preview adding one reviewed species to exact photo IDs, without writing.
 
@@ -803,11 +829,12 @@ def _register_best_tools(server, client):
         year) or, with no scope, the whole workspace; scopes combine.
 
         Each species lists ``per_species`` photos, best first, and a
-        ``decision`` for the first one: ``kind`` (``chosen``, ``tie``,
-        ``highlight``, ``pick``, ``score``, ``unanalyzed``), who chose it and
-        why, ``tied_photo_ids`` for a tie and ``contender_ids`` (every chosen
-        photo of the species here, best first). ``meta`` counts the species
-        that need a comparison and the ones Vireo guessed. Species held only
+        ``decision`` for the first one: ``kind`` (``highlight``, ``tie``,
+        ``pick``, ``score``, ``unanalyzed``), who chose it and why,
+        ``tied_photo_ids`` for a tie and ``contender_ids`` (every highlight
+        of the species here, best first). ``meta`` counts the species led by
+        a settled highlight (``highlighted``), the ones that need a
+        comparison and the ones Vireo guessed. Species held only
         by an unconfirmed prediction are left out and counted in
         ``meta.unconfirmed_species_omitted`` unless ``include_unconfirmed``.
         """
@@ -836,8 +863,9 @@ def _register_best_tools(server, client):
         """Record that ``photo_id`` is the best photo of ``species`` among
         photos you compared, after viewing them at full detail.
 
-        ``over`` lists the photo ids it beat. Without ``over``, it is chosen
-        over every other chosen photo of the species in the scope given
+        The photo becomes a highlight of the species, ahead of the photos
+        named. ``over`` lists the photo ids it beat. Without ``over``, it
+        goes ahead of every other highlight of the species in the scope given
         (folder, collection, dates; none means the whole workspace). Send
         ``over`` or a scope, not both. The photo must already carry the
         species as a confirmed identification. ``reason`` (required, up to

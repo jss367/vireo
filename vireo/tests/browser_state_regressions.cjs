@@ -450,7 +450,7 @@ async function testAsyncModalOwnership() {
     safeFetch: () => new Promise(resolve => {finish = resolve;}),
     isTauri: () => false, showToast() {}, escapeAttr: s => s,
   });
-  vm.runInContext(fn(navbar, 'inatDoSubmit'), ctx);
+  vm.runInContext(fn(navbar, 'readInatSubmission') + '\n' + fn(navbar, 'inatDoSubmit'), ctx);
   const pending = ctx.inatDoSubmit();
   // Close the old modal and open another while its request is in flight.
   ctx._inatModalGeneration++;

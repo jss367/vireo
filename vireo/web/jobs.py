@@ -144,10 +144,35 @@ def create_jobs_blueprint(
 
     @blueprint.get("/api/jobs/<job_id>")
     def api_job_status(job_id: str) -> ResponseReturnValue:
-        job = get_runner().get(job_id)
-        if not job:
+        """Return live status or a retained, read-only terminal history record.
+
+        Historical records carry historical=true and the stored result,
+        steps, progress and error count. Older records may only have error
+        details in the result and may lack final progress counters.
+        """
+        runner = get_runner()
+        job = runner.get(job_id)
+        if job is not None:
+            return jsonify(job)
+        try:
+            rows = runner.get_history(get_db(), limit=1, job_id=job_id)
+        except JobHistoryUnavailable as exc:
+            return json_error(str(exc), 503, code="job_history_unavailable")
+        if not rows:
             return json_error("job not found", 404)
-        return jsonify(job)
+        row = rows[0]
+        errors = row.get("errors")
+        if not isinstance(errors, list):
+            result = row["result"] if isinstance(row["result"], dict) else {}
+            errors = list(result["errors"]) if isinstance(result.get("errors"), list) else []
+            if result.get("error") and result["error"] not in errors:
+                errors.append(result["error"])
+        row["steps"] = row.pop("tree") or []
+        return jsonify({
+            **row, "errors": errors,
+            "historical": True, "_persisted": True, "pausable": False, "cancellable": False,
+            "control_unavailable_reason": "This job is in history.",
+        })
 
     @blueprint.post("/api/jobs/<job_id>/cancel")
     def api_job_cancel(job_id: str) -> ResponseReturnValue:

@@ -112,6 +112,18 @@ class Preferences:
         for comparison in kept:
             self._beats.setdefault(comparison.better, set()).add(comparison.worse)
 
+    def beats(
+        self, better: int, worse: int,
+        chosen_for_species: Iterable[int] | None = None,
+    ) -> bool:
+        """Whether ``better`` is recorded over ``worse``, directly or through
+        other photos (``chosen_for_species`` limits those, as in ``rank``)."""
+        through = (
+            None if chosen_for_species is None
+            else frozenset(chosen_for_species)
+        )
+        return better != worse and _reaches(self._beats, better, worse, through)
+
     def rank(
         self, contenders: Sequence[int],
         chosen_for_species: Iterable[int] | None = None,
@@ -165,18 +177,23 @@ def rank_contenders(
 def choice_note(
     notes: Mapping[int, Sequence[Mapping[str, Any]]], species: str, photo_id: int,
 ) -> Mapping[str, Any] | None:
-    """Who chose ``photo_id`` for ``species`` and why: its newest choice
-    recorded for that species, else None.
+    """Who highlighted ``photo_id`` for ``species`` and why: its newest
+    choice recorded for that species that names a source or a reason, else
+    its newest choice for the species, else None.
 
-    A photo can be chosen for more than one species, so a choice recorded
-    for another species (with its own source and reason) is never attributed
-    to the one being rendered. A species rename without a tracked alias
-    therefore loses its note on the next render, which is cheaper than
-    showing a note belonging to an unrelated species.
+    A reorder by hand carries neither a source nor a reason, so it does not
+    hide the reason an earlier choice gave for the photo. A photo can be a
+    highlight of more than one species, so a choice recorded for another
+    species (with its own source and reason) is never attributed to the one
+    being rendered.
 
     ``notes`` maps a photo to its choices, oldest first.
     """
+    newest = None
     for note in reversed(notes.get(photo_id) or ()):
-        if note.get("species") == species:
+        if note.get("species") != species:
+            continue
+        if note.get("source") or note.get("reason"):
             return note
-    return None
+        newest = newest or note
+    return newest

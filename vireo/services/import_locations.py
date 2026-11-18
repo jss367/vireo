@@ -21,6 +21,11 @@ A cell's suggestion comes from, in order:
     ``places.reverse_geocode`` (the nearest well-known park, else the named
     area), through the shared grid cache.
 
+For a dated walk with one directly matched park or natural feature, a city
+or broader cell can offer that park with source ``outing``. Its group lists
+the walk's ``outing_paths`` and requires confirmation. Cells shared with a
+different visit keep their direct suggestions.
+
 Cells with no suggestion form one unnamed group the user can still name.
 
 When Google can only name a county or broader for a cell (a trail deep in a
@@ -54,6 +59,7 @@ from services.gps_locations import (
     reverse_geocode_grid,
     summarize_details,
 )
+from services.outing_places import outing_offers
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -90,6 +96,8 @@ OUTING_LINK_M = 2000
 # thousand; dense spots near a pole could otherwise make billions.
 MAX_OUTING_COMPARISONS = 2_000_000
 MAX_NEARBY_PLACES = 6
+# Optional Google type checks for cells the catalog has already named.
+MAX_SAVED_EVIDENCE_CELLS = 32
 # Nearby lookups are made once per bucket of this many degrees (about 2 km),
 # from its center, not once per ~110 m cell: one walk spans dozens of cells.
 _NEARBY_BUCKET_DEG = 0.02
@@ -98,7 +106,7 @@ _NEARBY_BUCKET_DEG = 0.02
 _NEARBY_CACHE_TTL_S = 24 * 3600
 _NEARBY_CACHE_MAX = 4096
 
-_SOURCE_STRENGTH = ("your_photos", "your_place", "google_park", "google_area")
+_SOURCE_STRENGTH = ("your_photos", "your_place", "google_park", "google_area", "outing")
 _CELL_RE = re.compile(r"^-?\d{1,6},-?\d{1,6}$")
 _M_PER_DEG_LAT = 111_320.0
 
@@ -139,16 +147,19 @@ def _finite_point(lat: object, lng: object) -> tuple[float, float] | None:
 
 def read_source_gps(
     paths: Sequence[str], *,
+    capture_times: dict[str, str] | None = None,
     progress: Callable[[int, int], None] | None = None,
     checkpoint: Callable[[], None] | None = None,
 ) -> dict[str, tuple[float, float]]:
     """``{path: (lat, lng)}`` for the source files that carry usable GPS."""
     from metadata import extract_metadata
+    from scanner.exif_fields import _extract_timestamp
 
     grouped_by_path = extract_metadata(
         list(paths),
         # -fast2 skips maker notes, which hold no GPS; it halves a RAW read.
-        restricted_tags=["-GPSLatitude", "-GPSLongitude", "-fast2"],
+        restricted_tags=["-GPSLatitude", "-GPSLongitude", "-DateTimeOriginal", "-CreateDate",
+                         "-SubSecTimeOriginal", "-SubSecTime", "-fast2"],
         progress_callback=progress,
         checkpoint=checkpoint,
     )
@@ -157,6 +168,8 @@ def read_source_gps(
         point = gps_point(grouped)
         if point is not None:
             out[path] = point
+            if capture_times is not None and (timestamp := _extract_timestamp(grouped.get("EXIF") or {})):
+                capture_times[path] = timestamp
     return out
 
 
@@ -503,6 +516,7 @@ def _finish_group(db: Database, group: JsonDict) -> JsonDict | None:
     count = group["file_count"]
     return {
         "key": group["key"],
+        **({"outing_paths": group["outing_paths"]} if "outing_paths" in group else {}),
         "suggestion": suggestion,
         "cells": group["cells"],
         "file_count": count,
@@ -663,8 +677,10 @@ class ImportLocationSuggester:
 
     def __init__(
         self, db: Database, gps_by_path: Mapping[str, tuple[float, float]], *,
-        api_key: str, language: str | None,
+        api_key: str, language: str | None, capture_times: Mapping[str, str] | None = None,
     ) -> None:
+        self._saved_places: dict[str, str | None] = {}
+        self._capture_times = capture_times or {}
         self._db = db
         self._api_key = api_key
         self._language = language
@@ -684,17 +700,70 @@ class ImportLocationSuggester:
         cell = self._cells[key]
         suggestion = self._nearby.suggest(cell["lat"], cell["lng"])
         reason, broad = None, False
+        if suggestion and self._capture_times:
+            row = self._db.locations.keyword_place_row(suggestion["keyword_id"])
+            self._saved_places[key] = row["place_id"] if row else None
         if suggestion is None:
             suggestion, reason, broad = _google_suggestion(
                 self._db, cell["lat"], cell["lng"], self._api_key, self._language,
                 self._grid_cache,
             )
         self._named[key] = (suggestion, reason, broad)
-        group_key = _group_key(suggestion)
-        group = self._groups.setdefault(group_key, _new_group(group_key, suggestion))
-        _add_cell(group, key, cell, suggestion, reason)
-        if broad:
-            group["broad_cells"].append(key)
+
+    def saved_evidence_keys(self) -> list[str]:
+        # A single saved place already names the whole track. Only look up
+        # saved place types when cells have different candidate places.
+        if not self._grid_cache and len(set(self._saved_places.values()) - {None}) < 2:
+            return []
+        keys = []
+        for key, place_id in self._saved_places.items():
+            if place_id and any(path in self._capture_times for path in self._cells[key]["paths"]):
+                keys.append(key)
+                if len(keys) > MAX_SAVED_EVIDENCE_CELLS:
+                    # Keep the local suggestions for an over-budget preview.
+                    # A partial pass would favor the first cells on the card.
+                    return []
+        return keys
+
+    def name_saved_cell(self, key: str) -> None:
+        cell = self._cells[key]
+        resolve_place_for_point(self._db, cell["lat"], cell["lng"], self._api_key,
+                                self._language, self._grid_cache)
+
+    def _group_named_cells(self) -> None:
+        frames = []
+        for key, cell in self._cells.items():
+            grid = reverse_geocode_grid(cell["lat"], cell["lng"])
+            details, _ = self._grid_cache.get(grid, (None, None))
+            if key in self._saved_places and details and details["place_id"] != self._saved_places[key]:
+                details = None
+            for path, (lat, lng) in zip(cell["paths"], cell["points"], strict=True):
+                if path in self._capture_times:
+                    frames.append({"id": path, "timestamp": self._capture_times[path],
+                                   "latitude": lat, "longitude": lng, "place": details})
+        offers = outing_offers(frames)
+        by_path = {path: index for index, offer in enumerate(offers) for path in offer.inferred}
+        for key, (suggestion, reason, broad) in self._named.items():
+            cell = self._cells[key]
+            indices = {by_path.get(path) for path in cell["paths"]}
+            index = indices.pop() if len(indices) == 1 else None
+            group_key = _group_key(suggestion)
+            # Choices are applied by cell. Never infer for a cell shared
+            # with files outside the run or without a usable capture time.
+            if index is not None:
+                offer = offers[index]
+                suggestion = {"kind": "google", "place_id": offer.place["place_id"],
+                              "name": offer.place["name"], "source": "outing",
+                              "warning": "Confirm this park before assigning it to these photos."}
+                group_key = f"{_group_key(suggestion)}@outing:{index}"
+                broad = False
+            self._named[key] = (suggestion, reason, broad)
+            group = self._groups.setdefault(group_key, _new_group(group_key, suggestion))
+            _add_cell(group, key, cell, suggestion, reason)
+            if index is not None:
+                group["outing_paths"] = offers[index].members
+            if broad:
+                group["broad_cells"].append(key)
 
     def _split_outings(self) -> None:
         """Give each outing among broadly named cells its own group.
@@ -708,6 +777,7 @@ class ImportLocationSuggester:
         if self._outings_split:
             return
         self._outings_split = True
+        self._group_named_cells()
         regrouped: dict[str, JsonDict] = {}
         budget = _ComparisonBudget()
         for key, group in self._groups.items():
@@ -718,6 +788,9 @@ class ImportLocationSuggester:
                 # Refused in result(), before any Nearby Search.
                 self._outing_work_exceeded = True
                 return
+            if not outings:
+                regrouped[key] = group
+                continue
             if len(outings) == 1 and len(outings[0]) == len(group["cells"]):
                 regrouped[key] = group
                 continue
@@ -849,7 +922,7 @@ class ImportLocationSuggester:
 
 def suggest_import_locations(
     db: Database, gps_by_path: Mapping[str, tuple[float, float]], *,
-    api_key: str, language: str | None,
+    api_key: str, language: str | None, capture_times: Mapping[str, str] | None = None,
     cancel_check: Callable[[], bool] | None = None,
 ) -> JsonDict | None:
     """Group source files by GPS cell and suggest a place for each group.
@@ -872,11 +945,15 @@ def suggest_import_locations(
     callers must require fewer files or explicit GPS opt-out before import.
     """
     suggester = ImportLocationSuggester(
-        db, gps_by_path, api_key=api_key, language=language)
+        db, gps_by_path, api_key=api_key, language=language, capture_times=capture_times)
     for key in suggester.cell_keys:
         if cancel_check is not None and cancel_check():
             return None
         suggester.name_cell(key)
+    for key in suggester.saved_evidence_keys():
+        if cancel_check is not None and cancel_check():
+            return None
+        suggester.name_saved_cell(key)
     for bucket in suggester.nearby_keys():
         if cancel_check is not None and cancel_check():
             return None
@@ -1146,16 +1223,17 @@ def stream_location_suggestions(
         yield frame({"done": True, "error": "ExifTool isn't installed, so Vireo can't read the photos' GPS."})
         return
     yield frame({"reading": 0, "total": total})
+    capture_times: dict[str, str] = {}
     gps: dict[str, tuple[float, float]] = {}
     for start in range(0, total, _GPS_READ_CHUNK):
-        gps.update(read_source_gps(unique[start:start + _GPS_READ_CHUNK]))
+        gps.update(read_source_gps(unique[start:start + _GPS_READ_CHUNK], capture_times=capture_times))
         yield frame({"reading": min(start + _GPS_READ_CHUNK, total), "total": total})
     # create_app already set up the schema; repeating its DDL here could
     # queue behind an import's write transaction. Same rule as the request DB.
     db = Database(db_path, initialize_schema=(db_path == ":memory:"))
     try:
         suggester = ImportLocationSuggester(
-            db, gps,
+            db, gps, capture_times=capture_times,
             api_key=(maps_config.get("google_maps_api_key", "") or "").strip(),
             language=places.result_language(maps_config),
         )
@@ -1165,6 +1243,10 @@ def stream_location_suggestions(
         for done, key in enumerate(suggester.cell_keys, start=1):
             suggester.name_cell(key)
             yield frame({"naming": done, "total": cells})
+        saved = suggester.saved_evidence_keys()
+        for done, key in enumerate(saved, start=1):
+            suggester.name_saved_cell(key)
+            yield frame({"naming": cells + done, "total": cells + len(saved)})
         buckets = suggester.nearby_keys()
         for done, bucket in enumerate(buckets, start=1):
             suggester.find_nearby(bucket)

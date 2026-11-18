@@ -12,8 +12,8 @@ import { state } from './state.js';
     ['first_seen', 'First seen date'],
     ['last_seen', 'Last seen date'],
     ['locations', 'Locations'],
-    ['best_photo_id', 'Representative photo ID'],
-    ['best_filename', 'Representative filename'],
+    ['best_photo_id', 'Top photo ID'],
+    ['best_filename', 'Top photo filename'],
   ],
   photos: [
     ['number', 'Life-list number'],

@@ -254,7 +254,7 @@ function bindReviewGridClicks() {
   var imgTag = '<img src="' + thumbUrl + '" loading="lazy" alt="' + escapeAttr(pred.filename || '') +
     '" style="' + imgStyle + '" data-photo-id="' + pred.photo_id + '" data-filename="' + escapeAttr(pred.filename || '') + '">';
   var representativeBadge = pred.is_species_representative
-    ? '<span class="representative-badge">Representative</span>'
+    ? '<span class="representative-badge">Top highlight</span>'
     : '';
 
   var imgHtml;

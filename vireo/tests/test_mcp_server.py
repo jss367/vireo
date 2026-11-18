@@ -94,7 +94,7 @@ def test_tools_are_the_documented_set(mcp):
         "find_photos_by_text", "get_photo", "view_photo", "burst",
         "set_flag", "set_rating", "add_keyword", "remove_keyword",
         "get_species_evidence", "preview_species_assignment", "apply_species_assignment",
-        "reject_region", "restore_region",
+        "list_assignment_conflicts", "review_species_assignment", "reject_region", "restore_region",
         "best_of_each_species", "choose_best_photo",
     }
     for tool in anyio.run(server.list_tools):
@@ -746,7 +746,7 @@ def test_best_tools_list_choose_and_scope_by_date(mcp):
     }
     listed = call(server, "best_of_each_species", species="Bald Eagle")
     decision = listed["species"][0]["decision"]
-    assert (decision["kind"], decision["photo_id"]) == ("chosen", old)
+    assert (decision["kind"], decision["photo_id"]) == ("highlight", old)
     assert (decision["source"], decision["reason"]) == ("claude", "sharper eye")
 
     year = call(
@@ -754,7 +754,7 @@ def test_best_tools_list_choose_and_scope_by_date(mcp):
         date_from="2025-01-01", date_to="2025-12-31",
     )
     assert [p["id"] for p in year["species"][0]["photos"]] == [new]
-    assert year["species"][0]["decision"]["kind"] != "chosen"
+    assert year["species"][0]["decision"]["kind"] != "highlight"
 
 
 def test_choose_best_photo_requires_a_reason_and_reports_the_apps_refusal(mcp):
@@ -1063,3 +1063,22 @@ def test_mcp_flag_does_not_start_an_instance(tmp_path):
     assert result.is_error
     assert NOT_RUNNING_MESSAGE in result.content[0].text
     assert not (home / ".vireo" / "runtime.json").exists()
+
+def test_report_and_resolve_assignment_conflict_from_photo_details(mcp):
+    server, db, _ = mcp
+    kid = db.keywords.add('Mallard', is_species=True)
+    keyword_tagging.tag_photo(db, 1, kid)
+    db.commit()
+    def decide(action):
+        photo = call(server, "get_photo", photo_id=1)
+        assignment = next(a for a in photo['species_assignments'] if a['keyword_id'] == kid)
+        return call(server, "review_species_assignment", photo_id=1, keyword_id=kid,
+                    observed_workspace_id=photo['review_workspace_id'], review_version=assignment['review_version'],
+                    action=action, reviewer='Reviewer', reason='Reviewed frame', evidence_source='Native image')
+
+    assert decide('report')['entry_id']
+    assert call(server, "list_assignment_conflicts")['assignments'][0]['keyword_id'] == kid
+    assert decide('remove')['entry_id']
+    assert not call(server, "list_assignment_conflicts")['assignments']
+    record, = call(server, "get_photo", photo_id=1)['assignment_reviews']
+    assert record['resolution']['action'] == 'remove'

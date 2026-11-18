@@ -101,6 +101,12 @@
       "_gmapsCallback"
     ]
   },
+  "inaturalist": {
+    "route": "/inaturalist",
+    "template": "inaturalist.html",
+    "pageHooks": [],
+    "sharedWrites": []
+  },
   "life-list": {
     "route": "/life-list",
     "template": "life_list.html",

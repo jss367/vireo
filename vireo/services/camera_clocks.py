@@ -76,7 +76,7 @@ def _camera_name(row: sqlite3.Row) -> str | None:
 
 def frame_from_row(row: sqlite3.Row) -> ClockFrame | None:
     """A ``ClockFrame`` from one ``camera_clock_rows`` row, or None without a capture time."""
-    captured = _parse_exif_time(row["date_time_original"])
+    captured = _parse_exif_time(row["date_time_original"] or row["create_date"])
     if captured is None:
         return None
     shutter = _number(row["shutter_count"])
@@ -84,8 +84,8 @@ def frame_from_row(row: sqlite3.Row) -> ClockFrame | None:
     return ClockFrame(
         ref=row["id"],
         filename=row["filename"],
-        captured=_with_subseconds(captured, row["subsec"]),
-        offset_minutes=camera_clock.parse_offset(row["offset_original"] or row["offset_time"]),
+        captured=_with_subseconds(captured, row["subsec"] or row["subsec_fallback"]),
+        offset_minutes=camera_clock.parse_offset(row["offset_original"] or row["offset_time"] or row["offset_digitized"]),
         camera=_camera_name(row),
         shutter_count=int(shutter) if shutter is not None else None,
         gps_utc=_parse_exif_time(row["gps_date_time"]),

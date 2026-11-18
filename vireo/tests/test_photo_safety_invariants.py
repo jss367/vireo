@@ -214,6 +214,10 @@ class _Runner:
     def wait_if_paused(self, job_id, *, publish_paused=False):
         return job_id in self.cancelled
 
+    def pause_elapsed_seconds(self, job_id):
+        # Never pauses; the import subtracts this from its phase timings.
+        return 0.0
+
     def checkpoint_live_jobs(self):
         return 0
 

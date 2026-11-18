@@ -1,0 +1,8 @@
+{
+  "extends": "../tsconfig.frontend.base.json",
+  "files": [
+    "../types/pages/inaturalist.d.ts",
+    "../vireo/static/inaturalist/shared.js",
+    "../vireo/static/inaturalist/boot.js"
+  ]
+}

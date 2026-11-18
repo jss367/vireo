@@ -9,6 +9,7 @@ import threading
 
 import numpy as np
 from app_paths import default_path
+from focus_point import FocusMatch
 from resource_ledger import ResourceWaitCancelled
 from services.hf_cache_lock import cache_access
 
@@ -56,6 +57,10 @@ RAW_CONF_FLOOR = 0.01
 # early stop after the corner subset would silently blind those seams.
 TILED_FALLBACK_TRIGGER_CONFIDENCE = 0.50
 TILED_CROP_FRACTION = 0.60
+FOCUS_CROP_FRACTIONS = (0.60, 0.25)
+FOCUS_SHADOW_CROP_FRACTION = 0.40
+# A second rendition exposes shadow detail on dark animals against bright water.
+_SHADOW_LIFT = np.rint(255 * np.sqrt(np.arange(256) / 255)).astype(np.uint8)
 TILED_SOURCE_MAX_SIZE = 2560
 TILED_EDGE_MARGIN = 0.01
 TILED_NMS_IOU = 0.45
@@ -566,7 +571,26 @@ def _tiled_fallback(session, input_name, image_array):
     return tiled
 
 
-def detect_animals(image_path):
+def _focus_crop(session, input_name, image, point, fraction, *, lift_shadows=False):
+    """Map proposals near the AF area back to the full image."""
+    height, width = image.shape[:2]
+    side = max(1, round(min(height, width) * fraction))
+    left = min(width - side, max(0, round(point.x * width - side / 2)))
+    top = min(height - side, max(0, round(point.y * height - side / 2)))
+    window = (left, top, left + side, top + side)
+    crop = image[top:top + side, left:left + side]
+    if lift_shadows:
+        crop = _SHADOW_LIFT[crop]
+    proposals = _infer_array(session, input_name, crop, RAW_CONF_FLOOR)
+    result = []
+    for proposal in proposals:
+        mapped = _map_tile_detection(proposal, window, width, height)
+        if mapped and point.match(mapped["box"]):
+            result.append(mapped)
+    return result
+
+
+def detect_animals(image_path, *, focus=None):
     """Detect animals in an image using MegaDetector.
 
     Returns every detection above ``RAW_CONF_FLOOR``. The user-visible
@@ -577,6 +601,7 @@ def detect_animals(image_path):
 
     Args:
         image_path: path to the image file
+        focus: optional display-oriented AF area from the camera metadata
 
     Returns:
         list of detections, each with:
@@ -613,7 +638,14 @@ def detect_animals(image_path):
             ),
             default=0.0,
         )
-        if best_animal < TILED_FALLBACK_TRIGGER_CONFIDENCE:
+        weak_frame = best_animal < TILED_FALLBACK_TRIGGER_CONFIDENCE
+        # Any read-time confidence floor that retains a bystander should have
+        # a chance to retain the focused animal too.
+        focus_retry = focus is not None and not any(
+            d.get("category", "animal") == "animal"
+            and d["confidence"] >= max(best_animal, TILED_FALLBACK_TRIGGER_CONFIDENCE)
+            and focus.match(d["box"]) == FocusMatch.CENTER for d in detections)
+        if weak_frame or focus_retry:
             # Reload only weak photos at a larger source size. Cropping the
             # already-downsampled 1280px fast-path image merely enlarges the
             # same pixels and does not recover fine bird detail.
@@ -632,7 +664,14 @@ def detect_animals(image_path):
             detections = _infer_array(
                 session, input_name, tiled_array, RAW_CONF_FLOOR,
             )
-            tiled = _tiled_fallback(session, input_name, tiled_array)
+            tiled = _tiled_fallback(session, input_name, tiled_array) if weak_frame else []
+            if focus_retry:
+                for fraction in FOCUS_CROP_FRACTIONS:
+                    tiled.extend(_focus_crop(session, input_name, tiled_array, focus, fraction))
+                if not any(d["category"] == "animal" and d["confidence"] >= TILED_FALLBACK_TRIGGER_CONFIDENCE
+                           and focus.match(d["box"]) >= FocusMatch.AREA for d in detections + tiled):
+                    tiled.extend(_focus_crop(session, input_name, tiled_array, focus, FOCUS_SHADOW_CROP_FRACTION,
+                                             lift_shadows=True))
             if tiled:
                 detections = _merge_detections(detections, tiled)
         return detections

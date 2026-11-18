@@ -596,9 +596,11 @@ def test_top_unrejected_predictions_by_photo(db, cat):
         # match summary was recorded for this run.
         "detector_confidence": 0.9, "detector_model": "md",
         "max_match_score": None, "background_score": None, "score_kind": None,
-        # Its place in the photo's primary-subject order, and the box
-        # dimensions the frame-spanning rule reads.
-        "subject_rank": 1, "subject_chosen": 0, "box_w": 0.5, "box_h": 0.5,
+        # Its place in the photo's primary-subject order, and the box: its
+        # dimensions for the frame-spanning rule, its position for
+        # ``species_presence`` to test against the photo's crop.
+        "subject_rank": 1, "subject_chosen": 0,
+        "box_x": 0.1, "box_y": 0.1, "box_w": 0.5, "box_h": 0.5,
     }
     # Equal confidence: the higher id wins.
     assert got[p1]["id"] == kite

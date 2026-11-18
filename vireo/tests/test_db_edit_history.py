@@ -464,7 +464,7 @@ def test_keyword_add_undo_redo_replays_prediction_and_curation(db, pids, monkeyp
         EditHistoryRepository, "reapply_relabel_curation",
         lambda self, *a: curation_calls.append(("reapply",) + a),
     )
-    curation = {"hl_prev": ["Old"]}
+    curation = {"rep_prev": [{"species": "Old"}]}
     old_value = json.dumps({
         "prediction_id": p["a_top"], "prediction_status": "alternative",
         "curation": curation,
@@ -972,13 +972,6 @@ def test_prediction_accept_undo_redo_round_trip(db, pids):
 # -- relabel curation -----------------------------------------------------
 
 
-def _hl(db, ws, species, pid, rank):
-    db.conn.execute(
-        "INSERT INTO species_highlights (workspace_id, species, photo_id, rank) "
-        "VALUES (?, ?, ?, ?)", (ws, species, pid, rank),
-    )
-
-
 def _pref(db, ws, purpose, species, pid):
     db.conn.execute(
         "INSERT INTO photo_preferences (workspace_id, purpose, species, photo_id) "
@@ -995,73 +988,31 @@ def _rep(db, species, pid, order):
 
 def _curation_state(db, ws):
     with _reader(db) as conn:
-        hl = sorted(tuple(r) for r in conn.execute(
-            "SELECT species, photo_id, rank FROM species_highlights "
-            "WHERE workspace_id = ?", (ws,)))
         pref = sorted(tuple(r) for r in conn.execute(
             "SELECT purpose, species, photo_id FROM photo_preferences "
             "WHERE workspace_id = ?", (ws,)))
         rep = sorted(tuple(r) for r in conn.execute(
             "SELECT species, photo_id, selected_order FROM species_representatives"))
-    return hl, pref, rep
+    return pref, rep
 
 
-@pytest.mark.parametrize("curation", [None, {}])
+# A relabel recorded before highlights became one catalog-wide list carries
+# ``hl_prev`` (the per-workspace ranked rows it moved). Those rows no longer
+# exist, so undoing or redoing such an entry leaves curation alone.
+_LEGACY_HIGHLIGHT_PAYLOAD = {
+    "hl_prev": [{"species": "Old", "rank": 2, "dst_existed": False}, "Older"],
+}
+
+
+@pytest.mark.parametrize("curation", [None, {}, _LEGACY_HIGHLIGHT_PAYLOAD])
 def test_restore_and_reapply_curation_noop_without_payload(db, pids, curation):
     ws = db._active_workspace_id
+    _rep(db, "New", pids[0], 1)
+    db.conn.commit()
     db.edit_history.restore_relabel_curation(ws, pids[0], "New", curation)
     db.edit_history.reapply_relabel_curation(ws, pids[0], "New", curation)
-    assert _curation_state(db, ws) == ([], [], [])
+    assert _curation_state(db, ws) == ([], [("New", pids[0], 1)])
     assert not db.conn.in_transaction
-
-
-def test_restore_relabel_curation_highlights(db, pids):
-    ws = db._active_workspace_id
-    p0, p1, p2 = pids
-    _hl(db, ws, "New", p0, 1)
-    _hl(db, ws, "Old3", p1, 7)      # bucket for the legacy string entry
-    _hl(db, ws, "Old5", p0, 2)      # photo already in the old bucket
-    _hl(db, ws, "Old6", p2, 4)
-    db.conn.commit()
-    curation = {"hl_prev": [
-        {"species": "Old1", "rank": 3, "dst_existed": False},
-        {"species": "Old2", "rank": "bad"},
-        "Old3",
-        "",
-        "New",
-        {"species": "New"},
-        {"species": "Old5", "rank": 9},
-        {"species": "Old6", "rank": None, "dst_existed": True},
-    ]}
-
-    db.edit_history.restore_relabel_curation(ws, p0, "New", curation)
-
-    # No commit of its own: the undo caller commits.
-    assert db.conn.in_transaction
-    db.conn.commit()
-    hl, _, _ = _curation_state(db, ws)
-    assert hl == sorted([
-        ("Old1", p0, 3),
-        ("Old2", p0, 1),       # non-int rank falls back to MAX+1 of empty
-        ("Old3", p0, 8),       # legacy string appends after rank 7
-        ("Old3", p1, 7),
-        ("Old5", p0, 2),       # already present: untouched
-        ("Old6", p0, 5),       # MAX+1 after p2's rank 4
-        ("Old6", p2, 4),
-    ])
-
-
-def test_restore_relabel_curation_keeps_preexisting_destination(db, pids):
-    ws = db._active_workspace_id
-    _hl(db, ws, "New", pids[0], 1)
-    db.conn.commit()
-    db.edit_history.restore_relabel_curation(
-        ws, pids[0], "New",
-        {"hl_prev": [{"species": "Old", "rank": 2, "dst_existed": True}]},
-    )
-    db.conn.commit()
-    hl, _, _ = _curation_state(db, ws)
-    assert hl == [("New", pids[0], 1), ("Old", pids[0], 2)]
 
 
 def test_restore_relabel_curation_preferences_and_reps(db, pids, monkeypatch):
@@ -1103,7 +1054,7 @@ def test_restore_relabel_curation_preferences_and_reps(db, pids, monkeypatch):
     db.edit_history.restore_relabel_curation(ws, p0, "New", curation)
     db.conn.commit()
 
-    _, pref, rep = _curation_state(db, ws)
+    pref, rep = _curation_state(db, ws)
     assert pref == sorted([
         ("highlights", "OldA", p0),
         ("life_list", "New", p1),
@@ -1119,33 +1070,6 @@ def test_restore_relabel_curation_preferences_and_reps(db, pids, monkeypatch):
     assert restored == [
         ("OldA", p0, 2), ("OldB", p0, None), ("OldC", p0, "3"), ("OldD", p0, 4),
     ]
-
-
-def test_reapply_relabel_curation_highlights(db, pids):
-    ws = db._active_workspace_id
-    p0, p1 = pids[0], pids[1]
-    _hl(db, ws, "Old1", p0, 5)
-    _hl(db, ws, "New", p1, 3)
-    _hl(db, ws, "Old2", p0, 1)
-    _hl(db, ws, "Old3", p0, 1)
-    db.conn.commit()
-    curation = {"hl_prev": [
-        {"species": "Old1"},
-        "Old2",
-        "",
-        {"species": "New"},
-        "Missing",
-    ]}
-
-    db.edit_history.reapply_relabel_curation(ws, p0, "New", curation)
-    assert db.conn.in_transaction
-    db.conn.commit()
-    hl, _, _ = _curation_state(db, ws)
-    assert hl == sorted([
-        ("New", p0, 4),        # MAX(3)+1; the second move finds it and skips
-        ("New", p1, 3),
-        ("Old3", p0, 1),
-    ])
 
 
 def test_reapply_relabel_curation_preferences_and_reps(db, pids, monkeypatch):
@@ -1183,7 +1107,7 @@ def test_reapply_relabel_curation_preferences_and_reps(db, pids, monkeypatch):
     db.edit_history.reapply_relabel_curation(ws, p0, "New", curation)
     db.conn.commit()
 
-    _, pref, rep = _curation_state(db, ws)
+    pref, rep = _curation_state(db, ws)
     assert pref == [("highlights", "New", p0)]
     assert rep == [("New", p0, 6)]  # 9 first, then overwritten by OldC's 6
     assert restored == [("New", p0, 9), ("New", p0, 6)]
@@ -1196,11 +1120,16 @@ def test_species_replace_undo_redo_moves_curation(db, pids):
     new_kid = db.keywords.add("New Bird", is_species=True)
     keyword_tagging.tag_photo(db, p0, new_kid)
     db.commit()
-    _hl(db, ws, "New Bird", p0, 1)
+    _rep(db, "New Bird", p0, 1)
     db.conn.commit()
     old_value = json.dumps({
         "keyword_ids": [old_kid],
-        "curation": {"hl_prev": [{"species": "Old Bird", "rank": 1}]},
+        "curation": {
+            "pref_prev": [],
+            "rep_prev": [{
+                "species": "Old Bird", "dst_existed": False, "selected_order": 1,
+            }],
+        },
     })
     db.record_edit(
         "species_replace", "Relabel", str(new_kid),
@@ -1209,11 +1138,11 @@ def test_species_replace_undo_redo_moves_curation(db, pids):
     db.commit()
 
     undo_last_edit(db)
-    hl, _, _ = _curation_state(db, ws)
-    assert hl == [("Old Bird", p0, 1)]
+    _, rep = _curation_state(db, ws)
+    assert rep == [("Old Bird", p0, 1)]
     redo_last_undo(db)
-    hl, _, _ = _curation_state(db, ws)
-    assert hl == [("New Bird", p0, 1)]
+    _, rep = _curation_state(db, ws)
+    assert rep == [("New Bird", p0, 1)]
 
 
 # -- pruning --------------------------------------------------------------

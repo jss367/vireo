@@ -3,7 +3,7 @@
 One eagle is photographed on two trips. Choosing the best eagle of each trip
 must not claim more than the trip: across both trips the two winners are tied
 until someone compares them, and every surface (the best-of-each-species
-list, Highlights, the Life List, the representative badge) shows the same
+list, Highlights, the Life List, the top-highlight badge) shows the same
 photo for the same set.
 """
 
@@ -74,7 +74,7 @@ def test_unchosen_species_lead_with_vireos_score(trips):
     assert eagle["decision"]["contender_ids"] == []
     assert eagle["photo_count"] == 4
     assert data["meta"]["guessed"] == 1
-    assert data["meta"]["chosen"] == 0
+    assert data["meta"]["highlighted"] == 0
     assert data["meta"]["needs_comparison"] == 0
 
 
@@ -91,11 +91,11 @@ def test_a_choice_within_a_trip_leads_that_trip_and_records_who_and_why(trips):
     assert response.get_json()["over"] == []
     _data, species = _best(client, folder_id=folders["first"])
     decision = species["Bald Eagle"]["decision"]
-    assert decision["kind"] == "chosen"
+    assert decision["kind"] == "highlight"
     assert decision["photo_id"] == photos["a1"]
     assert decision["source"] == "claude"
     assert decision["reason"] == "eye is sharp"
-    assert species["Bald Eagle"]["photos"][0]["is_chosen"] is True
+    assert species["Bald Eagle"]["photos"][0]["is_highlighted"] is True
     # The other trip has no chosen photo, so Vireo's score still leads it.
     _data, species = _best(client, folder_id=folders["second"])
     assert species["Bald Eagle"]["decision"]["kind"] == "score"
@@ -119,7 +119,7 @@ def test_winners_of_two_trips_tie_until_compared(trips):
     # Each trip is settled on its own.
     for folder, winner in (("first", "a1"), ("second", "b1")):
         _data, scoped = _best(client, folder_id=folders[folder])
-        assert scoped["Bald Eagle"]["decision"]["kind"] == "chosen"
+        assert scoped["Bald Eagle"]["decision"]["kind"] == "highlight"
         assert scoped["Bald Eagle"]["decision"]["photo_id"] == photos[winner]
 
     response = _choose(
@@ -130,7 +130,7 @@ def test_winners_of_two_trips_tie_until_compared(trips):
     assert response.get_json()["over"] == [photos["b1"]]
     data, species = _best(client)
     decision = species["Bald Eagle"]["decision"]
-    assert decision["kind"] == "chosen"
+    assert decision["kind"] == "highlight"
     assert decision["photo_id"] == photos["a1"]
     assert decision["reason"] == "cleaner background"
     assert decision["contender_ids"] == [photos["a1"], photos["b1"]]
@@ -190,7 +190,7 @@ def test_a_newer_choice_supersedes_the_comparison_it_contradicts(trips):
     assert [(c.better, c.worse) for c in comparisons] == [(photos["b1"], photos["a1"])]
     _data, species = _best(client)
     assert species["Bald Eagle"]["decision"]["photo_id"] == photos["b1"]
-    assert species["Bald Eagle"]["decision"]["kind"] == "chosen"
+    assert species["Bald Eagle"]["decision"]["kind"] == "highlight"
 
 
 def test_a_rule_tree_scopes_the_list_to_a_year(trips):
@@ -208,7 +208,7 @@ def test_a_rule_tree_scopes_the_list_to_a_year(trips):
     _choose(client, species="Bald Eagle", photo_id=photos["b1"], rules=json.loads(year))
     _data, species = _best(client, rules=year, per_species=5)
     assert [p["id"] for p in species["Bald Eagle"]["photos"]] == [photos["b1"], photos["b2"]]
-    assert [p["is_chosen"] for p in species["Bald Eagle"]["photos"]] == [True, False]
+    assert [p["is_highlighted"] for p in species["Bald Eagle"]["photos"]] == [True, False]
 
 
 def test_a_collection_scopes_the_list(trips):
@@ -285,7 +285,7 @@ def test_set_representative_is_a_choice_over_every_other_chosen_photo(trips):
 
     assert response.status_code == 200
     _data, species = _best(client)
-    assert species["Bald Eagle"]["decision"]["kind"] == "chosen"
+    assert species["Bald Eagle"]["decision"]["kind"] == "highlight"
     assert species["Bald Eagle"]["decision"]["photo_id"] == photos["a1"]
     assert db.get_species_representatives(eligible_only=True)["Bald Eagle"] == photos["a1"]
 
@@ -306,14 +306,14 @@ def test_every_surface_leads_with_the_same_photo(trips):
     bucket = next(b for b in highlights["buckets"] if b["species"] == "Bald Eagle")
     assert bucket["photos"][0]["id"] == photos["b1"]
     assert bucket["preferred_photo_id"] == photos["b1"]
-    assert bucket["best_decision"]["kind"] == "chosen"
+    assert bucket["best_decision"]["kind"] == "highlight"
 
     life_list = build_life_list_payload(db)
     entry = next(e for e in life_list["species"] if e["species"] == "Bald Eagle")
     assert entry["best"]["id"] == photos["b1"]
     assert entry["preferred_photo_id"] == photos["b1"]
-    assert entry["best_source"] == "representative"
-    assert entry["best_decision"]["kind"] == "chosen"
+    assert entry["best_source"] == "highlight"
+    assert entry["best_decision"]["kind"] == "highlight"
     assert entry["best_decision"]["source"] == "claude"
 
     assert db.get_species_representatives(eligible_only=True)["Bald Eagle"] == photos["b1"]
@@ -370,7 +370,7 @@ def test_rank_traverses_through_representatives_visible_in_other_workspaces(trip
     _data, species = _best(app.test_client())
 
     decision = species["Bald Eagle"]["decision"]
-    assert decision["kind"] == "chosen"
+    assert decision["kind"] == "highlight"
     assert decision["photo_id"] == photos["b1"]
 
 
@@ -403,7 +403,7 @@ def test_life_list_rank_traverses_through_other_workspace_representatives(trips)
         e for e in build_life_list_payload(db)["species"] if e["species"] == "Bald Eagle"
     )
 
-    assert entry["best_decision"]["kind"] == "chosen"
+    assert entry["best_decision"]["kind"] == "highlight"
     assert entry["best"]["id"] == photos["b1"]
 
 
@@ -520,7 +520,7 @@ def test_a_comparison_survives_renaming_the_species(trips):
     assert response.status_code == 200, response.get_json()
     _data, species = _best(client)
     decision = species["American Bald Eagle"]["decision"]
-    assert decision["kind"] == "chosen"
+    assert decision["kind"] == "highlight"
     assert decision["photo_id"] == photos["a1"]
     assert decision["contender_ids"] == [photos["a1"], photos["b1"]]
     assert (decision["source"], decision["reason"]) == ("claude", "closer")
@@ -609,6 +609,61 @@ def test_a_bucket_page_carries_the_decision_for_its_order(trips):
         "/api/highlights/bucket?scope=workspace&species=Bald%20Eagle"
     ).get_json()
 
-    assert page["best_decision"]["kind"] == "chosen"
+    assert page["best_decision"]["kind"] == "highlight"
     assert page["best_decision"]["reason"] == "in flight"
     assert page["photos"][0]["id"] == photos["b1"]
+
+
+@pytest.mark.parametrize("visual", [False, True])
+def test_collection_highlights_scope_counts_paging_and_choices(trips, monkeypatch, visual):
+    from services.visual_scope import VisualScope
+
+    app, db, _, photos = trips
+    members = [photos["a1"], photos["b1"]]
+    rules = [{"field": "photo_ids", "value": members}]
+    visual_json = None
+    if visual:
+        visual_json = json.dumps({"prompt": "flying eagles", "strength": "balanced"})
+        monkeypatch.setattr(VisualScope, "resolve", lambda *args, **kwargs: (
+            {"status": "ok"}, members, {},
+        ))
+    with db.transaction():
+        cid = db.collections.add("Trip highlights", json.dumps([] if visual else rules), visual_json)
+    client = app.test_client()
+    for pid in [photos["a2"], photos["b1"]]:
+        _choose(client, species="Bald Eagle", photo_id=pid, over=[])
+    params = {"collection_id": cid, "limit_per_bucket": 1}
+    payload = client.get("/api/highlights", query_string=params).get_json()
+    assert payload["scope"] == "collection"
+    assert payload["meta"]["total_in_scope"] == payload["meta"]["eligible"] == 2
+    bucket, = payload["buckets"]
+    assert bucket["has_more"]
+    page = client.get("/api/highlights/bucket", query_string={
+        **params, "species": "Bald Eagle", "offset": 1,
+    }).get_json()
+    assert {p["id"] for p in bucket["photos"] + page["photos"]} == set(members)
+    choice = client.post("/api/photo-preferences", json={
+        "purpose": "species_representative", "species": "Bald Eagle",
+        "photo_id": photos["a1"], "collection_id": cid,
+    })
+    assert choice.get_json()["over"] == [photos["b1"]]
+
+
+def test_unavailable_visual_collection_cannot_broaden_highlights(trips, monkeypatch):
+    from services.visual_scope import VisualScope
+
+    app, db, _, photos = trips
+    monkeypatch.setattr(VisualScope, "resolve", lambda *args, **kwargs: (
+        {"status": "no_embeddings"}, None, None,
+    ))
+    with db.transaction():
+        cid = db.collections.add("Flying eagles", "[]", json.dumps({"prompt": "flying eagles"}))
+    client = app.test_client()
+    params = {"collection_id": cid, "species": "Bald Eagle"}
+    for url in ["/api/highlights", "/api/highlights/bucket"]:
+        assert client.get(url, query_string=params).status_code == 400
+    response = client.post("/api/photo-preferences", json={
+        **params, "purpose": "species_representative", "photo_id": photos["a1"],
+    })
+    assert response.status_code == 400
+    assert db.species_choices.notes() == {}

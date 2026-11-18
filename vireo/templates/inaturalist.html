@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>iNaturalist · Vireo</title>
+<link rel="stylesheet" href="/static/vireo-base.css">
+<style>
+  main { max-width: 960px; margin: auto; padding: 24px; }
+  h1 { margin: 0 0 18px; }
+  #account, .candidate { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  #account input, main button { font: inherit; padding: 6px 10px; border-radius: 4px;
+    background: var(--bg-secondary); border: 1px solid var(--border-secondary); color: var(--text-primary); }
+  main button { cursor: pointer; }
+  main p:not(:empty) { margin: 12px 0; }
+  main button:disabled { opacity: 0.45; cursor: default; }
+  #summary, .details { color: var(--text-secondary); }
+  .candidate { border-top: 1px solid var(--border-primary); padding: 14px 0; }
+  .candidate h2 { font-size: 1.05rem; margin: 0 0 4px; }
+  .candidate img { display: block; width: 112px; height: 84px; object-fit: contain; }
+  .candidate .preview { padding: 0; }
+  .info { flex: 1 1 200px; }
+  .controls { display: flex; align-items: center; gap: 8px; }
+  #receipt a { color: var(--accent); }
+</style>
+</head>
+<body>
+{% include '_navbar.html' %}
+<main>
+  <h1>Species to upload</h1>
+  <form id="account">
+    <label for="login">iNaturalist username</label>
+    <input id="login" required maxlength="100" autocomplete="off" autocapitalize="none" spellcheck="false">
+    <button>Refresh</button>
+  </form>
+  <p id="status" role="status">Enter your username to compare your Life List with your iNaturalist observations.</p>
+  <p id="summary"></p>
+  <p id="receipt" aria-live="polite"></p>
+  <section id="queue" aria-label="Missing species"></section>
+</main>
+<script type="module" src="/static/inaturalist/boot.js"></script>
+</body>
+</html>

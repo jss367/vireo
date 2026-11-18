@@ -314,6 +314,11 @@ def open_library(path):
     # scopes required by load_photo_features. Never use immutable=1 on a live WAL.
     conn = sqlite3.connect(Path(path).expanduser().resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
     conn.row_factory = sqlite3.Row
+    # Historical feature loaders do not have or call this SQL function.
+    with contextlib.suppress(ImportError):
+        from focus_point import focus_area_json
+
+        conn.create_function("vireo_focus_area", 1, focus_area_json, deterministic=True)
     conn.execute("BEGIN")
     # New production loaders use source identities, and the detection floor
     # requires a NULL ``subject_verdict`` (a region the reviewer rejected as
@@ -323,7 +328,7 @@ def open_library(path):
     for table, optional in {
         "predictions": ("source_taxon_id",),
         "keywords": ("source_taxon_id",),
-        "photos": ("companion_path", "active_mask_variant", "quality_input_recipe"),
+        "photos": ("companion_path", "active_mask_variant", "quality_input_recipe", "exif_data"),
         "detector_runs": ("input_fingerprint",),
         "detections": ("subject_verdict",),
         "classifier_match_scores": ("score_kind", "background_score"),
@@ -342,6 +347,7 @@ def open_library(path):
     for table, columns in {
         "detection_subjects": ("detection_id", "crop", "quality_score", "exposure_ev"),
         "photo_subject_choices": ("photo_id", "detection_id"),
+        "subject_focus": ("detection_id", "af", "sharp", "continuity"),
         "workspace_photos": ("workspace_id", "photo_id"),
         "classifier_match_scores": ("rowid", "detection_id", "score_kind", "max_match_score",
                                     "background_score", "run_at"),

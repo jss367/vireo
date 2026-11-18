@@ -43,6 +43,8 @@ each species for a trip, a year or everything; see
 [the best photo of each species](#the-best-photo-of-each-species).
 `view_photo(view="subject", detection_id=...)` addresses the exact animal region,
 and `get_photo` includes saved `species_assignments` and their provenance.
+Use `list_assignment_conflicts` to find disputed labels and `review_species_assignment`
+to report or resolve a conflict. [Species assignment review](species-label-provenance.md#conflicting-evidence-on-a-saved-assignment)
 For linked taxa, photo-detail keywords and assignments also share `display_name`
 (the catalog's preferred common name, falling back to the scientific name),
 `synonyms` (alternate saved keyword names for that taxon), `scientific_name`,
@@ -183,7 +185,7 @@ Current stable set:
 | GET  | `/api/v1/photos/<id>/burst-evidence` | The burst around a photo as an evidence pack: ranked frames, feature coverage, ambiguity reasons, 1:1 crop URLs. `margin`, `focus_size`, `gap_seconds`, `max_photos`. |
 | POST | `/api/v1/photos/burst-evidence` | The same pack for an explicit `{"photo_ids": [...]}` selection (2–500 ids). |
 | POST | `/api/v1/photos/species-evidence` | Read-only identification evidence for 1–100 exact unique `photo_ids`: subjects, model candidates, score meanings, uncertainty, list provenance and bound crop URLs. No automatic continuity or assignment claim. |
-| GET  | `/api/v1/photos/<id>/focus-crop` | Unresampled JPEG window around the scored focus point. `size` (128–1024, default 512); `basis` (`auto`, `eye`, `subject`, `frame`); `center=x,y` uses normalized coordinates in the unedited upright source raster, before any crop/rotation recipe; `source` (`auto` default, `working`, `original`): working requires a usable working copy and returns 404 without decoding an original when absent; auto serves the working copy unless it is downsized against the catalog dimensions and the original can be decoded; `mask=1` shades pixels outside the SAM mask. Headers: `X-Vireo-Focus-Basis` (`eye`, `subject`, `frame`, `point`), `X-Vireo-Focus-Center`, `X-Vireo-Focus-Window`, `X-Vireo-Focus-Source` (`working_copy`, `original`), `X-Vireo-Focus-Raster-Size`, `X-Vireo-Focus-Original-Scale` (decoded pixels per original pixel, `unknown` without catalog dimensions), `X-Vireo-Focus-Mask`. |
+| GET  | `/api/v1/photos/<id>/focus-crop` | Unresampled JPEG window around the scored focus point. `size` (128–1024, default 512); `basis` (`auto`, `eye`, `subject`, `frame`); `center=x,y` uses normalized coordinates in the unedited upright source raster, before any crop/rotation recipe; `source` (`auto` default, `working`, `original`): working requires a usable working copy and returns 404 without decoding an original when absent; auto serves the working copy unless it is downsized against the catalog dimensions and the original can be decoded; `mask=1` shades pixels outside the SAM mask at the default or manual center. An unavailable, stale, or geometry-incompatible mask returns a JSON error (404). An empty valid mask shades the entire window. Headers: `X-Vireo-Focus-Basis` (`eye`, `subject`, `frame`, `point`), `X-Vireo-Focus-Center`, `X-Vireo-Focus-Window`, `X-Vireo-Focus-Source` (`working_copy`, `original`), `X-Vireo-Focus-Raster-Size`, `X-Vireo-Focus-Original-Scale` (decoded pixels per original pixel, `unknown` without catalog dimensions), `X-Vireo-Focus-Mask`. |
 | GET  | `/api/v1/species-best` | The best photos of each species within a scope, each with the decision behind its first photo. See [the best photo of each species](#the-best-photo-of-each-species). |
 | POST | `/api/v1/species-best/choose` | Record that one photo is the best of a species among others: `{"species": str, "photo_id": int, "over"?: [int], "folder_id"?, "collection_id"?, "rules"?, "source"?: str, "reason"?: str}`. |
 | GET  | `/api/v1/folders/<id>/bursts` | Every burst in one folder with coverage, the scorer's pick and ambiguity; folder-level coverage too. `margin` (relative sharpness gap for a close call, default 0.10). Folders over 5000 photos answer 400. |
@@ -235,10 +237,10 @@ different subject. A pinned retry always rebuilds that subject under the photo
 lock, including when prior measurements are complete; if the subject is gone,
 it fails without running replacement detection. Unpinned retries keep normal
 readiness-based stage selection. The lightbox's **Retry subject mask and quality** button
-uses this path. The older `subjects/analyze` endpoint measures detection boxes
-for crop/exposure suggestions; it does not rebuild the selected animal's mask,
-quality or available eye evidence used for ranking. Missing eye identification
-remains explicit; selecting a region does not manufacture a species prediction.
+uses this path. `POST /api/photos/<id>/subjects/analyze` measures retained
+boxes for crop and exposure suggestions. With a `detection_id`, it also
+computes or reuses comparison evidence for that detection. The job returns
+the detection and verified generation in `result.photos` on success.
 
 ### Burst adjudication
 
@@ -307,38 +309,48 @@ lists that many photos of each, best first, and `include_unconfirmed=1` adds
 species held only by an unconfirmed prediction (left out otherwise and counted
 in `meta.unconfirmed_species_omitted`). Rejected photos are never listed.
 
-Within a species the order is: the species' chosen photos (the photos marked
-as its representative), then the workspace's ranked highlights, then flagged
-picks by Vireo's score, then everything else by score. Each species carries a
+A species has one list of highlights: the photos chosen to show for it,
+catalog-wide. Within a species the order is its highlights, then flagged picks
+by Vireo's score, then everything else by score. Each species carries a
 `decision` saying which of those put its first photo there:
 
 | `kind` | Meaning |
 | --- | --- |
-| `chosen` | Someone chose this photo, and no other chosen photo in the scope beats it. `source`, `reason` and `chosen_at` say who, why and when (all null for a photo chosen before choices were recorded). |
-| `tie` | Several chosen photos in the scope have never been compared (`tied_photo_ids`). The newest choice is shown until someone compares them. |
-| `highlight` | Nobody chose a photo here; the workspace's top ranked highlight leads. |
-| `pick` | Nobody chose; a flagged pick leads, by Vireo's score among the picks. |
-| `score` | Nobody chose or flagged; Vireo's score ordered the photos. |
-| `unanalyzed` | Nobody chose and the first photo has no score yet, so the order is capture order. Run Process before trusting it. |
+| `highlight` | This photo is a highlight, and no other highlight in the scope beats it. `source`, `reason` and `chosen_at` say who chose it, why and when (all null when none was recorded). |
+| `tie` | Several highlights in the scope have never been compared (`tied_photo_ids`). The newest is shown until someone compares them. |
+| `pick` | Nothing is highlighted here; a flagged pick leads, by Vireo's score among the picks. |
+| `score` | Nothing is highlighted or flagged; Vireo's score ordered the photos. |
+| `unanalyzed` | Nothing is highlighted and the first photo has no score yet, so the order is capture order. Run Process before trusting it. |
 
-`contender_ids` lists every chosen photo of the species in the scope, best
-first. `meta` counts `chosen`, `needs_comparison` (ties) and `guessed` (score or
-unanalyzed) so a reviewer can see what is left to settle.
+`contender_ids` lists every highlight of the species in the scope, best first,
+and each photo carries `is_highlighted` and `highlight_rank` (its place among
+them, 1 first). `meta` counts `highlighted`, `needs_comparison` (ties) and
+`guessed` (score or unanalyzed) so a reviewer can see what is left to settle.
 
-Chosen photos are ranked by comparisons, not by when they were chosen. A choice
-made for a trip says that photo beats the other chosen photos of that trip and
-nothing more, so the best eagle of 2024 and the best eagle of 2025 stay tied in
-a lifetime list until they are compared. `POST /api/v1/species-best/choose`
-records a choice: with `over`, the photo beats exactly those photos (they need
-not be chosen yet; the comparison counts once both are); without `over`, it
-beats every other chosen photo of the species within the scope sent (all of
-them when no scope is sent). `over` and a scope together answer 400. The photo
-must be a confirmed, unrejected photo of the species. The response lists `over`
-and `superseded`, the older comparisons this choice reversed: the newest
-decision wins a contradiction and the older comparison is removed. A comparison
-counts through other photos (A over B and B over C puts A over C). "Set as
-representative" in the app records the same choice, over every other chosen
-photo of the species.
+`in_frame` and `outside_crop` decisions mean no photo here has the species as
+its subject. Each photo carries `species_presence` (`subject`, `in_frame` or
+`outside_crop`) and `subject_species`. A pick and quality score describe the
+photo's subject; they do not promote other species merely present in it.
+
+Highlights are ordered by comparisons, not by stored numbers or by when they
+were added. A choice made for a trip says that photo beats the other
+highlights of that trip and nothing more, so the best eagle of 2024 and the
+best eagle of 2025 stay tied in a lifetime list until they are compared.
+`POST /api/v1/species-best/choose` records a choice and makes the photo a
+highlight: with `over`, it beats exactly those photos (they need not be
+highlights yet; the comparison counts once both are); without `over`, it beats
+every other highlight of the species within the scope sent (all of them when
+no scope is sent). `over` and a scope together answer 400. The photo must be a
+confirmed, unrejected photo of the species. The response lists `over` and
+`superseded`, the older comparisons this choice reversed: the newest decision
+wins a contradiction and the older comparison is removed. A comparison counts
+through other highlights (A over B and B over C puts A over C).
+
+The Highlights page writes the same comparisons through the browser routes:
+adding a highlight records it behind the highlights the page showed, Up and
+Down swap it with its neighbor, "Make Top Highlight" puts it ahead of the
+others, and removing one keeps the rest in order. Each sends the folder the
+page showed, so it orders that folder's highlights only.
 
 A reviewer working through a scope reads the list, takes the species whose
 `kind` is `tie`, `score` or `unanalyzed`, lists more of each
@@ -437,8 +449,12 @@ comparison has no suggested best frame.
 
 To compute missing evidence, POST the same comparison to
 `/api/v1/photos/burst-evidence` with `"analyze": true`. It returns `job_id`;
-poll `/api/jobs/<job_id>`, then fetch the comparison again. Job results report
-`analyzed`, `cached`, unresolved identities, and per-photo errors separately.
+poll `/api/jobs/<job_id>`, then fetch the comparison again. A selection with
+one photo and its `subject_overrides` entry supports both analysis and readback.
+Its card contains the evidence and has no relative rank. Each entry in
+`result.photos` reports `analyzed`, `cached`, `skipped` with a reason, or
+`failed` with an error. For an analyzed or cached entry, match its
+`detection_id` and `analysis_key` to the returned card's `subject` fields.
 Analysis uses original-derived images capped at 1024 pixels on the longest
 edge, SAM masks, and the existing mask-gated eye policy when enabled and its
 model is available. Each card reports the actual analysis dimensions and eye
@@ -462,6 +478,21 @@ Focus responses include `X-Vireo-Detection-Id` and `X-Vireo-Analysis-Key`.
 Full-frame previews and subject crops support visual review of pose, eye
 visibility, and obstructions; this feature does not introduce aesthetic weights.
 
+
+## Looking up a finished job
+
+Save the ID returned when you start a job. `GET /api/jobs/<job_id>` first checks
+the live runner. After the runner releases a job or Vireo restarts, the same
+URL returns its retained terminal record with `historical: true`. Read
+`status`, `result`, `steps`, `progress`, `errors`, and `error_count` to
+reconcile the outcome. For a chained import, follow `result.process_job_id`
+to the processing job. Its `parent_job_id` identifies the import.
+
+Historical jobs are read-only. Older records can have null progress and only
+the error messages retained in the result. A 404 means there is no live job
+or retained terminal record visible for that ID. A 503 with code
+`job_history_unavailable` means the catalog read failed. Retry the lookup
+with the same ID.
 
 ## Exporting photos with metadata
 

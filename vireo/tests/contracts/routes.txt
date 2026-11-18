@@ -76,6 +76,7 @@ GET          /api/import/folder-preview/thumbnail
 GET          /api/import/orphaned-staging
 GET          /api/import/pending-archives
 GET          /api/import/readiness
+GET          /api/inat/account-species
 GET          /api/inat/prepare/<int:photo_id>
 GET          /api/inat/submissions
 GET          /api/jobs
@@ -147,6 +148,7 @@ GET          /api/settings/schema
 GET          /api/settings/values
 GET          /api/species
 GET          /api/species-best
+GET          /api/species/assignment-conflicts
 GET          /api/species/search
 GET          /api/stats
 GET          /api/storage
@@ -202,6 +204,7 @@ GET          /favicon.ico
 GET          /highlights
 GET          /id-conflicts
 GET          /import
+GET          /inaturalist
 GET          /jobs
 GET          /keywords
 GET          /life-list
@@ -387,6 +390,7 @@ POST         /api/photos/<int:photo_id>/location
 POST         /api/photos/<int:photo_id>/location/text
 POST         /api/photos/<int:photo_id>/rating
 POST         /api/photos/<int:photo_id>/species/<int:keyword_id>/provenance
+POST         /api/photos/<int:photo_id>/species/<int:keyword_id>/review
 POST         /api/photos/<int:photo_id>/subjects/analyze
 POST         /api/photos/<int:photo_id>/wildlife_excluded
 POST         /api/photos/analysis-readiness

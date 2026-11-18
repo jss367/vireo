@@ -94,7 +94,6 @@ function bindHighlightsControls() {
   highlightsEl('speciesSearch').addEventListener('input', function() { debounceLoad(); });
   highlightsEl('confirmationFilter').addEventListener('change', resetExpansionAndReload);
   highlightsEl('highlightSelectionFilter').addEventListener('change', resetExpansionAndReload);
-  highlightsEl('representativeFilter').addEventListener('change', resetExpansionAndReload);
   highlightsEl('perRowSlider').addEventListener('input', function(event) {
     highlightsEl('perRowValue').textContent = controlValue(event);
     if (state.currentData) render();

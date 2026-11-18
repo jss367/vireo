@@ -5,10 +5,7 @@
  */
 import { updateZoomControl } from './viewport-zoom-control.js';
 
-export function _lbDisplayDimsForRecipe(/** @type {number | null | undefined} */ width, /** @type {number | null | undefined} */ height, /** @type {LightboxRecipe | null | undefined} */ recipe) {
-  var w = Number(width) || 0;
-  var h = Number(height) || 0;
-  if (!w || !h) return { w: null, h: null };
+export function _lbDisplayDimsForRecipe(/** @type {number} */ w, /** @type {number} */ h, /** @type {LightboxRecipe | null | undefined} */ recipe) {
   recipe = recipe || {};
   var rotation = Number(recipe.rotation || 0);
   if (rotation === 90 || rotation === 270) {
@@ -38,22 +35,21 @@ export function applyTransform(/** @type {LightboxViewportContext} */ vp) {
   updateZoomControl(vp);
 }
 
-function orientedPhotoDims(/** @type {LightboxViewportContext} */ vp, /** @type {HTMLImageElement} */ img) {
-  if (!vp.options.photo().width || !vp.options.photo().height) return null;
-  var w = vp.options.photo().width || 0;
-  var h = vp.options.photo().height || 0;
-  if (vp.options.orientationSwapsAxes(vp.options.photo().orientation)) {
-    w = vp.options.photo().height || 0;
-    h = vp.options.photo().width || 0;
-  } else if (img && img.naturalWidth && img.naturalHeight) {
-    var storedAspect = w / h;
-    var imgAspect = img.naturalWidth / img.naturalHeight;
-    if (Math.abs(storedAspect - imgAspect) > Math.abs((1 / storedAspect) - imgAspect)) {
-      w = vp.options.photo().height || 0;
-      h = vp.options.photo().width || 0;
-    }
+function catalogDisplayDims(/** @type {LightboxViewportContext} */ vp, /** @type {HTMLImageElement} */ img) {
+  var photo = vp.options.photo();
+  if (!photo.width || !photo.height) return null;
+  if (vp.options.orientationSwapsAxes(photo.orientation)) {
+    return _lbDisplayDimsForRecipe(photo.height, photo.width, photo.recipe);
   }
-  return { w: w, h: h };
+  var dims = _lbDisplayDimsForRecipe(photo.width, photo.height, photo.recipe);
+  if (!img.naturalWidth || !img.naturalHeight) return dims;
+
+  // The decoded preview already includes the crop and rotation. Compare both
+  // possible catalog orientations after applying those same edits.
+  var swapped = _lbDisplayDimsForRecipe(photo.height, photo.width, photo.recipe);
+  var aspect = img.naturalWidth / img.naturalHeight;
+  return Math.abs(dims.w / dims.h - aspect) <= Math.abs(swapped.w / swapped.h - aspect)
+    ? dims : swapped;
 }
 
 export function layoutDims(/** @type {LightboxViewportContext} */ vp) {
@@ -73,13 +69,9 @@ export function layoutDims(/** @type {LightboxViewportContext} */ vp) {
   // While /original is available, keep the transform layer in original photo
   // coordinates even if the currently displayed tier is /full. That matches the
   // sharp natural-layout path and avoids recalibrating pan/zoom when the source swaps.
-  var originalDims = !vp.options.photo().originalUnavailable ? orientedPhotoDims(vp, img) : null;
-  if (originalDims) {
-    return _lbDisplayDimsForRecipe(
-      originalDims.w,
-      originalDims.h,
-      vp.options.photo().recipe
-    );
+  if (!vp.options.photo().originalUnavailable) {
+    var dims = catalogDisplayDims(vp, img);
+    if (dims) return dims;
   }
   if (img.naturalWidth && img.naturalHeight) {
     return { w: img.naturalWidth, h: img.naturalHeight };

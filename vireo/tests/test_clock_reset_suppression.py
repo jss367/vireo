@@ -116,3 +116,24 @@ def test_audit_still_reports_the_finding_without_actionable_corrections(app_and_
     assert finding["fixes"] == []
     assert any("Automatic corrections are unavailable" in line for line in finding["evidence"])
     assert [tuple(row) for row in db.conn.execute("SELECT * FROM photos ORDER BY id")] == before
+
+
+@pytest.mark.parametrize("later_shift,should_withhold", [(60, True), (240, False)])
+def test_independent_groups_on_opposite_sides_of_reset(later_shift, should_withhold):
+    frames = []
+    for frame in _reset_frames(gps_error_after=-later_shift):
+        if frame.ref <= 6:
+            frames.append(replace(frame, captured=frame.captured + timedelta(minutes=48),
+                                  latitude=1., longitude=0.))
+        else:
+            delay = timedelta(minutes=29)
+            frames.append(replace(frame, captured=frame.captured - delay, gps_utc=frame.gps_utc - delay))
+
+    problem = analyze_camera(frames, zone_lookup=lambda *_: ("Synthetic zone", -360))
+
+    assert problem is not None and problem.jump_count == 1
+    assert any("Automatic corrections are unavailable" in line for line in problem.evidence) == should_withhold
+    if should_withhold:
+        assert problem.fixes == []
+    else:
+        assert {fix.shift_minutes for fix in problem.fixes} == {0, 60, later_shift}

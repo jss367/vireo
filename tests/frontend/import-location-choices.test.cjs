@@ -303,3 +303,17 @@ test('uncertain GPS suggestion needs confirmation and permits a broader label', 
   assert.equal(choices()[0].name, 'Verified broader area');
   assert.equal(choices()[0].kind, 'new');
 });
+
+test('an outing park shows the grouped walk and requires a choice', () => {
+  const {ctx, run, choices} = harness();
+  const group = ctx.data.groups[0];
+  group.suggestion = {kind: 'google', source: 'outing', name: 'Preserve', place_id: 'park',
+    warning: 'Confirm this park before assigning it to these photos.'};
+  group.outing_paths = ['/card/a', '/card/b'];
+  run('globalThis.row = renderImportLocationGroup(data.groups[0]);');
+  assert.match(run('row.children[2].children[2].textContent'), /Inferred/);
+  assert.match(run('row.children[2].children[2].children[0].children[0].textContent'), /2 photos/);
+  assert.deepEqual(choices(), []);
+  run('row.children[0].checked = true; row.children[0].handlers.change();');
+  assert.equal(choices()[0].place_id, 'park');
+});

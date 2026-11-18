@@ -12,6 +12,7 @@ from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, S
 from typing import TYPE_CHECKING, Any, Literal, Self
 
 import settings_source
+from focus_point import focus_area_json
 from keyword_normalization import (
     normalize_keyword_display,
 )
@@ -321,7 +322,7 @@ NO_LOCATION_INFORMATION_RULES = {
 ALL_NAV_IDS = frozenset({
     "import",
     "pipeline", "jobs", "pipeline_review", "pipeline_rapid_review", "review", "cull",
-    "misses", "highlights", "life_list", "browse", "edit", "map", "location_review",
+    "misses", "highlights", "life_list", "inaturalist", "browse", "edit", "map", "location_review",
     "dashboard", "storage", "audit", "card_cleanup", "move", "id_conflicts",
     "settings", "workspace", "lightroom", "shortcuts",
     "keywords", "duplicates", "logs",
@@ -491,6 +492,7 @@ class Database:
         self._unit = UnitOfWork()
         self.conn.units = self._unit
         self.conn.row_factory = sqlite3.Row
+        self.conn.create_function("vireo_focus_area", 1, focus_area_json, deterministic=True)
         self.conn.create_function(
             "vireo_keyword_text_match",
             4,
@@ -2742,7 +2744,7 @@ class Database:
     # Action types that appear in history but cannot be reversed
     _NON_UNDOABLE = (
         'audit_remove_orphans', 'audit_resolve', 'keyword_clean',
-        'identity_alternatives_superseded',
+        'identity_alternatives_superseded', 'assignment_review_superseded',
         'prediction_reject', 'discard',
         # Legacy rows lack the before-state required for a lossless replay.
         # New assignments use photo_location; new reject/review decisions

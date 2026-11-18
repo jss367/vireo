@@ -248,7 +248,10 @@ def create_batch_blueprint(
 
         Preview mode performs/caches reverse-geocode lookups and returns
         grouped assignments without linking keywords. Apply mode reuses the
-        same resolution path, then writes each photo's own resolved place.
+        same resolution path. To choose an inferred park, include
+        ``outing_choices: [{"place_id": ..., "photo_ids": [...]}]`` with
+        IDs from that outing's inferred_photo_ids and the full source selection.
+        Other photos keep their direct GPS suggestions.
         """
         body = request.get_json(silent=True) or {}
         apply_changes = body.get("apply") is True

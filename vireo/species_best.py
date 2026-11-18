@@ -6,16 +6,17 @@ Highlights payload's own buckets and order, cut to the first photos of each
 species, so the photo it names for a species is the photo the Highlights
 page leads that species with over the same photos:
 
-1. the species' chosen photos (representatives), ranked by the recorded
-   comparisons, the newest choice first among photos nobody has compared;
-2. the workspace's ranked highlights;
-3. flagged picks, by Vireo's score;
-4. everything else by Vireo's score, unanalyzed photos last.
+1. the species' highlights, ranked by the recorded comparisons, the newest
+   one first among photos nobody has compared;
+2. flagged picks, by Vireo's score;
+3. everything else by Vireo's score, unanalyzed photos last.
+4. photos where the species is only in frame or outside the crop
+   (``species_presence``); another bird's pick or score does not promote them.
 
 Each species carries a ``decision`` saying which of these put its first
 photo there (``highlights_payload.best_decision``), so a reader can tell a
-photo someone chose from one Vireo guessed, and a settled choice from two
-chosen photos nobody has compared.
+highlight from a photo Vireo guessed, and a settled highlight from two
+nobody has compared.
 
 A pure payload builder: a ``Database`` in, JSON-ready dicts out.
 """
@@ -24,7 +25,6 @@ from dataclasses import dataclass, field
 
 from highlights_payload import (
     apply_highlight_preferences,
-    apply_ordered_highlights,
     collect_highlight_buckets,
     species_canonicalizer,
 )
@@ -33,7 +33,7 @@ from services.species_choices import PhotoScope
 
 MAX_PHOTOS_PER_SPECIES = 50
 #: Decision kinds where nobody chose the photo: Vireo ordered it.
-GUESSED_KINDS = frozenset({"score", "unanalyzed"})
+GUESSED_KINDS = frozenset({"score", "unanalyzed", "in_frame", "outside_crop"})
 
 
 @dataclass(frozen=True)
@@ -51,7 +51,7 @@ class SpeciesBestQuery:
     """The prediction confidence an unconfirmed species needs to be listed."""
 
 
-def _photo_entry(photo, chosen_ids):
+def _photo_entry(photo):
     """The trimmed photo dict a species entry carries."""
     return {
         "id": photo["id"],
@@ -60,11 +60,12 @@ def _photo_entry(photo, chosen_ids):
         "folder_name": photo.get("folder_name"),
         "rating": photo.get("rating") or 0,
         "flag": photo.get("flag") or "none",
+        "species_presence": photo.get("species_presence") or "subject",
+        "subject_species": photo.get("subject_species_list") or [],
         "quality_score": photo.get("quality_score"),
         "is_analyzed": photo.get("quality_score") is not None,
         "highlight_score": photo.get("highlight_score"),
         "reasons": photo.get("reasons") or [],
-        "is_chosen": photo["id"] in chosen_ids,
         "is_highlighted": bool(photo.get("is_highlighted")),
         "highlight_rank": photo.get("highlight_rank"),
         "is_confirmed": bool(photo.get("has_accepted_species")),
@@ -74,7 +75,6 @@ def _photo_entry(photo, chosen_ids):
 
 def _species_entry(bucket, per_species):
     decision = bucket.get("best_decision")
-    chosen_ids = set(decision["contender_ids"]) if decision else set()
     photos = bucket.get("photos") or []
     return {
         "species": bucket["species"],
@@ -82,7 +82,7 @@ def _species_entry(bucket, per_species):
         "certainty": bucket.get("certainty"),
         "photo_count": len(photos),
         "decision": decision,
-        "photos": [_photo_entry(p, chosen_ids) for p in photos[:per_species]],
+        "photos": [_photo_entry(p) for p in photos[:per_species]],
     }
 
 
@@ -133,7 +133,6 @@ def build_species_best_payload(db, query=None):
         key for key in map(keyword_match_key, seen_species)
         if key not in listed and wanted in (None, key)
     })
-    apply_ordered_highlights(db, buckets)
     apply_highlight_preferences(db, buckets)
     entries = sorted(
         (_species_entry(bucket, per_species) for bucket in buckets),
@@ -149,7 +148,7 @@ def build_species_best_payload(db, query=None):
             "per_species": per_species,
             "include_unconfirmed": bool(query.include_unconfirmed),
             "unconfirmed_species_omitted": unconfirmed_omitted,
-            "chosen": kinds.count("chosen"),
+            "highlighted": kinds.count("highlight"),
             "needs_comparison": kinds.count("tie"),
             "guessed": sum(1 for kind in kinds if kind in GUESSED_KINDS),
         },

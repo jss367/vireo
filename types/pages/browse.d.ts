@@ -16,6 +16,7 @@ interface BrowsePhoto {
   _similarity?: number; similarity?: number;
   life_list?: {species: string; is_current_photo?: boolean; is_species_representative?: boolean}[];
   flag_note?: BrowseFlagNote | null;
+  review_workspace_id?: number; assignment_reviews?: BrowseAssignmentReview[];
   species_assignments?: BrowseSpeciesAssignment[];
 }
 interface BrowseFlagNote {flag: 'none' | 'flagged' | 'rejected'; source: string | null; reason: string | null; description?: string; at?: string | null}
@@ -217,8 +218,17 @@ interface BrowseSpeciesNames {
   display_name?: string; synonyms?: string[];
   taxon_id?: number; source_taxon_id?: number | null; scientific_name?: string | null;
 }
+interface BrowseReviewNote {
+  reviewer: string; reason: string; evidence_source: string; recorded_at: string;
+}
+interface BrowseAssignmentReview {
+  id: string; species: string; conflict: BrowseReviewNote;
+  original_provenance: Pick<BrowseSpeciesAssignment, 'method' | 'reviewer' | 'reason' | 'evidence_source' | 'supporting_photo_ids'>;
+  resolution: (BrowseReviewNote & {action: string; species?: string}) | null;
+}
 interface BrowseSpeciesAssignment extends BrowseSpeciesNames {
   photo_id: number; keyword_id: number; species: string; method: string;
+  review_version?: string; review?: BrowseAssignmentReview | null;
   reviewer?: string | null; reason?: string | null; evidence_source?: string | null;
   supporting_photo_ids?: number[]; detection_id?: number | null; subject_photo_id?: number | null;
   confidence?: number | null; confidence_meaning?: string;

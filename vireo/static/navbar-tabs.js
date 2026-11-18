@@ -38,6 +38,7 @@ export var NAV_ALL_PAGES = [
   {id: 'misses',          label: 'Misses',          href: '/misses'},
   {id: 'highlights',      label: 'Highlights',      href: '/highlights'},
   {id: 'life_list',       label: 'Life List',       href: '/life-list'},
+  {id: 'inaturalist',    label: 'iNaturalist',    href: '/inaturalist'},
   {id: 'browse',          label: 'Browse',          href: '/browse'},
   {id: 'edit',            label: 'Edit',            href: '/edit'},
   {id: 'map',             label: 'Map',             href: '/map'},
@@ -71,7 +72,6 @@ let TABS = NAV_DEFAULT_TABS.slice();
 let ALL_PAGES = NAV_ALL_PAGES.slice();
 /** @type {Record<string,NavPage>} */ let pageById = {};
 ALL_PAGES.forEach(p => { pageById[p.id] = p; });
-/** @type {string | null} */ let ephemeralId = null; // nav-id of the ephemeral tab, if any
 
 /** @param {string} url @param {Record<string,unknown>} body */
 function postJSON(url, body) {
@@ -148,9 +148,23 @@ function applyActiveClass() {
   });
 }
 
-function renderStrip() {
+/** @type {string | null} */ let scrollKey = null;
+
+function saveStripScroll() {
+  const strip = STRIP();
+  if (scrollKey && strip?.childElementCount) sessionStorage.setItem(scrollKey, String(strip.scrollLeft));
+}
+
+/** @param {string | null} nextScrollKey */
+function renderStrip(nextScrollKey = scrollKey) {
   const strip = STRIP();
   if (!strip) return;
+  let scrollLeft = strip.scrollLeft;
+  if (nextScrollKey !== scrollKey) {
+    saveStripScroll();
+    scrollKey = nextScrollKey;
+    scrollLeft = scrollKey ? Number(sessionStorage.getItem(scrollKey)) || 0 : 0;
+  }
   strip.textContent = '';
   TABS.forEach(id => {
     const page = pageById[id];
@@ -159,13 +173,11 @@ function renderStrip() {
   // Ephemeral tab: only if currently on an unpinned page
   const cur = currentNavId();
   if (cur && !TABS.includes(cur) && pageById[cur]) {
-    ephemeralId = cur;
     strip.appendChild(buildTabAnchor(pageById[cur], {ephemeral: true}));
-  } else {
-    ephemeralId = null;
   }
+  strip.scrollLeft = scrollLeft;
   applyActiveClass();
-  recomputeOverflow();
+  rebuildPagesMenu();
   if (vireoSyncNumberedNavigation) vireoSyncNumberedNavigation();
   // Re-apply hotkey hints (underline + (key) suffix) — tabs are
   // built async, so the initial DOM-ready call doesn't see them.
@@ -174,51 +186,16 @@ function renderStrip() {
   }
 }
 
-function recomputeOverflow() {
-  const strip = STRIP();
-  const overBtn = OVERBTN();
-  if (!strip || !overBtn) return;
-  // Reset: show all tabs
-  const tabs = Array.from(/** @type {NodeListOf<HTMLAnchorElement>} */ (strip.querySelectorAll('.nav-tab')));
-  tabs.forEach(t => { t.style.display = ''; });
-  overBtn.hidden = true;
-  // Detect overflow against parent (the navbar). The strip is a flex
-  // child with min-width:0 + overflow:hidden — its scrollWidth >
-  // clientWidth means tabs are clipped.
-  if (strip.scrollWidth <= strip.clientWidth) return;
-  // Hide tabs from the right end until the strip fits, but never hide
-  // the active tab or the ephemeral tab.
-  overBtn.hidden = false;
-  const cur = currentNavId();
-  const protectedIds = new Set([cur, ephemeralId].filter((id) => id !== null));
-  // A newly pinned tab is appended to the end of TABS; keep it visible
-  // instead of immediately moving it into overflow on narrower navbars.
-  const lastTab = TABS[TABS.length - 1];
-  if (lastTab) protectedIds.add(lastTab);
-  // Walk right-to-left, hiding pinned tabs that aren't protected.
-  for (let i = tabs.length - 1; i >= 0; i--) {
-    if (strip.scrollWidth <= strip.clientWidth) break;
-    const t = tabs[i];
-    if (!t) continue;
-    if (protectedIds.has(t.dataset.navId || '')) continue;
-    t.style.display = 'none';
-  }
-  rebuildOverflowMenu(tabs);
-}
-
-/** @param {HTMLAnchorElement[]} tabs */
-function rebuildOverflowMenu(tabs) {
+function rebuildPagesMenu() {
   const menu = OVERMENU();
   if (!menu) return;
   menu.textContent = '';
-  tabs.forEach(t => {
-    if (t.style.display !== 'none') return;
-    const page = pageById[t.dataset.navId || ''];
-    if (!page) return;
+  const cur = currentNavId();
+  ALL_PAGES.forEach(page => {
     const item = document.createElement('button');
     item.type = 'button';
     item.className = 'nav-overflow-item';
-    item.dataset.navId = page.id;
+    if (page.id === cur) item.setAttribute('aria-current', 'page');
     item.appendChild(document.createTextNode(page.label));
     item.addEventListener('click', () => {
       window.location.href = vireoResolveNavigationHref(page.href);
@@ -232,27 +209,29 @@ function rebuildOverflowMenu(tabs) {
   const menu = OVERMENU();
   const btn = OVERBTN();
   if (!menu || !btn) return;
-  if (menu.hasAttribute('hidden')) {
-    menu.removeAttribute('hidden');
-    const r = btn.getBoundingClientRect();
-    menu.style.left = r.left + 'px';
-    setTimeout(() => {
-      document.addEventListener('click', closeOverflowMenuOnOutside, {once: true});
-    }, 0);
-  } else {
-    menu.setAttribute('hidden', '');
-  }
+  menu.hidden = !menu.hidden;
+  btn.setAttribute('aria-expanded', String(!menu.hidden));
 }
 
-/** @param {Event} e */
-function closeOverflowMenuOnOutside(e) {
-  const menu = OVERMENU();
-  if (!menu) return;
-  if (/** @type {HTMLElement} */ (e.target).closest('.nav-overflow-menu, .nav-overflow-btn')) {
-    document.addEventListener('click', closeOverflowMenuOnOutside, {once: true});
-    return;
+document.addEventListener('click', event => {
+  if (!(/** @type {Element} */ (event.target)).closest('.nav-pages')) closePagesMenu();
+});
+
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && OVERMENU() && !OVERMENU().hidden) {
+    event.preventDefault();
+    event.stopPropagation();
+    closePagesMenu();
+    OVERBTN().focus();
   }
-  menu.setAttribute('hidden', '');
+}, true);
+
+function closePagesMenu() {
+  const menu = OVERMENU();
+  if (menu && !menu.hidden) {
+    menu.hidden = true;
+    OVERBTN().setAttribute('aria-expanded', 'false');
+  }
 }
 
 /** @param {string} navId */
@@ -280,24 +259,8 @@ function unpinTab(navId) {
 }
 
 function clearEphemeral() {
-  // Closing ephemeral === navigate away from the unpinned page.
-  // Ephemeral renders at the right end of the strip, so its visually
-  // adjacent neighbor is the rightmost *visible* pinned tab. Under
-  // overflow, recomputeOverflow() hides rightmost pinned tabs first,
-  // so TABS[length-1] may be hidden; walk right-to-left to find the
-  // first one that's actually rendered.
-  const strip = STRIP();
-  let adjId = null;
-  if (strip) {
-    for (let i = TABS.length - 1; i >= 0; i--) {
-      const id = TABS[i];
-      const t = /** @type {HTMLAnchorElement | null} */ (strip.querySelector(
-        '.nav-tab[data-nav-id="' + id + '"]:not(.is-ephemeral)'
-      ));
-      if (t && t.style.display !== 'none') { adjId = id; break; }
-    }
-  }
-  if (!adjId && TABS.length) adjId = TABS[TABS.length - 1];
+  // The temporary tab follows the last pinned tab in the scrollable strip.
+  const adjId = TABS[TABS.length - 1];
   const next = adjId ? pageById[adjId] : null;
   window.location.href = vireoResolveNavigationHref(
     next ? next.href : '/browse'
@@ -317,7 +280,7 @@ function fetchAndRender() {
       ALL_PAGES = (state && state.all_pages) || [];
       pageById = {};
       ALL_PAGES.forEach(p => { pageById[p.id] = p; });
-      renderStrip();
+      renderStrip(state?.workspace_id == null ? null : 'vireo_nav_scroll_' + state.workspace_id);
       return state;
     })
     .catch(err => {
@@ -330,45 +293,7 @@ function fetchAndRender() {
     });
 }
 
-// Re-recompute overflow on viewport resize *and* when individual tabs
-// change width (e.g. the Jobs tab's badge updates as background jobs
-// start/finish — without observing the tabs themselves, those content
-// changes never trigger a resize event and overflowing tabs stay
-// clipped instead of moving into the `…` menu).
-//
-// Recompute on the next frame, not inside the observer callback: hiding and
-// showing tabs resizes the very elements being observed, and doing it in the
-// callback makes the browser report a ResizeObserver loop.
-/** @type {ResizeObserver | null} */ let tabsRO = null;
-let overflowFrame = 0;
-function scheduleRecomputeOverflow() {
-  if (overflowFrame) return;
-  overflowFrame = requestAnimationFrame(() => {
-    overflowFrame = 0;
-    recomputeOverflow();
-  });
-}
-if (window.ResizeObserver) {
-  const navbarRO = new ResizeObserver(scheduleRecomputeOverflow);
-  const navbar = document.querySelector('.navbar');
-  if (navbar) navbarRO.observe(navbar);
-  tabsRO = new ResizeObserver(scheduleRecomputeOverflow);
-  // Observe each rendered tab; renderStrip() replaces tab nodes, so
-  // re-attach the observer on the MutationObserver below.
-  function observeTabs() {
-    tabsRO?.disconnect();
-    const strip = STRIP();
-    if (!strip) return;
-    /** @type {NodeListOf<HTMLAnchorElement>} */ (strip.querySelectorAll('.nav-tab')).forEach(t => tabsRO?.observe(t));
-  }
-  const stripEl = STRIP();
-  if (stripEl) {
-    observeTabs();
-    new MutationObserver(observeTabs).observe(stripEl, {childList: true});
-  }
-} else {
-  window.addEventListener('resize', recomputeOverflow);
-}
+window.addEventListener('pagehide', saveStripScroll);
 
 // Expose for the palette + drag-reorder code in the next scripts
 /** @type {NavTabs} */

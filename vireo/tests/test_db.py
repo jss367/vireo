@@ -4,7 +4,7 @@ import sys
 
 import pytest
 from repositories.masks_features import MaskQuality, PipelineFeatures
-from services import folder_merges, keyword_tagging, review_decisions
+from services import folder_merges, keyword_tagging, review_decisions, species_choices
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from services import (
@@ -7633,8 +7633,9 @@ def test_replace_prediction_migrates_curation_from_canonical_root_of_alias(tmp_p
     ``Verdin`` — but curation was preserved under the canonical root name
     ``Verdin`` because that is where ``_canonical_curation_species`` keeps
     it. Renaming the curation from only the raw alias ``Desert Verdin``
-    would leave ``species_highlights`` / ``photo_preferences`` stranded
-    under ``Verdin`` after the photo is retagged to a different species.
+    would leave the highlight (``species_representatives``) and the
+    ``photo_preferences`` row stranded under ``Verdin`` after the photo is
+    retagged to a different species.
     """
     from db import Database
 
@@ -7677,11 +7678,9 @@ def test_replace_prediction_migrates_curation_from_canonical_root_of_alias(tmp_p
         (ws_id, "highlights", "Verdin", pid),
     )
     db.conn.execute(
-        """INSERT INTO species_highlights
-             (workspace_id, species, photo_id, rank,
-              created_at, updated_at)
-           VALUES (?, ?, ?, 1, datetime('now'), datetime('now'))""",
-        (ws_id, "Verdin", pid),
+        """INSERT INTO species_representatives (species, photo_id, selected_order)
+           VALUES (?, ?, 1)""",
+        ("Verdin", pid),
     )
     db.conn.commit()
 
@@ -7725,7 +7724,7 @@ def test_replace_prediction_migrates_curation_from_canonical_root_of_alias(tmp_p
 
     hl_species = {
         row["species"] for row in db.conn.execute(
-            "SELECT species FROM species_highlights WHERE photo_id = ?",
+            "SELECT species FROM species_representatives WHERE photo_id = ?",
             (pid,),
         ).fetchall()
     }
@@ -19702,7 +19701,7 @@ def test_species_keywords_preserves_unlinked_case_variant_spellings(tmp_path):
     db.commit()
 
     # Both distinct spellings survive the dedup so downstream lookups
-    # (species_representatives, species_highlights) can match either key.
+    # (species_representatives) can match either key.
     result = db.photo_species.get_species_for_photos([pid])
     assert set(result[pid]) == {"Foo", "foo"}
 
@@ -19824,8 +19823,8 @@ def test_photo_life_list_species_preserves_linked_homonyms(tmp_path):
     example a legacy ``Robin`` bound to the American robin taxon and a
     taxonomy ``robin`` bound to the European robin taxon), both must
     surface in the per-photo life-list species so ``api_photo_detail``
-    can match either against its ``species_representative_lists`` /
-    ``species_highlights`` state. Folding by an ASCII-case-fold match
+    can match either against its ``species_representative_lists``
+    state. Folding by an ASCII-case-fold match
     key would hide one taxon even though its keyword remains
     attached."""
     from db import Database
@@ -22048,7 +22047,7 @@ def test_all_nav_ids_covers_every_page():
     expected = {
         "import", "card_cleanup",
         "pipeline", "jobs", "pipeline_review", "pipeline_rapid_review", "review", "cull",
-        "misses", "highlights", "life_list", "browse", "edit", "map", "location_review",
+        "misses", "highlights", "life_list", "inaturalist", "browse", "edit", "map", "location_review",
         "dashboard", "storage", "audit", "move", "id_conflicts",
         "settings", "workspace", "lightroom", "shortcuts",
         "keywords", "duplicates", "logs",
@@ -24115,18 +24114,23 @@ def test_curation_setters_canonicalize_species_casing(tmp_path):
         ).fetchall()
         assert {r["species"] for r in prefs} == {"Common waxbill"}
 
-        rank = db.species_curation.add_highlight("Common Waxbill", pid)
-        assert rank == 1
+        db.species_curation.clear_representative("Common Waxbill")
+        added = species_choices.add_highlight(db, "Common Waxbill", pid)
+        assert added["added"] is True
         rows = db.conn.execute(
-            "SELECT species FROM species_highlights"
+            "SELECT species FROM species_representatives"
         ).fetchall()
         assert [r["species"] for r in rows] == ["Common waxbill"]
 
-        # Re-adding under yet another casing reuses the canonical row
-        # instead of appending a second rank.
-        assert db.species_curation.add_highlight("COMMON WAXBILL", pid) == 1
+        # Re-adding under yet another casing finds the canonical row
+        # instead of storing a second highlight.
+        again = species_choices.add_highlight(db, "COMMON WAXBILL", pid)
+        assert again["added"] is False
+        assert db.conn.execute(
+            "SELECT COUNT(*) FROM species_representatives"
+        ).fetchone()[0] == 1
 
-        removed = db.species_curation.remove_highlight("Common Waxbill", pid)
+        removed = species_choices.remove_highlight(db, "Common Waxbill", pid)
         assert removed == 1
     finally:
         db.close()
@@ -24940,7 +24944,7 @@ def test_mark_species_keywords_preserves_higher_rank_taxon_when_no_species_match
 def test_get_species_highlights_canonicalizes_prediction_alias(tmp_path):
     """``resolve_species_display`` routes a linked hierarchy alias
     (e.g. ``Desert Verdin`` bound to the ``Verdin`` species taxon) to the
-    canonical root spelling, so ``species_curation.add_highlight`` /
+    canonical root spelling, so ``species_choices.add_highlight`` /
     ``collect_highlight_buckets`` store an unconfirmed prediction's
     highlight under ``Verdin``. The prediction-fallback branch of
     ``species_curation.get_highlights(eligible_only=True)`` must apply the same
@@ -24992,24 +24996,24 @@ def test_get_species_highlights_canonicalizes_prediction_alias(tmp_path):
     )
     db.conn.commit()
 
-    # species_curation.add_highlight canonicalizes the label via
+    # species_choices.add_highlight canonicalizes the label via
     # resolve_species_display — the leaf's linked taxon resolves
     # back to root "Verdin", so the highlight lands under "Verdin".
-    db.species_curation.add_highlight("Desert Verdin", pid)
+    species_choices.add_highlight(db, "Desert Verdin", pid)
     stored = db.conn.execute(
-        "SELECT species FROM species_highlights WHERE photo_id = ?", (pid,)
+        "SELECT species FROM species_representatives WHERE photo_id = ?", (pid,)
     ).fetchone()
     assert stored["species"] == "Verdin"
 
     # Prediction-fallback eligibility must canonicalize pr.species the
     # same way, so the stored highlight remains eligible on reload.
     highlights = db.species_curation.get_highlights(eligible_only=True)
-    assert pid in highlights.get("Verdin", {}), (
+    assert pid in highlights.get("Verdin", []), (
         "highlight canonicalized to root spelling must still match a photo "
         "whose top prediction is the linked hierarchy alias"
     )
     single = db.species_curation.get_highlights(species="Verdin", eligible_only=True)
-    assert pid in single.get("Verdin", {})
+    assert pid in single.get("Verdin", [])
 
 
 def test_get_species_highlights_prediction_fallback_rejects_wrong_taxon(tmp_path):
@@ -25068,7 +25072,7 @@ def test_get_species_highlights_prediction_fallback_rejects_wrong_taxon(tmp_path
     )
     # A highlight under a different root — must not become eligible for
     # a photo whose top prediction canonicalizes to another root.
-    db.species_curation.add_highlight("American Robin", pid)
+    species_choices.add_highlight(db, "American Robin", pid)
     db.conn.commit()
 
     highlights = db.species_curation.get_highlights(
@@ -25148,24 +25152,24 @@ def test_get_species_highlights_prediction_fallback_skips_ambiguous_alias(tmp_pa
     )
     # Simulate highlights saved directly under each root's canonical name.
     db.conn.execute(
-        "INSERT INTO species_highlights (species, photo_id, rank, workspace_id) "
-        "VALUES ('American Robin', ?, 0, 1)",
+        "INSERT INTO species_representatives (species, photo_id, selected_order) "
+        "VALUES ('American Robin', ?, 1)",
         (pid,),
     )
     db.conn.execute(
-        "INSERT INTO species_highlights (species, photo_id, rank, workspace_id) "
-        "VALUES ('European Robin', ?, 0, 1)",
+        "INSERT INTO species_representatives (species, photo_id, selected_order) "
+        "VALUES ('European Robin', ?, 2)",
         (pid,),
     )
     db.conn.commit()
 
     highlights = db.species_curation.get_highlights(eligible_only=True)
-    assert pid not in highlights.get("American Robin", {}), (
+    assert pid not in highlights.get("American Robin", []), (
         "ambiguous prediction label must not silently canonicalize to an "
         "arbitrary root — the 'American Robin' highlight must not become "
         "eligible when the top prediction 'Robin' resolves to multiple taxa"
     )
-    assert pid not in highlights.get("European Robin", {}), (
+    assert pid not in highlights.get("European Robin", []), (
         "ambiguous prediction label must not silently canonicalize to an "
         "arbitrary root — the 'European Robin' highlight must not become "
         "eligible when the top prediction 'Robin' resolves to multiple taxa"
@@ -25210,7 +25214,7 @@ def test_get_species_highlights_rejects_taxon_mismatch(tmp_path):
         "UPDATE keywords SET taxon_id = ? WHERE id = ?",
         (taxa["American Robin"], robin_root),
     )
-    db.species_curation.add_highlight("American Robin", pid)
+    species_choices.add_highlight(db, "American Robin", pid)
     db.conn.commit()
 
     highlights = db.species_curation.get_highlights(
@@ -25229,7 +25233,7 @@ def test_get_species_highlights_prediction_fallback_prefers_same_name_root(tmp_p
     leaf that points at a different taxon, the reload canonicalization
     must return the root's stored spelling, not the leaf's root spelling.
 
-    Without this, ``species_curation.add_highlight`` stores the highlight under
+    Without this, ``species_choices.add_highlight`` stores the highlight under
     the root name (case 1) but the eligibility reload canonicalizes
     through the mismatched leaf's taxon and drops the saved highlight.
     """
@@ -25290,16 +25294,16 @@ def test_get_species_highlights_prediction_fallback_prefers_same_name_root(tmp_p
         "VALUES (?, 'test', 'fp1', 'Robin', 0.95)",
         (did,),
     )
-    # ``species_curation.add_highlight`` funnels through
+    # ``species_choices.add_highlight`` funnels through
     # ``resolve_species_display``, which returns "Robin" (root-first)
     # for the label "Robin".
-    db.species_curation.add_highlight("Robin", pid)
+    species_choices.add_highlight(db, "Robin", pid)
     db.conn.commit()
 
     highlights = db.species_curation.get_highlights(
         species="Robin", eligible_only=True,
     )
-    assert pid in highlights.get("Robin", {}), (
+    assert pid in highlights.get("Robin", []), (
         "highlight stored under root 'Robin' must remain eligible when "
         "the prediction label 'Robin' also matches a hierarchy leaf "
         "pointing at a different taxon — the reload path must prefer the "
@@ -25309,19 +25313,19 @@ def test_get_species_highlights_prediction_fallback_prefers_same_name_root(tmp_p
 
 def test_curation_eligibility_higher_rank_taxonomy_homonym(tmp_path):
     """A linked higher-rank taxonomy keyword (e.g. a genus row named
-    ``Puma``) is eligible for the identification-name-keyed
-    representative curation row that shares its stored spelling, but
-    not for the species-only ordered-highlights row keyed on the same
-    name.
+    ``Puma``) keeps the highlight stored under its spelling eligible for
+    the identification-name-keyed read the Life List uses
+    (``get_representative_lists``), but not for the species-only read the
+    Highlights page uses (``get_highlights``).
 
     Representative eligibility mirrors the widened
     :meth:`species_curation.get_life_list_candidates`, :meth:`species_curation.get_photo_life_list_species`,
     and ``_photo_can_be_life_list_preference`` write path — the Life
     List renders higher-rank identifications so their photos must
     survive the ``eligible_only=True`` read that ``GET /api/photos/<id>``
-    uses to decide whether the shared Set-Representative button is
+    uses to decide whether the shared Make Top Highlight button is
     current. ``species_curation.get_highlights`` remains species-only, because
-    the Highlights page still only surfaces species buckets.
+    the Highlights page only surfaces species buckets.
     """
     from db import Database
 
@@ -25359,9 +25363,8 @@ def test_curation_eligibility_higher_rank_taxonomy_homonym(tmp_path):
     keyword_tagging.tag_photo(db, pid, kid)
     db.commit()
 
-    # Curation rows stored under the "Puma" identification key.
+    # The highlight stored under the "Puma" identification key.
     db.set_species_representative("Puma", pid)
-    db.species_curation.add_highlight("Puma", pid)
     db.conn.commit()
 
     # Representative eligibility matches the widened Life List siblings:
@@ -25378,12 +25381,12 @@ def test_curation_eligibility_higher_rank_taxonomy_homonym(tmp_path):
     # species buckets, so a genus-rank keyword named 'Puma' must not
     # keep the species 'Puma' highlight eligible.
     highlights = db.species_curation.get_highlights(eligible_only=True)
-    assert pid not in highlights.get("Puma", {}), (
+    assert pid not in highlights.get("Puma", []), (
         "genus-rank taxonomy row named 'Puma' must not satisfy species "
         "'Puma' highlight eligibility"
     )
     single = db.species_curation.get_highlights(species="Puma", eligible_only=True)
-    assert pid not in single.get("Puma", {})
+    assert pid not in single.get("Puma", [])
 
     # Sanity check: when the row is rebound to the species-rank taxon,
     # even the species-only highlight eligibility flips on.
@@ -25399,15 +25402,15 @@ def test_curation_eligibility_higher_rank_taxonomy_homonym(tmp_path):
     reps_after = db.species_curation.get_representative_lists(eligible_only=True)
     assert reps_after.get("Puma") == [pid]
     highlights_after = db.species_curation.get_highlights(eligible_only=True)
-    assert pid in highlights_after.get("Puma", {})
+    assert pid in highlights_after.get("Puma", [])
 
 
 def test_accept_prediction_replace_migrates_each_case_variant_curation_row(tmp_path):
     """Replace Keywords must migrate curation for every distinct removed
     row's exact spelling. Legacy ``Robin`` and taxonomy ``robin`` coexist
     as separate keyword rows (the ``UNIQUE(name, parent_id)`` index on
-    ``keywords`` is case-sensitive), and both can carry
-    ``species_highlights`` / ``photo_preferences`` rows keyed by the
+    ``keywords`` is case-sensitive), and both can carry highlight
+    (``species_representatives``) / ``photo_preferences`` rows keyed by the
     exact stored name. Deduping the curation-source list by
     ``keyword_match_key`` — an ASCII-only NOCASE fold — collapses those
     two spellings into one, so only one migrates onto the new species
@@ -25438,18 +25441,18 @@ def test_accept_prediction_replace_migrates_each_case_variant_curation_row(tmp_p
     keyword_tagging.tag_photo(db, pid, lower_id)
     db.commit()
 
-    # Curation rows keyed to BOTH exact stored names. ``species_highlights``
-    # has PK (workspace_id, species, photo_id) with case-sensitive TEXT,
-    # so both can coexist.
+    # Highlight rows keyed to BOTH exact stored names.
+    # ``species_representatives`` is UNIQUE(species, photo_id) with
+    # case-sensitive TEXT, so both can coexist.
     db.conn.execute(
-        "INSERT INTO species_highlights (workspace_id, species, photo_id, rank) "
-        "VALUES (?, 'Robin', ?, 0)",
-        (ws_id, pid),
+        "INSERT INTO species_representatives (species, photo_id, selected_order) "
+        "VALUES ('Robin', ?, 1)",
+        (pid,),
     )
     db.conn.execute(
-        "INSERT INTO species_highlights (workspace_id, species, photo_id, rank) "
-        "VALUES (?, 'robin', ?, 1)",
-        (ws_id, pid),
+        "INSERT INTO species_representatives (species, photo_id, selected_order) "
+        "VALUES ('robin', ?, 2)",
+        (pid,),
     )
     db.conn.commit()
 
@@ -25475,11 +25478,11 @@ def test_accept_prediction_replace_migrates_each_case_variant_curation_row(tmp_p
 
     remaining_species = {
         row["species"] for row in db.conn.execute(
-            "SELECT species FROM species_highlights "
-            "WHERE workspace_id = ? AND photo_id = ?",
-            (ws_id, pid),
+            "SELECT species FROM species_representatives WHERE photo_id = ?",
+            (pid,),
         ).fetchall()
     }
+    assert remaining_species == {"Sparrow"}
     # Under the ``keyword_match_key`` dedup only one of ``Robin`` /
     # ``robin`` would land in curation_sources, so the other exact
     # spelling would still appear here. Neither may survive: both

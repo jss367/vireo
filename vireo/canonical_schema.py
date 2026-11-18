@@ -20,7 +20,7 @@ This module must not import ``db``: ``schema.py`` imports ``db``, and
 # database it creates from nothing. It is the newest registry migration in
 # ``schema.MIGRATIONS``: ``create_tables`` builds every migration's end state,
 # so a fresh database has nothing to migrate.
-SCHEMA_VERSION = 38
+SCHEMA_VERSION = 43
 
 # Promoted EXIF summary columns in the ``photos`` table — the canonical
 # list the scanner uses to clear absent fields on rescan (a metadata write
@@ -65,7 +65,8 @@ FORMERLY_LAZY_OBJECTS = (
         reason      TEXT,
         repeat_count INTEGER NOT NULL DEFAULT 1,
         repeat_since TEXT,
-        task_scope  TEXT
+        task_scope  TEXT,
+        errors      TEXT
     )""",
     # The durable "do not adopt this preview" marker consulted by
     # web.media_previews._PreviewServer._serve_preview:
@@ -220,6 +221,15 @@ def create_detection_evidence_reviews(conn):
     )""")
 
 
+def create_assignment_reviews(conn):
+    conn.execute("""CREATE TABLE IF NOT EXISTS assignment_reviews (
+        id TEXT PRIMARY KEY,
+        photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+        record TEXT NOT NULL
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_assignment_reviews_photo ON assignment_reviews(photo_id)")
+
+
 def create_identity_alternatives(conn):
     """Catalog-wide uncertainty follows the same identity scope as species tags."""
     conn.execute("""CREATE TABLE IF NOT EXISTS photo_identity_alternatives (
@@ -266,7 +276,9 @@ def create_photo_versions(conn):
 
 
 def create_species_choices(conn):
-    """A species' chosen photos compared: one choice, the photos it beat."""
+    """A species' highlights compared: one choice about a photo, the photos
+    it was placed ahead of (losers) and the ones it was placed behind
+    (winners)."""
     conn.execute("""CREATE TABLE IF NOT EXISTS species_choices (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         species TEXT NOT NULL,
@@ -280,6 +292,15 @@ def create_species_choices(conn):
         photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
         PRIMARY KEY (choice_id, photo_id)
     )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS species_choice_winners (
+        choice_id INTEGER NOT NULL REFERENCES species_choices(id) ON DELETE CASCADE,
+        photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+        PRIMARY KEY (choice_id, photo_id)
+    )""")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_species_choice_winners_photo "
+        "ON species_choice_winners(photo_id)"
+    )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_species_choices_species "
         "ON species_choices(species, photo_id)"
@@ -292,6 +313,16 @@ def create_species_choices(conn):
         "CREATE INDEX IF NOT EXISTS idx_species_choice_losers_photo "
         "ON species_choice_losers(photo_id)"
     )
+
+
+def create_subject_focus(conn):
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_photos_burst_capture ON photos(folder_id, burst_id, timestamp)")
+    conn.execute("""CREATE TABLE IF NOT EXISTS subject_focus (
+        detection_id INTEGER PRIMARY KEY REFERENCES detections(id) ON DELETE CASCADE,
+        af INTEGER NOT NULL,
+        sharp INTEGER NOT NULL,
+        continuity INTEGER NOT NULL
+    )""")
 
 
 def create_subject_candidates(conn):
@@ -332,11 +363,13 @@ def create_auxiliary_schema_objects(conn):
     create_current_flag_attribution(conn)
     create_subject_ranking_analysis(conn)
     create_identity_alternatives(conn)
+    create_assignment_reviews(conn)
     create_detection_evidence_reviews(conn)
     create_same_shot_reviews(conn)
     create_photo_versions(conn)
     create_species_choices(conn)
     create_subject_candidates(conn)
+    create_subject_focus(conn)
     create_reviewed_gps(conn)
 
 
@@ -763,7 +796,10 @@ class CanonicalSchema:
             );
             CREATE TABLE IF NOT EXISTS photo_subject_state (
                 photo_id INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
-                detection_id INTEGER NOT NULL
+                detection_id INTEGER NOT NULL,
+                min_conf REAL,
+                detector_model TEXT,
+                refresh_pending INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS predictions (
@@ -1018,16 +1054,6 @@ class CanonicalSchema:
                 UNIQUE(species, photo_id)
             );
 
-            CREATE TABLE IF NOT EXISTS species_highlights (
-                workspace_id  INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-                species       TEXT NOT NULL,
-                photo_id      INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
-                rank          INTEGER NOT NULL,
-                created_at    TEXT DEFAULT (datetime('now')),
-                updated_at    TEXT DEFAULT (datetime('now')),
-                PRIMARY KEY (workspace_id, species, photo_id)
-            );
-
             CREATE TABLE IF NOT EXISTS preview_cache (
                 photo_id INTEGER NOT NULL,
                 size INTEGER NOT NULL,
@@ -1158,10 +1184,6 @@ class CanonicalSchema:
                 ON species_representatives(photo_id);
             CREATE INDEX IF NOT EXISTS idx_species_representatives_order
                 ON species_representatives(species, selected_order DESC);
-            CREATE INDEX IF NOT EXISTS idx_species_highlights_photo
-                ON species_highlights(photo_id);
-            CREATE INDEX IF NOT EXISTS idx_species_highlights_rank
-                ON species_highlights(workspace_id, species, rank);
             CREATE INDEX IF NOT EXISTS preview_cache_last_access
                 ON preview_cache(last_access_at);
             CREATE INDEX IF NOT EXISTS idx_offline_originals_status

@@ -382,10 +382,6 @@ class KeywordTreeRepository:
         # representatives rename isn't needed here.
         if photo_workspace_pairs:
             curation = SpeciesCurationRepository(self.conn, self._resolve_workspace_id)
-            curation.rename_highlights(
-                old_name, new_name,
-                photo_workspace_pairs=photo_workspace_pairs,
-            )
             curation.rename_photo_preferences(
                 old_name, new_name,
                 photo_workspace_pairs=photo_workspace_pairs,

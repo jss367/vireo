@@ -278,16 +278,18 @@ class MasksFeaturesRepository:
         ).fetchone()
         return row["mask_path"] if row else None
 
-    def active_prompt_detection(self, photo_id: int) -> sqlite3.Row | None:
+    def active_prompt_detection(self, photo_id: int, *, include_mask_path: bool = False) -> sqlite3.Row | None:
         """The exact detection that authored the active, denormalized mask.
 
         A validated contextual rescue may activate a below-floor prompt. Do
         not lower the normal floor or substitute an arbitrary weak box: match
         the active variant, path, detector model and all prompt coordinates.
-        The media caller has already checked workspace visibility.
+        The media caller has already checked workspace visibility. Include
+        ``active_mask_path`` to capture the mask and its owner in one read.
         """
-        return self.conn.execute(
-            """SELECT d.* FROM photos p
+        mask_column = ", p.mask_path AS active_mask_path" if include_mask_path else ""
+        matches = self.conn.execute(
+            f"""SELECT d.*{mask_column} FROM photos p
                JOIN photo_masks pm ON pm.photo_id = p.id
                 AND pm.variant = p.active_mask_variant AND pm.path = p.mask_path
                JOIN detections d ON d.photo_id = p.id
@@ -296,9 +298,10 @@ class MasksFeaturesRepository:
                 AND d.box_w = pm.prompt_w AND d.box_h = pm.prompt_h
                WHERE p.id = ? AND d.category = 'animal'
                  AND d.detector_model != 'full-image'
-               LIMIT 1""",
+               LIMIT 2""",
             (photo_id,),
-        ).fetchone()
+        ).fetchall()
+        return matches[0] if len(matches) == 1 else None
 
     def photo_mask_state(self, photo_id: int) -> sqlite3.Row | None:
         """Row (``active_mask_variant``, ``dino_embedding_variant``,

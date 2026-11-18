@@ -25,6 +25,7 @@ from canonical_schema import (
     JOB_HISTORY_LINEAGE_COLUMNS,
     JOB_HISTORY_PARENT_INDEX,
     JOB_HISTORY_WORKSPACE_OBJECTS,
+    create_assignment_reviews,
     create_current_flag_attribution,
     create_detection_evidence_reviews,
     create_formerly_lazy_objects,
@@ -34,11 +35,13 @@ from canonical_schema import (
     create_same_shot_reviews,
     create_species_choices,
     create_subject_candidates,
+    create_subject_focus,
     create_subject_ranking_analysis,
     job_history_columns,
 )
 from db import Database, IncompatibleDatabaseError
 from file_replace import replace_file
+from species_preference import Comparison, Preferences, split_contradictions
 
 log = logging.getLogger(__name__)
 
@@ -383,6 +386,138 @@ def _validate_flag_attribution_keeper(conn):
         raise RuntimeError("current_flag_attribution is missing its keeper columns")
 
 
+def _merge_species_highlights(conn):
+    """Fold the per-workspace ranked highlights into the catalog-wide list.
+
+    ``species_representatives`` becomes the one list of a species' highlights
+    and ``species_choices`` its order. Each ranked list turns into
+    comparisons (every photo over the ones ranked after it), and a photo that
+    was already a representative is recorded over the highlights that were
+    not, because it led the page ahead of them. Where those two disagree the
+    representative wins among the synthesized comparisons written last.
+    Existing curated comparisons retain precedence over every synthesized
+    edge, including when several legacy edges form a conflicting chain.
+    """
+    create_species_choices(conn)
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'species_highlights'"
+    ).fetchone() is None:
+        return
+    curated_through = conn.execute("SELECT COALESCE(MAX(id), 0) FROM species_choices").fetchone()[0]
+    ranked: dict[tuple[int, str], list[int]] = {}
+    for row in conn.execute(
+        """SELECT workspace_id, species, photo_id FROM species_highlights
+           ORDER BY workspace_id, species, rank, created_at, photo_id"""
+    ).fetchall():
+        ranked.setdefault((row[0], row[1]), []).append(row[2])
+    representatives: dict[str, list[int]] = {}
+    for row in conn.execute(
+        "SELECT species, photo_id FROM species_representatives ORDER BY id"
+    ).fetchall():
+        representatives.setdefault(row[0], []).append(row[1])
+    order = conn.execute(
+        "SELECT COALESCE(MAX(selected_order), 0) FROM species_representatives"
+    ).fetchone()[0]
+    # A pre-existing choice already settles the pair it covers; the legacy
+    # ranked list must not reverse it because a workspace ranked those same
+    # photos the other way.
+    prior = Preferences(
+        Comparison(row[0], row[1], row[2])
+        for row in conn.execute(
+            """SELECT c.id, c.photo_id, l.photo_id
+               FROM species_choices c
+               JOIN species_choice_losers l ON l.choice_id = c.id"""
+        ).fetchall()
+    )
+
+    def record(species, better, worse):
+        losers = [
+            photo_id for photo_id in worse
+            if photo_id != better and not prior.beats(photo_id, better)
+        ]
+        if not losers:
+            return
+        choice_id = conn.execute(
+            "INSERT INTO species_choices (species, photo_id) VALUES (?, ?)",
+            (species, better),
+        ).lastrowid
+        conn.executemany(
+            "INSERT OR IGNORE INTO species_choice_losers (choice_id, photo_id) VALUES (?, ?)",
+            [(choice_id, photo_id) for photo_id in losers],
+        )
+
+    added: dict[str, list[int]] = {}
+    for (_workspace_id, species), photo_ids in ranked.items():
+        known = set(representatives.get(species, ())) | set(added.get(species, ()))
+        # Ties fall to the newest selection, so the first-ranked photo joins last.
+        for photo_id in reversed(photo_ids):
+            if photo_id in known:
+                continue
+            order += 1
+            conn.execute(
+                """INSERT INTO species_representatives (species, photo_id, selected_order)
+                   VALUES (?, ?, ?)""",
+                (species, photo_id, order),
+            )
+            added.setdefault(species, []).append(photo_id)
+        for place, better in enumerate(photo_ids[:-1]):
+            record(species, better, photo_ids[place + 1:])
+    for species, photo_ids in added.items():
+        for representative in representatives.get(species, ()):
+            record(species, representative, photo_ids)
+    _discard_migrated_highlight_contradictions(conn, curated_through)
+    conn.execute("DROP TABLE species_highlights")
+
+
+def _discard_migrated_highlight_contradictions(conn, curated_through):
+    """Resolve synthesized edges below existing choices without rewriting them."""
+    comparisons = [Comparison(*row) for row in conn.execute(
+        """SELECT c.id, c.photo_id, l.photo_id
+           FROM species_choices c
+           JOIN species_choice_losers l ON l.choice_id = c.id
+           UNION ALL
+           SELECT c.id, w.photo_id, c.photo_id
+           FROM species_choices c
+           JOIN species_choice_winners w ON w.choice_id = c.id"""
+    )]
+    # Virtual choice ids express migration priority only during resolution.
+    # Existing decisions retain newest-first precedence among themselves.
+    choices = sorted({c.choice_id for c in comparisons},
+                     key=lambda cid: (cid <= curated_through, cid))
+    priority = {choice_id: index for index, choice_id in enumerate(choices)}
+    virtual = [Comparison(priority[c.choice_id], c.better, c.worse) for c in comparisons]
+    _kept, contradicted = split_contradictions(virtual)
+    conn.executemany(
+        "DELETE FROM species_choice_losers WHERE choice_id = ? AND photo_id = ?",
+        [(choices[c.choice_id], c.worse) for c in contradicted
+         if choices[c.choice_id] > curated_through],
+    )
+
+def _validate_merged_species_highlights(conn):
+    conn.execute("SELECT choice_id, photo_id FROM species_choice_winners LIMIT 0")
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'species_highlights'"
+    ).fetchone() is not None:
+        raise RuntimeError("species_highlights was not merged into species_representatives")
+
+
+def _add_job_history_errors(conn):
+    if "errors" not in job_history_columns(conn):
+        conn.execute("ALTER TABLE job_history ADD COLUMN errors TEXT")
+
+
+def _add_primary_projection_policy(conn):
+    # Catalogs that already have subject focus can carry version 39 or 40
+    # without the job-history column. Ensure both schemas converge at 41.
+    _add_job_history_errors(conn)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(photo_subject_state)")}
+    for name, definition in (
+        ("min_conf", "REAL"), ("detector_model", "TEXT"), ("refresh_pending", "INTEGER NOT NULL DEFAULT 0"),
+    ):
+        if name not in columns:
+            conn.execute(f"ALTER TABLE photo_subject_state ADD COLUMN {name} {definition}")
+
+
 MIGRATIONS = (
     Migration(
         13, "companion_identities_file_mtime",
@@ -436,7 +571,15 @@ MIGRATIONS = (
     Migration(35, "subject_detail", _add_subject_detail, _validate_subject_detail),
     Migration(36, "species_choices", create_species_choices),
     Migration(37, "subject_candidates", create_subject_candidates),
-    Migration(38, "reviewed_gps", create_reviewed_gps),
+    Migration(38, "assignment_reviews", create_assignment_reviews),
+    Migration(39, "job_history_errors", _add_job_history_errors),
+    Migration(40, "subject_focus", create_subject_focus),
+    Migration(41, "primary_projection_policy", _add_primary_projection_policy),
+    Migration(
+        42, "merge_species_highlights",
+        _merge_species_highlights, _validate_merged_species_highlights,
+    ),
+    Migration(43, "reviewed_gps", create_reviewed_gps),
 )
 
 

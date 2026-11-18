@@ -961,7 +961,9 @@
   function renderTotal() {
     const total = state.resultTotal;
     const el = /** @type {HTMLElement} */ ($('.vf-total strong'));
-    if (el) el.textContent = total == null ? '–' : Number(total).toLocaleString();
+    if (el) el.textContent = total == null ? '' : Number(total).toLocaleString();
+    const label = $('.vf-total span');
+    if (label) label.textContent = total == null ? '' : (total === 1 ? 'photo' : 'photos');
     const matchEl = /** @type {HTMLElement} */ ($('.vf-match-count'));
     if (matchEl) matchEl.textContent = total == null ? '' : `${Number(total).toLocaleString()} matching ${total === 1 ? 'photo' : 'photos'}`;
   }

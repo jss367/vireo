@@ -115,6 +115,7 @@ ALL_PAGES = [
     {"id": "misses",          "label": "Misses",          "href": "/misses"},
     {"id": "highlights",      "label": "Highlights",      "href": "/highlights"},
     {"id": "life_list",       "label": "Life List",       "href": "/life-list"},
+    {"id": "inaturalist",    "label": "iNaturalist",     "href": "/inaturalist"},
     {"id": "browse",          "label": "Browse",          "href": "/browse"},
     {"id": "edit",            "label": "Edit",            "href": "/edit"},
     {"id": "map",             "label": "Map",             "href": "/map"},
@@ -977,7 +978,7 @@ def _register_core_blueprints(app, w):
     """
     _get_db, db_path, missing_originals = w.get_db, w.db_path, w.missing_originals
     app.register_blueprint(create_pages_blueprint(_get_db))
-    app.register_blueprint(create_highlights_blueprint(_get_db, json_error))
+    app.register_blueprint(create_highlights_blueprint(_get_db, json_error, w.visual_scope))
     app.register_blueprint(create_species_best_blueprint(_get_db, json_error))
     app.register_blueprint(
         create_local_workspace_blueprint(
@@ -1107,7 +1108,7 @@ def _register_browse_blueprints(app, w):
     )
     app.register_blueprint(create_editing_blueprint(_get_db, json_error))
     app.register_blueprint(create_photo_versions_blueprint(_get_db, json_error, app.config))
-    app.register_blueprint(create_species_blueprint(_get_db))
+    app.register_blueprint(create_species_blueprint(_get_db, json_error, db_path))
     app.register_blueprint(
         create_system_blueprint(
             _get_db,
