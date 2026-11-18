@@ -534,10 +534,7 @@ class EditHistoryRepository:
     ) -> None:
         """Undo the curation migration performed by ``api_highlights_relabel``.
 
-        For each ``species_highlights`` row the relabel moved from an old
-        species bucket to ``new_species``, delete the row at ``new_species``
-        and re-insert it at the end of the old bucket (unless the photo
-        already appears there). For each ``photo_preferences`` row moved
+        For each ``photo_preferences`` row moved
         by the relabel, delete the row at ``(new_species, purpose)`` and
         re-insert it at ``(old_species, purpose)``. For each rep-only
         ``species_representatives`` row moved with no matching

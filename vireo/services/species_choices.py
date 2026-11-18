@@ -100,10 +100,25 @@ def contenders_in_scope(
 
 
 def _eligible_highlights(db: Database, canonical: str) -> list[int]:
-    return list(
-        db.species_curation.get_highlights(canonical, eligible_only=True)
-        .get(canonical, [])
-    )
+    """The species' highlights a page can show, newest selection first.
+
+    Two rules admit one: the Highlights bucket rule (a species-rank keyword
+    or a prediction that still puts the photo in the bucket) and the Life
+    List rule (a confirmed identification at any rank, so a genus or family
+    entry's highlights count too).
+    """
+    curation = db.species_curation
+    eligible = {
+        *curation.get_highlights(canonical, eligible_only=True).get(canonical, []),
+        *curation.get_representative_lists(
+            eligible_only=True, species=canonical, ranked=False,
+        ).get(canonical, []),
+    }
+    return [
+        photo_id
+        for photo_id in curation.get_highlights(canonical).get(canonical, [])
+        if photo_id in eligible
+    ]
 
 
 def _traversal_set(db: Database, canonical: str) -> set[int]:

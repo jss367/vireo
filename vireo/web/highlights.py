@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from flask import Blueprint, jsonify, request
@@ -595,6 +596,15 @@ def _accept_confirm_targets(
     return affected, skipped
 
 
+@dataclass(frozen=True)
+class _HighlightWrite:
+    """What a highlight write covers and who made it."""
+
+    scope: PhotoScope
+    source: str | None
+    reason: str | None
+
+
 def create_highlights_blueprint(get_db: GetDb, json_error: JsonError) -> Blueprint:
     """Build the highlights / photo-preferences blueprint.
 
@@ -722,8 +732,8 @@ def create_highlights_blueprint(get_db: GetDb, json_error: JsonError) -> Bluepri
 
     def _highlight_request(
         body: JsonDict, parsed: JsonDict,
-    ) -> tuple[PhotoScope, str | None, str | None] | ResponseReturnValue:
-        """``(scope, source, reason)`` for a highlight write, or the error
+    ) -> _HighlightWrite | ResponseReturnValue:
+        """The scope and provenance of a highlight write, or the error
         response. A hand click sends no source or reason; a headless reviewer
         that does has them recorded with the choice. A page showing one
         folder sends it, so the write claims only the highlights the user
@@ -738,14 +748,14 @@ def create_highlights_blueprint(get_db: GetDb, json_error: JsonError) -> Bluepri
         scope = scope_from(db, body, json_error=json_error)
         if not isinstance(scope, PhotoScope):
             return scope
-        return scope, provenance[0], provenance[1]
+        return _HighlightWrite(scope, provenance[0], provenance[1])
 
     def _add_highlight(body: JsonDict, parsed: JsonDict) -> ResponseReturnValue:
         db = get_db()
         request_parts = _highlight_request(body, parsed)
-        if not isinstance(request_parts, tuple):
+        if not isinstance(request_parts, _HighlightWrite):
             return request_parts
-        scope, source, reason = request_parts
+        scope, source, reason = request_parts.scope, request_parts.source, request_parts.reason
         if not _photo_can_be_highlighted(db, parsed["species"], parsed["photo_id"]):
             return json_error(
                 "photo_id is not eligible as a highlight for that species", 400,
@@ -775,9 +785,9 @@ def create_highlights_blueprint(get_db: GetDb, json_error: JsonError) -> Bluepri
         if parsed["purpose"] == "highlights":
             return _add_highlight(body, parsed)
         request_parts = _highlight_request(body, parsed)
-        if not isinstance(request_parts, tuple):
+        if not isinstance(request_parts, _HighlightWrite):
             return request_parts
-        scope, source, reason = request_parts
+        scope, source, reason = request_parts.scope, request_parts.source, request_parts.reason
         if not _photo_can_be_highlighted(db, parsed["species"], parsed["photo_id"]):
             return json_error(
                 "photo_id is not eligible for that purpose/species", 400,
@@ -886,9 +896,9 @@ def create_highlights_blueprint(get_db: GetDb, json_error: JsonError) -> Bluepri
         if error:
             return json_error(error)
         request_parts = _highlight_request(body, parsed)
-        if not isinstance(request_parts, tuple):
+        if not isinstance(request_parts, _HighlightWrite):
             return request_parts
-        scope, source, reason = request_parts
+        scope, source, reason = request_parts.scope, request_parts.source, request_parts.reason
         try:
             with db.transaction():
                 result = species_choices.move_highlight(

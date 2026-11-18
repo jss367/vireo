@@ -800,6 +800,35 @@ def _seed_higher_rank_accipiter(db, folder_id):
             "keyword": keyword_id}
 
 
+def test_a_second_top_highlight_of_a_higher_rank_entry_is_recorded_over_the_first(life_app):
+    """A genus entry's highlights are compared like a species': making a
+    second photo the top highlight records it over the first, so the entry
+    leads with it and is not left as an unsettled tie."""
+    app, db, ids = life_app
+    seed = _seed_higher_rank_accipiter(db, ids["folder"])
+    second = photo_ingest.add_photo(
+        db, folder_id=ids["folder"], filename="accipiter-2.jpg",
+        extension=".jpg", file_size=1000, file_mtime=7.0,
+        timestamp="2024-06-01T12:05:00",
+    )
+    keyword_tagging.tag_photo(db, second, seed["keyword"])
+    db.commit()
+    client = app.test_client()
+
+    def make_top(photo_id):
+        return client.post("/api/photo-preferences", json={
+            "purpose": "life_list", "species": "Accipiter", "photo_id": photo_id,
+        }).get_json()
+
+    assert make_top(seed["photo"])["over"] == []
+    assert make_top(second)["over"] == [seed["photo"]]
+
+    entry = _entry(_get_life_list(app), "Accipiter")
+    assert entry["best"]["id"] == second
+    assert entry["best_decision"]["kind"] == "highlight"
+    assert entry["best_decision"]["contender_ids"] == [second, seed["photo"]]
+
+
 def test_higher_rank_taxonomy_identification_is_listed(life_app):
     app, db, ids = life_app
     seed = _seed_higher_rank_accipiter(db, ids["folder"])

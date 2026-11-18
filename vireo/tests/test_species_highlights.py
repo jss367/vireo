@@ -325,6 +325,30 @@ def test_the_highlight_filter_keeps_species_with_or_without_one(trips):
     assert species("no") == []
 
 
+@pytest.mark.parametrize("extra, status", [
+    ({"folder_id": "everywhere"}, 400),
+    ({"source": "x" * 200}, 400),
+    ({"photo_id": 999999}, 404),
+])
+def test_a_highlight_write_with_a_bad_request_is_refused_and_writes_nothing(
+    trips, extra, status,
+):
+    app, db, folders, photos = trips
+    client = app.test_client()
+    body = {"species": "Bald Eagle", "photo_id": photos["a1"], **extra}
+
+    responses = [
+        client.post("/api/species-highlights", json=body),
+        client.patch("/api/species-highlights/order", json={**body, "direction": "up"}),
+        client.post("/api/photo-preferences", json={**body, "purpose": "species_representative"}),
+        client.post("/api/photo-preferences", json={**body, "purpose": "highlights"}),
+    ]
+
+    assert [r.status_code for r in responses] == [status] * 4
+    assert db.species_curation.get_highlights() == {}
+    assert db.conn.execute("SELECT COUNT(*) FROM species_choices").fetchone()[0] == 0
+
+
 def _legacy_catalog():
     """A scratch catalog shaped like one before the merge."""
     conn = sqlite3.connect(":memory:")
