@@ -186,3 +186,49 @@ def test_unmeasured_clock_offers_both_readings_and_ranks_by_nearby_day():
     assert by_shift[0].recommended and not by_shift[-60].recommended
     assert "2026-01-02" in by_shift[0].explanation
     assert len({f.group for f in problem.fixes}) == 1
+
+
+def _reset_frames(gps_error_before=None, gps_error_after=None):
+    """14:00-14:05 at -07:00, then the clock set back so 13:06 follows 14:05."""
+    def run(start, first, count, gps_error):
+        out = []
+        for i in range(count):
+            captured = start + timedelta(minutes=i)
+            gps = None
+            if gps_error is not None:
+                gps = captured + timedelta(minutes=420) - timedelta(minutes=gps_error)
+            out.append(ClockFrame(ref=first + i, filename=f"DSC_{first + i:04d}.NEF", captured=captured,
+                                  offset_minutes=-420, gps_utc=gps))
+        return out
+    return (run(datetime(2026, 4, 1, 14, 0), 1, 6, gps_error_before)
+            + run(datetime(2026, 4, 1, 13, 6), 7, 6, gps_error_after))
+
+
+def test_reset_with_gps_after_it_composes_the_fix_before_it():
+    """GPS measures only the stretch after the reset (45 min behind): that
+    stretch moves forward 45 min, and the stretch before moves back 60 + 45."""
+    problem = analyze_camera(_reset_frames(gps_error_after=-45))
+    assert problem is not None and "set back" in problem.summary
+    by_first = {fix.frames[0].ref: fix for fix in problem.fixes}
+    assert by_first[7].shift_minutes == 45 and [f.ref for f in by_first[7].frames] == list(range(7, 13))
+    assert by_first[1].shift_minutes == -15 and [f.ref for f in by_first[1].frames] == list(range(1, 7))
+    assert "Apply both" in by_first[1].explanation
+    assert any("too few GPS fixes" in line for line in problem.evidence)
+    assert any("45 min behind" in line for line in problem.evidence)
+
+
+def test_reset_with_a_right_clock_before_it_moves_the_frames_after_it():
+    problem = analyze_camera(_reset_frames(gps_error_before=0))
+    assert problem is not None
+    [fix] = problem.fixes
+    assert [f.ref for f in fix.frames] == list(range(7, 13))
+    assert fix.shift_minutes == 60
+    assert "right before the reset" in fix.explanation
+
+
+def test_reset_needs_no_fix_before_it_when_gps_fixes_the_rest_exactly():
+    problem = analyze_camera(_reset_frames(gps_error_after=-60))
+    assert problem is not None
+    [fix] = problem.fixes
+    assert [f.ref for f in fix.frames] == list(range(7, 13))
+    assert fix.shift_minutes == 60

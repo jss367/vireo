@@ -398,6 +398,10 @@ class _CameraClock:
     clock_error: int | None = None
     error_fixes: int = 0
     zones: dict[Hashable, tuple[str, int]] = field(default_factory=dict)
+    sequences: list[list[ClockFrame]] = field(default_factory=list)
+    # One entry per stretch between clock resets, when there are resets:
+    # (first frame, last frame, clock error or None, GPS fixes it rests on).
+    epoch_errors: list[tuple[ClockFrame, ClockFrame, int | None, int]] = field(default_factory=list)
     _groups: dict[int | None, list[ClockFrame]] = field(default_factory=dict)
     _parent: dict[int, int] = field(default_factory=dict)
     _position: dict[Hashable, tuple[int, int]] = field(default_factory=dict)
@@ -410,6 +414,7 @@ class _CameraClock:
         index = len({p[0] for p in self._position.values()})
         for position, frame in enumerate(sequence):
             self._position.setdefault(frame.ref, (index, position))
+        self.sequences.append(list(sequence))
         self.jumps.extend(find_jumps(sequence))
         self.switches.extend(find_zone_switches(sequence))
 
@@ -417,6 +422,42 @@ class _CameraClock:
         """Frames in shot order; frames outside every sequence last, by name."""
         unplaced = (1 << 30, 0)
         return sorted(frames, key=lambda f: (self._position.get(f.ref, unplaced), f.filename))
+
+    def epochs(self) -> list[list[ClockFrame]]:
+        """The frames split, in shot order, wherever the clock itself was set back.
+
+        A reset changes how far the clock is off, so each stretch between
+        resets has its own clock error. Frames outside every shot sequence
+        form one last stretch.
+        """
+        starts = {j.after.ref for j in self.jumps if j.kind == "reset"}
+        epochs: list[list[ClockFrame]] = []
+        placed: set[Hashable] = set()
+        for sequence in self.sequences:
+            current: list[ClockFrame] = []
+            for frame in sequence:
+                if frame.ref in starts and current:
+                    epochs.append(current)
+                    current = []
+                current.append(frame)
+                placed.add(frame.ref)
+            if current:
+                epochs.append(current)
+        rest = [f for f in self.frames if f.ref not in placed]
+        if rest:
+            epochs.append(rest)
+        return epochs
+
+    def part(self, frames: list[ClockFrame], use_gps: bool) -> _CameraClock:
+        """The same camera over one stretch between resets, with its own clock error."""
+        refs = {f.ref for f in frames}
+        part = _CameraClock(frames=frames, zones={r: z for r, z in self.zones.items() if r in refs})
+        part._position = self._position
+        part.switches = [s for s in self.switches if s.before.ref in refs and s.after.ref in refs]
+        part.link_switches()
+        if use_gps:
+            _measure(part)
+        return part
 
     def offset_groups(self) -> list[tuple[int, list[ClockFrame]]]:
         return sorted(((o, g) for o, g in self._groups.items() if o is not None), key=lambda kv: kv[0])
@@ -563,28 +604,82 @@ def _restate_fix(clock: _CameraClock, recorded: int, group: list[ClockFrame]) ->
     )
 
 
-def _reset_fixes(clock: _CameraClock, covered: set[Hashable]) -> list[ClockFix]:
-    fixes = []
+def _reset_fix(jump: ClockJump, frames: list[ClockFrame], other_shift: int, *, move_before: bool) -> ClockFix:
+    """Put the frames on one side of a reset back in order with the other side.
+
+    ``move_before`` moves the frames shot before the reset back past the first
+    frame after it; otherwise the frames after it move forward past the last
+    frame before it. ``other_shift`` is how far another fix moves that other
+    side, so both fixes together keep shot order.
+    """
+    # Whole minutes strictly past the jump: a shift of exactly the jump would
+    # leave the two frames on the same time, which a capture-time sort can
+    # still order either way.
+    step = math.floor(jump.minutes_back) + 1
+    reset = -step if move_before else step
+    shift = reset + other_shift
+    anchor = jump.after if move_before else jump.before
+    explanation = (
+        f"The clock was set back between {jump.before.filename} and {jump.after.filename}. "
+        f"Moving {frames[0].filename}-{frames[-1].filename} {_direction(reset)} {format_minutes(reset)} "
+        f"is the smallest shift that puts them {'before' if move_before else 'after'} {anchor.filename}; "
+        "the real gap between the two frames is unknown, so check the preview against what you remember."
+    )
+    if not move_before:
+        explanation += " GPS time shows the clock was right before the reset, so these are the photos to move."
+    if other_shift:
+        explanation += (
+            f" The fix for {anchor.filename} moves it {_direction(other_shift)} "
+            f"{format_minutes(other_shift)}, so these move "
+            + (f"{_direction(shift)} {format_minutes(shift)} in all." if shift else "nowhere in all.")
+            + " Apply both."
+        )
+    return ClockFix(
+        frames=frames, group=f"{'before' if move_before else 'from'} {jump.after.filename}",
+        recorded_offset=None, target_offset=None, shift_minutes=shift, explanation=explanation,
+    )
+
+
+def _fixes_across_resets(clock: _CameraClock, nearby_error: tuple[int, str] | None,
+                         use_gps: bool) -> list[ClockFix]:
+    """Fixes when the clock itself was set back somewhere in these frames.
+
+    A reset changes the clock error, so GPS is measured separately on each
+    stretch between resets and each stretch gets its own fixes. Around each
+    reset, a stretch neither GPS nor any other fix settles moves past the
+    other side, composed with whatever that side's fix moves it by, so
+    applying both keeps shot order.
+    """
+    fixes: list[ClockFix] = []
+    shifts: dict[Hashable, int] = {}
+    settled: set[Hashable] = set()
+    stretch_of: dict[Hashable, list[ClockFrame]] = {}
+    for epoch in clock.epochs():
+        part = clock.part(epoch, use_gps)
+        clock.epoch_errors.append((epoch[0], epoch[-1], part.clock_error, part.error_fixes))
+        part_fixes = _fixes(part, nearby_error)
+        fixes.extend(part_fixes)
+        for fix in part_fixes:
+            if fix.recommended:
+                shifts.update({f.ref: fix.shift_minutes for f in fix.frames})
+        if part.clock_error is not None or part_fixes:
+            settled.update(f.ref for f in epoch)
+        stretch_of.update({f.ref: epoch for f in epoch})
     for jump in clock.jumps:
         if jump.kind != "reset":
             continue
-        frames = [f for f in jump.earlier if f.ref not in covered]
-        if not frames:
+        before = [f for f in stretch_of[jump.before.ref] if f.ref not in settled]
+        after = [f for f in stretch_of[jump.after.ref] if f.ref not in settled]
+        if before:
+            fix = _reset_fix(jump, before, shifts.get(jump.after.ref, 0), move_before=True)
+        elif after:
+            fix = _reset_fix(jump, after, shifts.get(jump.before.ref, 0), move_before=False)
+        else:
             continue
-        # Whole minutes strictly past the jump: a shift of exactly the jump
-        # would leave the last earlier frame on the same time as the first
-        # later one, which a capture-time sort can still order either way.
-        shift = -(math.floor(jump.minutes_back) + 1)
-        fixes.append(ClockFix(
-            frames=frames, group=f"before {jump.after.filename}", recorded_offset=None,
-            target_offset=None, shift_minutes=shift,
-            explanation=(
-                f"The clock was set back between {jump.before.filename} and {jump.after.filename}. "
-                f"Moving {frames[0].filename}-{frames[-1].filename} back {format_minutes(shift)} is "
-                f"the smallest shift that puts them before {jump.after.filename}; the real gap "
-                "between the two frames is unknown, so check the preview against what you remember."
-            ),
-        ))
+        # Zero means the other side's fix alone restores the order.
+        if fix.shift_minutes:
+            fixes.append(fix)
+        settled.update(f.ref for f in fix.frames)
     return fixes
 
 
@@ -604,8 +699,7 @@ def _fixes(clock: _CameraClock, nearby_error: tuple[int, str] | None) -> list[Cl
             fix = _restate_fix(clock, recorded, group)
             if fix is not None:
                 fixes.append(fix)
-    covered = {f.ref for fix in fixes for f in fix.frames}
-    return fixes + _reset_fixes(clock, covered)
+    return fixes
 
 
 def _evidence(clock: _CameraClock) -> list[str]:
@@ -637,7 +731,9 @@ def _evidence(clock: _CameraClock) -> list[str]:
     if len(recorded) > 1:
         lines.append("Recorded time zones: "
                      + ", ".join(f"{format_offset(o)} ({_plural(n, 'photo')})" for o, n in recorded) + ".")
-    if clock.clock_error:
+    if clock.epoch_errors:
+        lines.extend(_epoch_error_lines(clock))
+    elif clock.clock_error:
         lines.append(
             f"GPS time shows the camera's clock was {format_minutes(clock.clock_error)} "
             f"{'behind' if clock.clock_error < 0 else 'ahead'} ({_plural(clock.error_fixes, 'GPS fix', 'GPS fixes')} "
@@ -650,6 +746,28 @@ def _evidence(clock: _CameraClock) -> list[str]:
         (name, offset), _ = zone_counts.most_common(1)[0]
         lines.append(f"Local time at the GPS position was {format_offset(offset)} ({name}).")
     return lines
+
+
+def _epoch_error_lines(clock: _CameraClock) -> list[str]:
+    lines = []
+    for first, last, error, fixes in clock.epoch_errors:
+        span = f"{first.filename}-{last.filename}"
+        if error is None:
+            lines.append(f"{span}: too few GPS fixes to measure the clock.")
+        elif error:
+            lines.append(f"{span}: GPS time shows the clock was {format_minutes(error)} "
+                         f"{'behind' if error < 0 else 'ahead'} ({_plural(fixes, 'GPS fix', 'GPS fixes')} agree).")
+        else:
+            lines.append(f"{span}: GPS time agrees with the clock ({_plural(fixes, 'GPS fix', 'GPS fixes')}).")
+    return lines
+
+
+def _measure(clock: _CameraClock) -> None:
+    """Set the clock error from GPS; an error under the reporting floor counts as none."""
+    measured = estimate_clock_error(clock.frames)
+    if measured is not None:
+        clock.clock_error = measured[0] if abs(measured[0]) >= CLOCK_ERROR_MIN_MINUTES else 0
+        clock.error_fixes = measured[1]
 
 
 def _summary(clock: _CameraClock, fixes: list[ClockFix]) -> str:
@@ -683,10 +801,7 @@ def analyze_camera(frames: Sequence[ClockFrame], *, zone_lookup: ZoneLookup | No
         clock.add_sequence(sequence)
     clock.link_switches()
     if use_gps:
-        measured = estimate_clock_error(clock.frames)
-        if measured is not None:
-            clock.clock_error = measured[0] if abs(measured[0]) >= CLOCK_ERROR_MIN_MINUTES else 0
-            clock.error_fixes = measured[1]
+        _measure(clock)
         if zone_lookup is not None:
             for frame in clock.frames:
                 if frame.latitude is None or frame.longitude is None:
@@ -697,8 +812,9 @@ def analyze_camera(frames: Sequence[ClockFrame], *, zone_lookup: ZoneLookup | No
                 if zone is not None:
                     clock.zones[frame.ref] = zone
 
-    fixes = _fixes(clock, nearby_error)
-    if not fixes and not any(j.kind == "reset" for j in clock.jumps):
+    resets = any(j.kind == "reset" for j in clock.jumps)
+    fixes = _fixes_across_resets(clock, nearby_error, use_gps) if resets else _fixes(clock, nearby_error)
+    if not fixes and not resets:
         # Every offset is right for where the photos were taken (or nothing
         # says otherwise), so a backward step in clock time was real travel.
         return None
