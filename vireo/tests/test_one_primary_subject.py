@@ -470,3 +470,24 @@ def test_subject_audit_excludes_rejected_and_superseded_predictions(db):
                        labels_fingerprint="current")
     db.commit()
     assert db.audit.subject_findings(.2)[0]['unnamed'] == 0
+
+
+def test_subject_audit_reference_label_excludes_rejected_prediction(db):
+    """A reference photo whose primary prediction is rejected in this
+    workspace must not caption the crop with the rejected species."""
+    from services.subject_audit import subject_audit
+
+    fid = _folder(db)
+    pid, hawk, _strip, _ = _hawk_frame(db, fid)
+    db.collections.add_import("Subject audit references", [pid])
+    db.commit()
+    before = next(r for r in subject_audit(db)["references"] if r["id"] == pid)
+    assert (before["detection_id"], before["species"]) == (hawk, "Red-shouldered Hawk")
+    db.conn.execute(
+        "INSERT INTO prediction_review(prediction_id, workspace_id, status, reviewed_at) "
+        "SELECT id, ?, 'rejected', '2026-11-18' FROM predictions WHERE detection_id=?",
+        (db._ws_id(), hawk),
+    )
+    db.commit()
+    after = next(r for r in subject_audit(db)["references"] if r["id"] == pid)
+    assert (after["detection_id"], after["species"]) == (hawk, None)

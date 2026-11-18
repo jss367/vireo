@@ -47,7 +47,7 @@ def _references(db: Database, floor: float) -> list[JsonDict]:
                 continue
             subjects = retained(db, pid, floor)
             det = subjects[0]["id"] if subjects else None
-            predictions = db.predictions.get_top_per_detection_for_photo(pid, floor)
+            predictions = db.predictions.top_unrejected_by_detection([pid]).get(pid, [])
             name = next((p["species"] for p in predictions if p["detection_id"] == det), None)
             rows.append(dict(id=pid, filename=photo["filename"], detection_id=det, species=name))
     return rows
