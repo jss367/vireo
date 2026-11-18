@@ -390,48 +390,53 @@ def inspection_candidates(db, photo, regions, retained_ids):
 
 
 def payload(db, photo_id, *, inspection_photo=None):
-    detections = retained(db, photo_id)
-    choice = db.subjects.choice(photo_id)
-    analyses = db.subjects.analyses_for_photo(photo_id)
-    import config as cfg
-    floor = db.get_effective_config(cfg.load()).get("classifier_confidence", 0)
-    predictions = db.subjects.visible_predictions(db.require_workspace_id(), photo_id, floor)
-    grouped = {}
-    for prediction in predictions:
-        grouped.setdefault(prediction["detection_id"], []).append(dict(prediction))
-    kept = db.candidate_subjects.evidence(d["id"] for d in detections)
-    for detection in detections:
-        analysis = analyses.get(detection["id"])
-        # The detector's own label for a person/vehicle region kept as an
-        # animal subject (``classify_job.candidate_subjects``), else None.
-        check = kept.get(detection["id"])
-        detection["detector_category"] = check["detector_category"] if check and check["promoted"] else None
-        detection["analysis"] = ({"crop": json.loads(analysis["crop"]),
-            "quality_score": analysis["quality_score"], "exposure_ev": analysis["exposure_ev"],
-            "basis": "detection_box", "source_key": analysis["source_key"]} if analysis else None)
-        detection["evidence_basis"] = "reviewer_box" if detection["detector_model"] == REVIEWER_MODEL else "detector_box"
-        detection["predictions"] = grouped.get(detection["id"], [])
-        detection["is_primary"] = detection is detections[0]
-    primary_id = detections[0]["id"] if detections else None
-    rejected = []
-    for row in db.subjects.rejected_regions(photo_id):
-        region = dict(row)
-        region["predictions"] = grouped.get(region["id"], [])
-        rejected.append(region)
-    regions = detection_store.get_detections(db, photo_id, min_conf=0, include_rejected=inspection_photo is not None)
-    full_image_ids = {d["id"] for d in regions
-                      if d["detector_model"] == "full-image" and not d["subject_verdict"]}
-    return {"photo_id": photo_id, "workspace_id": db.require_workspace_id(), "subjects": detections,
-            "full_image_predictions": [p for did in full_image_ids for p in grouped.get(did, [])],
-            "primary_detection_id": primary_id,
-            **selection_evidence(db, photo_id, detections),
-            **({"inspection": inspection_candidates(db, inspection_photo, regions, {d["id"] for d in detections})}
-               if inspection_photo is not None else {}),
-            "selection": "manual" if choice else "automatic",
-            "choice_unavailable": bool(choice and choice["detection_id"] != primary_id),
-            # Regions the user rejected as background: not retained, shown
-            # with their crops so the rejection is visible and reversible.
-            "rejected": rejected}
+    # Every read shares one snapshot, so the retained subjects, the rejected
+    # regions and the inspection inventory describe the same catalog version
+    # even when a detector run or another reviewer rewrites a region midway.
+    with db.transaction(join=True):
+        db.hold_read_snapshot()
+        detections = retained(db, photo_id)
+        choice = db.subjects.choice(photo_id)
+        analyses = db.subjects.analyses_for_photo(photo_id)
+        import config as cfg
+        floor = db.get_effective_config(cfg.load()).get("classifier_confidence", 0)
+        predictions = db.subjects.visible_predictions(db.require_workspace_id(), photo_id, floor)
+        grouped = {}
+        for prediction in predictions:
+            grouped.setdefault(prediction["detection_id"], []).append(dict(prediction))
+        kept = db.candidate_subjects.evidence(d["id"] for d in detections)
+        for detection in detections:
+            analysis = analyses.get(detection["id"])
+            # The detector's own label for a person/vehicle region kept as an
+            # animal subject (``classify_job.candidate_subjects``), else None.
+            check = kept.get(detection["id"])
+            detection["detector_category"] = check["detector_category"] if check and check["promoted"] else None
+            detection["analysis"] = ({"crop": json.loads(analysis["crop"]),
+                "quality_score": analysis["quality_score"], "exposure_ev": analysis["exposure_ev"],
+                "basis": "detection_box", "source_key": analysis["source_key"]} if analysis else None)
+            detection["evidence_basis"] = "reviewer_box" if detection["detector_model"] == REVIEWER_MODEL else "detector_box"
+            detection["predictions"] = grouped.get(detection["id"], [])
+            detection["is_primary"] = detection is detections[0]
+        primary_id = detections[0]["id"] if detections else None
+        rejected = []
+        for row in db.subjects.rejected_regions(photo_id):
+            region = dict(row)
+            region["predictions"] = grouped.get(region["id"], [])
+            rejected.append(region)
+        regions = detection_store.get_detections(db, photo_id, min_conf=0, include_rejected=inspection_photo is not None)
+        full_image_ids = {d["id"] for d in regions
+                          if d["detector_model"] == "full-image" and not d["subject_verdict"]}
+        return {"photo_id": photo_id, "workspace_id": db.require_workspace_id(), "subjects": detections,
+                "full_image_predictions": [p for did in full_image_ids for p in grouped.get(did, [])],
+                "primary_detection_id": primary_id,
+                **selection_evidence(db, photo_id, detections),
+                **({"inspection": inspection_candidates(db, inspection_photo, regions, {d["id"] for d in detections})}
+                   if inspection_photo is not None else {}),
+                "selection": "manual" if choice else "automatic",
+                "choice_unavailable": bool(choice and choice["detection_id"] != primary_id),
+                # Regions the user rejected as background: not retained, shown
+                # with their crops so the rejection is visible and reversible.
+                "rejected": rejected}
 
 
 def select_reviewer_box(db, photo_id, box, *, frame_runtime=None):
