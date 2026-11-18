@@ -72,7 +72,10 @@ none of this catalog's cameras (D7200, D850, Z 8) is one. Migration 38
 returns to "not measured" every stored value that came another way (a
 subject under 518 px, read from either rendering, and a subject spanning a
 third of the frame or more, measured on the proxy when its mask was fresh),
-and the mask stage measures those cached masks again.
+and the mask stage measures those cached masks again. The comparison
+analyses (`subject_ranking_analysis`) store the detail too; their key carries
+`subject_ranking.ANALYSIS_RECIPE_VERSION`, raised with this change, so an
+analysis made before it no longer matches and the subject is analysed again.
 
 `photos.subject_detail_px` is the subject box's longer side in native pixels,
 kept so a reader can see what the value came from ("measured at 512 px from

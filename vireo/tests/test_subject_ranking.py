@@ -240,6 +240,31 @@ def test_source_and_configuration_changes_invalidate_analysis(comparison_library
     assert cached_analysis(db, photo, detection, changed)[1] is None
 
 
+def test_an_analysis_made_under_an_earlier_recipe_is_analysed_again(comparison_library, monkeypatch):
+    """A stored feature that is now measured another way (the rendering the
+    subject detail is read from) must not keep ranking a comparison: the
+    recipe version is part of every analysis key."""
+    import config as cfg
+    import subject_ranking
+
+    app, db, pids, _ = comparison_library
+    current = subject_ranking.ANALYSIS_RECIPE_VERSION
+    monkeypatch.setattr(subject_ranking, "ANALYSIS_RECIPE_VERSION", current - 1)
+    _analyze(db, pids, SubjectComparison(TARGET), cfg.load())
+    earlier = {c["id"]: c for c in _pack(app, pids, requested_species=TARGET)["cards"]}
+    assert earlier[pids[0]]["evidence_status"] == "ready"
+
+    monkeypatch.setattr(subject_ranking, "ANALYSIS_RECIPE_VERSION", current)
+    stale = {c["id"]: c for c in _pack(app, pids, requested_species=TARGET)["cards"]}
+    assert {c["evidence_status"] for c in stale.values()} == {"subject_analysis_missing"}
+    assert app.test_client().get(earlier[pids[0]]["mask_url"]).status_code == 404
+
+    _analyze(db, pids, SubjectComparison(TARGET), cfg.load())
+    fresh = {c["id"]: c for c in _pack(app, pids, requested_species=TARGET)["cards"]}
+    assert fresh[pids[0]]["evidence_status"] == "ready"
+    assert fresh[pids[0]]["subject"]["analysis_key"] != earlier[pids[0]]["subject"]["analysis_key"]
+
+
 def test_eye_measurements_are_selected_and_mask_gated(comparison_library, monkeypatch):
     _, db, pids, _ = comparison_library
     import keypoints as kp
