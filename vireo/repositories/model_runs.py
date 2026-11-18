@@ -34,6 +34,8 @@ import sqlite3
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from typing import Any
 
+from sql_chunks import chunked
+
 # Chunk to stay under SQLITE_MAX_VARIABLE_NUMBER (default 999).
 _UNCLASSIFIABLE_CHUNK = 500
 
@@ -208,20 +210,20 @@ class ModelRunsRepository:
         ).fetchone()
         return row is not None
 
-    def stale_detector_input_ids(self, photo_ids: Sequence[int] | None = None) -> set[int]:
+    def stale_detector_input_ids(self, photo_ids: Sequence[int]) -> set[int]:
         """Find portable MegaDetector runs whose source or focus changed, except reviewed runs.
 
-        Callers can limit the lookup to one chunk of a larger classification request.
+        Pass one bounded batch of candidate photo IDs.
         Legacy runs do not carry a portable input to compare.
         """
         from cache_identity import catalog_detector_input, is_sha256
 
-        scope = "" if photo_ids is None else f"AND dr.photo_id IN ({','.join('?' for _ in photo_ids)})"
+        placeholders = ",".join("?" for _ in photo_ids)
         rows = self.conn.execute(f"""SELECT dr.photo_id, dr.input_fingerprint, p.file_hash,
                 vireo_focus_area(p.exif_data) AS focus_area
             FROM detector_runs dr JOIN photos p ON p.id=dr.photo_id
             WHERE dr.detector_model='megadetector-v6' AND length(dr.input_fingerprint)=64
-              AND length(p.file_hash)=64 {scope}""", tuple(photo_ids or ()))
+              AND length(p.file_hash)=64 AND dr.photo_id IN ({placeholders})""", photo_ids)
         stale = set()
         for row in rows:
             if not (is_sha256(row["file_hash"]) and is_sha256(row["input_fingerprint"])):
@@ -280,8 +282,9 @@ class ModelRunsRepository:
             params,
         )
         ids = {r["photo_id"] for r in rows}
-        if ids and detector_model == "megadetector-v6":
-            ids.difference_update(self.stale_detector_input_ids())
+        if detector_model == "megadetector-v6":
+            for candidates in chunked(list(ids)):
+                ids.difference_update(self.stale_detector_input_ids(candidates))
         return ids
 
     def record_classifier_run(
