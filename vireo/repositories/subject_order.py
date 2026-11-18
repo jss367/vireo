@@ -40,7 +40,8 @@ def primary_terms(alias="detections"):
         return f"COALESCE((SELECT {column} FROM subject_focus WHERE detection_id={alias}.id), 0)"
 
     return [
-        ("Animal region", f"({alias}.category = 'animal' AND {alias}.detector_model != 'full-image')", "DESC"),
+        ("Animal region", f"CASE WHEN {alias}.category = 'animal' AND {alias}.detector_model != 'full-image' "
+         "THEN 1 ELSE 0 END", "DESC"),
         ("Your choice", chosen_subject_sql(alias), "DESC"),
         ("Contains the camera AF point", f"({focus_term('af')} = {FocusMatch.CENTER})", "DESC"),
         ("Overlaps the camera AF area", f"({focus_term('af')} = {FocusMatch.AREA})", "DESC"),
