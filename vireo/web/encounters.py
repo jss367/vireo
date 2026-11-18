@@ -551,18 +551,10 @@ class _SpeciesConfirmation:
         self.preserve_keyword_metadata = preserve
         if not preserve or self.remove_mode:
             return None
-        target = self.db.keywords.species_confirmation_target(self.species)
-        keyword = target['keyword']
-        if keyword is None:
-            return None
-        rank = next((t['rank'] for t in target['taxa'] if t['id'] == keyword['taxon_id']), None)
-        if (keyword['type'] != 'taxonomy' or rank not in (None, 'species')
-                or not (keyword['is_species'] or rank == 'species')):
-            return self.json_error(
-                'The existing keyword needs explicit review of its type or taxon in keyword management '
-                'before a scoped species assignment; no photos were changed', 409,
-            )
-        self.preserved_keyword_id = keyword['id']
+        try:
+            self.preserved_keyword_id = self.db.keywords.scoped_species_keyword_id(self.species)
+        except ValueError as exc:
+            return self.json_error(str(exc), 409)
         return None
 
     # -- request against the cache ----------------------------------

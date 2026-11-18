@@ -535,7 +535,7 @@ def create_workspace_blueprint(
         except (sqlite3.Error, RuntimeError):
             log.warning("Could not read workspace tabs; showing defaults", exc_info=True)
             tabs = list(DEFAULT_TABS)
-        return jsonify({"tabs": tabs, "all_pages": all_pages})
+        return jsonify({"workspace_id": db.active_workspace_id, "tabs": tabs, "all_pages": all_pages})
 
     @blueprint.route("/api/workspaces")
     def api_get_workspaces() -> ResponseReturnValue:

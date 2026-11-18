@@ -1938,9 +1938,11 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   align-items: stretch;
   flex-shrink: 1;
   min-width: 0;
-  overflow: hidden;
+  overflow-x: auto;
+  scrollbar-width: thin;
   white-space: nowrap;
 }
+.navbar .nav-pages { position: relative; flex: none; }
 .navbar .nav-cmd-hint {
   display: inline-block;
   padding: 4px 8px;
@@ -1968,7 +1970,10 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 .navbar .nav-overflow-btn[hidden] { display: none; }
 .nav-overflow-menu {
   position: absolute;
-  top: 44px;
+  top: 100%;
+  right: 0;
+  max-height: 75vh;
+  overflow-y: auto;
   background: var(--bg-secondary, #2a2a2a);
   border: 1px solid var(--border-primary, rgba(255,255,255,0.15));
   border-radius: 6px;
@@ -1984,6 +1989,7 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   text-align: left; padding: 6px 8px; font: inherit;
   cursor: pointer; border-radius: 4px;
 }
+.nav-overflow-item[aria-current="page"] { font-weight: bold; }
 .nav-overflow-item:hover { background: var(--bg-tertiary, rgba(255,255,255,0.08)); }
 /* Ephemeral tab styling — italic + no "active" border */
 .navbar .nav-tab.is-ephemeral {

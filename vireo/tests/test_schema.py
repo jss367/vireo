@@ -635,12 +635,12 @@ def test_version_34_catalog_gains_subject_detail_columns(tmp_path):
         assert conn.execute("SELECT COUNT(*) FROM photos WHERE subject_detail IS NOT NULL").fetchone()[0] == 0
 
 
-def test_version_37_catalog_preserves_historical_job_on_upgrade(tmp_path):
+def test_version_38_catalog_preserves_historical_job_on_upgrade(tmp_path):
     path = str(tmp_path / "vireo.db")
     schema.ensure_schema(path)
     with sqlite3.connect(path) as conn:
         conn.execute("ALTER TABLE job_history DROP COLUMN errors")
-        conn.execute("PRAGMA user_version=37")
+        conn.execute("PRAGMA user_version=38")
         conn.execute(
             "INSERT INTO job_history (id, type, status, result, error_count) "
             """VALUES ('old-job', 'scan', 'failed', '{"error":"old failure"}', 1)"""

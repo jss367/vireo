@@ -103,7 +103,7 @@ def create_history_blueprint(
                 # only the photo edit was reversed.
                 return True
             action = (payload.get("photo_edit") or {}).get("action_type")
-        if action not in ("species_replace", "keyword_add", "prediction_accept", "identity_alternatives",
+        if action not in ("species_replace", "keyword_add", "prediction_accept", "identity_alternatives", "assignment_review",
                           subject_verdicts.ACTION_TYPE, subject_selections.ACTION_TYPE):
             return True
         photo_ids = [
@@ -117,7 +117,7 @@ def create_history_blueprint(
             # cached evidence (not its confirmed species) is what to redo.
             return subject_verdicts.refresh_pipeline_cache(db, db_path, photo_ids)
         try:
-            if action == "identity_alternatives":
+            if action in ("identity_alternatives", "assignment_review"):
                 from services.identity_alternatives import refresh_species_caches
                 return not refresh_species_caches(db, os.path.dirname(db_path), photo_ids)
             species_by_photo = db.photo_species.get_species_for_photos(photo_ids)

@@ -43,6 +43,8 @@ each species for a trip, a year or everything; see
 [the best photo of each species](#the-best-photo-of-each-species).
 `view_photo(view="subject", detection_id=...)` addresses the exact animal region,
 and `get_photo` includes saved `species_assignments` and their provenance.
+Use `list_assignment_conflicts` to find disputed labels and `review_species_assignment`
+to report or resolve a conflict. [Species assignment review](species-label-provenance.md#conflicting-evidence-on-a-saved-assignment)
 For linked taxa, photo-detail keywords and assignments also share `display_name`
 (the catalog's preferred common name, falling back to the scientific name),
 `synonyms` (alternate saved keyword names for that taxon), `scientific_name`,
