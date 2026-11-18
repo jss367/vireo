@@ -76,3 +76,100 @@ At 4.5 s per photo, about 3.4 s of it the SAM2-large encoder, no change that kee
 1. Use `sam2-base-plus` for imports where speed matters more than mask detail (about 2.3x on the encoder; different masks on some photos).
 2. Ship an int8 `sam2-large` as its own variant (about 1.9x on the encoder; about 1 photo in 30 gets a different mask), after checking its masks across more than one batch.
 3. A GPU path that does not go through CoreML's partitioned graph (for example a PyTorch MPS export). Untested here: PyTorch is not a runtime dependency.
+
+## Follow-up experiment on encoder precision
+
+On November 17, 2026 we compared the installed SAM2-large FP32 encoder with a
+dynamically quantized copy of its MatMul weights. We kept the FP32 decoder,
+stored box prompts, 2048 px RAW proxies and DINOv2 vit-b14 fixed. Each arm
+used the merged #2409 workload at revision `d16d8baa4`, including its
+overlap of quality analysis with embedding. The timed interval runs from RAW
+decode through the mask PNG write. It excludes session construction, database
+writes, native-resolution subject detail and pipeline scheduling. This isolates
+the part of Extract features affected by encoder precision.
+
+The sample comprised ten seeded draws without replacement from each of three
+other Nikon NEF imports. The October 25, November 7 and November 15 imports
+had 5,103, 3,475 and 1,786 photos with stored SAM2-large prompts respectively.
+Sampling from stored prompts makes the two arms comparable and limits the
+conclusion to previously masked photos. Each arm ran in a separate process,
+one photo at a time, on the shared 64 GiB M3 Max. Both used Vireo's CPU
+inference sessions (eight intra-op threads, one inter-op thread) and a single
+analysis helper. We reversed arm order on
+the middle import to reduce sensitivity to cache warming and machine load.
+
+### Results and decision
+
+Keep the installed FP32 encoder for SAM2-large. The int8 encoder used 20.1%
+fewer process CPU seconds across the sample and less peak memory in each
+process. Its elapsed time improved on two imports and regressed on one.
+The 30 photos took 429.9 s with FP32 and 452.2 s with int8. These single runs
+under varying contention do not establish a reliable import speedup.
+
+| Import (10 photos each) | Encoder | Wall (s) | Photos/min | Mean segment (s/photo) | CPU (s) | Peak RSS (GiB) |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| October 25 | FP32 | 222.9 | 2.69 | 15.02 | 527.5 | 5.52 |
+| October 25 | int8 | 203.5 | 2.95 | 12.15 | 398.5 | 4.14 |
+| November 7 | FP32 | 106.5 | 5.63 | 7.76 | 444.1 | 6.20 |
+| November 7 | int8 | 159.5 | 3.76 | 9.28 | 374.4 | 3.79 |
+| November 15 | FP32 | 100.5 | 5.97 | 7.43 | 417.5 | 6.11 |
+| November 15 | int8 | 89.2 | 6.73 | 5.57 | 337.2 | 4.37 |
+
+The timing variation extends beyond SAM2. On November 7 the same decode
+averaged 2.51 s/photo in the first (int8) arm and 0.67 s/photo in the
+second. The earlier encoder-only speedup cannot predict wall time here.
+
+Mean mask intersection over union was 0.989 across the 30 pairs, with a
+minimum of 0.937. The largest relative focus change came on a different
+photo (230725), where mask overlap was 0.990 but subject Tenengrad fell from
+11,365 to 10,222 (10.1%). Median subject luminance changed on eight photos
+and the subject crop's perceptual hash changed on eleven. All 60 evaluations
+produced masks. FP32 is a comparison reference, not a ground-truth annotation.
+
+The focus difference here and the earlier 0.62-overlap outlier rule out
+substituting int8 under the existing model identity. This experiment ends
+without adding a production variant. Shipping int8 separately would require
+its own model artifact, explicit selection and cache identity. Production
+recovery, readiness and selected-subject ownership continue to use the
+existing extraction path.
+
+### Reproduction
+
+Use an environment with Vireo's dependencies, ONNX 1.21.0 and ONNX Runtime
+1.24.4. Install SAM2-large and DINOv2 vit-b14 first. From the checkout,
+run the following in Bash with the originals mounted. For a different catalog,
+substitute ID ranges covering distinct imports. The catalog is opened read-only.
+Keep generated models and masks in the scratch directory.
+
+```bash
+set -eu
+export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1
+scratch=$(mktemp -d)
+model="$HOME/.vireo/models/sam2-large"
+python - "$model/image_encoder.onnx" "$scratch/encoder-int8.onnx" <<'PY'
+import sys
+from onnxruntime.quantization import QuantType, quantize_dynamic
+
+quantize_dynamic(sys.argv[1], sys.argv[2], op_types_to_quantize=["MatMul"],
+                 weight_type=QuantType.QInt8)
+PY
+
+for batch in "252 221564 227371 fp int" "254 229921 233986 int fp" "257 236434 238450 fp int"; do
+    read -r collection first last a b <<< "$batch"
+    for arm in "$a" "$b"; do
+        encoder="$model/image_encoder.onnx"
+        if [[ "$arm" == int ]]; then encoder="$scratch/encoder-int8.onnx"; fi
+        python scripts/benchmark_sam2_encoder.py run --db "$HOME/.vireo/vireo.db" \
+            --photo-ids "$first" "$last" --encoder "$encoder" \
+            --decoder "$model/mask_decoder.onnx" --output "$scratch/$collection-$arm"
+    done
+    python scripts/benchmark_sam2_encoder.py compare "$scratch/$collection-fp" "$scratch/$collection-int"
+done
+```
+
+The reference encoder and decoder SHA-256 digests are
+`840bfe5872ef0d55f9f44d183301ce0b309aa2f7802ae9ee4fe629443717f63b` and
+`8dfcf127524aa1207346f86b265d9d223d1e9d15204b0b7c5582c5af8b0d2226`.
+Each run writes the actual masks, per-photo phase timings, CPU seconds,
+quality features and process peak resident memory to its output directory.
+CPU seconds include all process threads. Peak memory includes model loading.
