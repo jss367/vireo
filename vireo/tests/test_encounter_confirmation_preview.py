@@ -57,6 +57,9 @@ def test_explicit_transition_exact_subset_and_single_undo(app_and_db, first, sec
     db.photo_review.set_flag(ids[1], 'flagged')
     db.commit()
     before = json.load(open(path))
+    before['encounters'][0]['visual_neighbor_photo_ids'] = ids[:2]
+    with open(path, 'w') as handle:
+        json.dump(before, handle)
     body = {'species': second, 'previous_species': first, 'photo_ids': ids[1:],
             'source_photo_ids': ids, 'split': True}
     preview = request_preview(client, body)
@@ -71,6 +74,7 @@ def test_explicit_transition_exact_subset_and_single_undo(app_and_db, first, sec
     assert response.status_code == 200, response.get_json()
     after = response.get_json()['encounters']
     assert [enc['photo_ids'] for enc in after] == [ids[:1], ids[1:]]
+    assert all('visual_neighbor_photo_ids' not in enc for enc in after)
     assert [enc['confirmed_species'] for enc in after] == [first, second]
     actual = db.photo_species.get_species_for_photos(ids)
     assert actual[ids[0]] == [first]
@@ -1271,6 +1275,65 @@ def test_scoped_edits_retain_shared_taxon_when_one_frame_has_same_name_homonym(a
     assert db.photo_species.get_species_for_photos(ids, include_identities=True) == after
 
 
+def test_review_across_encounters_binds_membership_and_undoes_once(app_and_db):
+    from pathlib import Path
+
+    app, db = app_and_db
+    client = app.test_client()
+    ids, filename = seed(app, db)
+    path = Path(filename)
+    cache = json.loads(path.read_text())
+
+    def group(members):
+        return {**cache['encounters'][0], 'photo_ids': members, 'photo_count': len(members),
+                'bursts': [members]}
+
+    cache['encounters'] = [group(ids[:1]), group(ids[1:])]
+    path.write_text(json.dumps(cache))
+    selection = [ids[0], ids[2]]
+    body = {'species': 'Wood Duck', 'photo_ids': selection, 'add': True, 'response_mode': 'compact',
+            'provenance': {'method': 'direct_visual', 'reviewer': 'Reviewer', 'reason': 'Reviewed frames'}}
+    preview = request_preview(client, body)
+    regrouped = [group(ids[:2]), group(ids[2:])]
+    path.write_text(json.dumps({**cache, 'encounters': regrouped}))
+    stale = apply(client, body, preview)
+    assert stale.status_code == 409
+    assert stale.json['unchanged_photo_ids'] == selection
+    assert [r['unchanged_photo_ids'] for r in stale.json['encounter_results']] == [[ids[0]], [ids[2]]]
+    assert all(not db.species_provenance.assignments(pid) for pid in ids)
+    result = apply(client, body, request_preview(client, body))
+    assert result.status_code == 200, result.json
+    assert [r['changed_photo_ids'] for r in result.json['encounter_results']] == [[ids[0]], [ids[2]]]
+    history = db.edit_history.action_and_new_value(result.json['undo']['edit_id'])
+    decision = json.loads(history['new_value'])['reviewed_selection']
+    assert decision['photo_ids'] == selection
+    assert decision['provenance']['reason'] == 'Reviewed frames'
+    assert db.species_provenance.assignments(ids[1]) == []
+    assert all(db.species_provenance.assignments(pid)[0]['reviewer'] == 'Reviewer' for pid in selection)
+    assert client.post('/api/undo', json=result.json['undo']).status_code == 200
+    assert json.loads(path.read_text())['encounters'] == regrouped
+    assert all(not db.species_provenance.assignments(pid) for pid in ids)
+
+
+@pytest.mark.parametrize('response_mode', ['compact', 'full'])
+@pytest.mark.parametrize(('selected_index', 'applied_index'), [(0, 0), (2, 1)])
+def test_split_reports_selected_encounter_at_apply_time(app_and_db, response_mode, selected_index, applied_index):
+    app, db = app_and_db
+    client = app.test_client()
+    ids, path = seed(app, db)
+    selected = [ids[selected_index]]
+    body = {'species': 'Wood Duck', 'photo_ids': selected, 'source_photo_ids': ids, 'add': True,
+            'split': True, 'response_mode': response_mode}
+    preview = request_preview(client, body)
+    assert preview['encounter_results'] == [{'encounter_index': 0, 'photo_ids': selected}]
+    result = apply(client, body, preview)
+    assert result.status_code == 200, result.json
+    group, = result.json['encounter_results']
+    assert group['encounter_index'] == applied_index
+    assert group['photo_ids'] == group['changed_photo_ids'] == selected
+    assert json.load(open(path))['encounters'][applied_index]['photo_ids'] == selected
+
+
 def test_pre_grouping_confirmation_survives_grouping_and_one_undo(app_and_db, tmp_path):
     from pipeline import load_photo_features, load_results_raw, run_full_pipeline, save_results
 
@@ -1331,3 +1394,34 @@ def test_pre_grouping_preview_checks_all_source_memberships(app_and_db):
     assert client.post('/api/encounters/species', json={**body, 'preview': True}).status_code == 409
     _seed_encounter_cache(app, db, [3])
     assert apply(client, body, preview).status_code == 200
+
+
+def test_source_only_encounters_revalidate_without_appearing_in_results(app_and_db):
+    from pathlib import Path
+
+    app, db = app_and_db
+    client = app.test_client()
+    ids, filename = seed(app, db)
+    path = Path(filename)
+    cache = json.loads(path.read_text())
+    template = cache['encounters'][0]
+    cache['encounters'] = [
+        {**template, 'photo_ids': members, 'bursts': [members], 'photo_count': len(members)}
+        for members in (ids[:2], ids[2:])
+    ]
+    path.write_text(json.dumps(cache))
+    selected = ids[2:]
+    body = {'species': 'Wood Duck', 'photo_ids': selected, 'source_photo_ids': ids,
+            'add': True, 'response_mode': 'compact'}
+    preview = request_preview(client, body)
+    expected = {'encounter_index': 1, 'photo_ids': selected}
+    assert preview['encounter_results'] == [expected]
+
+    cache['encounters'][0]['bursts'] = [[pid] for pid in ids[:2]]
+    path.write_text(json.dumps(cache))
+    stale = apply(client, body, preview)
+    assert stale.status_code == 409
+    assert stale.json['encounter_results'] == [{**expected, 'changed_photo_ids': [], 'unchanged_photo_ids': selected}]
+    result = apply(client, body, request_preview(client, body))
+    assert result.status_code == 200
+    assert result.json['encounter_results'] == [{**expected, 'changed_photo_ids': selected, 'unchanged_photo_ids': []}]

@@ -90,6 +90,9 @@ def _current_groups(data: JsonDict, photos: dict[int, JsonDict]) -> list[JsonDic
         ids = [pid for pid in encounter.get("photo_ids", []) if pid in photos]
         if not ids:
             continue
+        if ids != encounter["photo_ids"]:
+            encounter.pop("trace", None)
+            encounter.pop("visual_neighbor_photo_ids", None)
         encounter["photo_ids"] = ids
         encounter["photo_count"] = len(ids)
         members = set(ids)

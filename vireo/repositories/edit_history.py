@@ -335,6 +335,8 @@ class EditHistoryRepository:
             if photo_edit:
                 # A recompute invalidates structure, not the recorded photo edit.
                 remaining = {'photo_edit': photo_edit, 'photo_only': True}
+                if 'reviewed_selection' in change:
+                    remaining['reviewed_selection'] = change['reviewed_selection']
                 if change.get('flag_items'):
                     remaining['flag_items'] = change['flag_items']
                 self.conn.execute(

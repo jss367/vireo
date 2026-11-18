@@ -731,9 +731,8 @@ def _register_species_tools(server, client):
         provenance requires method (direct_visual or adjacent_frames for a
         visual review), reviewer and evidence: reason, evidence_source and
         supporting_photo_ids. Model predictions remain suggestions until reviewed.
-        Inspect every proposed addition/removal before applying. This existing
-        confirmation workflow requires IDs within one cached encounter; split
-        requests explicitly, never expand the selection to satisfy that rule.
+        A selection may span cached encounters. Inspect every proposed
+        addition or removal before applying the selection as one decision.
         """
         body = _species_assignment_payload(photo_ids, species, provenance)
         return client.post_json("/api/encounters/species", {**body, "preview": True})

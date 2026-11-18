@@ -264,6 +264,7 @@ def test_confident_species_change_is_hard_encounter_boundary():
     assert [len(segment) for segment in microsegments] == [1, 1]
     assert trace[0]["decision"] == "cut_species"
     conflict = trace[0]["species_conflict"]
+    assert (conflict["photo_a_id"], conflict["photo_b_id"]) == (1, 2)
     assert conflict["photo_a_species"] == "Verdin"
     assert conflict["photo_b_species"] == "Costa's Hummingbird"
     for field in (
@@ -1482,3 +1483,139 @@ def test_cut_null_timestamps_missing_folder_id_still_cuts():
     ]
     segments = cut_microsegments(photos)
     assert len(segments) == 2
+
+
+def test_close_undetected_frame_joins_by_hash_and_records_its_id():
+    from encounters import segment_encounters
+    from pipeline import _serialize_encounter
+
+    photos = [
+        {'id': 1, 'timestamp': '2026-11-14T08:40:00', 'subject_present': True, 'phash_crop': 'abcd12345678abcd'},
+        {'id': 2, 'timestamp': '2026-11-14T08:40:01', 'subject_absent': True, 'phash_crop': 'abcd12345678abcc'},
+    ]
+    result = segment_encounters(photos, emit_trace=True)
+    assert len(result) == 1
+    assert result[0]['trace'][0]['decision'] == 'kept_visual_neighbor'
+    assert _serialize_encounter(result[0], set())['visual_neighbor_photo_ids'] == [2]
+    photos[1]['phash_crop'] = '5432edcba9875432'
+    assert all(not enc['visual_neighbor_photo_ids'] for enc in segment_encounters(photos))
+
+
+def test_visual_merge_requires_two_matches_across_the_boundary():
+    from encounters import merge_microsegments
+
+    def frame(pid, phash, absent):
+        return {'id': pid, 'timestamp': f'2026-11-14T08:40:00.{pid}', 'subject_absent': absent,
+                'subject_present': not absent, 'phash_crop': phash}
+
+    pattern = 'abcd12345678abcd'
+    other = '5432edcba9875432'
+    left = [frame(1, pattern, True), frame(2, pattern, True)]
+    right = [frame(3, other, True), frame(4, pattern, False), frame(5, pattern, False)]
+    assert merge_microsegments([left, right]) == [left + right]
+    right[2]['phash_crop'] = other
+    assert merge_microsegments([left, right]) == [left, right]
+
+
+def test_single_missed_frame_uses_detected_support_pairs():
+    from encounters import DEFAULTS, _visual_boundary_support, merge_microsegments
+
+    pattern = 'abcd12345678abcd'
+    other = '5432edcba9875432'
+    frames = [dict(id=i, timestamp=f'2026-11-14T08:40:00.{i}',
+                   subject_absent=i == 3, subject_present=i != 3,
+                   phash_crop=other if i == 3 else pattern) for i in range(1, 6)]
+    left, right = frames[:3], frames[3:]
+    assert _visual_boundary_support(left, right, DEFAULTS) == [frames[2]]
+    assert merge_microsegments([left, right]) == [frames]
+    # One corroborating match is insufficient.
+    frames[0]['phash_crop'] = other
+    assert _visual_boundary_support(left, right, DEFAULTS) == []
+    # Matching detected pairs alone never enable this missing-frame fallback.
+    frames[0]['phash_crop'] = pattern
+    frames[2]['subject_absent'] = False
+    assert _visual_boundary_support(left, right, DEFAULTS) == []
+
+
+def test_missing_boundary_cannot_skip_detected_species_conflict():
+    from encounters import DEFAULTS, _visual_boundary_support
+
+    for absent_left in (True, False):
+        frames = [dict(id=i, timestamp=f'2026-11-14T08:40:00.{i}',
+                       subject_present=True, phash_crop='abcd12345678abcd',
+                       species_top5=[['Robin', .99]]) for i in range(1, 7)]
+        left, right = frames[:3], frames[3:]
+        missing, conflicting = (left[-1], right[0]) if absent_left else (right[0], left[-1])
+        missing.update(subject_absent=True, subject_present=False)
+        conflicting['phash_crop'] = '5432edcba9875432'
+        conflicting['species_top5'] = [['Mallard', .99]]
+        assert _visual_boundary_support(left, right, DEFAULTS) == []
+
+
+def test_visual_support_can_skip_either_absent_boundary():
+    from encounters import DEFAULTS, _visual_boundary_support
+
+    for absent_left in (True, False):
+        frames = [dict(id=i, timestamp=f'2026-11-14T08:40:00.{i}',
+                       subject_present=True, phash_crop='abcd12345678abcd',
+                       species_top5=[['Robin', .99]]) for i in range(1, 7)]
+        left, right = frames[:3], frames[3:]
+        missing = left[-1] if absent_left else right[0]
+        missing.update(subject_absent=True, subject_present=False, phash_crop='5432edcba9875432')
+        assert _visual_boundary_support(left, right, DEFAULTS) == [missing]
+
+
+def test_isolated_missed_frame_between_two_detected_segments():
+    from encounters import cut_microsegments, segment_encounters
+
+    pattern, other = 'abcd12345678abcd', '5432edcba9875432'
+    frames = [dict(id=i, timestamp=f'2026-11-14T08:40:00.{i}', subject_absent=i == 3,
+                   subject_present=i != 3, phash_crop=other if i == 3 else pattern)
+              for i in range(1, 6)]
+    assert [len(s) for s in cut_microsegments(frames)] == [2, 1, 2]
+    encounter, = segment_encounters(frames, emit_trace=True)
+    assert encounter['photos'] == frames
+    assert encounter['visual_neighbor_photo_ids'] == [3]
+    assert [t['decision'] for t in encounter['trace']].count('merged_back') == 2
+
+    frames[0]['phash_crop'] = other
+    assert [enc['photo_count'] for enc in segment_encounters(frames)] == [2, 1, 2]
+
+    frames[0]['phash_crop'] = pattern
+    assert len(segment_encounters(frames, config={'merge_max_gap': .05})) == 3
+    for frame in frames:
+        if frame['subject_present']:
+            frame['species_top5'] = [('Robin' if frame['id'] < 3 else 'Mallard', .99)]
+    assert [enc['photo_count'] for enc in segment_encounters(frames)] == [2, 1, 2]
+
+
+def test_visual_join_preserves_species_boundaries_across_missed_runs():
+    from encounters import segment_encounters
+
+    for missed in (1, 3):
+        for following in ('Robin', 'Mallard'):
+            species = ['Robin'] * 2 + [None] * missed + [following] * 2
+            frames = [dict(id=i, timestamp=f'2026-11-14T08:40:00.{i}', subject_absent=name is None,
+                           subject_present=name is not None, species_top5=[(name, .99)] if name else [],
+                           phash_crop='abcd12345678abcd') for i, name in enumerate(species)]
+            # Even a permissive second-pass merge must honor a confident change.
+            groups = segment_encounters(frames, config={'merge_score': 0}, emit_trace=True)
+            expected = [frames] if following == 'Robin' else [frames[:-2], frames[-2:]]
+            assert [g['photos'] for g in groups] == expected
+            assert groups[0]['visual_neighbor_photo_ids'] == list(range(2, 2 + missed))
+
+
+def test_cut_trace_distinguishes_scored_pair_from_species_evidence():
+    from encounters import cut_microsegments
+
+    species = ['Robin', None, None, 'Mallard']
+    frames = [dict(id=i, timestamp=f'2026-11-14T08:40:00.{i}', subject_absent=name is None,
+                   subject_present=name is not None, species_top5=[(name, .99)] if name else [],
+                   phash_crop='abcd12345678abcd') for i, name in enumerate(species, start=1)]
+    _, trace = cut_microsegments(frames, emit_trace=True)
+    boundary = trace[-1]
+    assert boundary['decision'] == 'cut_species'
+    assert (boundary['photo_a_id'], boundary['photo_b_id']) == (3, 4)
+    conflict = boundary['species_conflict']
+    assert (conflict['photo_a_id'], conflict['photo_a_species']) == (1, 'Robin')
+    assert (conflict['photo_b_id'], conflict['photo_b_species']) == (4, 'Mallard')

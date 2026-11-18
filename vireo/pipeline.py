@@ -868,6 +868,7 @@ class _FeatureLoad:
             "subject_clip_high": row["subject_clip_high"],
             "subject_clip_low": row["subject_clip_low"],
             "subject_y_median": row["subject_y_median"],
+            "phash": row["phash"],
             "phash_crop": row["phash_crop"],
             "dino_subject_embedding": subj_emb,
             "dino_global_embedding": global_emb,
@@ -1524,6 +1525,8 @@ def _serialize_encounter(enc, prior_empty_photo_ids):
     # Surface per-cut-point trace when run_full_pipeline was invoked with
     # emit_trace=True (e.g. from /api/pipeline/regroup-live so the
     # pipeline-review sidebar can show how each encounter was formed).
+    if enc.get("visual_neighbor_photo_ids"):
+        s_enc["visual_neighbor_photo_ids"] = enc["visual_neighbor_photo_ids"]
     if "trace" in enc:
         s_enc["trace"] = enc["trace"]
     if "focus_cohorts" in enc:
@@ -1856,7 +1859,11 @@ def prune_results(cache_dir, workspace_id, deleted_ids):
 
     pruned_encounters = []
     for enc in data.get("encounters", []):
-        enc["photo_ids"] = [pid for pid in enc.get("photo_ids", []) if pid not in deleted]
+        original_ids = enc.get("photo_ids", [])
+        enc["photo_ids"] = [pid for pid in original_ids if pid not in deleted]
+        if len(enc["photo_ids"]) != len(original_ids):
+            enc.pop("trace", None)
+            enc.pop("visual_neighbor_photo_ids", None)
         if "bursts" in enc:
             kept_bursts = []
             for burst in enc["bursts"]:

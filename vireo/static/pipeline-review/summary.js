@@ -16,6 +16,20 @@ function setFocusedEncounter(idx) {
   renderAlgorithmTrace();
 }
 
+/** @type {Record<string,string>} */ var traceDecisionLabels = {
+  kept_visual_neighbor: 'kept · close capture time and similar image',
+  kept_weak_detection: 'kept · weak detection rescued',
+  kept_species_continuity: 'kept · neighboring frames support the same species'
+};
+
+/** @param {ReviewEncounter} enc */
+function visualNeighborSummary(enc) {
+  var joined = enc.visual_neighbor_photo_ids || [];
+  return joined.length
+    ? '<div>Frames grouped by capture time and visual similarity after a missed detection: ' +
+      escapeHtml(joined.join(', ')) + '</div>' : '';
+}
+
 function renderAlgorithmTrace() {
   var panel = /** @type {HTMLElement} */ (document.getElementById('algorithmTrace'));
   var label = /** @type {HTMLElement} */ (document.getElementById('traceFocusLabel'));
@@ -31,8 +45,9 @@ function renderAlgorithmTrace() {
     if (label) label.textContent = 'Click an encounter to see how it was formed';
     return;
   }
+  var visualEvidence = visualNeighborSummary(enc);
   if (!enc.trace) {
-    panel.innerHTML = '<div class="trace-empty">Trace not available &mdash; drag a slider to recompute.</div>';
+    panel.innerHTML = visualEvidence + '<div class="trace-empty">Trace not available &mdash; drag a slider to recompute.</div>';
     if (label) label.textContent = 'Encounter ' + (_focusedEncounterIdx + 1);
     return;
   }
@@ -40,7 +55,7 @@ function renderAlgorithmTrace() {
     var emptyMsg = (enc.photo_count <= 1)
       ? 'Single-photo encounter &mdash; no internal cut points.'
       : 'No adjacent-pair scores (encounter has no internal pairs).';
-    panel.innerHTML = '<div class="trace-empty">' + emptyMsg + '</div>';
+    panel.innerHTML = visualEvidence + '<div class="trace-empty">' + emptyMsg + '</div>';
     if (label) label.textContent = 'Encounter ' + (_focusedEncounterIdx + 1);
     return;
   }
@@ -72,7 +87,7 @@ function renderAlgorithmTrace() {
       + '<span class="name">' + escapeHtml(label) + '</span>'
       + '</div>';
   }
-  var html = '';
+  var html = visualEvidence;
   var thr = enc.trace[0] && enc.trace[0].thresholds;
   if (thr) {
     var thrParts = [];
@@ -99,11 +114,7 @@ function renderAlgorithmTrace() {
     else rowCls += ' kept';
     var dt = (t.dt_seconds === null || t.dt_seconds === undefined) ? '∞' : t.dt_seconds.toFixed(1) + 's';
     var score = (typeof t.score === 'number') ? t.score.toFixed(3) : '-';
-    /** @type {Record<string,string>} */ var decisionLabels = {
-      kept_weak_detection: 'kept · weak detection rescued',
-      kept_species_continuity: 'kept · neighboring frames support the same species'
-    };
-    var decision = decisionLabels[t.decision || ''] || t.decision || '?';
+    var decision = traceDecisionLabels[t.decision || ''] || t.decision || '?';
     html += '<div class="' + rowCls + '">';
     html += '<span>pair ' + (i + 1) + ' · ' + dt + '</span>';
     html += '<span>S=' + score + '</span>';

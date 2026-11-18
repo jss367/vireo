@@ -327,11 +327,13 @@ async function main() {
       return null;
     }},
     escapeHtml: s => String(s), escapeAttr: s => String(s),
+    // Module-scope var in summary.js; fn() only extracts function declarations.
+    traceDecisionLabels: {},
   });
   let tracePanelHtml = '';
   for (const name of [
     'isReviewScopeFilterMode', 'activeReviewScopeFilter', 'photoInOpenGroupReview',
-    'isPhotoActionableInReviewScope', 'renderAlgorithmTrace',
+    'isPhotoActionableInReviewScope', 'visualNeighborSummary', 'renderAlgorithmTrace',
   ]) vm.runInContext(fn(review, name), traceCtx);
   traceCtx.renderAlgorithmTrace();
   assert(tracePanelHtml.includes('openInspect(1)'), 'photo 1 is in scope and must be clickable');

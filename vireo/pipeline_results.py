@@ -245,6 +245,7 @@ def auto_detach_burst_for_species(results, enc_idx, burst_idx, new_species):
         # so the algorithm-trace panel renders an honest "needs recompute"
         # state instead of stale rows.
         enc.pop("trace", None)
+        enc.pop("visual_neighbor_photo_ids", None)
 
     detached["species_predictions"] = rebuild_species_predictions(results, detached_ids)
 
@@ -263,6 +264,7 @@ def auto_detach_burst_for_species(results, enc_idx, burst_idx, new_species):
         )
         # Same reason as above — target's trace no longer matches its photo set.
         target.pop("trace", None)
+        target.pop("visual_neighbor_photo_ids", None)
         t_min, t_max = target.get("time_range") or [None, None]
         d_min, d_max = detached_range
         mins = [x for x in (t_min, d_min) if x is not None]
