@@ -430,7 +430,7 @@ def select_reviewer_box(db, photo_id, box, *, frame_runtime=None):
 
     validate_reviewer_box(box)
     with db.transaction(immediate=True):
-        existing = db.detections.get(photo_id, 0, REVIEWER_MODEL, include_rejected=True)
+        existing = detection_store.get_detections(db, photo_id, 0, REVIEWER_MODEL, include_rejected=True)
         for row in existing:
             if _box(row) == box:
                 if row["runtime_fingerprint"] != (frame_runtime or "reviewer-v1") or row["subject_verdict"]:

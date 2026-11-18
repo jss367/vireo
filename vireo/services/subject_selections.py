@@ -6,7 +6,7 @@ import json
 from typing import TYPE_CHECKING
 
 from detection_id import detection_id as legacy_detection_id
-from services.detection_store import get_detections
+from services.detection_store import delete_detections_by_ids, get_detections
 from services.subject_verdicts import SubjectVerdictError, _photo_free_of_analysis
 from subjects import (
     REVIEWER_MODEL,
@@ -61,7 +61,7 @@ def _write_region(db: Database, photo_id: int, region_id: int, old: JsonDict | N
     db.masks_features.clear_detection_embeddings(photo_id, region_id)
     db.masks_features.retire_prompt_masks(photo_id, REVIEWER_MODEL, old["box"])
     if new is None:
-        db.detections.delete_by_ids([region_id])
+        delete_detections_by_ids(db, [region_id])
     else:
         db.detections.update_reviewer_region(region_id, new["box"], new["runtime"], new["verdict"])
 
