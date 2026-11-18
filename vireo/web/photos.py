@@ -516,6 +516,19 @@ def _attach_photo_file_fields(db: Database, photo: Row, result: JsonDict) -> Non
         result["xmp_path"] = ""
 
 
+def _attach_species_reviews(db: Database, photo_id: int, result: JsonDict) -> None:
+    reviews = db.species_provenance.reviews(photo_id)
+    result["assignment_reviews"] = list(reviews.values())
+    result["review_workspace_id"] = db.require_workspace_id()
+    result["species_assignments"] = db.species_provenance.assignments(photo_id, reviews=reviews)
+    names_by_keyword = {a["keyword_id"]: a for a in result["species_assignments"]}
+    for keyword in result["keywords"]:
+        names = names_by_keyword.get(keyword["id"], {})
+        keyword.update({key: names[key] for key in (
+            "display_name", "synonyms", "taxon_id", "source_taxon_id", "scientific_name",
+        ) if key in names})
+
+
 def create_photos_blueprint(
     get_db: GetDb,
     json_error: JsonError,
@@ -1002,13 +1015,7 @@ def create_photos_blueprint(
 
         keywords = db.photo_keywords.get_for_photo(photo_id)
         result["keywords"] = [dict(k) for k in keywords]
-        result["species_assignments"] = db.species_provenance.assignments(photo_id)
-        names_by_keyword = {a["keyword_id"]: a for a in result["species_assignments"]}
-        for keyword in result["keywords"]:
-            names = names_by_keyword.get(keyword["id"], {})
-            keyword.update({key: names[key] for key in (
-                "display_name", "synonyms", "taxon_id", "source_taxon_id", "scientific_name",
-            ) if key in names})
+        _attach_species_reviews(db, photo_id, result)
         # Export naming uses the species-rank keyword list, which is narrower
         # than the detail payload's life-list identifications (that list can
         # also contain genus/family rows). Expose the exact export metadata so

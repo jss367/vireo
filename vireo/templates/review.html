@@ -897,6 +897,10 @@
 <!-- Review tools: each is one line until opened, and an open one takes the
      full width below the others. -->
 <div class="review-tools">
+  <details id="assignmentConflicts">
+    <summary>Saved species assignments with outstanding conflicts</summary>
+    <div id="assignmentConflictList" aria-live="polite"></div>
+  </details>
   {% include '_identity_alternatives.html' %}
   {% include '_review_queue.html' %}
   <details class="evidence-explanation">

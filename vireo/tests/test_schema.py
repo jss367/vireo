@@ -616,7 +616,7 @@ def test_subject_comparison_cache_migrates_without_changing_photographer_choices
             "detection_id", "source_key", "features", "mask_png"]
 
 
-def test_version_37_catalog_unmeasures_the_detail_read_another_way(tmp_path):
+def test_version_38_catalog_unmeasures_the_detail_read_another_way(tmp_path):
     """Subjects under 512 px came from a rendering the larger ones never use,
     and subjects that fit an analysis proxy were measured on it when fresh;
     both return to "not measured" and the subjects in between are kept."""
@@ -649,7 +649,7 @@ def test_version_37_catalog_unmeasures_the_detail_read_another_way(tmp_path):
                     "prompt_w, prompt_h, subject_detail, subject_detail_px) VALUES (?, ?, ?, 0, 'md', 0, 0, 1, 1, ?, ?)",
                     (photo_id, variant, f"/masks/{photo_id}.{variant}.png", detail, px),
                 )
-        conn.execute("PRAGMA user_version=37")
+        conn.execute("PRAGMA user_version=38")
     schema.ensure_schema(path)
     schema.ensure_schema(path)
     kept = {photo_id: rows[photo_id][:2] for photo_id in (3, 4, 5, 7)}

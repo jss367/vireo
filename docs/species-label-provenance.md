@@ -35,3 +35,13 @@ Update evidence for an existing species assignment with `POST /api/photos/{photo
 Attribution is stored on the catalog’s photo-keyword association, independently of the existing keyword authorship stamp. Per-item history preserves the before and after attribution for undo and redo, including encounter edits that also change cached grouping. Supporting frames must be visible in the active workspace when evidence is recorded. The standard keyword synchronization queue continues to handle species labels; these richer evidence fields are stored in the catalog and edit history.
 
 Photo pairing, duplicate resolution, and folder/archive collisions carry evidence to the surviving photo. Existing evidence on the survivor wins a collision. Copied subject references retain their original photo in `subject_photo_id`; editing other evidence can preserve that historical reference, including after its source photo is deleted. New subject references must still identify a detection in the assigned photo. Previously recorded supporting-frame links can also be retained without inventing replacement frames.
+
+## Conflicting evidence on a saved assignment
+
+In Browse, expand the species and select **Report conflicting evidence**. Give the reviewer, the reason for questioning that assignment, and a reference to the evidence. Review lists outstanding conflicts under **Saved species assignments with outstanding conflicts**. Open a photo from that list to retain the label, change the species, or remove the assignment. Each resolution records its own reviewer and evidence. Photo details keep earlier reviews, including reviews of removed assignments.
+
+API clients read the photo’s `review_workspace_id` and the assignment’s `review_version` from `GET /api/photos/{photo_id}`. Post them as `observed_workspace_id` and `review_version` to `/api/photos/{photo_id}/species/{keyword_id}/review`, together with `action`, `reviewer`, `reason`, and `evidence_source`. Use `report` to open the conflict. For resolution, read the current version and use `retain`, `remove`, or `amend` with the replacement `species`. A stale version returns HTTP 409. The standard undo and redo endpoints apply to each decision.
+
+`GET /api/species/assignment-conflicts` lists outstanding assignments visible in the active workspace. In photo details, an assignment with a null `review` has no conflict review recorded. A non-null review contains the original evidence, the conflict report, and a `resolution` that stays null until someone resolves it.
+
+MCP clients can use `list_assignment_conflicts`, `get_photo`, and `review_species_assignment` for the same workflow.
