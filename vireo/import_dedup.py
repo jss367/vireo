@@ -43,7 +43,7 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
-from grouping import read_exif_clock
+from grouping import metadata_camera_label, read_exif_clock
 from scanner import EMPTY_FILE_SHA256, compute_file_hash
 
 log = logging.getLogger(__name__)
@@ -174,6 +174,10 @@ def source_capture_timestamps(files):
                     "-TrackCreateDate",
                     "-OffsetTimeOriginal",
                     "-OffsetTime",
+                    "-Model",
+                    "-SerialNumber",
+                    "-BodySerialNumber",
+                    "-CameraSerialNumber",
                 ],
             )
         except Exception:  # broad: ExifTool failures leave capture times unknown, which falls back to hashing
@@ -187,6 +191,7 @@ def source_capture_timestamps(files):
             metadata = metadata_by_path.get(str(source_file), {})
             timestamps[source_file] = metadata_capture_timestamp(metadata)
             timestamps.offsets[source_file] = metadata_capture_offset(metadata)
+            timestamps.cameras[source_file] = metadata_camera_label(metadata)
 
     return timestamps
 
