@@ -463,6 +463,21 @@ Full-frame previews and subject crops support visual review of pose, eye
 visibility, and obstructions; this feature does not introduce aesthetic weights.
 
 
+## Looking up a finished job
+
+Save the ID returned when you start a job. `GET /api/jobs/<job_id>` first checks
+the live runner. After the runner releases a job or Vireo restarts, the same
+URL returns its retained terminal record with `historical: true`. Read
+`status`, `result`, `steps`, `progress`, `errors`, and `error_count` to
+reconcile the outcome. For a chained import, follow `result.process_job_id`
+to the processing job. Its `parent_job_id` identifies the import.
+
+Historical jobs are read-only. Older records can have null progress and only
+the error messages retained in the result. A 404 means there is no live job
+or retained terminal record visible for that ID. A 503 with code
+`job_history_unavailable` means the catalog read failed. Retry the lookup
+with the same ID.
+
 ## Exporting photos with metadata
 
 The export endpoints use an explicit `metadata_fields` list. Saved presets are

@@ -122,3 +122,90 @@ def test_a_dict_shaped_tree_is_dropped_before_the_frontend_sees_it(app_and_db):
     assert "history_error" not in jobs
     history_rows = {row["id"]: row for row in jobs["history"]}
     assert history_rows["dict-tree"]["tree"] == []
+
+
+def test_status_read_failure_is_distinct_from_unknown_id(app_and_db, locked_history):
+    app, _ = app_and_db
+    resp = app.test_client().get("/api/jobs/missing")
+    assert resp.status_code == 503
+    assert resp.get_json()["code"] == "job_history_unavailable"
+
+
+@pytest.mark.parametrize("restart", [False, True], ids=["eviction", "restart"])
+def test_status_recovers_chained_jobs(app_and_db, restart, monkeypatch):
+    from job_runner.lineage import JobLineage
+    from jobs import JobRunner
+    from wait import wait_for_job_via_runner
+
+    app, db = app_and_db
+    client = app.test_client()
+    runner = app._job_runner
+    ws = db.active_workspace_id
+
+    def process_work(job):
+        job["steps"] = [{"id": "scan", "status": "completed", "summary": "Scanned 3 photos"}]
+        job["errors"].extend(["preview failed", "thumbnail failed"])
+        job["progress"].update(current=3, total=3)
+        return {"scanned": 3}
+
+    def import_work(job):
+        process_id = runner.start("pipeline", process_work, workspace_id=ws,
+                                  lineage=JobLineage.following(job["id"]))
+        return {"imported": 3, "process_job_id": process_id}
+
+    import_id = runner.start("import", import_work, workspace_id=ws)
+    imported = wait_for_job_via_runner(runner, import_id, wait_for_history=True)
+    process_id = imported["result"]["process_job_id"]
+    processed = wait_for_job_via_runner(runner, process_id, wait_for_history=True)
+    if restart:
+        assert runner.shutdown(timeout=5)
+        app._job_runner = JobRunner(db=db)
+    else:
+        monkeypatch.setattr("jobs._JOB_RETENTION_SECS", 0)
+        with runner._lock:
+            runner._prune_finished_jobs()
+    assert app._job_runner.get(import_id) is None
+    assert app._job_runner.get(process_id) is None
+
+    parent = client.get(f"/api/jobs/{import_id}").get_json()
+    assert parent["historical"] and parent["status"] == "completed"
+    assert parent["result"] == imported["result"]
+    url = f"/api/jobs/{parent['result']['process_job_id']}"
+    child = client.get(url).get_json()
+    assert child["parent_job_id"] == import_id
+    assert child["historical"] and child["status"] == "failed"
+    assert child["result"]["scanned"] == 3
+    assert child["steps"] == processed["steps"]
+    assert child["progress"] == processed["progress"]
+    assert child["errors"] == processed["errors"]
+    assert child["error_count"] == 2
+    assert child["pausable"] is False and child["cancellable"] is False
+    for action in ("pause", "resume", "cancel"):
+        assert client.post(f"{url}/{action}").status_code == 404
+
+
+def test_historical_detail_limits_lookup_to_visible_terminal_rows(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    _insert_terminal_row(db, job_id="other-workspace", tree_json="[]")
+    _insert_terminal_row(db, job_id="unfinished", tree_json="[]")
+    other = db.create_workspace("Other workspace")
+    db.conn.execute("UPDATE job_history SET workspace_id=? WHERE id='other-workspace'", (other,))
+    db.conn.execute("UPDATE job_history SET status='running' WHERE id='unfinished'")
+    db.commit()
+    for job_id in ("other-workspace", "unfinished", "unknown"):
+        assert client.get(f"/api/jobs/{job_id}").status_code == 404
+
+
+def test_historical_detail_recovers_legacy_error_details(app_and_db):
+    app, db = app_and_db
+    _insert_terminal_row(db, job_id="old-job", tree_json="[]")
+    db.conn.execute(
+        "UPDATE job_history SET status='failed', result=?, error_count=3 WHERE id='old-job'",
+        (json.dumps({"error": "fatal", "errors": ["decoder error"]}),),
+    )
+    db.commit()
+    row = app.test_client().get("/api/jobs/old-job").get_json()
+    assert row["errors"] == ["decoder error", "fatal"]
+    assert row["error_count"] == 3
+    assert row["progress"] is None
