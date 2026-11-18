@@ -63,7 +63,7 @@ class _InferenceEntry(TypedDict):
     input_recipe: str | None
     photo: sqlite3.Row
     detection_id: int
-    _reviewer_box: tuple[float, ...] | None
+    _reviewer_box: tuple[float | str, ...] | None
     folder_path: str
     image_path: str
     img: Image.Image
@@ -518,8 +518,12 @@ class _ClassifyPass:
         if img is not None and self.raw_session is not None and detection is not None:
             report = img.info.get("_vireo_raw_analysis")
             if report is not None:
-                with self.thread_db.transaction():
-                    self.thread_db.masks_features.save_subject_raw_analysis(detection["id"], report)
+                snapshot = detection_store.reviewer_box_snapshot(detection)
+                with self.thread_db.transaction(immediate=snapshot is not None):
+                    if detection_store.reviewer_result_is_current(self.thread_db, {
+                        "photo": photo, "detection_id": detection["id"], "_reviewer_box": snapshot,
+                    }):
+                        self.thread_db.masks_features.save_subject_raw_analysis(detection["id"], report)
         return img, folder_path, image_path
 
     def _should_stop(self) -> bool | str | None:

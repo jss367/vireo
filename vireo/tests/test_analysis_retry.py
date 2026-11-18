@@ -1158,6 +1158,87 @@ def test_quality_retry_replaces_a_mask_with_different_framing(retry_library, tmp
         assert mask.size == (100, 80)
         assert mask.info["vireo_mask_frame"] == "camera_rendered"
 
+
+@pytest.mark.parametrize("count", [2, 3])
+def test_overlapping_reviewer_regions_keep_independent_evidence(retry_library, tmp_path, monkeypatch, count):
+    from subjects import analyze_photo
+
+    app, db, photos, _ = retry_library
+    pid = photos[0]
+    source = tmp_path / "duck-0.jpg"
+    effective = db.get_effective_config({"pipeline": {"eye_detect_enabled": True}})
+    monkeypatch.setattr("subject_analysis.measure_eye", lambda db, pid, detection, *args:
+                        {"eye_status": "measured", "eye_x": detection["box_x"] + .05, "eye_y": .3,
+                         "eye_conf": .9, "eye_tenengrad": 50.})
+    client = app.test_client()
+    url = f"/api/photos/{pid}/subjects/reviewer-box"
+    token = client.get(f"/photos/{pid}/preview?view=subject&size=1920").headers["X-Vireo-Subject-Frame"]
+    def segment(image, box, variant):
+        mask = np.zeros((image.height, image.width), bool)
+        left = round(image.width * box["x"])
+        mask[16:55, left:left + 28] = True
+        return mask
+
+    monkeypatch.setattr("masking.generate_mask", segment)
+    keys = {}
+    region_ids = []
+    evidence = {}
+    for index in range(count):
+        box = dict(x=.1 + index * .15, y=.2, w=.35, h=.5)
+        result = client.put(url, json={"box": box, "frame_token": token, "source": "field-review"})
+        assert result.status_code == 200
+        did = result.json["primary_detection_id"]
+        region_ids.append(did)
+        job = {"id": "reviewer-retry", "progress": {}, "errors": []}
+        report = run_retry(Context(db), job, [pid], effective, str(tmp_path), expected_primary_detection_id=did)
+        assert report["ok"], report["errors"]
+        keys[did], = db.conn.execute("SELECT source_key FROM subject_ranking_analysis WHERE detection_id=?", (did,)).fetchone()
+        measured = db.subjects.ranking_analysis(did, keys[did])
+        assert measured["mask_png"].startswith(b"\x89PNG")
+        assert measured["features"]["eye_x"] == box["x"] + .05
+        evidence[did] = dict(db.subjects.analysis(did)), measured
+
+    def reload():
+        return {s["id"]: s for s in client.get(f"/api/photos/{pid}/subjects").json["subjects"]}
+
+    assert set(reload()) == set(region_ids)
+    assert len({analysis["mask_png"] for _, analysis in evidence.values()}) == count
+    chosen, edited = region_ids[:2]
+    assert client.put(f"/api/photos/{pid}/primary-subject", json={"detection_id": chosen}).status_code == 200
+    assert client.post("/api/undo").status_code == 200
+    assert reload()[region_ids[-1]]["is_primary"]
+    assert client.post("/api/redo").status_code == 200
+    for did in region_ids:
+        assert (dict(db.subjects.analysis(did)), db.subjects.ranking_analysis(did, keys[did])) == evidence[did]
+
+    edit = dict(operation="edit", detection_id=edited, revision=reload()[edited]["revision"],
+                box=dict(x=.3, y=.24, w=.36, h=.5), frame_token=token)
+    assert client.put(url, json=edit).json["edit_id"]
+    assert client.put(url, json=edit).status_code == 409
+    assert reload()[chosen]["is_primary"]
+    current = reload()[edited]
+    assert client.put(f"/api/photos/{pid}/primary-subject", json={"detection_id": edited}).status_code == 200
+    stale = run_retry(Context(db), {"id": "stale-box", "progress": {}, "errors": []}, [pid], effective,
+                      str(tmp_path), expected_primary_detection_id=edited, expected_reviewer_revision=edit["revision"])
+    assert not stale["ok"] and "box changed" in stale["errors"][0]["error"]
+    assert current["revision"] != edit["revision"]
+    assert client.post("/api/undo").status_code == 200
+    assert db.subjects.ranking_analysis(edited, keys[edited]) is None
+    assert analyze_photo(db, pid, str(source)) == 1
+    remove = dict(operation="remove", detection_id=edited, revision=reload()[edited]["revision"])
+    assert client.put(url, json=remove).json["edit_id"]
+    assert set(reload()) == set(region_ids) - {edited}
+    assert client.put(url, json=remove).status_code == 409
+    assert client.post("/api/undo").status_code == 200
+    assert reload()[edited]["box_x"] == edit["box"]["x"]
+    assert client.post("/api/undo").status_code == 200
+    assert reload()[edited]["box_x"] == .25
+    assert set(reload()) == set(region_ids)
+    assert analyze_photo(db, pid, str(source)) == 1
+    for did in set(region_ids) - {edited}:
+        assert (dict(db.subjects.analysis(did)), db.subjects.ranking_analysis(did, keys[did])) == evidence[did]
+
+
 @pytest.mark.parametrize("legacy", [True, False])
 def test_quality_retry_requires_original_weights_for_comparison(retry_library, tmp_path, legacy):
     _, db, ids, calls = retry_library

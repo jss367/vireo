@@ -13,7 +13,7 @@ const analyze = initializer.body.body.find(node => node.type === 'FunctionDeclar
 function harness(outcome, navigate = false) {
   const requests = [], warnings = [], loaded = [], refreshed = [], events = [];
   const context = vm.createContext({
-    data: {photo_id: 230871, workspace_id: 5}, generation: 1, busy: false,
+    data: {photo_id: 230871, workspace_id: 5, subjects: [{id: 3422044149613778, revision: "current-box"}]}, generation: 1, busy: false,
     status: {}, render() {}, _lbGuardReadOnly: () => false,
     vireoLightboxSession: {requestedPhotoId: () => context.currentPhoto}, currentPhoto: 230871,
     safeFetch: async (url, options = {}) => {
@@ -39,7 +39,7 @@ test('retry rebuilds full analysis for exactly the current photo, workspace, and
   await h.run();
   assert.equal(h.requests[0].url, '/api/photos/analysis-retry');
   assert.deepEqual(JSON.parse(h.requests[0].options.body), {
-    photo_ids: [230871], expected_workspace_id: 5, expected_primary_detection_id: 3422044149613778,
+    photo_ids: [230871], expected_workspace_id: 5, expected_primary_detection_id: 3422044149613778, expected_reviewer_revision: "current-box",
   });
   assert.deepEqual(h.loaded, [230871]);
   assert.deepEqual(h.refreshed, ['mask', 230871]);

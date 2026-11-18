@@ -433,12 +433,16 @@ def _subject_payload(db, photo_id, inspection_photo):
             "quality_score": analysis["quality_score"], "exposure_ev": analysis["exposure_ev"],
             "basis": "detection_box", "source_key": analysis["source_key"]} if analysis else None)
         detection["evidence_basis"] = "reviewer_box" if detection["detector_model"] == REVIEWER_MODEL else "detector_box"
+        if detection["detector_model"] == REVIEWER_MODEL:
+            detection["revision"] = reviewer_revision(detection)
         detection["predictions"] = grouped.get(detection["id"], [])
         detection["is_primary"] = detection is detections[0]
     primary_id = detections[0]["id"] if detections else None
     rejected = []
     for row in db.subjects.rejected_regions(photo_id):
         region = dict(row)
+        if region["detector_model"] == REVIEWER_MODEL:
+            region["revision"] = reviewer_revision(region)
         region["predictions"] = grouped.get(region["id"], [])
         rejected.append(region)
     regions = detection_store.get_detections(db, photo_id, min_conf=0, include_rejected=inspection_photo is not None)
@@ -457,14 +461,13 @@ def _subject_payload(db, photo_id, inspection_photo):
             "rejected": rejected}
 
 
-def select_reviewer_box(db, photo_id, box, *, frame_runtime=None):
-    """Save an explicit human region separately from model output, then select it.
+def reviewer_revision(row):
+    """Input token for an optimistic edit to this reviewer region."""
+    values = [row[key] for key in ("id", "runtime_fingerprint", "box_x", "box_y", "box_w", "box_h", "subject_verdict")]
+    return hashlib.sha256(json.dumps(values).encode()).hexdigest()
 
-    Coordinates use the upright, unedited source frame. The stored confidence
-    of 1 keeps the explicit choice above detector thresholds; it is not a
-    model probability. No detector run or species prediction is manufactured.
-    Caller holds the photo lock.
-    """
+
+def validate_reviewer_box(box):
     if not isinstance(box, dict) or set(box) != set("xywh"):
         raise ValueError("box must contain x, y, w and h")
     if any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in box.values()):
@@ -478,20 +481,28 @@ def select_reviewer_box(db, photo_id, box, *, frame_runtime=None):
     x, y, w, h = (box[k] for k in "xywh")
     if min(x, y) < 0 or min(w, h) <= 0 or x + w > 1 or y + h > 1:
         raise ValueError("Choose a nonempty box inside the source image")
+
+
+def select_reviewer_box(db, photo_id, box, *, frame_runtime=None):
+    """Add and select a reviewer region. Its identity survives subsequent redraws."""
+    import secrets
+
+    validate_reviewer_box(box)
     with db.transaction(immediate=True):
-        previous_ids = [d["id"] for d in detection_store.get_detections(
-            db, photo_id, min_conf=0, detector_model=REVIEWER_MODEL, include_rejected=True)]
-        for previous_id in previous_ids:
-            db.masks_features.clear_detection_embeddings(photo_id, previous_id)
-        # Clear previous measurements even if a legacy catalog lacks primary state.
-        db.subjects.clear_primary_features(photo_id)
-        db.masks_features.retire_prompt_masks(photo_id, REVIEWER_MODEL)
-        ids = db.detections.upsert_rows(photo_id, REVIEWER_MODEL, [
-            {"box": box, "confidence": 1.0, "category": "animal"}], frame_runtime or "reviewer-v1")
-        detection_store.delete_detections_by_ids(db, set(previous_ids).difference(ids))
-        # Re-saving an identical or quantization-equivalent box reuses its ID.
-        # Retire that ID's cached box analysis before sync_primary can project it.
-        db.subjects.clear_analysis(ids[0])
-        db.subjects.set_choice(photo_id, ids[0])
+        existing = detection_store.get_detections(db, photo_id, 0, REVIEWER_MODEL, include_rejected=True)
+        for row in existing:
+            if _box(row) == box:
+                if row["runtime_fingerprint"] != (frame_runtime or "reviewer-v1") or row["subject_verdict"]:
+                    raise ValueError("Edit the existing reviewer region to change this box")
+                db.subjects.set_choice(photo_id, row["id"])
+                sync_primary(db, photo_id)
+                return row["id"]
+        region_id = secrets.randbelow(2**52 - 1) + 1
+        while db.detections.row(region_id) is not None:
+            region_id = secrets.randbelow(2**52 - 1) + 1
+        db.detections.insert_reviewer_region(photo_id, region_id, box, frame_runtime or "reviewer-v1", None)
+        if db.subjects.primary_state(photo_id) is None:
+            db.subjects.clear_primary_features(photo_id)
+        db.subjects.set_choice(photo_id, region_id)
         sync_primary(db, photo_id)
-    return ids[0]
+    return region_id

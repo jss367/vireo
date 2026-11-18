@@ -219,8 +219,10 @@ def retry_detection(db: Database, pid: int, checkpoint: Callable[[], None],
 def retry_features(db: Database, pid: int, effective: JsonDict, cache_dir: str,
                    checkpoint: Callable[[], None], *, quality_only: bool = False,
                    expected_primary_detection_id: int | None = None,
+                   expected_reviewer_revision: str | None = None,
                    on_published: Callable[[], None] | None = None) -> None:
     from subject_analysis import analyze_detection
+    from subjects import reviewer_revision
 
     photo, path, identity = _source(db, pid)
     checkpoint()
@@ -232,6 +234,8 @@ def retry_features(db: Database, pid: int, effective: JsonDict, cache_dir: str,
         # the one the user chose.
         if expected_primary_detection_id is not None and detection["id"] != expected_primary_detection_id:
             raise ValueError("Primary subject changed before analysis started; retry the chosen subject")
+        if expected_reviewer_revision is not None and reviewer_revision(detection) != expected_reviewer_revision:
+            raise ValueError("Reviewer box changed before analysis started; retry the current box")
         mask_path = db.masks_features.get_mask(pid, effective.get("pipeline", {}).get("sam2_variant") or "sam2-small")
         existing_path = None
         if (quality_only and expected_primary_detection_id is None and mask_path and mask_path["detector_model"] == detection["detector_model"]
@@ -387,7 +391,7 @@ def _publish_features(db: Database, pid: int, detection: JsonDict, analysis: Jso
 
 def run_retry(ctx: RetryContext, job: JobDict, photo_ids: list[int], effective: JsonDict, cache_dir: str,
               *, results_dir: str | None = None,
-              expected_primary_detection_id: int | None = None) -> JsonDict:
+              expected_primary_detection_id: int | None = None, expected_reviewer_revision: str | None = None) -> JsonDict:
     """Execute only the immutable selection; partial failures stay visible and retryable."""
     from resource_ledger import bind_resource_cancel_check
 
@@ -398,11 +402,13 @@ def run_retry(ctx: RetryContext, job: JobDict, photo_ids: list[int], effective: 
     with bind_resource_cancel_check(cancellation_probe):
         return _run_retry(ctx, job, photo_ids, effective, cache_dir,
                           results_dir if results_dir is not None else cache_dir,
-                          expected_primary_detection_id=expected_primary_detection_id)
+                          expected_primary_detection_id=expected_primary_detection_id,
+                          expected_reviewer_revision=expected_reviewer_revision)
 
 
 def _run_retry(ctx: RetryContext, job: JobDict, photo_ids: list[int], effective: JsonDict, cache_dir: str,
-               results_dir: str, *, expected_primary_detection_id: int | None = None) -> JsonDict:
+               results_dir: str, *, expected_primary_detection_id: int | None = None,
+               expected_reviewer_revision: str | None = None) -> JsonDict:
     db = ctx.thread_db()
     result: JsonDict = {"ok": True, "photos": [], "errors": [], "requested_photo_ids": photo_ids,
                        "review_refresh": {"status": "not_needed", "photo_ids": []}}
@@ -428,6 +434,7 @@ def _run_retry(ctx: RetryContext, job: JobDict, photo_ids: list[int], effective:
                     job["progress"]["phase"] = "Rebuilding selected subject measurements"
                     retry_features(db, pid, effective, cache_dir, checkpoint,
                                    expected_primary_detection_id=expected_primary_detection_id,
+                                   expected_reviewer_revision=expected_reviewer_revision,
                                    on_published=lambda photo_id=pid: published.add(photo_id))
                     ran.extend(["segmentation", "quality"])
                     stages = []
