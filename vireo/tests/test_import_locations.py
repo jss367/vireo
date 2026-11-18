@@ -1472,3 +1472,14 @@ def test_repeated_fast_legs_cannot_renew_the_walks_jitter(db, monkeypatch):
     preview = suggest_import_locations(db, points, api_key="KEY", language="en", capture_times=times)
     [offer] = [g for g in preview["groups"] if g["suggestion"]["source"] == "outing"]
     assert offer["outing_paths"] == list(points)[:2]
+
+
+
+def test_over_budget_saved_evidence_keeps_local_names_without_lookups(db, monkeypatch, no_google):
+    monkeypatch.setattr(import_locations, "MAX_SAVED_EVIDENCE_CELLS", 1)
+    points = _files([(32, 0), (32.009, 0)])
+    for i, point in enumerate(points.values()):
+        _kw(db, f"Saved {i}", point=point, place_id=f"place{i}")
+    times = dict(zip(points, ["2026-11-14T08:00", "2026-11-14T08:10"], strict=True))
+    preview = suggest_import_locations(db, points, api_key="KEY", language="en", capture_times=times)
+    assert {g["suggestion"]["name"] for g in preview["groups"]} == {"Saved 0", "Saved 1"}

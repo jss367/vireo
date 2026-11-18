@@ -96,6 +96,8 @@ OUTING_LINK_M = 2000
 # thousand; dense spots near a pole could otherwise make billions.
 MAX_OUTING_COMPARISONS = 2_000_000
 MAX_NEARBY_PLACES = 6
+# Optional Google type checks for cells the catalog has already named.
+MAX_SAVED_EVIDENCE_CELLS = 32
 # Nearby lookups are made once per bucket of this many degrees (about 2 km),
 # from its center, not once per ~110 m cell: one walk spans dozens of cells.
 _NEARBY_BUCKET_DEG = 0.02
@@ -713,8 +715,15 @@ class ImportLocationSuggester:
         # saved place types when cells have different candidate places.
         if not self._grid_cache and len(set(self._saved_places.values()) - {None}) < 2:
             return []
-        return [key for key, place_id in self._saved_places.items() if place_id
-                and any(path in self._capture_times for path in self._cells[key]["paths"])]
+        keys = []
+        for key, place_id in self._saved_places.items():
+            if place_id and any(path in self._capture_times for path in self._cells[key]["paths"]):
+                keys.append(key)
+                if len(keys) > MAX_SAVED_EVIDENCE_CELLS:
+                    # Keep the local suggestions for an over-budget preview.
+                    # A partial pass would favor the first cells on the card.
+                    return []
+        return keys
 
     def name_saved_cell(self, key: str) -> None:
         cell = self._cells[key]
