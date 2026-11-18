@@ -1930,7 +1930,7 @@ def _refresh_encounter_confirmed_species(enc, enc_photos):
 
 
 def refresh_cache_species_for_photos(
-    cache_dir, workspace_id, species_by_photo, photos_only=False,
+    cache_dir, workspace_id, species_by_photo, photos_only=False, *, identities_by_photo=None,
 ):
     """Rewrite the on-disk pipeline cache so its per-photo, per-burst, and
     per-encounter species fields match ``species_by_photo`` — a
@@ -1976,6 +1976,8 @@ def refresh_cache_species_for_photos(
         names = [n for n in (species_by_photo.get(p["id"]) or []) if n]
         p["confirmed_species"] = names[0] if names else None
         p["confirmed_species_list"] = list(names)
+        if identities_by_photo is not None:
+            p["confirmed_species_identities"] = list(identities_by_photo.get(p["id"]) or [])
 
     photos_by_id = {p.get("id"): p for p in data.get("photos", [])}
     for enc in data.get("encounters", []) if not photos_only else []:

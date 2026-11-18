@@ -122,7 +122,10 @@ def create_history_blueprint(
             if saved_before_grouping or action in ("identity_alternatives", "assignment_review"):
                 from services.identity_alternatives import refresh_species_caches
                 return not refresh_species_caches(db, os.path.dirname(db_path), photo_ids)
-            species_by_photo = db.photo_species.get_species_for_photos(photo_ids)
+            with db.transaction(join=True):
+                db.hold_read_snapshot()
+                identities = db.photo_species.get_species_for_photos(photo_ids, include_identities=True)
+            species_by_photo = {pid: [entry['name'] for entry in identities.get(pid, [])] for pid in photo_ids}
             # Photos with no surviving species tags must still be included so
             # the cache clears their confirmed_species_list — get_species_
             # keywords_for_photos omits them entirely.
@@ -136,7 +139,7 @@ def create_history_blueprint(
             # changed them.
             refresh_cache_species_for_photos(
                 cache_dir, db.active_workspace_id, species_by_photo,
-                photos_only=True,
+                photos_only=True, identities_by_photo=identities,
             )
         except Exception:  # broad: the undo already committed; a stale pipeline cache must not fail it
             log.exception(

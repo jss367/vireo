@@ -1301,10 +1301,22 @@ def test_pre_grouping_confirmation_survives_grouping_and_one_undo(app_and_db, tm
                 for pid in enc['photo_ids']}
 
     assert confirmed() == {1, 3}
+
+    def assert_cached_identities():
+        cache = load_results_raw(str(tmp_path), ws)
+        actual = db.photo_species.get_species_for_photos([1, 3], include_identities=True)
+        for photo in cache['photos']:
+            if photo['id'] in (1, 3):
+                assert photo['confirmed_species_identities'] == actual.get(photo['id'], [])
+                assert photo['confirmed_species_list'] == [entry['name'] for entry in actual.get(photo['id'], [])]
+
+    assert_cached_identities()
     assert client.post('/api/undo').get_json()['entry_id'] == edit_id
     assert confirmed() == set()
+    assert_cached_identities()
     assert client.post('/api/redo').get_json()['entry_id'] == edit_id
     assert confirmed() == {1, 3}
+    assert_cached_identities()
 
 
 def test_pre_grouping_preview_checks_all_source_memberships(app_and_db):
