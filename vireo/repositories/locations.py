@@ -92,7 +92,7 @@ class LocationRepository:
         conditions = [
             "wf.workspace_id = ?",
             "((p.latitude IS NOT NULL AND p.longitude IS NOT NULL) "
-            " OR (kl.latitude IS NOT NULL AND kl.longitude IS NOT NULL))",
+            " OR g.photo_id IS NOT NULL OR (kl.latitude IS NOT NULL AND kl.longitude IS NOT NULL))",
         ]
         params = [self.workspace_id_fn()]
 
@@ -133,6 +133,7 @@ class LocationRepository:
         join_clause = (
             "JOIN photo_workspace_visibility wf ON wf.photo_id = p.id"
             "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')"
+            "\nLEFT JOIN reviewed_gps g ON g.photo_id = p.id"
             f"\n{location_subquery}"
         )
         where = "WHERE " + " AND ".join(conditions)
@@ -150,11 +151,14 @@ class LocationRepository:
 
         query = f"""
             SELECT p.id,
-                   CASE WHEN p.latitude IS NOT NULL AND p.longitude IS NOT NULL
+                   CASE WHEN g.photo_id IS NOT NULL THEN g.latitude
+                        WHEN p.latitude IS NOT NULL AND p.longitude IS NOT NULL
                         THEN p.latitude ELSE kl.latitude END AS latitude,
-                   CASE WHEN p.latitude IS NOT NULL AND p.longitude IS NOT NULL
+                   CASE WHEN g.photo_id IS NOT NULL THEN g.longitude
+                        WHEN p.latitude IS NOT NULL AND p.longitude IS NOT NULL
                         THEN p.longitude ELSE kl.longitude END AS longitude,
-                   CASE WHEN p.latitude IS NOT NULL AND p.longitude IS NOT NULL
+                   CASE WHEN g.photo_id IS NOT NULL THEN 'reviewed_gps'
+                        WHEN p.latitude IS NOT NULL AND p.longitude IS NOT NULL
                         THEN 'exif' ELSE 'keyword' END AS coord_source,
                    CASE WHEN p.latitude IS NOT NULL AND p.longitude IS NOT NULL
                         THEN NULL ELSE kl.name END AS keyword_location_name,
@@ -414,8 +418,9 @@ class LocationRepository:
                       AND k_loc.longitude IS NOT NULL
                 )
                 SELECT p.id,
-                       p.latitude AS photo_latitude,
-                       p.longitude AS photo_longitude,
+                       COALESCE(g.latitude, p.latitude) AS photo_latitude,
+                       COALESCE(g.longitude, p.longitude) AS photo_longitude,
+                       g.photo_id AS reviewed_id,
                        kl.latitude AS keyword_latitude,
                        kl.longitude AS keyword_longitude,
                        kl.name AS keyword_location_name,
@@ -423,6 +428,7 @@ class LocationRepository:
                 FROM selected s
                 JOIN photos p ON p.id = s.id
                 {workspace_join}
+                LEFT JOIN reviewed_gps g ON g.photo_id = p.id
                 LEFT JOIN ranked_locations kl
                   ON kl.photo_id = p.id AND kl.rn = 1
                 """,
@@ -438,7 +444,7 @@ class LocationRepository:
                         "photo_id": row["id"],
                         "latitude": row["photo_latitude"],
                         "longitude": row["photo_longitude"],
-                        "source": "exif",
+                        "source": "reviewed_gps" if row["reviewed_id"] else "exif",
                         "keyword_location_name": None,
                         "place_id": None,
                     }

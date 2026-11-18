@@ -3,6 +3,7 @@
 // Integrity tab.
 // ES module.
 
+import { runGpsCheck } from './gps.js';
 import { byId } from './helpers.js';
 import { bindTabs, loadSummary, runAllChecks } from './summary.js';
 import { bindDriftTable, resolveAll, runDriftCheck } from './drift.js';
@@ -29,6 +30,7 @@ onClick('btnImportAllUntracked', importAllUntracked);
 onClick('sendToPipelineBtn', sendToPipeline);
 onClick('btnSidecars', runSidecarCheck);
 onClick('btnDeleteAllSidecars', deleteAllSidecars);
+onClick('btnGps', runGpsCheck);
 onClick('btnClocks', runClockCheck);
 onClick('btnVerify', runHashVerify);
 bindDriftTable();

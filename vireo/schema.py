@@ -30,6 +30,7 @@ from canonical_schema import (
     create_formerly_lazy_objects,
     create_identity_alternatives,
     create_photo_versions,
+    create_reviewed_gps,
     create_same_shot_reviews,
     create_species_choices,
     create_subject_candidates,
@@ -435,6 +436,7 @@ MIGRATIONS = (
     Migration(35, "subject_detail", _add_subject_detail, _validate_subject_detail),
     Migration(36, "species_choices", create_species_choices),
     Migration(37, "subject_candidates", create_subject_candidates),
+    Migration(38, "reviewed_gps", create_reviewed_gps),
 )
 
 

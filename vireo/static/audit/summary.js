@@ -3,6 +3,7 @@
 // ES module.
 
 import { CHECK_LABELS } from './state.js';
+import { runGpsCheck } from './gps.js';
 import { byId, errorMessage } from './helpers.js';
 import { safeFetch, timeAgo } from './shared.js';
 import { runDriftCheck } from './drift.js';
@@ -115,6 +116,8 @@ export async function runAllChecks() {
     await runSidecarCheck();
     note.textContent = 'Checking camera clocks…';
     await runClockCheck();
+    note.textContent = 'Checking GPS jumps…';
+    await runGpsCheck();
     note.textContent = 'Verifying file hashes…';
     await runHashVerify();
   } finally {

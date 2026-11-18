@@ -4361,3 +4361,22 @@ def test_export_renderer_rejects_unknown_source_folder(export_env, monkeypatch):
     photo = env["db"].photos.get_by_ids([env["p1"]])[env["p1"]]
     with pytest.raises(FileNotFoundError, match="source file missing"):
         export_mod.load_export_image(photo, env["vireo_dir"], {})
+
+
+def test_export_uses_reviewed_gps(export_env):
+    from metadata import exiftool_available, extract_metadata
+
+    if not exiftool_available():
+        pytest.skip("ExifTool is not available")
+    env = export_env
+    db, pid = env["db"], env["p1"]
+    db.conn.execute("UPDATE photos SET latitude=44, longitude=-117 WHERE id=?", (pid,))
+    db.audit.apply_gps_review([pid], "test evidence", latitude=44.02, longitude=-117.03)
+    db.commit()
+    result = export_photos(db, env["vireo_dir"], [pid], env["dest"], options={
+        "collect_files": True, "metadata_fields": ["location"],
+    })
+    assert result["errors"] == []
+    path, = result["files"]
+    assert extract_metadata([path])[path]["Composite"]["GPSPosition"] == "44.02 -117.03"
+    assert result["metadata_summary"]["location_coordinates"] == {"catalog_reviewed_gps": 1}

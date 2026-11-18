@@ -1160,6 +1160,12 @@
   ],
   [
    "table",
+   "reviewed_gps",
+   "reviewed_gps",
+   "CREATE TABLE reviewed_gps (\n        photo_id INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,\n        latitude REAL NOT NULL, longitude REAL NOT NULL, evidence TEXT NOT NULL\n    )"
+  ],
+  [
+   "table",
    "photo_exif_search_text",
    "photo_exif_search_text",
    "CREATE TABLE photo_exif_search_text (\n            photo_id   INTEGER PRIMARY KEY\n                REFERENCES photos(id) ON DELETE CASCADE ON UPDATE CASCADE,\n            value_text TEXT NOT NULL\n        )"
