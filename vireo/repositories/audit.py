@@ -26,6 +26,7 @@ from typing import Any
 
 from repositories.photo_row_deletion import photo_row_deletion
 from repositories.photo_sql import CAPTURE_TIME_STATE_SQL
+from repositories.prediction_review import prediction_review_join, prediction_review_status
 from repositories.subject_order import primary_order_sql
 
 
@@ -103,12 +104,10 @@ class AuditRepository:
             SELECT e.id, e.filename, e.detection_id,
                    d.id IS NOT NULL AND NOT EXISTS (
                        SELECT 1 FROM predictions pr
-                       LEFT JOIN prediction_review pr_rev
-                              ON pr_rev.prediction_id = pr.id
-                             AND pr_rev.workspace_id = ?
+                       {prediction_review_join('pr')}
                        WHERE pr.detection_id = d.id
                          AND pr.species IS NOT NULL
-                         AND COALESCE(pr_rev.status, 'pending') != 'rejected'
+                         AND {prediction_review_status()} != 'rejected'
                          AND pr.labels_fingerprint = (
                              SELECT pr2.labels_fingerprint FROM predictions pr2
                              WHERE pr2.detection_id = pr.detection_id
@@ -118,13 +117,11 @@ class AuditRepository:
                    ) AND EXISTS (
                        SELECT 1 FROM detections old
                        JOIN predictions pr ON pr.detection_id = old.id
-                       LEFT JOIN prediction_review pr_rev
-                              ON pr_rev.prediction_id = pr.id
-                             AND pr_rev.workspace_id = ?
+                       {prediction_review_join('pr')}
                        WHERE old.photo_id = e.id
                          AND old.detector_model = 'full-image'
                          AND pr.species IS NOT NULL
-                         AND COALESCE(pr_rev.status, 'pending') != 'rejected'
+                         AND {prediction_review_status()} != 'rejected'
                          AND pr.labels_fingerprint = (
                              SELECT pr2.labels_fingerprint FROM predictions pr2
                              WHERE pr2.detection_id = pr.detection_id
