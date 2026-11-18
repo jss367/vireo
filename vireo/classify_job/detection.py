@@ -585,14 +585,10 @@ def _analyze_subjects(
     """Subject-analysis pass of ``_detect_batch`` (see its comments)."""
     from subjects import analyze_photo
 
-    # Resolve the working-copy JPEG first when the caller supplied a
-    # ``vireo_dir``: cached-detection photos on an offline NAS still
-    # have a usable local preview, and the on-demand Analyze route
-    # already reads from it. Building only the source folder path
-    # would fail ``os.stat`` inside ``analyze_photo`` and leave those
-    # photos permanently without subject quality/crop/exposure data.
+    # RAW coordinates require the original. For other formats an available
+    # working copy still supports box analysis when the source is offline.
     if vireo_dir:
-        from image_loader import get_canonical_image_path
+        from image_loader import subject_box_image_path
 
     # Project the preceding frame before its burst neighbor reads that box.
     def capture_order(photo: sqlite3.Row) -> tuple[str, int]:
@@ -620,7 +616,7 @@ def _analyze_subjects(
             continue
         checkpoint()
         if vireo_dir:
-            image_path = get_canonical_image_path(photo, vireo_dir, folders)
+            image_path = subject_box_image_path(photo, vireo_dir, folders)
         else:
             image_path = os.path.join(folders.get(photo["folder_id"], ""), photo["filename"])
         try:

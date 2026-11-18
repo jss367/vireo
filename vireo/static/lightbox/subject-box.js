@@ -65,7 +65,7 @@ export function openSubjectBox(photoId, saved) {
     status.textContent = 'Saving selected subject…';
     try {
       const result = /** @type {NavSubjectData} */ (await safeFetch('/api/photos/' + photoId + '/subjects/reviewer-box', {
-        method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({box})
+        method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({box, frame: 'aligned-original-v1'})
       }, {toast: false}));
       if (dialog.isConnected) { saved(result); close(); }
     } catch (error) {
@@ -73,5 +73,5 @@ export function openSubjectBox(photoId, saved) {
     } finally { saving = false; save.disabled = false; }
   });
   document.body.append(dialog); dialog.showModal();
-  image.src = '/photos/' + photoId + '/preview?view=source&size=1920';
+  image.src = '/photos/' + photoId + '/preview?view=subject&size=1920';
 }

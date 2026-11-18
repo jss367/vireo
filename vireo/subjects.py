@@ -15,7 +15,7 @@ import numpy as np
 from focus_point import FocusMatch
 from services import detection_store
 
-ANALYSIS_VERSION = 2
+ANALYSIS_VERSION = 3
 REVIEWER_MODEL = "reviewer-selected"
 _BURST_REFRESH = ThreadPoolExecutor(max_workers=1, thread_name_prefix="burst-subject-refresh")
 
@@ -147,6 +147,7 @@ def _current_analysis_results(db, photo_id, pending, results, detection_id, min_
     # IDs quantize coordinates: both scoped and unscoped work must compare
     # the exact geometry, including edits that retain the same detection ID.
     valid = {d["id"] for d in pending if d["id"] in current
+             and current[d["id"]].get("runtime_fingerprint") == d.get("runtime_fingerprint")
              and all(current[d["id"]]["box_" + k] == d["box_" + k] for k in "xywh")}
     if detection_id is not None and detection_id not in valid:
         raise ValueError("Chosen subject changed during analysis; select it again")
@@ -378,7 +379,7 @@ def payload(db, photo_id):
             "rejected": rejected}
 
 
-def select_reviewer_box(db, photo_id, box):
+def select_reviewer_box(db, photo_id, box, *, aligned_frame=False):
     """Save an explicit human region separately from model output, then select it.
 
     Coordinates use the upright, unedited source frame. The stored confidence
@@ -386,6 +387,8 @@ def select_reviewer_box(db, photo_id, box):
     model probability. No detector run or species prediction is manufactured.
     Caller holds the photo lock.
     """
+    from detection_id import ALIGNED_REVIEWER_RUNTIME
+
     if not isinstance(box, dict) or set(box) != set("xywh"):
         raise ValueError("box must contain x, y, w and h")
     if any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in box.values()):
@@ -405,7 +408,7 @@ def select_reviewer_box(db, photo_id, box):
         # Clear previous measurements even if a legacy catalog lacks primary state.
         db.subjects.clear_primary_features(photo_id)
         ids = db.detections.upsert_rows(photo_id, REVIEWER_MODEL, [
-            {"box": box, "confidence": 1.0, "category": "animal"}], "reviewer-v1")
+            {"box": box, "confidence": 1.0, "category": "animal"}], ALIGNED_REVIEWER_RUNTIME if aligned_frame else "reviewer-v1")
         # Re-saving an identical or quantization-equivalent box reuses its ID.
         # Retire that ID's cached box analysis before sync_primary can project it.
         db.subjects.clear_analysis(ids[0])

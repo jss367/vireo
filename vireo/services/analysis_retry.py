@@ -267,7 +267,7 @@ def _refresh_box_analysis(db: Database, pid: int, detection_id: int, cache_dir: 
     without them. Runs after the photo lock is released because
     ``analyze_photo`` takes that lock itself.
     """
-    from image_loader import get_canonical_image_path
+    from image_loader import subject_box_image_path
     from subject_ranking import SubjectComparison, resolve_subject
     from subjects import analyze_photo
 
@@ -280,7 +280,7 @@ def _refresh_box_analysis(db: Database, pid: int, detection_id: int, cache_dir: 
         if current is None or current["id"] != detection_id:
             raise ValueError("Primary subject changed during analysis; retry the chosen subject")
 
-    analyze_photo(db, pid, get_canonical_image_path(photo, cache_dir, folders),
+    analyze_photo(db, pid, subject_box_image_path(photo, cache_dir, folders),
                   detection_id=detection_id, force=True, checkpoint=checkpoint,
                   validate_publication=validate_primary)
 

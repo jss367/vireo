@@ -214,7 +214,9 @@ concrete examples.
 `PUT /api/photos/<id>/primary-subject` accepts `detection_id` (a retained
 animal from this photo, or null for automatic selection).
 `PUT /api/photos/<id>/subjects/reviewer-box` accepts `box: {x,y,w,h}` in
-normalized upright source coordinates. Draw a reviewer box when the detector
+normalized upright source coordinates. To record verified analysis-frame coordinates,
+draw on `GET /photos/<id>/preview?view=subject&size=1920` and include
+`"frame": "aligned-original-v1"` with the box. Draw a reviewer box when the detector
 missed the animal or its usable box falls below the detector threshold.
 Both accept optional `source` and `reason`, save one Undo step per changed
 selection, and return the subject panel with `workspace_id`, `changed` and

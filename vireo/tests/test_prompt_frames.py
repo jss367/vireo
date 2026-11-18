@@ -143,3 +143,42 @@ def test_detector_runtime_identity_changes_with_decode_recipe(tmp_path, monkeypa
     assert current != old
     assert computation_cache._is_recognized_detector_runtime("megadetector-v6", current)
     assert not computation_cache._is_recognized_detector_runtime("megadetector-v6", old)
+
+
+def test_redrawing_on_aligned_original_repairs_legacy_reviewer_box(app_and_db, cropped_raw_scene, tmp_path):
+    import io
+
+    from image_loader import subject_box_image_path
+    from subjects import analyze_photo
+
+    app, db = app_and_db
+    source = cropped_raw_scene
+    folder = workspace_folders.add_folder(db, str(source.parent), name="Reviewer frame")
+    pid = photo_ingest.add_photo(db, folder, source.name, ".nef", source.stat().st_size, source.stat().st_mtime)
+    # A JPEG companion can have different framing even with the original online.
+    companion = tmp_path / "working.jpg"
+    Image.new("RGB", (1600, 800), "green").save(companion)
+    db.conn.execute("UPDATE photos SET working_copy_path=? WHERE id=?", (companion.name, pid))
+    db.commit()
+    photo = db.photos.get(pid)
+    path = subject_box_image_path(photo, str(tmp_path), {folder: str(source.parent)})
+    assert path == str(source)
+    client = app.test_client()
+    url = f"/api/photos/{pid}/subjects/reviewer-box"
+    box = {"x": .4, "y": .65, "w": .2, "h": .1}
+    previous = client.put(url, json={"box": box}).get_json()["primary_detection_id"]
+    with pytest.raises(ValueError, match="draw the box again"):
+        analyze_photo(db, pid, path, detection_id=previous)
+    response = client.get(f"/photos/{pid}/preview?view=subject&size=1920")
+    assert response.status_code == 200
+    with Image.open(io.BytesIO(response.data)) as frame:
+        assert frame.size == (1600, 1000)
+        assert frame.getpixel((800, 700))[0] > 200
+    result = client.put(url, json={"box": box, "frame": "aligned-original-v1"}).get_json()
+    assert result["primary_detection_id"] == previous
+    assert analyze_photo(db, pid, path, detection_id=previous) == 1
+    assert client.post("/api/undo").status_code == 200
+    with pytest.raises(ValueError, match="draw the box again"):
+        analyze_photo(db, pid, path, detection_id=previous, force=True)
+    assert client.post("/api/redo").status_code == 200
+    assert analyze_photo(db, pid, path, detection_id=previous, force=True) == 1

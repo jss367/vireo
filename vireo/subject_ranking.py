@@ -158,7 +158,7 @@ def analysis_key(path, detection, effective_cfg):
         except FileNotFoundError:
             weights.append((weight, None))
     inputs = [ANALYSIS_RECIPE_VERSION, EYE_KP_FINGERPRINT_VERSION, detection.get("prediction_fingerprint"), os.path.realpath(path), stat.st_size, stat.st_mtime_ns, detection["id"],
-              detection["detector_model"], [detection["box_" + k] for k in "xywh"], 1024,
+              detection["detector_model"], dict(detection).get("runtime_fingerprint"), [detection["box_" + k] for k in "xywh"], 1024,
               {k: pipeline.get(k, default) for k, default in (
                   ("sam2_variant", "sam2-small"), ("eye_detect_enabled", False),
                   ("eye_classifier_conf_gate", .5), ("eye_detection_conf_gate", .5), ("eye_window_k", .08))}, weights]

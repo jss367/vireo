@@ -229,6 +229,26 @@ class _PreviewServer:
             return fixed  # 0 = "full" — handled by /original path
         return fixed | {int(pm)}
 
+    def _serve_subject_frame(self, photo_id: int, size: int) -> ResponseReturnValue:
+        """Serve the original in the coordinate system used for subject analysis."""
+        import io
+
+        from image_loader import RAW_DECODE_ALIGNED, load_image
+
+        db = self._get_db()
+        photo = db.photos.get(photo_id, verify_workspace=True)
+        folder = db.folders.get(photo["folder_id"]) if photo is not None else None
+        if folder is None or photo is None:
+            return "Photo unavailable", 404
+        image = load_image(os.path.join(folder["path"], photo["filename"]), max_size=size, raw_decode=RAW_DECODE_ALIGNED)
+        if image is None:
+            return "Original subject frame unavailable", 404
+        with image, io.BytesIO() as data:
+            image.save(data, format="JPEG", quality=90)
+            response = Response(data.getvalue(), mimetype="image/jpeg")
+        response.cache_control.no_store = True
+        return response
+
     def _serve_source_frame(self, photo_id: int, size: int) -> ResponseReturnValue:
         """Serve the cached upright, unedited frame used for manual placement."""
         import config as cfg
@@ -555,6 +575,8 @@ class _PreviewServer:
             return "Invalid size", 400
         if size not in self.allowed_preview_sizes():
             return "Unsupported size", 400
+        if request.args.get("view") == "subject":
+            return self._serve_subject_frame(photo_id, size)
         if request.args.get("view") == "source":
             return self._serve_source_frame(photo_id, size)
         return self._serve_preview(photo_id, size, _prepare_source=_prepare_source)

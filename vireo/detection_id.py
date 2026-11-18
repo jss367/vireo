@@ -12,6 +12,8 @@ silent precision loss when ids ride through JSON to the frontend.
 """
 import hashlib
 
+ALIGNED_REVIEWER_RUNTIME = "reviewer-aligned-v1"
+
 
 def positive_int_hash(*parts: str) -> int:
     """Return a 52-bit non-negative int derived from SHA-256 of the parts.

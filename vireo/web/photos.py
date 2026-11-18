@@ -1584,7 +1584,7 @@ def create_photos_blueprint(
         vireo_dir = media_root(config["THUMB_CACHE_DIR"])
 
         def work(job: JobDict) -> JsonDict:
-            from image_loader import get_canonical_image_path
+            from image_loader import subject_box_image_path
             from subject_analysis import analyze_selected_subject
             from subject_ranking import SubjectComparison
             from subjects import analyze_photo
@@ -1596,7 +1596,7 @@ def create_photos_blueprint(
                 if photo is None:
                     raise ValueError("Photo is no longer in this workspace")
                 folders = {f["id"]: f["path"] for f in thread_db.folders.tree()}
-                path = get_canonical_image_path(photo, vireo_dir, folders)
+                path = subject_box_image_path(photo, vireo_dir, folders)
                 job["progress"]["current_file"] = photo["filename"]
                 count = analyze_photo(thread_db, photo_id, path, detection_id=detection_id,
                                       force=detection_id is not None, checkpoint=lambda: ctx.checkpoint(job))

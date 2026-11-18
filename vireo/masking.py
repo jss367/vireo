@@ -455,7 +455,12 @@ def require_aligned_detector_prompt(image, detector_runtime):
     if not getattr(image, "info", {}).get("vireo_rejected_preview_edge"):
         return
     from computation_cache import megadetector_runtime_fingerprint
+    from detection_id import ALIGNED_REVIEWER_RUNTIME
 
+    if detector_runtime == ALIGNED_REVIEWER_RUNTIME:
+        return
+    if detector_runtime == "reviewer-v1":
+        raise PromptFrameError("This reviewer box uses an unverified RAW frame. Open Subjects and draw the box again on the original.")
     current = megadetector_runtime_fingerprint()
     if current is None or detector_runtime != current:
         raise PromptFrameError("Detector coordinates use an unverified RAW frame; enable Re-classify to rerun detection before subject analysis")

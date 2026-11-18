@@ -804,6 +804,13 @@ def _photo_field(photo, key):
         return None
 
 
+def subject_box_image_path(photo, vireo_dir, folders):
+    """RAW box coordinates refer to the original, even when a local JPEG exists."""
+    if Path(photo["filename"]).suffix.lower() in RAW_EXTENSIONS:
+        return os.path.join(folders.get(photo["folder_id"], ""), photo["filename"])
+    return get_canonical_image_path(photo, vireo_dir, folders)
+
+
 def get_canonical_image_path(photo, vireo_dir, folders):
     """Return the canonical image path for a photo — the root of the pyramid.
 
