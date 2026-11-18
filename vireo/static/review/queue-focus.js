@@ -39,10 +39,11 @@ async function rqLoadCrop() {
   }
   var sequence = reviewQueue.cropSequence;
   var photoId = reviewQueue.current.id;
-  var manual = !!rqItem(photoId).center;
-  var url = '/photos/' + photoId + '/focus-crop?size=512&source=' + reviewQueue.source + '&center=' + center.join(',');
+  var item = rqItem(photoId);
+  var url = '/photos/' + photoId + '/focus-crop?size=512&source=' + reviewQueue.source +
+    (item.center ? '&center=' + center.join(',') : '&basis=head&detection_id=' + item.subject);
   rqElement('rqCropStatus').textContent = 'Loading native focus pixels…';
-  rqMarkCenter(center);
+  rqMarkCenter(item.center);
   try {
     var response = await fetch(url, {cache: 'no-store'});
     if (!response.ok) {
@@ -61,8 +62,17 @@ async function rqLoadCrop() {
     image.hidden = false;
     var h = response.headers;
     var scale = h.get('X-Vireo-Focus-Original-Scale') || 'unknown';
-    rqElement('rqCropStatus').textContent = (manual ? 'Manual center; verify eye visibility. ' :
-      'Subject-box center; the head or eye may be outside this crop. ') + 'Source: ' + (h.get('X-Vireo-Focus-Source') || 'unknown') +
+    var actual = (h.get('X-Vireo-Focus-Center') || '').split(',').map(Number);
+    if (actual.length === 2 && actual.every(Number.isFinite)) rqMarkCenter(/** @type {[number,number]} */ (actual));
+    var basis = h.get('X-Vireo-Focus-Basis');
+    var label = basis === 'head' ? 'Centered on estimated head landmarks. Verify visibility in the full frame. ' :
+      basis === 'eye' ? 'Eye-centered on the selected animal. ' : basis === 'point' ? 'Manual center. ' :
+        'No verified head location for this source. Showing the subject box center. ';
+    if (basis === 'subject' && reviewQueue.source === 'working') label += 'Choose Original to check for head landmarks. ';
+    var edges = h.get('X-Vireo-Focus-Source-Edges');
+    rqElement('rqCropStatus').textContent = label +
+      (edges && edges !== 'none' ? 'Window reaches the source edge (' + edges + '). ' : '') +
+      (h.get('X-Vireo-Focus-Subject-Clipped') === '1' ? 'Part of the subject box lies outside this window. ' : '') + 'Source: ' + (h.get('X-Vireo-Focus-Source') || 'unknown') +
       ' · decoded raster: ' + (h.get('X-Vireo-Focus-Raster-Size') || 'unknown') + ' px · original pixel scale: ' + scale +
       '. One crop pixel per decoded raster pixel; displayed at native size (scroll for more).' +
       (scale !== 'unknown' && Number(scale) < 0.98 ? ' This raster is smaller than the original; it is not a full-resolution RAW inspection.' : '') +
@@ -92,9 +102,8 @@ function rqRenderSubjects() {
     'No cached box analysis is recorded for this subject.') +
     ' Subject choice and manual centering only change this inspection. They do not change the saved primary, rankings, or analysis.' +
     (item.center ? ' Using the saved manual center; verify that the head or eye is visible.' :
-      hasBox ? ' Focus window uses the subject box center; the head or eye may be outside the crop.' :
-        ' No usable subject box; place a manual head or eye center.') +
-    ' No current subject-bound eye evidence is verified in this view. Use Inspect head / eye to place a center on the intended animal.';
+      hasBox ? ' Head inspection uses available landmarks for the selected subject.' :
+        ' No usable subject box; place a manual head or eye center.');
   /** @type {HTMLSelectElement} */ (rqElement('rqSource')).value = reviewQueue.source;
 }
 

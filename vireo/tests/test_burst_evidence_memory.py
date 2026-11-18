@@ -189,6 +189,12 @@ class Image:
     def __init__(self, size=(3000, 2000), events=None, kind="image"):
         self.size, self.mode, self.events, self.kind = size, "RGB", events if events is not None else [], kind
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
     def crop(self, box):
         self.events.append(("crop", self.kind, box))
         return Image((box[2] - box[0], box[3] - box[1]), self.events, self.kind)
@@ -258,7 +264,17 @@ def focus(photo=None, args=None, size=(3000, 2000), enabled=True, mask_path=None
             MAX_FOCUS_CROP_SIZE=1024,
             numeric_query_arg=pure["numeric_query_arg"],
         ),
+        "subject_ranking": types.SimpleNamespace(
+            SubjectComparison=lambda **kwargs: kwargs,
+            resolve_subject=lambda db, pid, choice: (
+                next(row for row in (db.get_detections(pid) or [active_prompt])
+                     if row["id"] == choice["subject_overrides"][pid]), {}),
+            cached_analysis=lambda *args: (None, None),
+            source_path=forbidden,
+        ),
+        "detection_id": types.SimpleNamespace(detection_prompt_runtime=lambda row: None, prompt_frame_id=lambda runtime: None),
         "image_loader": types.SimpleNamespace(
+            RAW_DECODE_ALIGNED="aligned_camera_rendered",
             load_working_image=loader,
             load_image=lambda path, max_size=None: events.append(("original", path)) or Image(original_size or size, events, "original"),
         ),
@@ -306,7 +322,8 @@ def focus(photo=None, args=None, size=(3000, 2000), enabled=True, mask_path=None
     ns["get_db"] = lambda: db
     nested("web/media_common.py", ns, {"_focus_source_image"})
     nested("web/media_crops.py", ns, {"serve_focus_crop", "_focus_mask_bytes", "_validated_focus_source", "_focus_geometry_error",
-                                          "_needs_primary_focus_subject", "_requested_focus_mask", "_focus_masked_crop"})
+                                          "_needs_primary_focus_subject", "_requested_focus_mask", "_focus_masked_crop",
+                                          "_focus_response", "_head_response", "_head_selection"})
     route = types.SimpleNamespace(_get_db=ns["get_db"], _config=ns["config"], _db_path=ns["db_path"], _json_error=ns["json_error"])
     return ns["serve_focus_crop"](route, 1), events
 
