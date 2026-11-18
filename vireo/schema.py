@@ -393,14 +393,16 @@ def _merge_species_highlights(conn):
     comparisons (every photo over the ones ranked after it), and a photo that
     was already a representative is recorded over the highlights that were
     not, because it led the page ahead of them. Where those two disagree the
-    representative wins: its comparisons are written last, and the newest
-    decision is the one kept.
+    representative wins among the synthesized comparisons written last.
+    Existing curated comparisons retain precedence over every synthesized
+    edge, including when several legacy edges form a conflicting chain.
     """
     create_species_choices(conn)
     if conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'species_highlights'"
     ).fetchone() is None:
         return
+    curated_through = conn.execute("SELECT COALESCE(MAX(id), 0) FROM species_choices").fetchone()[0]
     ranked: dict[tuple[int, str], list[int]] = {}
     for row in conn.execute(
         """SELECT workspace_id, species, photo_id FROM species_highlights
@@ -462,21 +464,33 @@ def _merge_species_highlights(conn):
     for species, photo_ids in added.items():
         for representative in representatives.get(species, ()):
             record(species, representative, photo_ids)
-    comparisons = [
-        Comparison(row[0], row[1], row[2])
-        for row in conn.execute(
-            """SELECT c.id, c.photo_id, l.photo_id
-               FROM species_choices c
-               JOIN species_choice_losers l ON l.choice_id = c.id"""
-        ).fetchall()
-    ]
-    _kept, contradicted = split_contradictions(comparisons)
-    conn.executemany(
-        "DELETE FROM species_choice_losers WHERE choice_id = ? AND photo_id = ?",
-        [(c.choice_id, c.worse) for c in contradicted],
-    )
+    _discard_migrated_highlight_contradictions(conn, curated_through)
     conn.execute("DROP TABLE species_highlights")
 
+
+def _discard_migrated_highlight_contradictions(conn, curated_through):
+    """Resolve synthesized edges below existing choices without rewriting them."""
+    comparisons = [Comparison(*row) for row in conn.execute(
+        """SELECT c.id, c.photo_id, l.photo_id
+           FROM species_choices c
+           JOIN species_choice_losers l ON l.choice_id = c.id
+           UNION ALL
+           SELECT c.id, w.photo_id, c.photo_id
+           FROM species_choices c
+           JOIN species_choice_winners w ON w.choice_id = c.id"""
+    )]
+    # Virtual choice ids express migration priority only during resolution.
+    # Existing decisions retain newest-first precedence among themselves.
+    choices = sorted({c.choice_id for c in comparisons},
+                     key=lambda cid: (cid <= curated_through, cid))
+    priority = {choice_id: index for index, choice_id in enumerate(choices)}
+    virtual = [Comparison(priority[c.choice_id], c.better, c.worse) for c in comparisons]
+    _kept, contradicted = split_contradictions(virtual)
+    conn.executemany(
+        "DELETE FROM species_choice_losers WHERE choice_id = ? AND photo_id = ?",
+        [(choices[c.choice_id], c.worse) for c in contradicted
+         if choices[c.choice_id] > curated_through],
+    )
 
 def _validate_merged_species_highlights(conn):
     conn.execute("SELECT choice_id, photo_id FROM species_choice_winners LIMIT 0")
