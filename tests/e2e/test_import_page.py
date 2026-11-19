@@ -2630,7 +2630,9 @@ def test_mounted_nas_offers_managed_local_processing(live_server, page):
     page.locator("#chkLocalProcessing").uncheck()
     assert page.evaluate("localProcessingRequest()") is False
     assert page.evaluate("deferNasTransferRequest()") is False
-    expect(page.locator("#destModeHint")).to_contain_text("mounted volume")
+    hint = page.locator("#destModeHint")
+    expect(hint).to_contain_text("Synology NAS")
+    expect(hint).to_contain_text("/Volumes/Photography")
     page.locator("#chkLocalProcessing").check()
     page.locator("#afterImportSelect").select_option("__none__")
     expect(page.locator("#localProcessingRow")).to_be_hidden()
