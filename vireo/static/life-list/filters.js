@@ -72,30 +72,35 @@ export function populateLifeListTaxonomyFilters() {
   return String(name || '').replace(/^[\u0027\u0060\u00B4\u02B9\u02BB\u02BC\u2018\u2019\u201B]+/, '');
 }
 
-/** @param {LifeSpecies} a @param {LifeSpecies} b */ export function compareLifeListSpeciesAlphabetically(a, b) {
-  var aName = String(a.species || '');
-  var bName = String(b.species || '');
+/** @param {LifeSpecies} entry @param {boolean} useEbird */
+export function displayBirdName(entry, useEbird) {
+  return (useEbird && entry.ebird_common_name) || entry.species;
+}
+
+/** @param {LifeSpecies} a @param {LifeSpecies} b @param {boolean} useEbird */ export function compareLifeListSpeciesAlphabetically(a, b, useEbird) {
+  var aName = displayBirdName(a, useEbird);
+  var bName = displayBirdName(b, useEbird);
   return lifeListAlphabeticalName(aName).localeCompare(lifeListAlphabeticalName(bName))
     || aName.localeCompare(bName);
 }
 
-export function sortedSpecies() {
+/** @param {boolean} useEbird */ export function sortedSpecies(useEbird) {
   var sort = /** @type {HTMLSelectElement} */ (document.getElementById('sortSelect')).value;
   var list = (state.currentData?.species || []).slice();
   list.sort(function(a, b) {
-    if (sort === 'alpha') return compareLifeListSpeciesAlphabetically(a, b);
+    if (sort === 'alpha') return compareLifeListSpeciesAlphabetically(a, b, useEbird);
     if (sort === 'most-photos') return b.photo_count - a.photo_count;
     if (sort === 'life-order') return a.number - b.number;
     // 'newest' — by first_seen desc, undated species last so they
     // don't masquerade as the newest lifers (server gives them the highest
     // life-list numbers for stable numbering, so reversing number is wrong).
     var af = a.first_seen, bf = b.first_seen;
-    if (!af && !bf) return compareLifeListSpeciesAlphabetically(a, b);
+    if (!af && !bf) return compareLifeListSpeciesAlphabetically(a, b, useEbird);
     if (!af) return 1;
     if (!bf) return -1;
     if (af < bf) return 1;
     if (af > bf) return -1;
-    return compareLifeListSpeciesAlphabetically(a, b);
+    return compareLifeListSpeciesAlphabetically(a, b, useEbird);
   });
   return list;
 }
@@ -106,6 +111,7 @@ export function debounceRender() {
 }
 
 export function bindLifeListControls() {
+  /** @type {HTMLSelectElement} */ (document.getElementById('birdNames')).addEventListener('change', render);
   /** @type {HTMLInputElement} */ (document.getElementById('speciesSearch')).addEventListener('input', debounceRender);
   /** @type {HTMLSelectElement} */ (document.getElementById('taxonomicGroupSelect')).addEventListener('change', render);
   /** @type {HTMLSelectElement} */ (document.getElementById('identificationRankSelect')).addEventListener('change', render);

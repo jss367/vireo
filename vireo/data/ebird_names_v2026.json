@@ -1,0 +1,72 @@
+{
+  "14850": {
+    "scientific_name": "Sturnus vulgaris",
+    "relationship": "match",
+    "targets": [
+      {
+        "species_code": "eursta",
+        "concept_id": "avibase-94A44032",
+        "common_name": "European Starling"
+      }
+    ],
+    "evidence": [
+      "https://www.inaturalist.org/taxa/14850/taxonomy_details",
+      "https://avibase.bsc-eoc.org/species.jsp?avibaseid=94A44032"
+    ]
+  },
+  "4954": {
+    "scientific_name": "Ardea cinerea",
+    "relationship": "match",
+    "targets": [
+      {
+        "species_code": "graher1",
+        "concept_id": "avibase-6429024D",
+        "common_name": "Gray Heron"
+      }
+    ],
+    "evidence": [
+      "https://www.inaturalist.org/taxa/4954/taxonomy_details",
+      "https://avibase.bsc-eoc.org/species.jsp?avibaseid=6429024D"
+    ]
+  },
+  "7601": {
+    "scientific_name": "Cistothorus palustris",
+    "relationship": "split review",
+    "targets": [
+      {
+        "species_code": "eamwre1",
+        "concept_id": "avibase-5D56DAAA",
+        "common_name": "Eastern Marsh Wren"
+      },
+      {
+        "species_code": "marwre1",
+        "concept_id": "avibase-2B20EB43",
+        "common_name": "Western Marsh Wren"
+      }
+    ],
+    "evidence": [
+      "https://api.inaturalist.org/v1/taxa/7601",
+      "https://www.birds.cornell.edu/clementschecklist/updates-and-corrections-october-2026/"
+    ]
+  },
+  "144491": {
+    "scientific_name": "Tringa semipalmata",
+    "relationship": "split review",
+    "targets": [
+      {
+        "species_code": "willet2",
+        "concept_id": "avibase-6D372C9F",
+        "common_name": "Saltmarsh Willet"
+      },
+      {
+        "species_code": "willet3",
+        "concept_id": "avibase-750C014A",
+        "common_name": "Prairie Willet"
+      }
+    ],
+    "evidence": [
+      "https://www.inaturalist.org/taxa/144491/taxonomy_details",
+      "https://www.birds.cornell.edu/clementschecklist/updates-and-corrections-october-2026/"
+    ]
+  }
+}

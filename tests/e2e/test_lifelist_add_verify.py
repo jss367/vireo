@@ -514,3 +514,39 @@ def test_unlinked_life_list_card_pages_its_own_same_named_photos(live_server, pa
         entry => entry.species === 'Shared Bird' && entry.taxon_id === null
     ).photos.map(photo => photo.id)""")
     assert set(loaded) == set(expected)
+
+
+def test_ebird_names_keep_the_confirmed_photo_and_split_identification(live_server, page):
+    db = live_server["db"]
+    birds = db.conn.execute("INSERT INTO taxa (name, rank) VALUES ('Aves', 'class')").lastrowid
+    photos = live_server["data"]["photos"]
+    for label, scientific, inat_id, photo in [
+        ("Common Starling", "Sturnus vulgaris", 14850, photos[1]),
+        ("Marsh Wren", "Cistothorus palustris", 7601, photos[2]),
+    ]:
+        taxon = db.conn.execute(
+            "INSERT INTO taxa (name, common_name, rank, inat_id, parent_id) VALUES (?, ?, 'species', ?, ?)",
+            (scientific, label, inat_id, birds),
+        ).lastrowid
+        keyword = db.keywords.add(label, is_species=True)
+        db.conn.execute("UPDATE keywords SET taxon_id=? WHERE id=?", (taxon, keyword))
+        keyword_tagging.tag_photo(db, photo, keyword)
+        db.commit()
+
+    page.goto(live_server["url"] + "/life-list")
+    starling = page.locator('.species-card[data-species="Common Starling"]')
+    expect(starling.locator(".species-name")).to_have_text("Common Starling")
+    count = page.locator(".species-card").count()
+    page.get_by_label("Bird names").select_option("ebird")
+    expect(starling.locator(".species-name")).to_have_text("European Starling")
+    expect(page.locator('.species-card[data-species="Marsh Wren"] .species-name')).to_have_text("Marsh Wren")
+    expect(page.locator(".species-card")).to_have_count(count)
+    page.reload()
+    expect(starling.locator(".species-name")).to_have_text("European Starling")
+    for name in ("Common Starling", "European Starling"):
+        page.locator("#speciesSearch").fill(name)
+        expect(page.locator(".species-card")).to_have_count(1)
+        expect(starling.locator("img")).to_have_attribute("data-photo-id", str(photos[1]))
+    starling.click()
+    expect(page.locator("#lightboxOverlay")).to_be_visible()
+    assert page.evaluate("vireoLightboxSession.requestedPhotoId()") == photos[1]

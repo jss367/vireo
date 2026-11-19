@@ -1,16 +1,16 @@
 // Species cards, paging more photos per species, and rendering the grid.
 
 import { state } from './state.js';
-import { sortedSpecies } from './filters.js';
+import { sortedSpecies, displayBirdName } from './filters.js';
 import { formatDate } from './list.js';
 import { escapeAttr, hasLightbox, openLightbox, photoThumbnailUrl, safeFetch, VireoTextSearch } from './shared.js';
 
 export const LIFE_LIST_PAGE_SIZE = 100;
 
-/** @param {LifeSpecies} entry @param {number} displayNumber */ export function renderCard(entry, displayNumber) {
+/** @param {LifeSpecies} entry @param {number} displayNumber @param {string} [displayName] */ export function renderCard(entry, displayNumber, displayName = entry.species) {
   var best = entry.best;
   var thumb = best ? photoThumbnailUrl(best) : '';
-  var sci = entry.scientific_name && entry.scientific_name !== entry.species
+  var sci = entry.scientific_name && entry.scientific_name !== displayName
     ? '<div class="species-sci">' + escapeAttr(entry.scientific_name) + '</div>'
     : '';
   var metaParts = [entry.photo_count + ' photo' + (entry.photo_count === 1 ? '' : 's')];
@@ -46,7 +46,7 @@ export const LIFE_LIST_PAGE_SIZE = 100;
     + badges
     + (best ? '<img src="' + escapeAttr(thumb) + '" data-photo-id="' + escapeAttr(best.id) + '" alt="' + escapeAttr(best.filename) + '" loading="lazy">' : '')
     + '<div class="species-info">'
-    + '<div class="species-name">' + escapeAttr(entry.species) + '</div>'
+    + '<div class="species-name">' + escapeAttr(displayName) + '</div>'
     + sci
     + '<div class="species-meta">' + metaParts.join(' &middot; ') + '</div>'
     + (locations ? '<div class="species-locations">' + locations + '</div>' : '')
@@ -119,11 +119,12 @@ export function render() {
   var taxonomicGroup = /** @type {HTMLSelectElement} */ (document.getElementById('taxonomicGroupSelect')).value;
   var identificationRank = /** @type {HTMLSelectElement} */ (document.getElementById('identificationRankSelect')).value;
   var searchOptions = VireoTextSearch.readOptions('lifeSpecies');
-  var list = sortedSpecies();
+  var useEbird = /** @type {HTMLSelectElement} */ (document.getElementById('birdNames')).value === 'ebird';
+  var list = sortedSpecies(useEbird);
   if (search) {
     list = list.filter(function(e) {
       return VireoTextSearch.matchesFields(
-        [e.species, e.scientific_name || '', e.common_name || ''],
+        [e.species, e.scientific_name || '', e.common_name || '', e.ebird_common_name || ''],
         search,
         searchOptions
       );
@@ -154,7 +155,7 @@ export function render() {
 
   var renumberView = /** @type {HTMLInputElement} */ (document.getElementById('renumberView')).checked;
   content.innerHTML = list.map(function(entry, index) {
-    return renderCard(entry, renumberView ? index + 1 : entry.number);
+    return renderCard(entry, renumberView ? index + 1 : entry.number, displayBirdName(entry, useEbird));
   }).join('')
     || '<div class="lifelist-empty" style="grid-column:1/-1;"><p>No life-list entries match these filters.</p></div>';
 
