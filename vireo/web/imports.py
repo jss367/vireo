@@ -1389,6 +1389,7 @@ def create_imports_blueprint(
             items.append({
                 "id": row["id"], "destination": row["destination"],
                 "folder_ids": folder_ids,
+                "mounted": json.loads(row["target_json"]).get("transport") == "mounted",
                 "created_at": row["created_at"],
                 "photo_count": photo_count, "cataloged_bytes": cataloged_bytes,
                 # Scoped to this archive's staging tree, not the catalog-wide
@@ -1414,6 +1415,20 @@ def create_imports_blueprint(
                     if row["state"] == "sending" and not sending else ""),
             })
         return jsonify({"items": items})
+
+    @blueprint.get("/api/import/pending-archives/<archive_id>/verification")
+    def api_pending_archive_verification(archive_id: str) -> ResponseReturnValue:
+        from move.mounted_verify import mounted_verification_target, verification_notice
+        from pending_archives import get_pending_archive
+
+        db = get_db()
+        archive = get_pending_archive(db, archive_id)
+        if archive is None:
+            return json_error("Pending NAS transfer not found in this workspace", 404)
+        if json.loads(archive["target_json"]).get("transport") != "mounted":
+            return json_error("This destination uses a direct SSH transfer", 400)
+        _, reason = mounted_verification_target(archive["destination"], db.effective_config())
+        return jsonify(verification_notice(reason, preflight=True))
 
     @blueprint.post("/api/import/pending-archives/<archive_id>/discard")
     def api_discard_pending_archive(archive_id: str) -> ResponseReturnValue:
@@ -1455,7 +1470,7 @@ def create_imports_blueprint(
             sync_job_lock.release()
 
     def _transfer_pending_archive(thread_db: Database, runner: JobRunner, job: JobDict, archive: JsonDict, sync_first: bool,
-                                  progress: Callable[..., None],
+                                  progress: Callable[..., None], steps: MoveSteps,
                                   send_pending_archive: Callable[..., JsonDict]) -> tuple[JsonDict, int, int | None]:
         """Sync staged metadata (when asked), then send the archive to NAS.
 
@@ -1487,6 +1502,7 @@ def create_imports_blueprint(
         result = send_pending_archive(
             thread_db, archive, vireo_dir=media_root(config["THUMB_CACHE_DIR"]),
             guard_folder=guard_move_folder, progress_cb=progress, control=control,
+            verification_cb=steps.verification_notice,
         )
         if sync_first:
             # Unconditionally, not just when something
@@ -1596,7 +1612,7 @@ def create_imports_blueprint(
                         progress = _send_archive_progress(runner, job, steps)
                         result, synced, residual = _transfer_pending_archive(
                             thread_db, runner, job, archive, sync_first,
-                            progress, send_pending_archive,
+                            progress, steps, send_pending_archive,
                         )
                         if sync_first:
                             result = _with_metadata_sync_summary(result, synced, residual)

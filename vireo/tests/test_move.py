@@ -6242,11 +6242,12 @@ def test_move_folder_counts_files_through_verification(move_env, merge):
     def counts(phase):
         return [(c[0], c[1]) for c in calls if c[3] == phase]
 
-    verify = counts("Verifying copy")
+    local_phase = "Verifying copy locally (NAS verification unavailable)"
+    verify = counts(local_phase)
     assert verify[0] == (0, 3)
     assert verify[-1] == (3, 3)
     assert [cur for cur, _ in verify] == sorted(cur for cur, _ in verify)
-    named = {c[2] for c in calls if c[3] == "Verifying copy" and c[2]}
+    named = {c[2] for c in calls if c[3] == local_phase and c[2]}
     assert named == {"bird1.jpg", "bird1.xmp", "bird2.jpg"}
 
     timestamps = counts("Checking timestamps")
@@ -7752,7 +7753,7 @@ def test_mounted_checksum_move_deletes_originals_only_after_verification(move_en
     env = move_env
     remote = {'host': 'nas', 'user': 'user', 'verify_path': '/Photos/src',
               'rsync_bin': binary, 'ssh_bin': 'ssh'}
-    monkeypatch.setattr(ft, 'mounted_verification_target', lambda *a: remote)
+    monkeypatch.setattr(ft, 'mounted_verification_target', lambda *a: (remote, None))
     monkeypatch.setattr(mv, '_probe_matches', lambda *a: not mode.startswith('fallback'))
     monkeypatch.setattr(mv, 'rsync_dest_spec', lambda *a: str(env['dst'] / 'src'))
     original_copy = ft._FolderTransfer.copy_tree

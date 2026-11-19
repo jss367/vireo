@@ -5851,7 +5851,7 @@ def test_pending_archive_review_delete_and_send(app_and_db, tmp_path, monkeypatc
     steps = {step["id"]: step for step in sent["steps"]}
     assert list(steps) == ["check", "copy", "timestamps", "verify", "catalog", "cleanup"]
     assert all(step["status"] == "completed" for step in steps.values()), steps
-    assert steps["verify"]["label"] == "Verify copy (compare every byte)"
+    assert steps["verify"]["label"] == "Verifying copy locally (NAS verification unavailable)"
     assert steps["verify"]["progress"]["current"] == steps["verify"]["progress"]["total"] > 0
     assert (tmp_path / "NAS" / "trip" / "keep.jpg").exists()
     assert not (tmp_path / "NAS" / "trip" / "reject.jpg").exists()

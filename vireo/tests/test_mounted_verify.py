@@ -43,23 +43,25 @@ def test_select_exact_subpath_and_do_not_redirect_symlinks(trees, monkeypatch):
     monkeypatch.setattr(mv, 'resolve_rsync_bin', lambda _: '/tools/rsync')
     monkeypatch.setattr(mv, 'resolve_ssh_bin', lambda _: '/tools/ssh')
     config = settings(dest.parent)
-    target = mv.mounted_verification_target(str(dest), config)
+    monkeypatch.setattr(mv, 'is_gnu_rsync', lambda _: True)
+    target, reason = mv.mounted_verification_target(str(dest), config)
+    assert reason is None
     assert target['verify_path'] == '/volume1/Photos/shoot'
     assert target['rsync_bin'] == '/tools/rsync'
-    assert mv.mounted_verification_target(str(dest.parent), config)['verify_path'] == '/volume1/Photos'
-    assert mv.mounted_verification_target(str(dest.parent) + '-other/shoot', config) is None
+    assert mv.mounted_verification_target(str(dest.parent), config)[0]['verify_path'] == '/volume1/Photos'
+    assert mv.mounted_verification_target(str(dest.parent) + '-other/shoot', config) == (None, 'missing_route')
     link = dest.parent / 'redirect'
     link.symlink_to(source, target_is_directory=True)
-    assert mv.mounted_verification_target(str(link), config) is None
+    assert mv.mounted_verification_target(str(link), config) == (None, 'missing_route')
     config['remote_targets'] *= 2
-    assert mv.mounted_verification_target(str(dest), config) is None
+    assert mv.mounted_verification_target(str(dest), config) == (None, 'ambiguous_route')
 
 
 def test_no_ssh_or_gnu_rsync_keeps_local_verification(trees, monkeypatch):
     _, dest, _ = trees
     monkeypatch.setattr(mv, 'resolve_rsync_bin', lambda _: None)
     monkeypatch.setattr(mv, 'resolve_ssh_bin', lambda _: '/tools/ssh')
-    assert mv.mounted_verification_target(str(dest), settings(dest.parent)) is None
+    assert mv.mounted_verification_target(str(dest), settings(dest.parent)) == (None, 'missing_rsync')
 
 
 def run_verify(trees, **kwargs):
@@ -90,7 +92,7 @@ def test_batches_preserve_paths_count_only_verified_files_and_never_read_mount(t
 
     monkeypatch.setattr(builtins, 'open', no_mounted_photo_reads)
     monkeypatch.setattr(mv, '_remote_verify_complete', checksum)
-    assert run_verify(trees, progress=lambda *a: events.append(a)) == (True, None)
+    assert run_verify(trees, progress=lambda *a: events.append(a)) == (None, None)
     assert set(calls) == {'./photo.nef', './day one/photo.xmp', './-odd\nname.jpg'}
     assert len(manifests) == 2
     assert all(not os.path.exists(p) for p in manifests)
@@ -111,13 +113,16 @@ def test_unavailable_verification_falls_back_and_cleans_probe(trees, monkeypatch
         return ('__ERROR__', 'rsync missing') if failure == 'tool' else None
 
     monkeypatch.setattr(mv, '_remote_verify_complete', checksum)
-    assert run_verify(trees) == (False, None)
+    expected = {"probe": "probe_failed", "remount": "identity_changed",
+                "ssh": "verifier_failed", "tool": "verifier_failed"}
+    assert run_verify(trees) == (expected[failure], None)
     assert not list(dest.glob('.vireo-verify-*'))
 
 
-def test_checksum_mismatch_blocks_deletion_without_fallback(trees, monkeypatch):
-    monkeypatch.setattr(mv, '_remote_verify_complete', lambda *a, **k: ('photo.nef', None))
-    assert run_verify(trees) == (True, 'photo.nef')
+@pytest.mark.parametrize('name', ['photo.nef', '__ERROR__'])
+def test_checksum_mismatch_blocks_deletion_without_fallback(trees, monkeypatch, name):
+    monkeypatch.setattr(mv, '_remote_verify_complete', lambda *a, **k: (name, None))
+    assert run_verify(trees) == (None, name)
 
 
 @pytest.mark.parametrize('damage', ['missing', 'symlink', 'hardlink', 'directory_link', 'after_hash'])
@@ -145,8 +150,8 @@ def test_mounted_structure_must_still_be_independent(trees, monkeypatch, damage)
             pytest.fail('unsafe mounted structure must be rejected before hashing')
 
     monkeypatch.setattr(mv, '_remote_verify_complete', checksum)
-    handled, mismatch = run_verify(trees)
-    assert handled and mismatch
+    reason, mismatch = run_verify(trees)
+    assert reason is None and mismatch
     assert (source / 'photo.nef').exists()
 
 
@@ -157,7 +162,7 @@ def test_source_added_during_hash_cannot_be_deleted_unverified(trees, monkeypatc
         (source / 'new.nef').write_bytes(b'new photo')
 
     monkeypatch.setattr(mv, '_remote_verify_complete', checksum)
-    assert run_verify(trees) == (True, 'source files changed during checksum verification')
+    assert run_verify(trees) == (None, 'source files changed during checksum verification')
 
 
 @pytest.mark.parametrize('change', ['rewrite', 'replace'])
@@ -174,7 +179,7 @@ def test_destination_changed_after_hash_cannot_authorize_deletion(trees, monkeyp
         os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
 
     monkeypatch.setattr(mv, '_remote_verify_complete', checksum)
-    assert run_verify(trees) == (True, 'destination files changed during checksum verification')
+    assert run_verify(trees) == (None, 'destination files changed during checksum verification')
 
 
 def test_merge_ignores_only_regular_finder_metadata(trees, monkeypatch):
@@ -187,10 +192,10 @@ def test_merge_ignores_only_regular_finder_metadata(trees, monkeypatch):
             assert b'.DS_Store' not in stream.read()
 
     monkeypatch.setattr(mv, '_remote_verify_complete', checksum)
-    assert run_verify(trees, is_merge=True) == (True, None)
+    assert run_verify(trees, is_merge=True) == (None, None)
     (source / '.DS_Store').unlink()
     (source / '.DS_Store').symlink_to('photo.nef')
-    assert run_verify(trees, is_merge=True) == (True, '.DS_Store')
+    assert run_verify(trees, is_merge=True) == (None, '.DS_Store')
 
 
 def test_cancellation_propagates_and_removes_probe(trees, monkeypatch):
@@ -235,11 +240,11 @@ def test_real_rsync_checks_same_size_corruption_and_ignores_timestamp_changes(tr
     # only the transport is replaced. No NAS or SSH service is needed in CI.
     monkeypatch.setattr(mv, 'rsync_dest_spec', lambda *a: str(dest))
     os.utime(dest / name, (1, 1))
-    assert run_verify(trees) == (True, None)
+    assert run_verify(trees) == (None, None)
     original = (source / name).read_bytes()
     (dest / name).write_bytes(b'x' * len(original))
-    handled, mismatch = run_verify(trees)
-    assert handled and mismatch == name
+    reason, mismatch = run_verify(trees)
+    assert reason is None and mismatch == name
 
 
 def test_ssh_probe_quotes_destination_and_requires_exact_nonce(monkeypatch):
@@ -254,32 +259,36 @@ def test_ssh_probe_quotes_destination_and_requires_exact_nonce(monkeypatch):
 
 
 @pytest.mark.parametrize('remote_result', [
-    (False, None), (True, 'photo.nef'), (True, None),
-    (True, 'source files changed during checksum verification'),
-    (True, 'destination files changed during checksum verification'),
+    ('probe_failed', None), (None, 'photo.nef'), (None, None),
+    (None, 'source files changed during checksum verification'),
+    (None, 'destination files changed during checksum verification'),
 ])
 def test_transfer_uses_full_byte_fallback_or_remote_verdict(trees, monkeypatch, remote_result):
     import move.folder_transfer as ft
     source, dest, remote = trees
     (dest / 'photo.nef').write_bytes(b'bad bytes!!' * 100)
-    monkeypatch.setattr(ft, 'mounted_verification_target', lambda *a: remote)
+    monkeypatch.setattr(ft, 'mounted_verification_target', lambda *a: (remote, None))
     monkeypatch.setattr(ft, 'verify_mounted_copy', lambda *a, **k: remote_result)
-    events = []
+    events, notices = [], []
     transfer = _FolderTransfer(
         SimpleNamespace(effective_config=lambda: {}), str(source),
         SimpleNamespace(transfer_dest=str(dest), dest_exists=True),
         remote=None, verify_contents=True, progress_cb=None,
         progress=lambda *a: events.append(a),
+        verification_cb=lambda step, notice: notices.append((step, notice)),
     )
     transfer.total_files = 3
     result = transfer.verify_copy()
-    if remote_result == (True, None):
+    if remote_result == (None, None):
         assert result is None
     else:
         assert result['moved'] == 0 and 'Originals preserved' in result['errors'][0]
-        if remote_result[0]:
+        if remote_result[0] is None:
             assert f'Verification failed ({remote_result[1]})' in result['errors'][0]
-    if not remote_result[0]:
+    if remote_result[0] is None:
+        assert notices == [('verify', None)]
+    else:
+        assert notices[-1] == ('verify', mv.verification_notice('probe_failed'))
         assert any('NAS verification unavailable' in e[3] for e in events)
 
 
@@ -314,9 +323,9 @@ def test_creation_timestamp_platform_keeps_full_byte_verification(tmp_path, monk
     monkeypatch.setattr(mv, '_supports_destination_change_tracking', lambda: False)
     monkeypatch.setattr(mv, '_probe_matches', lambda *a: pytest.fail('must not try SSH'))
     config = settings(dest)
-    assert mv.mounted_verification_target(str(dest), config) is None
+    assert mv.mounted_verification_target(str(dest), config) == (None, 'unsupported_platform')
     assert mv.verify_mounted_copy(str(source), str(dest), {}, is_merge=False,
-                                 progress=lambda *a: None) == (False, None)
+                                 progress=lambda *a: None) == ('unsupported_platform', None)
     transfer = _FolderTransfer(
         SimpleNamespace(effective_config=lambda: config), str(source),
         SimpleNamespace(transfer_dest=str(dest), dest_exists=True),

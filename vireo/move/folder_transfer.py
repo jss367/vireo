@@ -10,7 +10,7 @@ import sys
 from job_runner.work_control import JobCancelled
 
 from .folder_catalog import _plan_moved_file_mtimes
-from .mounted_verify import mounted_verification_target, verify_mounted_copy
+from .mounted_verify import mounted_verification_target, verification_notice, verify_mounted_copy
 from .remote import _remote_mkdir_p, _ssh_rsh_string, resolve_rsync_bin
 from .transfer import (
     RSYNC_STALL_TIMEOUT,
@@ -118,11 +118,12 @@ class _FolderTransfer:
     """
 
     def __init__(self, db, src_path, target, *, remote, verify_contents,
-                 progress_cb, progress, control=None):
+                 progress_cb, progress, control=None, verification_cb=None):
         self.db = db
         self.src_path = src_path
         self.target = target
         self.remote = remote
+        self.verification_cb = verification_cb
         self.verify_contents = verify_contents
         # ``progress_cb`` is the caller's raw callback (may be None), handed
         # to the copy and timestamp helpers; ``progress`` is the coordinator's
@@ -133,6 +134,12 @@ class _FolderTransfer:
         self.total_files = 0
         self.rsync_bin = None
         self.mtime_updates = []
+
+    def report_verification_eligibility(self):
+        if self.verify_contents and not self.remote and self.verification_cb:
+            _, reason = mounted_verification_target(
+                self.target.transfer_dest, self.db.effective_config())
+            self.verification_cb("check", verification_notice(reason, preflight=True))
 
     def ensure_remote_parent(self):
         """For a fresh remote move, ensure the destination's PARENT directory
@@ -344,9 +351,8 @@ class _FolderTransfer:
             verify_total = sum(1 for _, _, files in os.walk(src_path)
                                for _ in files)
 
-            def report(checked, name):
-                self.progress(checked, max(verify_total, checked), name,
-                              "Verifying copy")
+            def report(checked, name, phase="Verifying copy"):
+                self.progress(checked, max(verify_total, checked), name, phase)
             report(0, "")
         if self.remote:
             # The local filesystem can't be walked to confirm a remote copy, so
@@ -393,26 +399,31 @@ class _FolderTransfer:
 
     def _verify_local_copy(self, report):
         """Use a proven SSH route for mounted byte checks when available."""
-        remote = None
         if self.verify_contents:
-            remote = mounted_verification_target(
+            remote, reason = mounted_verification_target(
                 self.target.transfer_dest, self.db.effective_config())
-        if remote:
-            handled, mismatch = verify_mounted_copy(
-                self.src_path, self.target.transfer_dest, remote,
-                is_merge=self.target.dest_exists, progress=self.progress,
-                control=self.control,
-            )
-            if handled:
-                return mismatch
+            if self.verification_cb:
+                self.verification_cb("verify", None)  # Clear any pre-pause verdict.
+            if remote:
+                reason, mismatch = verify_mounted_copy(
+                    self.src_path, self.target.transfer_dest, remote,
+                    is_merge=self.target.dest_exists, progress=self.progress,
+                    control=self.control,
+                )
+                if reason is None:
+                    return mismatch
+                log.warning("NAS verification unavailable (%s), comparing bytes locally", reason)
+            if self.verification_cb:
+                self.verification_cb("verify", verification_notice(reason))
 
-            total = sum(len(files) for _, _, files in os.walk(self.src_path))
+            def report_local(checked, name):
+                report(checked, name, "Verifying copy locally (NAS verification unavailable)")
 
-            def report(checked, name):
-                self.progress(checked, max(total, checked), name,
-                              "Verifying copy locally (NAS verification unavailable)")
+            report_local(0, "")
+        else:
+            report_local = report
 
         return _first_missing_source_file(
             self.src_path, self.target.transfer_dest,
             verify_contents=self.verify_contents, is_merge=self.target.dest_exists,
-            progress=report)
+            progress=report_local)

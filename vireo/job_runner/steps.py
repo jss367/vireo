@@ -98,7 +98,7 @@ class StepTree:
                     for key in (
                         "label", "status", "summary", "error", "error_count",
                         "progress", "current_file", "source_index",
-                        "label_source",
+                        "label_source", "nas_verification",
                     ):
                         if key in kwargs:
                             step[key] = kwargs[key]

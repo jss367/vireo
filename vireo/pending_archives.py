@@ -92,7 +92,7 @@ def prepare_archive_mount(db, archive, confirmed_identities=None):
     return None
 
 
-def send_pending_archive(db, archive, *, vireo_dir, guard_folder, progress_cb, control=None):
+def send_pending_archive(db, archive, *, vireo_dir, guard_folder, progress_cb, control=None, verification_cb=None):
     """Move the remaining directory through the verified move implementation.
 
     The saved target is authoritative; never resolve the destination from
@@ -137,6 +137,7 @@ def send_pending_archive(db, archive, *, vireo_dir, guard_folder, progress_cb, c
         developed_dir=db.get_effective_config(config.load()).get("darktable_output_dir", "") or "",
         merge=True, remote=remote, allow_tracked_merge=True,
         verify_contents=remote is None,
+        **({"verification_cb": verification_cb} if verification_cb else {}),
         thumb_cache_dir=os.path.join(vireo_dir, "thumbnails"),
         **({"control": control} if control else {}),
         **({"pre_commit_check": check_mount} if check_mount else {}),

@@ -7,7 +7,6 @@ SSH or an unproven mapping falls back to the full local byte comparison.
 """
 
 import contextlib
-import logging
 import os
 import posixpath
 import secrets
@@ -20,6 +19,7 @@ from job_runner.subprocess_control import run_controlled_process
 from .remote import (
     _ssh_command,
     _ssh_target,
+    is_gnu_rsync,
     resolve_rsync_bin,
     resolve_ssh_bin,
     rsync_dest_spec,
@@ -33,7 +33,30 @@ try:
 except ImportError:
     from proc import no_window_kwargs
 
-log = logging.getLogger("move")
+# Only these fixed messages may cross the job/API boundary. SSH arguments,
+# subprocess output and connection settings can contain private information.
+REASONS = {
+    "unsupported_platform": "This platform cannot reliably detect changes during a NAS checksum pass.",
+    "missing_route": "No saved SSH route covers this destination. Check Remote targets in Settings.",
+    "ambiguous_route": "Multiple saved SSH routes cover this destination. Check Remote targets in Settings.",
+    "missing_ssh": "OpenSSH is unavailable on this computer.",
+    "missing_rsync": "GNU rsync is unavailable on this computer.",
+    "probe_failed": "The SSH check could not confirm that both paths reach the same destination.",
+    "identity_changed": "The destination identity could no longer be confirmed after the checksum pass.",
+    "verifier_failed": "The NAS checksum check could not complete.",
+}
+
+
+def verification_notice(reason, *, preflight=False):
+    if reason is None:
+        return {"code": "eligible", "message": "A saved SSH route and local tools are available. "
+                "Vireo will confirm the destination over SSH during verification."}
+    explanation = ("Vireo expects to compare every byte locally." if preflight else
+                   "Local verification compares every byte.")
+    return {"code": reason, "message": f"{REASONS[reason]} {explanation} "
+            "This may reread the destination over the network."}
+
+
 VERIFY_BATCH_SIZE = 128
 
 
@@ -47,13 +70,14 @@ def _supports_destination_change_tracking():
 def mounted_verification_target(destination, settings):
     """Find one unambiguous saved SSH route for this exact mounted folder.
 
+    Return (route, None) or (None, fallback reason).
     This never changes the transfer destination or catalog path. The nonce
     check below proves the mapping afresh, even if Settings changed since
     the import was queued. Relative and symlink-redirected mappings are not
     eligible for the optimization.
     """
     if not _supports_destination_change_tracking():
-        return None
+        return None, "unsupported_platform"
     candidates = []
     for entry in settings.get("remote_targets") or []:
         # Settings are normally validated on write. Still refuse malformed
@@ -77,14 +101,18 @@ def mounted_verification_target(destination, settings):
             continue
         remote_path = posixpath.join(target["remote_path"], *relative.split(os.sep))
         candidates.append({**target, "verify_path": posixpath.normpath(remote_path)})
-    if len(candidates) != 1:
-        return None
+    if not candidates:
+        return None, "missing_route"
+    if len(candidates) > 1:
+        return None, "ambiguous_route"
     target = candidates[0]
     target["rsync_bin"] = resolve_rsync_bin(settings.get("rsync_bin", "") or "")
     target["ssh_bin"] = resolve_ssh_bin(settings.get("ssh_bin", "") or "")
-    if not target["rsync_bin"] or not target["ssh_bin"]:
-        return None
-    return target
+    if not target["ssh_bin"]:
+        return None, "missing_ssh"
+    if not target["rsync_bin"] or not is_gnu_rsync(target["rsync_bin"]):
+        return None, "missing_rsync"
+    return target, None
 
 
 def _verification_route(entry):
@@ -181,7 +209,7 @@ def _verify_batches(source, remote, files, progress, control):
 
 
 def verify_mounted_copy(source, destination, remote, *, is_merge, progress, control=None):
-    """Return (handled, mismatch); False requests full byte-comparison fallback.
+    """Return (fallback reason, mismatch). Only unavailability requests a byte comparison.
 
     A checksum mismatch is a handled failure, never a reason to skip safety
     checks. SSH/tool/probe failures are inconclusive and use the original
@@ -189,7 +217,8 @@ def verify_mounted_copy(source, destination, remote, *, is_merge, progress, cont
     verification if the control generation changed during a pause.
     """
     if not _supports_destination_change_tracking():
-        return False, None
+        return "unsupported_platform", None
+    failure = "probe_failed"
     marker = None
     try:
         progress(0, 0, "", "Checking NAS verification")
@@ -199,8 +228,8 @@ def verify_mounted_copy(source, destination, remote, *, is_merge, progress, cont
             stream.write(nonce)
         marker_stat = os.stat(marker)
         if not _probe_matches(remote, os.path.basename(marker), nonce, control):
-            log.warning("NAS verification unavailable: SSH path does not prove the mounted destination")
-            return False, None
+            return failure, None
+        failure = "verifier_failed"
         files = _source_files(source, is_merge)
 
         def report_structure(checked, name):
@@ -209,34 +238,34 @@ def verify_mounted_copy(source, destination, remote, *, is_merge, progress, cont
         mismatch = _first_missing_source_file(source, destination, is_merge=is_merge,
                                                progress=report_structure)
         if mismatch is not None:
-            return True, mismatch
+            return None, mismatch
         destination_files = _destination_files(destination, files, report_structure)
         mismatch = _verify_batches(source, remote, files, progress, control)
         if mismatch is not None:
             name, detail = mismatch
-            if name == "__ERROR__":
-                log.warning("NAS checksum verification unavailable: %s; comparing bytes instead", detail)
-                return False, None
-            return True, name
+            if detail is not None:
+                return failure, None
+            return None, name
+        failure = "identity_changed"
         # Re-prove the route and mounted structure after hashing. A remount,
         # replaced file/link, or changed source must not authorize deletion.
         if not _probe_matches(remote, os.path.basename(marker), nonce, control):
-            return False, None
+            return failure, None
         current_stat = os.stat(marker)
         if (current_stat.st_dev, current_stat.st_ino) != (marker_stat.st_dev, marker_stat.st_ino):
-            return False, None
+            return failure, None
+        failure = "verifier_failed"
         if files != _source_files(source, is_merge):
-            return True, "source files changed during checksum verification"
+            return None, "source files changed during checksum verification"
         mismatch = _first_missing_source_file(
             source, destination, is_merge=is_merge, progress=report_structure)
         if mismatch is None and destination_files != _destination_files(destination, files, report_structure):
-            return True, "destination files changed during checksum verification"
+            return None, "destination files changed during checksum verification"
         if mismatch is None:
             progress(len(files), len(files), "", "Verifying copy on NAS")
-        return True, mismatch
-    except (OSError, subprocess.SubprocessError) as exc:
-        log.warning("NAS checksum verification unavailable: %s; comparing bytes instead", exc)
-        return False, None
+        return None, mismatch
+    except (OSError, subprocess.SubprocessError):
+        return failure, None
     finally:
         if marker is not None:
             with contextlib.suppress(OSError):

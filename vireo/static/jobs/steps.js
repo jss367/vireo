@@ -48,6 +48,23 @@ function importEtaStatusLine(progress) {
   return line + ' &middot; ETA ' + formatElapsed(etaSeconds);
 }
 
+/** @param {JobsStep} step */
+function stepProgressHtml(step) {
+  var html = '';
+  if (step.progress && (step.progress.current || 0) > 0) {
+    if ((step.progress.total || 0) > 0) {
+      var pct = Math.round(((step.progress.current || 0) / (step.progress.total || 1)) * 100);
+      html += '<span class="tree-step-progress-text">' + (step.progress.current || 0).toLocaleString() + ' / ' + (step.progress.total || 0).toLocaleString() + '</span>';
+      html += '<div class="tree-step-bar"><div class="tree-step-bar-fill" style="width:' + pct + '%"></div></div>';
+      html += '<span class="tree-step-progress-text">' + pct + '%</span>';
+    } else {
+      html += '<span class="tree-step-progress-text">' + (step.progress.current || 0).toLocaleString() + ' / ?</span>';
+      html += '<div class="tree-step-bar"><div class="tree-step-bar-fill indeterminate"></div></div>';
+    }
+  }
+  return html;
+}
+
 // "key: value" lines for a finished job's result, in place of a raw
 // JSON dump. Keys the interruption bookkeeping adds (and the error,
 // which renders on its own line) are skipped; nested objects stay as
@@ -74,18 +91,7 @@ function importEtaStatusLine(progress) {
   html += statusIcon(step.status, warningCount);
   html += '<span class="tree-step-label' + (step.status === 'pending' ? ' pending' : '') + '">' + escapeHtml(step.label) + '</span>';
 
-  // 1-3: Progress counts, bar, percentage (for steps with progress)
-  if (step.progress && (step.progress.current || 0) > 0) {
-    if ((step.progress.total || 0) > 0) {
-      var pct = Math.round(((step.progress.current || 0) / (step.progress.total || 1)) * 100);
-      html += '<span class="tree-step-progress-text">' + (step.progress.current || 0).toLocaleString() + ' / ' + (step.progress.total || 0).toLocaleString() + '</span>';
-      html += '<div class="tree-step-bar"><div class="tree-step-bar-fill" style="width:' + pct + '%"></div></div>';
-      html += '<span class="tree-step-progress-text">' + pct + '%</span>';
-    } else {
-      html += '<span class="tree-step-progress-text">' + (step.progress.current || 0).toLocaleString() + ' / ?</span>';
-      html += '<div class="tree-step-bar"><div class="tree-step-bar-fill indeterminate"></div></div>';
-    }
-  }
+  html += stepProgressHtml(step);
 
   // 7: Summary for terminal steps. The backend writes explanatory
   // summaries on completed, cancelled ("Cancelled (N animals detected
@@ -118,6 +124,10 @@ function importEtaStatusLine(progress) {
   }
 
   html += '</div>'; // end header
+
+  if (step.nas_verification) {
+    html += '<div class="tree-step-summary">' + escapeHtml(step.nas_verification.message) + '</div>';
+  }
 
   // Expanded content
   if (isExpanded) {
