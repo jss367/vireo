@@ -95,14 +95,16 @@ def create_export_blueprint(
     blueprint = Blueprint("export", __name__)
     background_job = make_background_job(get_runner, get_db, db_path, Database)
 
-    @blueprint.route("/api/jobs/panorama", methods=["POST"])
+    @blueprint.route("/api/jobs/panorama", methods=["POST"], defaults={"kind": "panorama"})
+    @blueprint.route("/api/jobs/hdr", methods=["POST"], defaults={"kind": "hdr"})
     @background_job
-    def api_job_panorama(ctx: JobLaunch) -> ResponseReturnValue:
-        """Create a panorama from every selected photo in this workspace."""
+    def api_job_panorama(ctx: JobLaunch, kind: str) -> ResponseReturnValue:
+        """Create a composite from the workspace selection."""
+        from hdr_merge import create_hdr
         from panorama import create_panorama, validate_options
 
         try:
-            options: JsonDict = validate_options(request.get_json(silent=True))
+            options: JsonDict = validate_options(request.get_json(silent=True), hdr=kind == "hdr")
         except ValueError as exc:
             return json_error(str(exc))
         db = get_db()
@@ -125,10 +127,11 @@ def create_export_blueprint(
 
             thread_db = ctx.thread_db()
             try:
-                result = create_panorama(
-                    thread_db, vireo_dir, **options, config=effective_cfg,
-                    checkpoint=lambda: ctx.checkpoint(job), progress=progress,
-                )
+                kwargs = {**options, "checkpoint": lambda: ctx.checkpoint(job), "progress": progress}
+                if kind == "hdr":
+                    result = create_hdr(thread_db, vireo_dir, **kwargs)
+                else:
+                    result = create_panorama(thread_db, vireo_dir, **kwargs, config=effective_cfg)
                 result["revealed"] = bool(
                     reveal and not ctx.runner.cancellation_requested(job["id"])
                     and reveal_exported_files([result["path"]])
@@ -137,7 +140,7 @@ def create_export_blueprint(
             finally:
                 thread_db.close()
 
-        return ctx.start("panorama", work, config={**options, "reveal": reveal})
+        return ctx.start(kind, work, config={**options, "reveal": reveal})
 
     @blueprint.route("/api/export/presets")
     def api_export_presets_list() -> ResponseReturnValue:

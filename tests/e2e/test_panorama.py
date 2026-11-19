@@ -47,7 +47,7 @@ def test_panorama_selection_folder_picker_and_real_stitch(live_server, page, tmp
     destination = page.locator("#panoramaDestination")
     destination.fill(str(folder))
     page.locator("#panoramaBrowse").click()
-    expect(page.locator("#folderBrowserTitle")).to_have_text("Choose Panorama Folder")
+    expect(page.locator("#folderBrowserTitle")).to_have_text("Choose Output Folder")
     expect(page.locator("#folderBrowserPath")).to_have_text(str(folder))
     page.locator("#folderBrowserSelectBtn").click()
     expect(destination).to_have_value(str(folder))
@@ -87,3 +87,19 @@ def test_panorama_api_failure_keeps_selection_and_allows_retry(live_server, page
     expect(page.locator("#panoramaSelection")).to_have_text("2 photos selected")
     page.keyboard.press("Escape")
     expect(page.locator("#panoramaOverlay")).not_to_be_visible()
+
+
+def test_hdr_selection_starts_hdr_job(live_server, page):
+    page.goto(f"{live_server['url']}/browse")
+    cards = page.locator(".grid-card")
+    for index in (0, 1):
+        cards.nth(index).click(modifiers=["Meta"])
+    page.locator("#batchMoreBtn").click()
+    page.locator(".vireo-ctx-menu").get_by_text("Merge to HDR…", exact=True).click()
+    expect(page.locator("#panoramaTitle")).to_have_text("Merge to HDR")
+    expect(page.locator("#panoramaFormat")).to_be_hidden()
+    page.locator("#hdrFormat").select_option("hdr")
+    with page.expect_request("**/api/jobs/hdr") as launched:
+        page.locator("#panoramaSubmit").click()
+    assert launched.value.post_data_json["format"] == "hdr"
+    expect(page.locator("#panoramaStatus")).to_contain_text("shutter speed")

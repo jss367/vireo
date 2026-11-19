@@ -183,6 +183,7 @@ def main():
         "--hidden-import", "compare",
         "--hidden-import", "develop",
         "--hidden-import", "panorama",
+        "--hidden-import", "hdr_merge",
         "--hidden-import", "cv2",
         "--hidden-import", "dino_embed",
         "--hidden-import", "image_loader",

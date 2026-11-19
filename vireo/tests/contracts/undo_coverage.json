@@ -243,6 +243,7 @@
       "POST /api/jobs/export-site",
       "POST /api/jobs/extract-masks",
       "POST /api/jobs/fetch-labels",
+      "POST /api/jobs/hdr",
       "POST /api/jobs/import-in-place",
       "POST /api/jobs/import-in-place/<job_id>/restart",
       "POST /api/jobs/ingest",

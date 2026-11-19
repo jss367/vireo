@@ -416,6 +416,9 @@ function photoOutputMenuItems(/** @type {number[]} */ photoIds) {
         VireoReleaseOriginals.release({photo_ids: photoIds}, photoIds.length.toLocaleString() + ' selected photos');
       } },
     { label: 'Export\u2026', onClick: function() { openExportModal(); } },
+    { label: 'Merge to HDR…', disabled: photoIds.length < 2 || photoIds.length > 12,
+      disabledHint: 'Select 2–12 bracketed exposures',
+      onClick: function() { openPanoramaModal(photoIds, true); } },
     { label: 'Create Panorama\u2026', disabled: photoIds.length < 2 || photoIds.length > 12,
       disabledHint: 'Select 2–12 overlapping photos',
       onClick: function() { openPanoramaModal(photoIds); } },

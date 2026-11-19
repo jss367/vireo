@@ -2,10 +2,18 @@
 /** @type {number[]} */
 var panoramaPhotoIds = [];
 var panoramaBusy = false;
+var panoramaIsHdr = false;
 
-/** @param {number[]} ids */
-function openPanoramaModal(ids) {
+/** @param {number[]} ids @param {boolean} [hdr] */
+function openPanoramaModal(ids, hdr = false) {
   if (!panoramaBusy) {
+    panoramaIsHdr = hdr;
+    document.querySelectorAll('[data-hdr-only], [data-panorama-only]').forEach(function(el) {
+      if (el instanceof HTMLElement) el.hidden = hdr !== el.hasAttribute('data-hdr-only');
+    });
+    var title = hdr ? 'Merge to HDR' : 'Create Panorama';
+    /** @type {HTMLElement} */ (document.getElementById('panoramaTitle')).textContent = title;
+    /** @type {HTMLElement} */ (document.getElementById('panoramaSubmit')).textContent = title;
     panoramaPhotoIds = ids.slice();
     /** @type {HTMLElement} */ (document.getElementById('panoramaSelection')).textContent = ids.length + ' photos selected';
     /** @type {HTMLElement} */ (document.getElementById('panoramaStatus')).textContent = '';
@@ -31,47 +39,48 @@ async function startPanorama() {
   if (panoramaBusy) return;
   setPanoramaBusy(true);
   var status = /** @type {HTMLElement} */ (document.getElementById('panoramaStatus'));
-  status.textContent = 'Starting panorama…';
+  var name = panoramaIsHdr ? 'HDR merge' : 'Panorama';
+  status.textContent = 'Starting ' + name + '…';
   try {
     /** @type {{job_id: string}} */
-    var data = await safeFetch('/api/jobs/panorama', {
+    var data = await safeFetch(panoramaIsHdr ? '/api/jobs/hdr' : '/api/jobs/panorama', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
         photo_ids: panoramaPhotoIds.slice(),
         destination: /** @type {HTMLInputElement} */ (document.getElementById('panoramaDestination')).value.trim(),
-        format: /** @type {HTMLSelectElement} */ (document.getElementById('panoramaFormat')).value,
+        format: /** @type {HTMLSelectElement} */ (document.getElementById(panoramaIsHdr ? 'hdrFormat' : 'panoramaFormat')).value,
         input_size: Number(/** @type {HTMLSelectElement} */ (document.getElementById('panoramaInputSize')).value),
         reveal: /** @type {HTMLInputElement} */ (document.getElementById('panoramaReveal')).checked,
       }),
     }, {toast: false});
-    status.textContent = 'Loading photos… You can close this dialog and follow progress or cancel in Jobs. Cancellation waits for the current stitching stage.';
+    status.textContent = 'Loading photos… You can close this dialog and follow progress or cancel in Jobs. Cancellation waits for the current processing stage.';
     safeEventSource('/api/jobs/' + data.job_id + '/stream', {
       /** @param {{phase?: string}} progress */
       onProgress: function(progress) {
-        status.textContent = (progress.phase || 'Creating panorama') + '… Follow progress or cancel in Jobs.';
+        status.textContent = (progress.phase || 'Processing photos') + '… Follow progress or cancel in Jobs.';
       },
       /** @param {PanoramaDone} done */
       onComplete: function(done) {
         setPanoramaBusy(false);
         if (!done.result || !done.result.path) {
-          status.textContent = 'Panorama ' + (done.status || 'failed') + ': ' + ((done.errors || [])[0] || 'No file saved.');
+          status.textContent = name + ' ' + (done.status || 'failed') + ': ' + ((done.errors || [])[0] || 'No file saved.');
           showToast(status.textContent, 'error');
           return;
         }
         var result = done.result;
-        status.textContent = 'Saved ' + result.width + ' × ' + result.height + ' panorama: ' + result.path
+        status.textContent = 'Saved ' + result.width + ' × ' + result.height + ' ' + name + ': ' + result.path
           + (done.status === 'cancelled' ? ' (Cancellation arrived after the file was saved.)' : '');
-        showToast('Panorama saved: ' + result.path, 'success');
+        showToast(name + ' saved: ' + result.path, 'success');
       },
       onError: function() {
         // Losing the progress stream does not cancel the server job.
-        status.textContent = 'Progress connection lost. Check Jobs for the panorama result before starting another.';
+        status.textContent = 'Progress connection lost. Check Jobs for the result before starting another.';
         setPanoramaBusy(false);
       },
     });
   } catch (error) {
-    status.textContent = (error instanceof Error ? error.message : '') || 'Could not start panorama';
+    status.textContent = (error instanceof Error ? error.message : '') || 'Could not start ' + name;
     setPanoramaBusy(false);
   }
 }

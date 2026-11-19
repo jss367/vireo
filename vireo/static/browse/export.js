@@ -121,7 +121,7 @@ export const exportFolderBrowser = new VireoFolderBrowser({
   defaultMode: 'destination',
   modes: {
     panorama: {
-      title: 'Choose Panorama Folder',
+      title: 'Choose Output Folder',
       multiple: false,
       showCounts: false,
       startPath: function() { return /** @type {HTMLInputElement} */ (document.getElementById('panoramaDestination')).value.trim(); },
