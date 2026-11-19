@@ -99,7 +99,7 @@ function page(){
   c.window=c;
   c.state=c;
   installBrowseOwners(c);
-  functions(c,'sidebar-collections.js',['collectionCountMarkup','renderCollectionList','filterByCollection','refreshActiveCollectionAfterMembershipChange','highlightedCollectionId','syncSidebarHighlights']);
+  functions(c,'sidebar-collections.js',['collectionCountMarkup','captureDateLabel','renderCollectionList','filterByCollection','refreshActiveCollectionAfterMembershipChange','highlightedCollectionId','syncSidebarHighlights']);
   functions(c,'sidebar-folders.js',['filterByFolder','renderFolderTree']);
   functions(c,'sidebar-keywords.js',['filterByKeyword','renderKeywordTree']);
   functions(c,'loading.js',['buildBrowsePageRequest','browseFilterReloadOptions','onBrowseFilterChange','settleSidebarScopeForReload']);
@@ -353,4 +353,22 @@ test('deep-link-installed callback drops opened collection after chip edits and 
     assert.equal(p.rows.collectionList.find(r=>r.dataset.collectionId==='12').classList.contains('active'),true);
 
   }
+});
+
+test('import rows show camera dates alongside the editable collection name', () => {
+  const {c} = page();
+  const row = {id: 9, name: 'Import 2026-11-01 01:14', photo_count: 3,
+    capture_dates: {first_day: '2026-10-30', last_day: '2026-10-31', undated: 1}};
+  c.renderCollectionList([row]);
+  const html = c.document.getElementById('collectionList').html;
+  assert.match(html, /class="collection-name">Import 2026-11-01 01:14</);
+  assert.match(html, /Captured 2026-10-30 to 2026-10-31 · 1 undated/);
+  row.capture_dates.first_day = '2026-10-31';
+  row.capture_dates.undated = 0;
+  assert.equal(c.captureDateLabel(row), 'Captured 2026-10-31');
+  row.capture_dates.first_day = null;
+  assert.equal(c.captureDateLabel(row), 'Capture date unknown');
+  row.name = 'Evening walk';
+  row.import_recorded_at = '2026-11-01 08:14:00';
+  assert.equal(c.captureDateLabel(row), 'Capture date unknown · Imported 2026-11-01 08:14 UTC');
 });

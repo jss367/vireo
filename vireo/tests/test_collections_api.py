@@ -1217,3 +1217,34 @@ def test_create_collection_preserves_explicit_has_visual_index_model(
     ).fetchone()
     stored = json.loads(row["rules"])
     assert stored[0]["model"] == "legacy-model"
+
+
+def test_import_capture_dates_for_legacy_renamed_and_undated_collections(app_and_db, tmp_path):
+    app, db = app_and_db
+    client = app.test_client()
+    staging = workspace_folders.add_folder(db, str(tmp_path / "staging"), name="Staging")
+    times = ["2026-10-31T23:55:00-07:00", "2026-10-30T00:10:00+09:00", None]
+    ids = [photo_ingest.add_photo(db, staging, f"{i}.jpg", ".jpg", 100, 1.0, timestamp=ts)
+           for i, ts in enumerate(times)]
+    name = "Import 2026-11-01 01:14"
+    with db.transaction():
+        cid = db.collections.add_import(name, ids)
+        legacy = db.collections.add(name, json.dumps([{"field": "photo_ids", "value": ids[:1]}]))
+        unknown = db.collections.add_import("Undated outing", ids[2:])
+
+    def listed():
+        return {c["id"]: c for c in client.get("/api/collections").get_json()}
+
+    before = listed()
+    expected = {"first_day": "2026-10-30", "last_day": "2026-10-31", "undated": 1}
+    assert before[cid]["capture_dates"] == expected
+    assert before[legacy]["capture_dates"] == {
+        "first_day": "2026-10-31", "last_day": "2026-10-31", "undated": 0,
+    }
+    assert before[unknown]["capture_dates"] == {"first_day": None, "last_day": None, "undated": 1}
+    with db.transaction():
+        db.collections.rename(cid, "Coastal outing")
+    renamed = listed()[cid]
+    assert renamed["name"] == "Coastal outing"
+    assert renamed["capture_dates"] == expected
+    assert set(db.collections.get_photo_ids(cid)) == set(ids)

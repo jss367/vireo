@@ -422,10 +422,11 @@ class CollectionRepository:
         )
         return cur.lastrowid
 
-    def list_all(self):
+    def list_all(self, *, include_import_time=False):
         """Return all collections for the active workspace."""
+        import_time = ", import_recorded_at" if include_import_time else ""
         return self.conn.execute(
-            "SELECT id, name, rules, visual_json FROM collections "
+            f"SELECT id, name, rules, visual_json{import_time} FROM collections "
             "WHERE workspace_id = ? ORDER BY name",
             (self.workspace_id,),
         ).fetchall()
@@ -813,7 +814,7 @@ class CollectionRepository:
         """
         return self.conn.execute(query, params).fetchone()[0]
 
-    def count_photo_availability(self, collection_id):
+    def count_photo_availability(self, collection_id, *, capture_dates=False):
         """Return stable membership and actionable counts for a collection."""
         parts = self._build_collection_query(
             collection_id, include_offline_folders=True,
@@ -822,12 +823,19 @@ class CollectionRepository:
             return {"total": 0, "available": 0, "offline": 0}
 
         folder_join, join_clause, where, params = parts
+        # Extract the recorded calendar day before SQLite can apply a UTC offset.
+        date_columns = """
+            , MIN(date(substr(p.timestamp, 1, 10))) AS first_day
+            , MAX(date(substr(p.timestamp, 1, 10))) AS last_day
+            , COUNT(DISTINCT CASE WHEN date(substr(p.timestamp, 1, 10)) IS NULL
+                                  THEN p.id END) AS undated
+        """ if capture_dates else ""
         row = self.conn.execute(
             f"""SELECT
                     COUNT(DISTINCT p.id) AS total,
                     COUNT(DISTINCT CASE
                         WHEN f.status IN ('ok', 'partial') THEN p.id
-                    END) AS available
+                    END) AS available {date_columns}
                 FROM photos p
                 {folder_join}
                 {join_clause}
@@ -836,11 +844,15 @@ class CollectionRepository:
         ).fetchone()
         total = row["total"] or 0
         available = row["available"] or 0
-        return {
+        counts = {
             "total": total,
             "available": available,
             "offline": max(0, total - available),
         }
+
+        if capture_dates:
+            counts["capture_dates"] = {key: row[key] for key in ("first_day", "last_day", "undated")}
+        return counts
 
     def count_prediction_decision_photos(self, collection_id, auto_match_marker, statuses):
         """Photos with an explicit decided prediction in this workspace.

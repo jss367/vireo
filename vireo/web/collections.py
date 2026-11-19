@@ -11,6 +11,7 @@ aliases them by their ``collections.``-qualified endpoint names.
 from __future__ import annotations
 
 import json
+import re
 from typing import TYPE_CHECKING
 
 import config as cfg
@@ -68,6 +69,19 @@ def _collection_accepts_manual_photos(rules: object) -> bool:
     return False
 
 
+def _show_capture_dates(c: Row) -> bool:
+    if c["import_recorded_at"]:
+        return True
+    # Historical imports have static membership and a timestamp name, but no provenance.
+    if not re.fullmatch(r"Import \d{4}-\d{2}-\d{2} \d{2}:\d{2}", c["name"]):
+        return False
+    rules = json.loads(c["rules"])
+    return (
+        isinstance(rules, list) and len(rules) == 1 and isinstance(rules[0], dict)
+        and rules[0].get("field") == "photo_ids" and isinstance(rules[0].get("value"), list)
+    )
+
+
 def _collection_list_entry(db: Database, c: Row) -> JsonDict:
     """One ``/api/collections`` row: counts, degraded state and add support."""
     d = dict(c)
@@ -89,12 +103,7 @@ def _collection_list_entry(db: Database, c: Row) -> JsonDict:
     # evaluates ``rules``, so a saved visual collection with e.g.
     # ``rules: []`` would return the workspace-wide metadata count
     # here while Browse shows a much smaller set on reopen.
-    # Resolving the visual clause on
-    # every listing would run the embedding for every visual
-    # collection on every page load — too expensive. Omit the count
-    # instead: the sidebar (browse.html) renders an empty count
-    # span for null photo_count, and the ✦ visual marker already
-    # tells users this collection is visually resolved.
+    # Omit that count to avoid running an embedding for each visual collection.
     #
     # Validate metadata rules separately when visual counts are omitted.
     # Without this check for malformed JSON or unresolvable fields, a
@@ -115,7 +124,10 @@ def _collection_list_entry(db: Database, c: Row) -> JsonDict:
             )
     else:
         try:
-            counts = db.collections.count_photo_availability(c["id"])
+            include_dates = _show_capture_dates(c)
+            counts = db.collections.count_photo_availability(c["id"], capture_dates=include_dates)
+            if include_dates:
+                d["capture_dates"] = counts.get("capture_dates")
             d["photo_count"] = counts["total"]
             d["available_photo_count"] = counts["available"]
             d["offline_photo_count"] = counts["offline"]
@@ -243,7 +255,7 @@ def create_collections_blueprint(
     @blueprint.route("/api/collections")
     def api_collections() -> ResponseReturnValue:
         db = get_db()
-        collections = db.collections.list_all()
+        collections = db.collections.list_all(include_import_time=True)
         result = []
         for c in collections:
             result.append(_collection_list_entry(db, c))
