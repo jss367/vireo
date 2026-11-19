@@ -89,7 +89,7 @@ def test_panorama_api_failure_keeps_selection_and_allows_retry(live_server, page
     expect(page.locator("#panoramaOverlay")).not_to_be_visible()
 
 
-def test_hdr_selection_starts_hdr_job(live_server, page):
+def test_hdr_selection_starts_hdr_job(live_server, page, tmp_path):
     page.goto(f"{live_server['url']}/browse")
     cards = page.locator(".grid-card")
     for index in (0, 1):
@@ -98,6 +98,8 @@ def test_hdr_selection_starts_hdr_job(live_server, page):
     page.locator(".vireo-ctx-menu").get_by_text("Merge to HDR…", exact=True).click()
     expect(page.locator("#panoramaTitle")).to_have_text("Merge to HDR")
     expect(page.locator("#panoramaFormat")).to_be_hidden()
+    # The seeded photos have catalog-only source folders.
+    page.locator("#panoramaDestination").fill(str(tmp_path))
     page.locator("#hdrFormat").select_option("hdr")
     with page.expect_request("**/api/jobs/hdr") as launched:
         page.locator("#panoramaSubmit").click()
