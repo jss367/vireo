@@ -192,6 +192,7 @@ function grmComputeDiff() {
       diff.detachNew++;
       return;
     }
+    if (!grmState.touched.has(p.id)) return;
     var st = (grmState.dbState && grmState.dbState[p.id]) || {};
     var oldFlag = st.flag || 'none';
     var newFlag;
@@ -199,7 +200,7 @@ function grmComputeDiff() {
     else if (grmState.rejects.has(p.id)) newFlag = 'rejected';
     else newFlag = 'none';
 
-    if (newFlag !== oldFlag) {
+    if (newFlag !== oldFlag || st.flag_confirmation_status !== 'confirmed') {
       if (newFlag === 'flagged') diff.flagNew++;
       else if (newFlag === 'rejected') diff.rejectNew++;
       else diff.clearNew++;
@@ -451,9 +452,11 @@ async function grmPrepareSpeciesApply(checks, species, sessionId) {
 function grmGroupApplyBody(sessionId) {
   var burst = currentReviewResults().encounters[grmState.encIdx ?? -1]?.bursts?.[grmState.burstIdx ?? -1];
   return {
-    picks: Array.from(grmState.picks), rejects: Array.from(grmState.rejects),
+    picks: Array.from(grmState.picks).filter(id => grmState.touched.has(id)),
+    rejects: Array.from(grmState.rejects).filter(id => grmState.touched.has(id)),
+    untouched: grmState.items.filter(p => !grmState.touched.has(p.id) && !grmState.removed.has(p.id)).map(p => p.id),
     candidates: grmState.items.filter(function(photo) {
-      return !grmState.picks.has(photo.id) && !grmState.rejects.has(photo.id) && !grmState.removed.has(photo.id);
+      return grmState.touched.has(photo.id) && !grmState.picks.has(photo.id) && !grmState.rejects.has(photo.id) && !grmState.removed.has(photo.id);
     }).map(photo => photo.id),
     removed: grmState.source === 'browse-selection' ? [] : Array.from(grmState.removed).filter(function(id) {
       return grmState.appliedRemovalSessionId !== sessionId || !(grmState.appliedRemovalIds || []).includes(id);
@@ -547,49 +550,16 @@ async function grmApply() {
     /** @type {Record<number,ReviewPhoto>} */ var photoMap = {};
     currentReviewResults().photos.forEach(function(p) { photoMap[p.id] = p; });
 
-    grmState.picks.forEach(function(pid) {
-      var p = photoMap[pid];
-      if (p) p.label = 'KEEP';
-    });
-
-    grmState.rejects.forEach(function(pid) {
-      var p = photoMap[pid];
-      if (p) p.label = 'REJECT';
-    });
-
-    // Candidates (not picked, not rejected, not removed) → REVIEW
-    grmState.items.forEach(function(item) {
-      if (!grmState.picks.has(item.id) && !grmState.rejects.has(item.id) && !grmState.removed.has(item.id)) {
-        var p = photoMap[item.id];
-        if (p) p.label = 'REVIEW';
-      }
-    });
-
-    // Sync the in-memory pipeline cache's per-photo `flag` with what the
-    // server just wrote, so the badges in the main grid (which read p.flag)
-    // refresh without a full reload. Rejected photos also lose eligibility
-    // as species representatives (get_species_representatives(eligible_only)
-    // filters them out), so clear the cached representative fields too — the
-    // main pipeline grid renders its Representative badge from
-    // p.is_species_representative and would otherwise keep displaying it on
-    // a rejected photo until a full reload.
+    // Only the returned photos received a new flag and photographer attribution.
     if (applyResp && applyResp.photos) {
       Object.keys(applyResp.photos).forEach(function(pidStr) {
         var pid = parseInt(pidStr, 10);
         var p = photoMap[pid];
         if (!p) return;
         var newFlag = requireReviewValue(requireReviewValue(applyResp).photos)[pidStr]?.flag;
-        p.flag = newFlag;
-        if (newFlag === 'rejected') {
-          if (p.is_species_representative) p.is_species_representative = false;
-          if (Array.isArray(p.life_list)) {
-            p.life_list.forEach(function(entry) {
-              if (!entry) return;
-              if (entry.is_current_photo) entry.is_current_photo = false;
-              if (entry.is_species_representative) entry.is_species_representative = false;
-            });
-          }
-        }
+        if (!newFlag) return;
+        updatePipelineReviewPhotoFlag(p, newFlag, 'confirmed');
+        p.label = confirmedReviewLabel(p);
       });
     }
 

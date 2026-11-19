@@ -16,7 +16,7 @@ function page() {
 }
 test('bare flags and ranking labels never become photographer decisions', () => {
   const ctx = page();
-  for (const flag of ['flagged', 'rejected', 'none']) {
+  for (const flag of ['flagged', 'picked', 'rejected', 'none']) {
     for (const status of [undefined, 'unverified']) {
       const decision = ctx.resolveCullDecision({id: 1, flag, label: 'KEEP', flag_confirmation_status: status});
       assert.equal(decision.action, 'review');
@@ -27,7 +27,9 @@ test('bare flags and ranking labels never become photographer decisions', () => 
 });
 test('live confirmed decisions and explicit session choices retain their priority', () => {
   const ctx = page();
-  assert.equal(ctx.resolveCullDecision({id: 1, flag: 'flagged', flag_confirmation_status: 'confirmed'}).action, 'keep');
+  for (const flag of ['flagged', 'picked']) {
+    assert.equal(ctx.resolveCullDecision({id: 1, flag, flag_confirmation_status: 'confirmed'}).action, 'keep');
+  }
   assert.equal(ctx.resolveCullDecision({id: 1, flag: 'rejected', flag_confirmation_status: 'confirmed'}).action, 'reject');
   ctx.cullManualDecisions[1] = 'review';
   assert.equal(ctx.resolveCullDecision({id: 1, flag: 'flagged', flag_confirmation_status: 'confirmed'}).action, 'review');

@@ -2991,6 +2991,7 @@ def test_cull_history_preserves_analysis_scope_and_unrelated_suggestions(live_se
     page.evaluate('''({ids, scoped}) => {
       const results = JSON.parse(JSON.stringify(pipelineResults));
       results.photos[0].label = 'KEEP';
+      results.photos[0].automatic_keep_eligible = true;
       results.photos[1].label = 'REJECT';
       if (scoped) {
         selectedCollectionId = 123;
@@ -3152,3 +3153,35 @@ def test_stale_undo_refreshes_the_advertised_action_without_undoing_another(live
     button.click()
     expect(page.locator('#historyRedoBtn')).to_be_enabled()
     assert db.photos.get(ids[0])['flag'] == 'none'
+
+
+@pytest.mark.parametrize("rapid", [False, True], ids=["group-review", "rapid-review"])
+def test_review_apply_preserves_untouched_algorithmic_pick(live_server, page, rapid):
+    db = live_server["db"]
+    ids = live_server["data"]["photos"][:4]
+    # Only the first of these existing picks receives a photographer decision.
+    for pid in ids[:2]:
+        db.photo_review.set_flag(pid, "flagged")
+    db.commit()
+    _write_grouped_pipeline_cache(live_server, ids)
+    view = "rapid-review" if rapid else "review"
+    page.goto(f"{live_server['url']}/pipeline/{view}?enc=0&burst=0")
+    apply = page.locator("#applyBtn" if rapid else "#grmApplyBtn")
+    expect(apply).to_be_enabled()
+    if rapid:
+        expect(page.locator("#pickCount")).to_have_text("0")
+    else:
+        expect(page.locator("#grmCandidates .grm-card")).to_have_count(2)
+
+    if rapid:
+        page.locator(".decision-btn.pick").click()
+    else:
+        page.keyboard.press("p")
+    with page.expect_response("**/api/pipeline/group/apply") as posted:
+        apply.click()
+    assert posted.value.ok
+    assert posted.value.request.post_data_json["picks"] == [ids[0]]
+    states = db.photo_review.culling_flag_states(ids[:2])
+    assert states[ids[0]]["confirmed_flag"] == "flagged"
+    assert states[ids[1]]["flag"] == "flagged"
+    assert states[ids[1]].get("confirmed_flag") is None

@@ -1,5 +1,5 @@
 // Rapid Review's classic scripts share this page-specific program.
-interface RapidPhoto {id:number; filename?:string; flag?:string; label?:string; confirmed_species?:string|null; confirmed_species_list?:string[]; confirmed_species_identities?:{name:string;key:string}[]; quality_composite?:number|null; subject_tenengrad?:number|null;}
+interface RapidPhoto {flag_confirmation_status?:string;id:number; filename?:string; flag?:string; label?:string; confirmed_species?:string|null; confirmed_species_list?:string[]; confirmed_species_identities?:{name:string;key:string}[]; quality_composite?:number|null; subject_tenengrad?:number|null;}
 interface RapidOverride {species?:string; species_list?:string[]; confirmed?:boolean;}
 interface RapidObjectBurst {photo_ids:number[]; species_override?:RapidOverride|null;}
 // load_results preserves legacy ID arrays alongside modern burst objects.
@@ -11,7 +11,7 @@ interface RapidSession {rawIndex:number;encIdx:number;burstIdx:number;ids:number
 type RapidZone = 'pick'|'reject'|'review';
 interface RapidHistory {id:number;prevZone:RapidZone;prevReviewed:boolean;prevTouched:boolean;prevIndex:number;}
 interface RapidQueue {filter:string;includeRejected:boolean;multiOnly:boolean;}
-interface RapidKeywordRow {flag?:string;has_species_keyword?:boolean;has_species_keywords?:Record<string,boolean>;}
+interface RapidKeywordRow {flag_confirmation_status?:string;flag?:string;has_species_keyword?:boolean;has_species_keywords?:Record<string,boolean>;}
 interface RapidGroupResponse {photos?:Record<string,RapidKeywordRow>;}
 interface RapidSpeciesResponse {species_list?:string[];encounters?:RapidEncounter[];summary?:RapidSummary;}
 interface RapidSpeciesRequest {species:string;remove?:boolean;add?:boolean;previous_species?:string;}

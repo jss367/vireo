@@ -349,6 +349,24 @@ def combined_request(ids):
                               'expected_burst_photo_ids': ids}}
 
 
+def test_combined_review_preserves_untouched_flag_origin(app_and_db):
+    app, db = app_and_db
+    ids, _ = seed(app, db, 'Western Grebe')
+    db.photo_review.set_flag(ids[1], 'flagged')
+    db.commit()
+    client = app.test_client()
+    body = combined_request(ids)
+    group = body['group_changes']
+    group['untouched'] = group['rejects']
+    group['rejects'] = []
+    response = apply(client, body, request_preview(client, body))
+    assert response.status_code == 200, response.get_json()
+    states = db.photo_review.culling_flag_states(ids[:2])
+    assert states[ids[0]]['confirmed_flag'] == 'flagged'
+    assert states[ids[1]]['flag'] == 'flagged'
+    assert states[ids[1]]['confirmed_flag'] is None
+
+
 def test_combined_species_flags_split_and_removal_share_one_undo(app_and_db):
     app, db = app_and_db
     ids, path = seed(app, db, 'Western Grebe')

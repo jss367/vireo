@@ -197,10 +197,15 @@ async function openSession(index) {
     rapid.items.forEach(function(p) {
       var st = photos[p.id] || {};
       var flag = st.flag || p.flag || 'none';
+      p.flag = flag;
+      p.flag_confirmation_status = st.flag_confirmation_status || 'unverified';
+      var confirmed = p.flag_confirmation_status === 'confirmed';
+      var confirmedPick = confirmed && (flag === 'flagged' || flag === 'picked');
+      p.label = confirmedPick ? 'KEEP' : confirmed && flag === 'rejected' ? 'REJECT' : 'REVIEW';
       rapid.initialFlags[p.id] = flag;
       rapid.initialSpeciesKeywords[p.id] = rapidKeywordStateFor(st, sessionSpeciesList);
-      if (flag === 'flagged') rapid.picks.add(p.id);
-      else if (flag === 'rejected') rapid.rejects.add(p.id);
+      if (confirmedPick) rapid.picks.add(p.id);
+      else if (confirmed && flag === 'rejected') rapid.rejects.add(p.id);
     });
     rapid.seeded = true;
     renderAll();

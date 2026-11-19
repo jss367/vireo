@@ -172,7 +172,7 @@ async function cancelAnalysisRetry() {
 async function refreshAnalysisRetryView() {
   var snapshot = reviewAnalysisRetry.snapshot;
   if (!snapshot || pipelineResults !== snapshot || reviewScopeRequestSeq !== reviewAnalysisRetry.scopeSequence) return false;
-  var decisions = new Map(snapshot.photos.map(function(photo) { return [photo.id, {flag: photo.flag, rating: photo.rating}]; }));
+  var decisions = new Map(snapshot.photos.map(function(photo) { return [photo.id, {flag: photo.flag, confirmation: photo.flag_confirmation_status, rating: photo.rating}]; }));
   /** @type {ReviewResults | null | undefined} */ var fresh;
   if (snapshot.source === 'browse-selection') {
     fresh = await safeFetch('/api/pipeline/selection-results', {method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -192,9 +192,9 @@ async function refreshAnalysisRetryView() {
     var previous = decisions.get(photo.id);
     if (!updated || !previous) return photo;
     // A decision made while the refresh was in flight remains authoritative.
-    if (photo.flag !== previous.flag) {
-      updated.flag = photo.flag;
-      updated.label = photo.flag === 'rejected' ? 'REJECT' : photo.flag === 'flagged' || photo.flag === 'picked' ? 'KEEP' : 'REVIEW';
+    if (photo.flag !== previous.flag || photo.flag_confirmation_status !== previous.confirmation) {
+      updatePipelineReviewPhotoFlag(updated, photo.flag || 'none', photo.flag_confirmation_status);
+      updated.label = confirmedReviewLabel(updated);
     }
     if (photo.rating !== previous.rating) updated.rating = photo.rating;
     return updated;

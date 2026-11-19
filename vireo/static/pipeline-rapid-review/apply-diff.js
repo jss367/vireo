@@ -49,7 +49,7 @@ function rapidComputeApplyDiff() {
   rapid.items.forEach(function(p) {
     var oldFlag = rapid.initialFlags[p.id] || 'none';
     var newFlag = rapid.picks.has(p.id) ? 'flagged' : rapid.rejects.has(p.id) ? 'rejected' : 'none';
-    if (newFlag !== oldFlag) {
+    if (rapid.touched.has(p.id) && (newFlag !== oldFlag || p.flag_confirmation_status !== 'confirmed')) {
       if (newFlag === 'flagged') diff.flagNew++;
       else if (newFlag === 'rejected') diff.rejectNew++;
       else diff.clearNew++;
