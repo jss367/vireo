@@ -180,12 +180,18 @@ function setPipelineReviewGroupFlag(target, flag) {
     };
     // Sync the review cache to the live snapshot so subsequent button
     // labels and card badges reflect truth, not the cache's opening value.
+    // Legacy `picked` keepers normalize to 'none' for the batch-decision
+    // comparison, so write the raw live keeper value through to the cache
+    // when only the confirmation status changed; otherwise an undo in
+    // another tab would flatten a picked photo to an unflagged Review.
     ids.forEach(function(/** @type {number} */ pid) {
       var liveFlag = liveFlagFor(pid);
       var photo = findPhotoInResults(pid);
       if (photo && (normalizedPipelineReviewFlag(photo.flag) !== liveFlag ||
           photo.flag_confirmation_status !== live[pid]?.flag_confirmation_status)) {
-        updatePipelineReviewPhotoFlag(photo, liveFlag, live[pid]?.flag_confirmation_status);
+        var rawLiveFlag = live[pid]?.flag;
+        var cachedFlag = rawLiveFlag === 'picked' ? 'picked' : liveFlag;
+        updatePipelineReviewPhotoFlag(photo, cachedFlag, live[pid]?.flag_confirmation_status);
       }
     });
     // "Reject" applies the reject flag to anything not already rejected —
