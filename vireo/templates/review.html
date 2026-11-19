@@ -376,6 +376,8 @@
     font-size: 15px;
   }
 
+  .grouping-hint { margin: 0 24px; font-size: 12px; color: var(--text-muted); }
+
   /* Keyboard shortcut hint */
   .kbd-hint {
     font-size: 11px;
@@ -907,13 +909,13 @@
     <summary>Scores are relative shares, not probabilities</summary>
     <p>Species scores are softmax shares within each model’s candidate list, not calibrated probabilities of correct identification. Scores from different models or label lists are not directly comparable. Inspect the subject before confirming its name.</p>
   </details>
-  <span class="kbd-hint">You can save species before grouping. They will be attached to encounters when grouping finishes.</span>
   <span class="kbd-hint" id="kbdHintReview">Keyboard: A = accept, S = skip</span>
 </div>
 
 {% include '_sync_panel.html' %}
 
 <!-- Photo Grid -->
+<p class="grouping-hint">You can save species before grouping. They will be attached to encounters when grouping finishes.</p>
 <div class="grid" id="grid"></div>
 <div class="empty" id="empty" style="display:none;">
   Select a collection above to load photos.
