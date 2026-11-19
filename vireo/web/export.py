@@ -129,7 +129,7 @@ def create_export_blueprint(
             try:
                 kwargs = {**options, "checkpoint": lambda: ctx.checkpoint(job), "progress": progress}
                 if kind == "hdr":
-                    result = create_hdr(thread_db, **kwargs)
+                    result = create_hdr(thread_db, vireo_dir, **kwargs)
                 else:
                     result = create_panorama(thread_db, vireo_dir, **kwargs, config=effective_cfg)
                 result["revealed"] = bool(

@@ -5,7 +5,8 @@ from pathlib import Path
 
 import numpy as np
 from export import _claim_export_path
-from image_loader import RAW_DECODE_LINEAR, load_image
+from image_loader import RAW_EXTENSIONS, load_image
+from offline_cache import resolve_original_path
 from PIL import Image
 
 
@@ -19,16 +20,14 @@ def _merge_frames(frames, input_size, checkpoint, progress):
     for index, (photo, path) in enumerate(frames):
         checkpoint()
         progress(index, len(frames) + 1, "Loading " + photo["filename"])
-        image = load_image(str(path), max_size=input_size, raw_decode=RAW_DECODE_LINEAR)
+        image = load_image(str(path), max_size=input_size)
         if image is None:
             raise ValueError(f"Could not read original {path.name}")
         with ExitStack() as stack:
             stack.enter_context(image)
-            encoded = isinstance(image, Image.Image)
-            if encoded:
-                pixels = np.asarray(stack.enter_context(image.convert("RGB")))
-            else:
-                pixels = image.pixels
+            if not isinstance(image, Image.Image):
+                raise ValueError("RAW HDR merging is not available yet. Use JPEG or PNG bracketed exposures.")
+            pixels = np.asarray(stack.enter_context(image.convert("RGB")))
             if radiance is None:
                 radiance = np.zeros(pixels.shape, dtype=np.float32)
                 weights = np.zeros(pixels.shape, dtype=np.float32)
@@ -39,7 +38,7 @@ def _merge_frames(frames, input_size, checkpoint, progress):
             for top in range(0, pixels.shape[0], 128):
                 rows = slice(top, top + 128)
                 samples = pixels[rows]
-                linear = linear_lut[samples] if encoded else np.maximum(samples, 0)
+                linear = linear_lut[samples]
                 weight = np.clip(np.minimum(linear, 1 - linear), 1e-8, 1)
                 radiance[rows] += linear * weight * (reference / photo["shutter_speed"])
                 weights[rows] += weight
@@ -47,30 +46,37 @@ def _merge_frames(frames, input_size, checkpoint, progress):
     return radiance
 
 
-def create_hdr(db, *, photo_ids, destination, output_format, input_size, checkpoint, progress):
+def create_hdr(db, vireo_dir, *, photo_ids, destination, output_format, input_size, checkpoint, progress):
     import cv2
 
     photos = db.photos.get_by_ids(photo_ids)
-    camera = db.photo_metadata.camera_data_by_ids(photo_ids)
-    folders = {f["id"]: Path(f["path"]) for f in db.folders.tree()}
-    if set(db.photo_visibility.visible_photo_ids(photo_ids)) != set(photo_ids):
+    if set(photos) != set(photo_ids) or set(db.photo_visibility.visible_photo_ids(photo_ids)) != set(photo_ids):
         raise ValueError("Every selected photo must be available in the current workspace")
+    if any(Path(p["filename"]).suffix.lower() in RAW_EXTENSIONS or p["extension"].lower() in RAW_EXTENSIONS
+           for p in photos.values()):
+        raise ValueError("RAW HDR merging is not available yet. Use JPEG or PNG bracketed exposures.")
+    camera = db.photo_metadata.camera_data_by_ids(photo_ids)
+    folders = {f["id"]: f["path"] for f in db.folders.tree()}
+    first = photos[photo_ids[0]]
+    destination = destination or folders.get(first["folder_id"], "")
+    if not destination or not Path(destination).is_dir():
+        raise ValueError("Choose an existing destination folder; the source folder may be offline.")
+    folder = Path(destination)
     frames = []
     for pid in photo_ids:
         photo = {**photos[pid], **camera[pid]}
         shutter = photo["shutter_speed"]
         if not isinstance(shutter, (float, int)) or not np.isfinite(shutter) or shutter <= 0:
             raise ValueError(f"Missing or invalid shutter speed for {photo['filename']}")
-        frames.append((photo, folders[photo["folder_id"]] / photo["filename"]))
+        original, _ = resolve_original_path(db, photo, vireo_dir, folders)
+        if not original or not Path(original).is_file():
+            raise ValueError(f"Original unavailable for {photo['filename']}")
+        frames.append((photo, Path(original)))
     if len({p["shutter_speed"] for p, _ in frames}) < 2:
         raise ValueError("Choose frames taken at different shutter speeds")
     for field in ("iso", "aperture"):
         if len({p[field] for p, _ in frames if p[field] is not None}) > 1:
             raise ValueError("Use a bracket captured at a fixed aperture and ISO")
-    first_path = frames[0][1]
-    folder = Path(destination) if destination else first_path.parent
-    if not folder.is_dir():
-        raise ValueError("Choose an existing destination folder")
     pixels = _merge_frames(frames, input_size, checkpoint, progress)
     total = len(frames) + 1
     checkpoint()
@@ -87,7 +93,7 @@ def create_hdr(db, *, photo_ids, destination, output_format, input_size, checkpo
     if not ok:
         raise ValueError("Could not encode HDR merge")
     checkpoint()
-    path, stream = _claim_export_path(str(folder / f"{first_path.stem}_hdr.{output_format}"))
+    path, stream = _claim_export_path(str(folder / f"{Path(first['filename']).stem}_hdr.{output_format}"))
     complete = False
     try:
         with stream:
