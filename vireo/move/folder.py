@@ -9,6 +9,7 @@ runs the move's phases in order through three collaborators:
 import logging
 import os
 import shutil
+from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass
 
@@ -31,6 +32,7 @@ class FolderMoveOptions:
     allow_tracked_merge: bool = False
     destination_name: str = ""
     verify_contents: bool = False
+    verification_cb: Callable[[str, dict[str, str] | None], None] | None = None
     pre_commit_check: object = None
     thumb_cache_dir: str | None = None
 
@@ -190,7 +192,7 @@ class _FolderMove:
         self.transfer = _FolderTransfer(
             db, src_path, self.target, remote=options.remote,
             verify_contents=options.verify_contents, progress_cb=progress_cb,
-            progress=self.progress, control=control,
+            progress=self.progress, control=control, verification_cb=options.verification_cb,
         )
         self.catalog = _FolderCatalogRewrite(
             db, folder_id, src_path, landing_name, self.target,
@@ -235,6 +237,7 @@ class _FolderMove:
             source_stat = os.stat(self.src_path)
             self.source_identity = (source_stat.st_dev, source_stat.st_ino)
 
+        transfer.report_verification_eligibility()
         for phase in (transfer.ensure_remote_parent, transfer.copy_tree):
             if self.control:
                 self.control.checkpoint()

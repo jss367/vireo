@@ -208,8 +208,17 @@ def test_confirmed_transfer_still_checks_identity_before_removing_originals(reco
     import shutil
 
     import move
+    from move import mounted_verify
 
     client, db, archive, root, state = recovery
+
+    # The optional preflight can succeed even if the route disappears by the send.
+    monkeypatch.setattr(mounted_verify, 'mounted_verification_target',
+                        lambda *args: ({"ssh_key": "private-key-path"}, None))
+    check = client.get(f"/api/import/pending-archives/{archive['id']}/verification")
+    assert check.get_json() == mounted_verify.verification_notice(None, preflight=True)
+    routes = iter([({"ssh_key": "private-key-path"}, None), (None, "missing_route")])
+    monkeypatch.setattr(move.folder_transfer, 'mounted_verification_target', lambda *args: next(routes))
     source = Path(archive['staging_destination'])
     originals = {str(path.relative_to(source)): path.read_bytes() for path in source.rglob('*') if path.is_file()}
     assert originals
@@ -226,6 +235,9 @@ def test_confirmed_transfer_still_checks_identity_before_removing_originals(reco
     response = client.post(url, json={'confirmed_mount_identities': proposal})
     assert response.status_code == 200, response.get_json()
     job = wait_for_job_via_client(client, response.get_json()['job_id'])
+    steps = {step['id']: step for step in job['steps']}
+    assert steps['check']['nas_verification'] == check.get_json()
+    assert steps['verify']['nas_verification'] == mounted_verify.verification_notice('missing_route')
     if replace_during_copy:
         assert job['status'] == 'failed', job
         assert 'NAS volume changed' in str(job['errors'])

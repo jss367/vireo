@@ -28,13 +28,16 @@ Destination identity, size, modification time, and change time must also
 match their values before the checksum pass; a changed copy blocks the move.
 Temporary verification markers are removed when the check ends.
 
-If SSH, rsync, or the path proof is unavailable, Vireo reads and compares
-every byte through the mounted share. Jobs shows **Verifying copy locally
-(NAS verification unavailable)** when an attempted remote check falls back;
-the log contains the connection or verification error when available.
-Destinations with no eligible saved SSH target keep their existing local
-verification behavior.
+Before sending a pending mounted transfer, open its details and select
+**Check NAS verification**. This checks the saved route and local tools.
+The job repeats this check before copying and proves the live destination
+identity during verification.
+
+If NAS verification is unavailable, Jobs shows the reason alongside the
+local verification count. Vireo compares every byte, which may reread the
+destination over the network. The reason remains in the verification step
+after the job finishes.
 
 A checksum mismatch stops the move and preserves the originals. Pausing
 invalidates earlier verification, so resuming must complete a fresh check
-before originals can be removed. Cancelling also preserves the originals.
+before originals can be removed. Canceling also preserves the originals.

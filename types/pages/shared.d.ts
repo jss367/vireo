@@ -122,6 +122,7 @@ interface ExportPreflightResult {
 }
 
 interface PendingArchive {
+  mounted?: boolean;
   id: string | number; name: string; destination: string; collection_id?: number | null;
   folder_ids?: number[];
   state: string; unsynced_photos?: number; unsynced_photos_other_workspaces?: number;

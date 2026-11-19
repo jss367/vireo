@@ -87,6 +87,9 @@ class MoveSteps:
         self._lock = threading.Lock()
         runner.set_steps(self._job_id, steps)
 
+    def verification_notice(self, step_id: str, notice: dict[str, str] | None) -> None:
+        self._runner.update_step(self._job_id, step_id, nas_verification=notice)
+
     def start(self) -> None:
         """Open the first step, for setup the work does before its first
         progress callback."""

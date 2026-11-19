@@ -670,7 +670,7 @@ def test_pause_after_nas_checksum_batch_reverifies_before_delete(transfer_env, m
     checked, release = threading.Event(), threading.Event()
     remote = {'host': 'nas', 'user': 'user', 'verify_path': '/Photos/originals',
               'rsync_bin': 'rsync', 'ssh_bin': 'ssh'}
-    monkeypatch.setattr(transfer, 'mounted_verification_target', lambda *a: remote)
+    monkeypatch.setattr(transfer, 'mounted_verification_target', lambda *a: (remote, None))
     monkeypatch.setattr(mv, '_probe_matches', lambda *a: True)
     monkeypatch.setattr(mv, 'VERIFY_BATCH_SIZE', 1)
     original_batches = mv._verify_batches

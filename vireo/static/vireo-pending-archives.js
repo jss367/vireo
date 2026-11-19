@@ -195,6 +195,31 @@
     row.appendChild(discard);
   }
 
+  /** @param {PendingArchive} item @param {HTMLElement} details */
+  function appendVerificationCheck(item, details) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'btn btn-secondary';
+    button.textContent = 'Check NAS verification';
+    const result = document.createElement('div');
+    result.setAttribute('role', 'status');
+    button.addEventListener('click', async () => {
+      button.disabled = true;
+      result.textContent = 'Checking destination…';
+      try {
+        const response = await fetch('/api/import/pending-archives/' + encodeURIComponent(String(item.id)) + '/verification');
+        if (!response.ok) throw new Error();
+        result.textContent = (await response.json()).message;
+      } catch {
+        result.textContent = 'Could not check this destination. Try again.';
+      } finally {
+        button.disabled = false;
+      }
+    });
+    details.appendChild(button);
+    details.appendChild(result);
+  }
+
   /** @param {PendingArchive} item @param {Set<string | null>} expanded @param {Set<string | null>} existing */
   function renderArchive(item, expanded, existing) {
     const row = document.createElement('div');
@@ -210,6 +235,7 @@
     destination.className = 'pending-archive-destination';
     destination.textContent = 'Destination: ' + item.destination;
     details.appendChild(destination);
+    if (item.mounted && item.state === 'ready') appendVerificationCheck(item, details);
     row.appendChild(details);
     appendArchiveSummary(item, row);
     const actions = document.createElement('div');

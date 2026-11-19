@@ -433,7 +433,7 @@ class FolderMoves:
                     allow_tracked_merge=request.allow_tracked_merge,
                     thumb_cache_dir=self._config["THUMB_CACHE_DIR"],
                     control=control,
-                    **({"verify_contents": True} if managed_staging_root and not remote else {}),
+                    **({"verify_contents": True, "verification_cb": steps.verification_notice} if managed_staging_root and not remote else {}),
                     **({"pre_commit_check": check_mount} if check_mount else {}),
                 )
 

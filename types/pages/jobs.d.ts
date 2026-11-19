@@ -7,6 +7,7 @@ interface JobsProgress {
   eta_kind?: string; cache_hits?: number; classified?: number;
 }
 interface JobsStep {
+  nas_verification?: {code: string; message: string} | null;
   id: string; label: string; status: string; error_count?: number; error?: string;
   source_index?: number; progress?: JobsProgress; summary?: string; started_at?: string;
   duration?: number; label_source?: string; current_file?: string;
