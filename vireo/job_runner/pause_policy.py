@@ -5,7 +5,7 @@ considering pause is an error, rather than a silently missing control.
 """
 
 PAUSABLE_JOBS = frozenset({
-    "pipeline", "scan", "thumbnails", "duplicate-scan", "verify-hashes",
+    "hdr", "pipeline", "scan", "thumbnails", "duplicate-scan", "verify-hashes",
     "capture-time", "verify-models", "sharpness", "cull", "regroup",
     "precompute-embeddings", "fetch-labels", "metadata-repair", "previews",
     "ingest", "move-photos", "offline-cache", "release-local-originals",

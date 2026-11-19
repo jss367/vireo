@@ -264,11 +264,11 @@ def _classify(result: dict, config: dict) -> tuple[str, list[str]]:
     return summary, notice_lines + _error_details(result)
 
 
-def _panorama(result: dict, config: dict) -> tuple[str, list[str]]:
+def _composite(result: dict, config: dict, name: str) -> tuple[str, list[str]]:
     if not result.get("path"):
-        return "No panorama saved", _error_details(result)
+        return f"No {name.lower()} saved", _error_details(result)
     return (
-        f"Panorama created from {_n(_int(result, 'photo_count'), 'photo')}",
+        f"{name} created from {_n(_int(result, 'photo_count'), 'photo')}",
         [str(result["path"]), f"{_int(result, 'width'):,} × {_int(result, 'height'):,} pixels"],
     )
 
@@ -914,7 +914,8 @@ _DESCRIBERS: dict[str, Callable[[dict, dict], tuple[str, list[str]]]] = {
     "previews": _previews,
     "classify": _classify,
     "export": _export,
-    "panorama": _panorama,
+    "panorama": lambda result, config: _composite(result, config, "Panorama"),
+    "hdr": lambda result, config: _composite(result, config, "HDR merge"),
     "cull": _cull,
     "regroup": _regroup,
     "sharpness": _sharpness,

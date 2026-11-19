@@ -12,13 +12,14 @@ MAX_PHOTOS = 12
 INPUT_SIZES = (2048, 4096)
 
 
-def validate_options(body):
+def validate_options(body, *, hdr=False):
     """Validate the entire selection: silently dropping a frame is unsafe."""
     if not isinstance(body, dict):
         raise ValueError("Request body must be a JSON object")
     ids = body.get("photo_ids")
     if not isinstance(ids, list) or not 2 <= len(ids) <= MAX_PHOTOS:
-        raise ValueError(f"Select between 2 and {MAX_PHOTOS} overlapping photos")
+        kind = "bracketed" if hdr else "overlapping"
+        raise ValueError(f"Select between 2 and {MAX_PHOTOS} {kind} photos")
     if any(type(pid) is not int or pid <= 0 for pid in ids):
         raise ValueError("photo_ids must contain positive integers")
     if len(set(ids)) != len(ids):
@@ -30,8 +31,9 @@ def validate_options(body):
     if destination and not os.path.isabs(destination):
         raise ValueError("Destination must be an absolute folder path")
     output_format = body.get("format", "jpg")
-    if output_format not in ("jpg", "png"):
-        raise ValueError("Format must be jpg or png")
+    formats = ("jpg", "hdr") if hdr else ("jpg", "png")
+    if output_format not in formats:
+        raise ValueError("Format must be " + " or ".join(formats))
     size = body.get("input_size", 2048)
     if type(size) is not int or size not in INPUT_SIZES:
         raise ValueError("Input size must be 2048 or 4096")

@@ -108,7 +108,7 @@ declare function showRevealFeedback(data: unknown): void;
 declare function submitToInatBatch(ids: number[]): Promise<void>;
 declare function showDeleteDialog(ids: number[], companionCount: number, callback: (data: {failed_photo_ids?: number[], deleted: number}) => void): void;
 declare function developPhotos(ids: number[]): Promise<void>;
-declare function openPanoramaModal(ids: number[]): void;
+declare function openPanoramaModal(ids: number[], hdr?: boolean): void;
 declare function closePanoramaModal(): void;
 declare function startPanorama(): Promise<void>;
 declare function openPipeline(photoId: number): void;
