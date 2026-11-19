@@ -15,6 +15,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from ebird_names import add_ebird_names
 from flask import Blueprint, jsonify, make_response, request
 from highlights_payload import build_life_list_payload
 
@@ -310,6 +311,7 @@ def create_life_list_blueprint(get_db: GetDb, json_error: JsonError) -> Blueprin
             trip=trip_scope(db),
             photos_per_species=request.args.get("photos_per_species", 100, type=int),
         )
+        add_ebird_names(payload["species"])
         return jsonify(payload)
 
     @blueprint.route("/api/life-list/species")

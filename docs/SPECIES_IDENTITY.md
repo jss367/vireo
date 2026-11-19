@@ -133,3 +133,29 @@ to unenriched BioCLIP text rows. Existing scientific names or taxonomy ranks
 may be native Tree-of-Life evidence and are preserved. Legacy-only consensus
 also snapshots source text and sidecars and rechecks them inside its writer
 transaction; changed evidence leaves the pass unmarked for retry.
+
+## eBird names on the numbered Life List
+
+The Bird names control uses eBird/Clements v2026 English (US) names for reviewed
+one-to-one matches. Both names are searchable. Card identity, numbering,
+representative photos, and confirmed keywords use the catalog identification.
+
+To compare the running catalog, download the v2026 workbook from
+[Cornell's common names page](https://support.ebird.org/en/support/solutions/articles/48000804865-bird-names-in-ebird).
+With Python and openpyxl installed, run:
+
+```sh
+python scripts/compare_ebird_life_list.py /path/to/workbook.xlsx > comparison.csv
+```
+
+The CSV includes linked, species-rank entries in class Aves. Each split gets
+one row per possible eBird species. A split review covers historical entries: an
+iNaturalist ID can persist for the narrower species after a split, while an
+older photo still carries the broad identification. A candidate shares a scientific name and
+needs review. An unmatched entry had no scientific-name hit.
+
+To extend `vireo/data/ebird_names_v2026.json`, check the iNaturalist ID and
+its taxon framework relationship. When the framework cites an older Clements
+release, look up its species in that edition on Avibase and compare its concept
+ID with the v2026 workbook. Record both sources with the mapping. A retained
+binomial or eBird code alone cannot establish equivalent species boundaries.
