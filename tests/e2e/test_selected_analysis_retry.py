@@ -1,4 +1,6 @@
 """Selected analysis stays bounded, observable, and separate from decisions."""
+
+import pytest
 from playwright.sync_api import expect
 
 from e2e.test_pipeline_review_species import _write_predictionless_pipeline_cache
@@ -157,7 +159,10 @@ def test_closing_while_submit_is_pending_does_not_change_job_targets(live_server
     assert state["polls"] >= 2
 
 
-def test_decision_changed_during_view_refresh_wins_over_the_old_response(live_server, page):
+@pytest.mark.parametrize(("flag", "confirmation", "label"), [
+    ("rejected", "confirmed", "REJECT"), ("flagged", "unverified", "REVIEW"),
+])
+def test_decision_changed_during_view_refresh_wins_over_the_old_response(live_server, page, flag, confirmation, label):
     ids = _open_review(live_server, page)
     state = _install_retry(live_server, page, ids, delay_refresh=True)
     page.locator("#grmAnalysisRetryAction").click()
@@ -165,14 +170,18 @@ def test_decision_changed_during_view_refresh_wins_over_the_old_response(live_se
     expect(page.locator("#analysisRetryStatus")).to_contain_text("Reloading current analysis")
     expect(page.locator("#analysisRetryPhotos")).to_have_attribute("data-refresh-held", "1")
     # A later user action in this page must win even if the response was read earlier.
-    page.evaluate("pid => { const p = findPhotoInResults(pid); p.flag = 'rejected'; p.rating = 2; }", ids[0])
+    page.evaluate("""([id, flag, confirmation]) => {
+        const photo = findPhotoInResults(id);
+        updatePipelineReviewPhotoFlag(photo, flag, confirmation);
+        photo.rating = 2;
+    }""", [ids[0], flag, confirmation])
     assert len(state["refresh_held"]) == 1
     route, payload = state["refresh_held"][0]
     route.fulfill(json=payload)
     expect(page.locator("#analysisRetryStatus")).not_to_contain_text("Reloading current analysis")
-    assert page.evaluate("pid => findPhotoInResults(pid).flag", ids[0]) == "rejected"
+    assert page.evaluate("pid => findPhotoInResults(pid).flag", ids[0]) == flag
     assert page.evaluate("pid => findPhotoInResults(pid).rating", ids[0]) == 2
-    assert page.evaluate("pid => findPhotoInResults(pid).label", ids[0]) == "REJECT"
+    assert page.evaluate("pid => findPhotoInResults(pid).label", ids[0]) == label
     assert page.evaluate("pid => findPhotoInResults(pid).subject_tenengrad", ids[0]) == 777
 
 

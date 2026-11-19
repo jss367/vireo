@@ -54,10 +54,18 @@ function normalizedPipelineReviewFlag(flag) {
   return flag === 'flagged' || flag === 'rejected' ? flag : 'none';
 }
 
-/** @param {ReviewPhoto | null | undefined} photo @param {string} flag */
-function updatePipelineReviewPhotoFlag(photo, flag) {
+/** @param {ReviewPhoto} photo */
+function confirmedReviewLabel(photo) {
+  if (photo.flag_confirmation_status !== 'confirmed') return 'REVIEW';
+  if (photo.flag === 'flagged' || photo.flag === 'picked') return 'KEEP';
+  return photo.flag === 'rejected' ? 'REJECT' : 'REVIEW';
+}
+
+/** @param {ReviewPhoto | null | undefined} photo @param {string} flag @param {string | undefined} confirmation */
+function updatePipelineReviewPhotoFlag(photo, flag, confirmation) {
   if (!photo) return;
   photo.flag = flag;
+  photo.flag_confirmation_status = confirmation === 'confirmed' ? 'confirmed' : 'unverified';
   // Rejected photos lose representative eligibility server-side
   // (get_species_representatives(eligible_only=True) filters them out), so
   // mirror that in the review cache immediately.
@@ -172,11 +180,18 @@ function setPipelineReviewGroupFlag(target, flag) {
     };
     // Sync the review cache to the live snapshot so subsequent button
     // labels and card badges reflect truth, not the cache's opening value.
+    // Legacy `picked` keepers normalize to 'none' for the batch-decision
+    // comparison, so write the raw live keeper value through to the cache
+    // when only the confirmation status changed; otherwise an undo in
+    // another tab would flatten a picked photo to an unflagged Review.
     ids.forEach(function(/** @type {number} */ pid) {
       var liveFlag = liveFlagFor(pid);
       var photo = findPhotoInResults(pid);
-      if (photo && normalizedPipelineReviewFlag(photo.flag) !== liveFlag) {
-        updatePipelineReviewPhotoFlag(photo, liveFlag);
+      if (photo && (normalizedPipelineReviewFlag(photo.flag) !== liveFlag ||
+          photo.flag_confirmation_status !== live[pid]?.flag_confirmation_status)) {
+        var rawLiveFlag = live[pid]?.flag;
+        var cachedFlag = rawLiveFlag === 'picked' ? 'picked' : liveFlag;
+        updatePipelineReviewPhotoFlag(photo, cachedFlag, live[pid]?.flag_confirmation_status);
       }
     });
     // "Reject" applies the reject flag to anything not already rejected —
@@ -198,7 +213,7 @@ function setPipelineReviewGroupFlag(target, flag) {
       body: JSON.stringify({photo_ids: changedIds, flag: flag}),
     }).then(function() {
       changedIds.forEach(function(/** @type {number} */ pid) {
-        updatePipelineReviewPhotoFlag(findPhotoInResults(pid), flag);
+        updatePipelineReviewPhotoFlag(findPhotoInResults(pid), flag, 'confirmed');
       });
       renderResults();
       refreshLatestScopeSnapshotIfCurrent();
@@ -352,7 +367,7 @@ function setPipelineReviewFlag(photoId, flag) {
   }).then(function() {
     var photo = findPhotoInResults(photoId);
     if (photo) {
-      updatePipelineReviewPhotoFlag(photo, flag);
+      updatePipelineReviewPhotoFlag(photo, flag, 'confirmed');
     }
     renderResults();
     if (inspectPhotoId === photoId && /** @type {HTMLElement} */ (document.getElementById('inspectOverlay')).classList.contains('open')) {

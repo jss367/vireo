@@ -113,9 +113,10 @@ def validate_group_changes(db: Database, cached: JsonDict, enc: JsonDict, body: 
         return None
     if not isinstance(group, dict) or not (body.get("preview") or body.get("preview_token")):
         raise InvalidGroupChanges("Combined Group Review changes require a species preview")
+    # Untouched members verify the complete burst without writing a flag or attribution.
     zones: list[list[int]] = []
-    for key in ("picks", "rejects", "candidates", "removed"):
-        ids = group.get(key)
+    for key in ("picks", "rejects", "candidates", "removed", "untouched"):
+        ids = group.get(key, [] if key == "untouched" else None)
         if not isinstance(ids, list) or any(type(pid) is not int for pid in ids):
             raise InvalidGroupChanges("Group Review decisions must be lists of photo IDs")
         zones.append(ids)

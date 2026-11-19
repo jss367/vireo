@@ -460,8 +460,8 @@ function grmShowSeedError(items, selectPhotoId) {
   }
 }
 
-// Seed picks/rejects on modal open only from live DB state. Unflagged photos
-// stay as candidates until the user explicitly moves them.
+// Only confirmed catalog decisions seed a zone. An automatic or legacy pick
+// stays in Candidates until the photographer chooses a zone for it.
 /** @param {Record<number,ReviewDbPhoto>} dbPhotos @param {ReviewPhoto[]} items @param {number | null | undefined} [selectPhotoId] */
 function grmSeedFromDbState(dbPhotos, items, selectPhotoId) {
   grmState.dbState = dbPhotos || {};
@@ -470,7 +470,8 @@ function grmSeedFromDbState(dbPhotos, items, selectPhotoId) {
     if (grmState.touched && grmState.touched.has(p.id)) return;
     var st = grmState.dbState[p.id];
     var flag = st ? st.flag : null;
-    if (flag === 'flagged') {
+    if (st?.flag_confirmation_status !== 'confirmed') return;
+    if (flag === 'flagged' || flag === 'picked') {
       grmState.picks.add(p.id);
     } else if (flag === 'rejected') {
       grmState.rejects.add(p.id);

@@ -2,14 +2,6 @@
 // requests to /api/encounters/species, the cache save, and the next burst.
 // Classic page script; load boot.js after all definitions.
 
-function candidateIdsForApply() {
-  return rapid.items.filter(function(p) {
-    var initial = rapid.initialFlags[p.id] || 'none';
-    return zoneFor(p.id) === 'review' &&
-      (rapid.touched.has(p.id) || initial === 'flagged' || initial === 'rejected');
-  }).map(function(p) { return p.id; });
-}
-
 function updateSummaryFromPhotos() {
   var summary = /** @type {Required<RapidSummary>} */ (/** @type {RapidResults} */ (rapid.results).summary || {});
   summary.keep_count = 0;
@@ -30,9 +22,9 @@ async function applyCurrent(openNext) {
   renderApplyState();
   var targetList = parseSpeciesList(/** @type {HTMLInputElement} */ (document.getElementById('speciesInput')).value);
   var species = joinSpecies(targetList);
-  var picks = Array.from(rapid.picks);
-  var rejects = Array.from(rapid.rejects);
-  var candidates = candidateIdsForApply();
+  var picks = Array.from(rapid.picks).filter(id => rapid.touched.has(id));
+  var rejects = Array.from(rapid.rejects).filter(id => rapid.touched.has(id));
+  var candidates = Array.from(rapid.touched).filter(id => zoneFor(id) === 'review');
   // Snapshot session context up front. The sidebar still allows openSession()
   // during the request, so reading rapid.sessionIndex / rapid.items /
   // rapid.picks / rapid.rejects after the await could splice burst A's
@@ -40,6 +32,7 @@ async function applyCurrent(openNext) {
   var sessionIndex = rapid.sessionIndex;
   var session = /** @type {RapidSession} */ (rapid.sessions[sessionIndex]);
   var items = rapid.items.slice();
+  var candidateSet = new Set(candidates);
   var pickSet = new Set(picks);
   var rejectSet = new Set(rejects);
   // Capture the species THIS burst is ALREADY confirmed as, BEFORE any
@@ -147,15 +140,10 @@ async function applyCurrent(openNext) {
       }),
     });
     items.forEach(function(p) {
-      if (pickSet.has(p.id)) p.label = 'KEEP';
-      else if (rejectSet.has(p.id)) {
-        p.label = 'REJECT';
-      } else {
-        p.label = 'REVIEW';
-      }
-      if (pickSet.has(p.id)) p.flag = 'flagged';
-      else if (rejectSet.has(p.id)) p.flag = 'rejected';
-      else p.flag = 'none';
+      if (!pickSet.has(p.id) && !rejectSet.has(p.id) && !candidateSet.has(p.id)) return;
+      p.flag_confirmation_status = 'confirmed';
+      p.flag = pickSet.has(p.id) ? 'flagged' : rejectSet.has(p.id) ? 'rejected' : 'none';
+      p.label = p.flag === 'flagged' ? 'KEEP' : p.flag === 'rejected' ? 'REJECT' : 'REVIEW';
     });
     if (resp && resp.photos) {
       Object.keys(resp.photos).forEach(function(pidStr) {

@@ -95,7 +95,7 @@ function actionForLabel(label) {
 
 /** @param {string | undefined} flag @returns {CullAction | null} */
 function actionForFlag(flag) {
-  if (flag === 'flagged') return 'keep';
+  if (flag === 'flagged' || flag === 'picked') return 'keep';
   if (flag === 'rejected') return 'reject';
   return null;
 }
