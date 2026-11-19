@@ -484,7 +484,7 @@ def test_pinned_navigation_stays_in_order_across_pages(live_server, page):
     for path in ["/review", "/cull", "/pipeline/rapid-review", "/dashboard"]:
         page.goto(f"{url}{path}")
         if path == "/review":
-            expect(page).to_have_title("Vireo - Review")
+            expect(page.locator(".nav-tab.active")).to_have_attribute("data-nav-id", "review")
             expect(page.locator('a[href="/classify"]')).to_have_count(0)
         strip = page.locator("#navTabStrip")
         tabs = strip.locator(".nav-tab:not(.is-ephemeral):visible")
