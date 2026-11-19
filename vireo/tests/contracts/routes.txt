@@ -77,6 +77,7 @@ GET          /api/import/<job_id>/recovery-options
 GET          /api/import/folder-preview/thumbnail
 GET          /api/import/orphaned-staging
 GET          /api/import/pending-archives
+GET          /api/import/pending-archives/<archive_id>/verification
 GET          /api/import/readiness
 GET          /api/inat/account-species
 GET          /api/inat/locations
