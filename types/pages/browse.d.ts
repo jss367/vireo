@@ -143,7 +143,7 @@ declare var VireoBrowseCompare: {
 };
 interface BrowseKeywordRefreshOptions {skipPanels?: boolean; skipDetail?: boolean; reportFailure?: boolean}
 interface BrowsePhoto {species_representatives?: {species: string; is_current_photo?: boolean; is_species_representative?: boolean}[]}
-interface BrowseCollection {can_add_photos?: boolean; rules?: string | BrowseRule | BrowseRule[]}
+interface BrowseCollection {import_recorded_at?: string | null; capture_dates?: {first_day: string | null; last_day: string | null; undated: number}; can_add_photos?: boolean; rules?: string | BrowseRule | BrowseRule[]}
 interface BrowseCaptureTimeSample {filename?: string; before_time?: string; before_offset?: string; after_time?: string; after_offset?: string; shift_minutes?: number}
 interface BrowseCaptureTimePreview {samples?: BrowseCaptureTimeSample[]; shifts_vary?: boolean; shift_minutes?: number; affected?: number; missing_time?: number; total?: number;}
 interface BrowseCaptureTimeCompletion {status?: string; errors?: string[]; result?: {skipped?: number; updated?: number; failed?: number}}

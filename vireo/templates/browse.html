@@ -165,7 +165,10 @@ body.sidebar-resizing {
 @media (prefers-reduced-motion: reduce) {
   .folder-local-status.updating::before { animation: none; }
 }
+.tree-item .collection-label { min-width: 0; }
+.tree-item .collection-capture-dates { display: block; font-size: 11px; color: var(--text-secondary); white-space: normal; }
 .tree-item .collection-name {
+  display: block;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;

@@ -23,6 +23,21 @@ function collectionCountMarkup(/** @type {BrowseCollection} */ collection) {
   return html;
 }
 
+function captureDateLabel(/** @type {BrowseCollection} */ collection) {
+  var dates = collection.capture_dates;
+  if (!dates || !collection.photo_count) return '';
+  var label = 'Capture date unknown';
+  if (dates.first_day) {
+    label = 'Captured ' + dates.first_day;
+    if (dates.last_day !== dates.first_day) label += ' to ' + dates.last_day;
+    if (dates.undated) label += ' · ' + dates.undated.toLocaleString() + ' undated';
+  }
+  if (collection.import_recorded_at && !/^Import \d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(collection.name)) {
+    label += ' · Imported ' + collection.import_recorded_at.slice(0, 16) + ' UTC';
+  }
+  return label;
+}
+
 export function renderCollectionList(/** @type {BrowseCollection[]} */ collections) {
   state.collectionsById = {};
   var html = '';
@@ -56,7 +71,8 @@ export function renderCollectionList(/** @type {BrowseCollection[]} */ collectio
     // it) while letting the context menu's Edit Rules return focus here on
     // Escape/Cancel — a plain <div> cannot receive programmatic focus.
     html += '<div class="' + itemClass + '" data-collection-id="' + c.id + '" data-collection-kind="' + kind + '" tabindex="-1"' + titleAttr + ' data-browse-on="click:filterByCollection">' +
-      '<span class="collection-name">' + escapeHtml(c.name) + '</span>' + visualMark +
+      '<span class="collection-label"><span class="collection-name">' + escapeHtml(c.name) + '</span>' +
+      '<span class="collection-capture-dates">' + escapeHtml(captureDateLabel(c)) + '</span></span>' + visualMark +
       '<span class="collection-kind-badge ' + kind + '">' + kindLabel + '</span>' +
       resolveBtn +
       trailing + '</div>';
@@ -161,6 +177,8 @@ export async function loadCollectionCounts() {
       // Keep our in-memory copy in sync so filterByCollection's guard fires
       // for collections that transitioned to (or out of) unavailable.
       state.collectionsById[id] = meta;
+      var dates = el.querySelector('.collection-capture-dates');
+      if (dates) dates.textContent = captureDateLabel(meta);
       var wasUnavailable = el.classList.contains('unavailable');
       var isUnavailable = !!meta.count_error;
       if (wasUnavailable !== isUnavailable) {

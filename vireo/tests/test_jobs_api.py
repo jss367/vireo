@@ -5824,6 +5824,20 @@ def test_pending_archive_review_delete_and_send(app_and_db, tmp_path, monkeypatc
     assert items[0]["state"] == "ready"
     assert items[0]["collection_id"] == imported["result"]["collection_id"]
 
+    cid = imported["result"]["collection_id"]
+    members = db.collections.get_photo_ids(cid)
+    assert len(members) == 1
+    with db.transaction():
+        db.conn.execute("UPDATE photos SET timestamp = ? WHERE id = ?",
+                        ("2026-10-31T23:45:00-07:00", members[0]))
+
+    def browse_dates():
+        rows = client.get("/api/collections").get_json()
+        return next(row["capture_dates"] for row in rows if row["id"] == cid)
+
+    staged_dates = browse_dates()
+    assert staged_dates == {"first_day": "2026-10-31", "last_day": "2026-10-31", "undated": 0}
+
     def no_rsync(*a, **kw):
         raise FileNotFoundError()
 
@@ -5842,6 +5856,8 @@ def test_pending_archive_review_delete_and_send(app_and_db, tmp_path, monkeypatc
     assert (tmp_path / "NAS" / "trip" / "keep.jpg").exists()
     assert not (tmp_path / "NAS" / "trip" / "reject.jpg").exists()
     assert (tmp_path / "NAS" / "trip" / "published" / "gallery.txt").exists()
+    assert browse_dates() == staged_dates
+    assert db.collections.get_photo_ids(cid) == members
     assert not os.path.exists(staging)
     assert client.get("/api/import/pending-archives").get_json()["items"] == []
     assert client.post(f"/api/import/pending-archives/{archive_id}/send").get_json()["already_sent"]
