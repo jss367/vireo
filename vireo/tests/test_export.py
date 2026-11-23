@@ -2196,7 +2196,8 @@ def test_export_preview_and_render_reject_symlink_escape(export_env, tmp_path):
     preview = export_mod.preview_export(env["db"], photo_ids, str(destination), options)
     result = export_photos(env["db"], env["vireo_dir"], photo_ids, str(destination), options)
 
-    assert preview == {"renames": [], "destination_folders": []}
+    assert preview["renames"] == preview["destination_folders"] == preview["files"] == []
+    assert preview["skipped"] == [{"photo_id": env["p1"], "reason": "unsafe output path"}]
     assert result["exported"] == 0
     assert result["errors"] == ["bird1.jpg: unsafe output path rejected"]
     assert list(outside.iterdir()) == []
@@ -4348,7 +4349,8 @@ def test_offline_export_never_uses_same_named_working_directory_file(export_env,
     Image.new("RGB", (40, 30), "blue").save("bird1.jpg")
 
     preview = export_mod.preview_export(db, [env["p1"]], env["dest"])
-    assert preview == {"renames": [], "destination_folders": []}
+    assert preview["renames"] == preview["destination_folders"] == preview["files"] == []
+    assert preview["skipped"] == [{"photo_id": env["p1"], "reason": "no readable original or working copy"}]
     result = export_photos(db, env["vireo_dir"], [env["p1"]], env["dest"])
     assert result["exported"] == 0
     assert result["errors"] == ["bird1.jpg: source file missing"]

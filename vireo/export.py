@@ -2160,11 +2160,28 @@ def _reserve_preview_export_path(requested_path, destination_reservations):
     return export_path
 
 
+def _preview_requested_path(photo, folder_path, source_path, destination, subfolder,
+                            template, output_ext, species_list, seq_counters):
+    """``(path, destination_base, None)``, or why this photo would not be written."""
+    if not source_path or not os.path.isfile(source_path):
+        return None, None, "no readable original or working copy"
+    base = destination or folder_path
+    if not base or (not destination and not os.path.isdir(base)):
+        return None, None, "original folder is not reachable"
+    photo_destination = os.path.normpath(os.path.join(base, subfolder) if subfolder else base)
+    path = _export_requested_path(
+        photo, folder_path, photo_destination, template, output_ext,
+        species_list[0] if species_list else None, seq_counters,
+    )
+    return (path, base, None) if path is not None else (None, None, "unsafe output path")
+
+
 def preview_export(db, photo_ids, destination=None, options=None):
     """Preview where an export would write and which names it would change.
 
-    Returns ``{"renames": [...], "destination_folders": [...]}``, with distinct
-    template roots listed in export order, before any export subfolder.
+    Returns ``{"renames", "destination_folders", "files", "skipped"}``: the
+    distinct template roots in export order, before any export subfolder, one
+    ``files`` entry per output, and why each other photo would not be written.
     Source, naming, sequence and deduplication rules match export without
     rendering files. Later filesystem changes can still introduce collisions.
     """
@@ -2197,12 +2214,15 @@ def preview_export(db, photo_ids, destination=None, options=None):
     seq_counters = {}
     destination_reservations = {}
     renames = []
+    files = []
+    skipped = []
     destination_folders = []
     seen_destination_folders = set()
 
     for pid in photo_ids:
         photo = photos_map.get(pid)
         if not photo:
+            skipped.append({"photo_id": pid, "reason": "not in the catalog"})
             continue
 
         folder_path = folders.get(photo["folder_id"], "")
@@ -2219,31 +2239,18 @@ def preview_export(db, photo_ids, destination=None, options=None):
             output_ext=output_ext,
             exif_data=exif_data_map.get(pid),
         )
-        if not source_path or not os.path.isfile(source_path):
-            continue
-
-        destination_base = destination or folder_path
-        if not destination_base:
-            continue
-        if not destination and not os.path.isdir(destination_base):
-            continue
-        photo_destination = os.path.normpath(
-            os.path.join(destination_base, subfolder)
-            if subfolder else destination_base
+        requested_path, destination_base, reason = _preview_requested_path(
+            photo, folder_path, source_path, destination, subfolder, template,
+            output_ext, species_map.get(pid, []), seq_counters,
         )
-
-        species_list = species_map.get(pid, [])
-        species = species_list[0] if species_list else None
-        requested_path = _export_requested_path(
-            photo, folder_path, photo_destination, template, output_ext,
-            species, seq_counters,
-        )
-        if requested_path is None:
+        if reason:
+            skipped.append({"photo_id": pid, "reason": reason})
             continue
 
         export_path = _reserve_preview_export_path(
             requested_path, destination_reservations,
         )
+        files.append({"photo_id": pid, "path": export_path})
         destination_folder = os.path.normpath(destination_base)
         if destination_folder not in seen_destination_folders:
             seen_destination_folders.add(destination_folder)
@@ -2259,4 +2266,5 @@ def preview_export(db, photo_ids, destination=None, options=None):
     for reservation_group in destination_reservations.values():
         for reservations in reservation_group:
             reservations.close()
-    return {"renames": renames, "destination_folders": destination_folders}
+    return {"renames": renames, "destination_folders": destination_folders,
+            "files": files, "skipped": skipped}

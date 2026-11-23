@@ -10,6 +10,7 @@ when to leave a photo undecided.
 | Skill | What it does |
 | --- | --- |
 | [vireo-adjudicate-bursts](vireo-adjudicate-bursts/SKILL.md) | Compares the frames of a folder's bursts at 1:1 and records picks and rejects with reasons. |
+| [vireo-species-views](vireo-species-views/SKILL.md) | Chooses distinct views of a species from a recent outing, edits them for detail, and exports them with location. |
 
 ## Installing a skill
 

@@ -67,12 +67,23 @@ EXIF dump, cached paths and render keys stays behind `get_photo(include_exif=tru
 | `view_photo` | `/thumbnails/<id>.jpg`, `/photos/<id>/preview`, `/photos/<id>/crop` | Returns the image itself (`thumbnail`, `preview` at 1920, or `subject`, the detection crop). |
 | `list_bursts`, `burst` | `/api/v1/folders/<id>/bursts`, `/api/v1/photos/<id>/burst-evidence` | A folder's bursts with the reasons each needs a reviewer; the ranked burst around a photo with its evidence. |
 | `focus_crop` | `/api/v1/photos/<id>/focus-crop` | Unresized pixels for judging focus, with what the response headers say about them. |
+| `get_edit`, `suggest_crop`, `suggest_tone`, `view_edit` | `/api/photos/<id>/edit-recipe`, `.../versions`, `.../subject-crop`, `.../auto-tone`, `/photos/<id>/edit-preview` | Reading and trying edits; nothing is saved. A recipe name the app would ignore is refused. |
+| `save_edit`, `save_edit_copy` | `PUT /api/photos/<id>/edit-recipe`, `POST .../versions` | One Undo step each. |
+| `list_export_presets`, `preview_export`, `start_export`, `get_job` | `/api/export/presets`, `/api/jobs/export/preflight`, `/api/jobs/export`, `/api/jobs/<id>` | Location metadata is included unless the caller turns it off. |
 | `set_flag` | `/api/batch/flag` | Optional `source` and `reason` are validated and persisted by the flag route; `get_photo` returns a trimmed current `flag_note`. |
 | `set_rating` | `/api/batch/rating` | |
 | `add_keyword`, `remove_keyword` | `/api/batch/keyword`, `/api/batch/keyword-remove` | |
 
-No tool deletes, moves or edits pixels. Every write goes through the same
-routes the UI uses, so it is one Undo step in Vireo like a hand edit.
+No tool deletes or moves photos or changes an original. Every catalog write,
+saved edits included, goes through the same routes the UI uses, so it is one
+Undo step in Vireo like a hand edit. Two rules cover what Undo cannot protect:
+
+- A tool never replaces the user's edit. `save_edit` refuses when the photo has
+  one unless the caller names the exact recipe it saved before, and the route
+  checks that inside the write's transaction (`expected_recipe`).
+- Undo cannot remove exported files, so `start_export` takes only the one-use
+  token of a `preview_export`, sends exactly the previewed request, and refuses
+  when the preflight, the photos' edits or the workspace changed since.
 
 ## Testing
 

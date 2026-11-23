@@ -20,6 +20,7 @@ from render_source import (
     recipe_source_dimensions as _recipe_source_dimensions,
 )
 from services.render_cache import queue_edit_recipe_sync
+from web.photo_review import flag_provenance
 from web.responses import photo_not_found_error
 
 if TYPE_CHECKING:
@@ -31,6 +32,12 @@ if TYPE_CHECKING:
     from web.web_types import AppConfig, GetDb, InvalidatePhotoRenderCache
 
 log = logging.getLogger(__name__)
+
+
+def _described(text: str, source: str | None, reason: str | None) -> str:
+    """The history line for an edit, with who made it and why when stated."""
+    stated = ": ".join(part for part in (source, reason) if part)
+    return f"{text} — {stated}" if stated else text
 
 
 def _create_current_local_mask_snapshot(
@@ -247,8 +254,49 @@ def create_photo_edit_recipes_blueprint(
             return json_error(str(exc))
         return jsonify({"mask": mask})
 
+    @blueprint.route("/api/photos/<int:photo_id>/subject-crop")
+    def api_photo_subject_crop(photo_id: int) -> ResponseReturnValue:
+        """A recipe crop framing one animal; nothing is saved.
+
+        ``margin`` pads the subject box by that fraction of its size on each
+        side (default 0.35), ``aspect`` is ``auto`` or ``W:H``, and
+        ``detection_id`` picks an animal other than the primary one. The crop
+        is in the unedited upright frame.
+        """
+        from burst_evidence import numeric_query_arg
+        from subject_framing import MAX_MARGIN, frame_subject, parse_aspect
+        from subjects import retained
+
+        db = get_db()
+        photo = db.photos.get(photo_id, verify_workspace=True)
+        if not photo:
+            return photo_not_found_error(legacy_error="not found")
+        try:
+            margin = numeric_query_arg(request.args, "margin", 0.35, float, 0, MAX_MARGIN)
+            aspect = parse_aspect(request.args.get("aspect"))
+            wanted = numeric_query_arg(request.args, "detection_id", None, int, 1, 2**63 - 1)
+        except ValueError as exc:
+            return json_error(str(exc))
+        animals = retained(db, photo_id)
+        animal = next((d for d in animals if wanted is None or d["id"] == wanted), None)
+        if animal is None:
+            return json_error("No such animal in this photo" if wanted else "No animal was detected in this photo", 404)
+        try:
+            framing = frame_subject({k: float(animal[f"box_{k}"]) for k in "xywh"},
+                                    _recipe_source_dimensions(photo), margin, aspect)
+        except ValueError as exc:
+            return json_error(str(exc), 409)
+        return jsonify({"photo_id": photo_id, "detection_id": animal["id"], **framing})
+
     @blueprint.route("/api/photos/<int:photo_id>/edit-recipe", methods=["PUT", "POST"])
     def api_set_photo_edit_recipe(photo_id: int) -> ResponseReturnValue:
+        """Save a photo's edit recipe as one Undo step.
+
+        ``expected_recipe``, when the body has it, must be the recipe stored
+        now (``null`` for an unedited photo) or the save answers 409, so a
+        caller cannot overwrite an edit it has not seen. ``source`` and
+        ``reason`` say who made the edit and why, and show in its history.
+        """
         db = get_db()
         body = request.get_json(silent=True)
         if not isinstance(body, dict):
@@ -259,12 +307,17 @@ def create_photo_edit_recipes_blueprint(
             description = "Updated photo edit recipe"
         if not isinstance(recipe, dict):
             return json_error("recipe must be a JSON object")
+        provenance, message = flag_provenance(body)
+        if provenance is None:
+            return json_error(message or "invalid source or reason")
+        source, reason = provenance
         photo = db.photos.get(photo_id, verify_workspace=True)
         if not photo:
             return photo_not_found_error(legacy_error="not found")
         from edit_recipe import RecipeError, normalize_recipe, recipe_to_json
         try:
             normalized = normalize_recipe(recipe)
+            expected = recipe_to_json(normalize_recipe(body.get("expected_recipe"))) or ""
         except RecipeError as e:
             return json_error(str(e))
         local: JsonDict | None = (normalized or {}).get("local")
@@ -280,11 +333,15 @@ def create_photo_edit_recipes_blueprint(
                     "via POST /api/photos/<id>/local-mask/snapshot first"
                 )
         # The recipe, its sidecar work and its undo entry are one unit; the
-        # render caches are dropped once it has committed.
-        with db.transaction():
+        # render caches are dropped once it has committed. Immediate, so the
+        # expected-recipe check and the write see the same stored recipe.
+        with db.transaction(immediate=True):
             old_recipe = db.get_photo_edit_recipe(photo_id)
+            old_value = recipe_to_json(old_recipe) or ""
+            if "expected_recipe" in body and old_value != expected:
+                return json_error("This photo's edit changed. Read it again before saving.",
+                                  409, code="edit_recipe_changed")
             try:
-                old_value = recipe_to_json(old_recipe) or ""
                 new_recipe = db.set_photo_edit_recipe(photo_id, recipe, verify_workspace=True)
                 new_value = recipe_to_json(new_recipe) or ""
             except RecipeError as e:
@@ -296,9 +353,10 @@ def create_photo_edit_recipes_blueprint(
                 queue_edit_recipe_sync(db, photo_id, new_value)
                 db.record_edit(
                     "edit_recipe",
-                    description.strip(),
+                    _described(description.strip(), source, reason),
                     new_value,
                     [{"photo_id": photo_id, "old_value": old_value, "new_value": new_value}],
+                    source=source, reason=reason,
                 )
         invalidate_photo_render_cache(db, [photo_id])
         return jsonify({

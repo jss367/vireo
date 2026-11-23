@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 
 def _photo_export_work(
     ctx: JobLaunch, photo_ids: list[int], destination: str, *, vireo_dir: str,
-    options: JsonDict, reveal_after_export: bool,
+    options: JsonDict, reveal_after_export: bool, list_files: bool,
 ) -> Callable[..., JsonDict]:
     """The ``export`` job's work function for an already-validated request."""
 
@@ -68,11 +68,52 @@ def _photo_export_work(
             and not ctx.runner.is_cancelled(job["id"])
             and reveal_exported_files(exported_files)
         )
+        if list_files:
+            result["files"] = exported_files
         # Per-photo export failures fail the job (the runner folds them in).
         result["ok"] = not result.get("errors")
         return result
 
     return work
+
+
+#: Most photos a preflight will list file by file (``list_files``).
+MAX_LISTED_FILES = 500
+
+
+def _preflight_listing(
+    db: Database, preview: JsonDict, hidden: list[int], recipe_overrides: dict[int, JsonDict | None],
+) -> JsonDict:
+    """Each output with what it will carry, and why other photos are left out.
+
+    ``edit_key`` changes when the photo's edit does, so a caller can tell that
+    an export it previewed would now render something else.
+    """
+    import hashlib
+
+    from edit_recipe import recipe_to_json
+
+    ids = [entry["photo_id"] for entry in preview["files"]]
+    locations = db.locations.get_effective(ids, verify_workspace=False)
+    places = db.locations.get_photo_leaves(ids)
+    recipes = {**db.edits.get_photo_recipes(ids), **recipe_overrides}
+
+    def described(entry: JsonDict) -> JsonDict:
+        pid = entry["photo_id"]
+        location = locations.get(pid) or {}
+        edit = recipe_to_json(recipes.get(pid))
+        return {
+            **entry,
+            "has_coordinates": location.get("latitude") is not None and location.get("longitude") is not None,
+            "has_place_name": pid in places,
+            "edit_key": hashlib.sha256(edit.encode()).hexdigest()[:16] if edit else None,
+        }
+
+    return {
+        "files": [described(entry) for entry in preview["files"]],
+        "skipped": [*({"photo_id": pid, "reason": "not visible in this workspace"} for pid in hidden),
+                    *preview["skipped"]],
+    }
 
 
 def create_export_blueprint(
@@ -216,7 +257,11 @@ def create_export_blueprint(
 
     @blueprint.route("/api/jobs/export/preflight", methods=["POST"])
     def api_job_export_preflight() -> ResponseReturnValue:
-        """Preview filenames, destinations and the explicit metadata selection."""
+        """Preview filenames, destinations and the explicit metadata selection.
+
+        ``list_files`` adds every output path with its location and edit state,
+        and the photos that would not be written.
+        """
         body = request.get_json(silent=True) or {}
         raw_ids = body.get("photo_ids", [])
         destination = body.get("destination", "")
@@ -261,7 +306,11 @@ def create_export_blueprint(
             return json_error(str(exc))
 
         db = get_db()
+        list_files = body.get("list_files") is True
+        if list_files and len(photo_ids) > MAX_LISTED_FILES:
+            return json_error(f"list_files covers at most {MAX_LISTED_FILES} photos")
         visible_set = set(db.photo_visibility.visible_photo_ids(photo_ids))
+        hidden = [pid for pid in photo_ids if pid not in visible_set]
         photo_ids = [pid for pid in photo_ids if pid in visible_set]
         if not photo_ids:
             return json_error("no exportable photos in current workspace")
@@ -303,6 +352,8 @@ def create_export_blueprint(
             "destination_folder_count": len(destination_folders),
             "destination_folders": destination_folders[:20],
             "metadata": metadata,
+            **(_preflight_listing(db, preview, hidden, version_options.get("recipe_overrides") or {})
+               if list_files else {}),
         })
 
     @blueprint.route("/api/jobs/export", methods=["POST"])
@@ -374,9 +425,10 @@ def create_export_blueprint(
         # perfected render over a fresh libraw decode of the RAW.
         developed_dir = effective_cfg.get("darktable_output_dir", "") or ""
 
+        list_files = body.get("list_files") is True
         work = _photo_export_work(
             ctx, photo_ids, destination, vireo_dir=vireo_dir,
-            reveal_after_export=reveal_after_export,
+            reveal_after_export=reveal_after_export, list_files=list_files,
             options={
                 "naming_template": naming_template,
                 "max_size": max_size,
@@ -387,7 +439,7 @@ def create_export_blueprint(
                 "metadata_fields": metadata_fields,
                 "export_to_subfolder": export_to_subfolder,
                 "subfolder_name": subfolder_name,
-                "collect_files": reveal_after_export,
+                "collect_files": reveal_after_export or list_files,
                 **version_options,
             },
         )
