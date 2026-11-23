@@ -31,7 +31,7 @@ from pipeline_results import (
     rebuild_encounter_species_label,
 )
 from runtime_warnings import build_cpu_runtime_warning, runtime_warning_work_units
-from services import detection_store, saved_processes, subject_masks
+from services import detection_store, process_runs, saved_processes, subject_masks
 from services.local_folder import (
     local_copy_scan_conflict,
     stage_pending_source_paths,
@@ -42,7 +42,7 @@ from services.pipeline_launch import (
     resolve_remote_archive_target,
 )
 from services.review_group_changes import detach_review_photo
-from web.request_args import coerce_collection_id, reject_visual_collection
+from web.request_args import coerce_collection_id, parse_selection_photo_ids, reject_visual_collection
 
 if TYPE_CHECKING:
     from sqlite3 import Row
@@ -167,6 +167,18 @@ def create_pipeline_blueprint(
             )
         ], None
 
+    def _plan_scope_photo_ids(body: JsonDict) -> tuple[list[int] | None, ErrorResponse | None]:
+        """A plan's explicit photo scope, or None for a collection or whole-workspace plan."""
+        if "photo_ids" in body:
+            err = photo_scope_error(body, json_error)
+            if err is not None:
+                return None, err
+            return parse_selection_photo_ids(get_db(), body, json_error=json_error, limit=None)
+        folder_ids = body.get("folder_ids")
+        if folder_ids is None:
+            return None, None
+        return _plan_folder_scope_photo_ids(folder_ids)
+
     def _expand_plan_process(body: JsonDict) -> tuple[JsonDict, ErrorResponse | None]:
         """Merge a plan body's saved process under it: ``(body, error)``; ``{}`` on error."""
         pid = body.get("process_id")
@@ -240,35 +252,25 @@ def create_pipeline_blueprint(
             )
         return None
 
-    def _plan_params(
-        body: JsonDict, collection_id: int | None, scope_photo_ids: list[int] | None, source_paths: list[str] | None,
-        hash_duplicate_paths: list[str] | None,
-    ) -> PipelinePlanParams:
-        """Build the ``PipelinePlanParams`` a validated plan body describes."""
-        from pipeline_plan import PipelinePlanParams
+    def _described_plan(body: JsonDict, params: PipelinePlanParams) -> ResponseReturnValue:
+        """The plan with the description ``expected_run`` is checked against.
 
-        review_mode = body.get("review_mode")
-        eye_detect_override_body = body.get("eye_detect_override")
-        return PipelinePlanParams(
-            raw_subject_analysis=body.get("raw_subject_analysis", False),
-            collection_id=collection_id,
-            photo_ids=scope_photo_ids,
-            exclude_photo_ids=body.get("exclude_photo_ids") or [],
-            skip_classify=bool(body.get("skip_classify")),
-            skip_extract_masks=bool(body.get("skip_extract_masks")),
-            skip_eye_keypoints=bool(body.get("skip_eye_keypoints")),
-            eye_detect_override=eye_detect_override_body,
-            skip_regroup=bool(body.get("skip_regroup")),
-            model_ids=body.get("model_ids") or (
-                [body["model_id"]] if body.get("model_id") else []
-            ),
-            labels_files=body.get("labels_files") or [],
-            reclassify=bool(body.get("reclassify")),
-            source_paths=source_paths,
-            hash_duplicate_paths=hash_duplicate_paths,
-            preview_max_size=body.get("preview_max_size"),
-            review_mode=review_mode,
-        )
+        The scope is resolved once, so both cover the same photos: a
+        collection's rules can match more photos a moment later.
+        """
+        from pipeline import _resolve_collection_photo_ids
+        from pipeline_plan import compute_plan
+
+        db = get_db()
+        problem = process_runs.undescribable(body)
+        if problem is not None:
+            return json_error(problem)
+        if params.photo_ids is None:
+            params.photo_ids = sorted(_resolve_collection_photo_ids(db, params.collection_id))
+        excluded = set(params.exclude_photo_ids)
+        params.photo_ids = [pid for pid in params.photo_ids if pid not in excluded]
+        run = process_runs.describe_run(db, params, params.photo_ids, body)
+        return jsonify({**compute_plan(db, params, db_path), "run": run})
 
     @blueprint.route("/api/pipeline/plan", methods=["POST"])
     def api_pipeline_plan() -> ResponseReturnValue:
@@ -319,12 +321,9 @@ def create_pipeline_blueprint(
         # active-workspace subtree photo ids with the same guards as
         # /api/jobs/pipeline, so the plan describes exactly the photos a
         # folder-scoped run would process.
-        scope_photo_ids = None
-        folder_ids = body.get("folder_ids")
-        if folder_ids is not None:
-            scope_photo_ids, err = _plan_folder_scope_photo_ids(folder_ids)
-            if err is not None:
-                return err
+        scope_photo_ids, err = _plan_scope_photo_ids(body)
+        if err is not None:
+            return err
         # Expand a saved-process id the same way /api/jobs/pipeline does so
         # the plan describes the run the same job body would produce. Without
         # this, the Identify-birds process (skip_regroup=True + species review)
@@ -365,10 +364,12 @@ def create_pipeline_blueprint(
             return err
         if not isinstance(body.get("raw_subject_analysis", False), bool):
             return json_error("raw_subject_analysis must be a boolean", 400)
-        params = _plan_params(
+        params = plan_params(
             body, collection_id, scope_photo_ids, source_paths,
             hash_duplicate_paths,
         )
+        if body.get("describe_run"):
+            return _described_plan(body, params)
         return jsonify(compute_plan(db, params, db_path))
 
     def _coerce_process_fields(body: JsonDict, *, require_name: bool) -> tuple[JsonDict, str | None]:
@@ -526,6 +527,7 @@ def create_pipeline_blueprint(
         runtime_warning = launch.runtime_warning(params)
 
         def work(job: JobDict) -> JsonDict:
+            launch.confirm_expected_run(db_path, params.collection_id)
             return run_pipeline_job(
                 job, runner, db_path, active_ws, params,
                 thumb_cache_dir=config["THUMB_CACHE_DIR"],
@@ -2155,6 +2157,62 @@ _SQLITE_INT_MIN = -(1 << 63)
 _SQLITE_INT_MAX = (1 << 63) - 1
 
 
+def plan_params(
+    body: JsonDict, collection_id: int | None, scope_photo_ids: list[int] | None, source_paths: list[str] | None,
+    hash_duplicate_paths: list[str] | None,
+) -> PipelinePlanParams:
+    """Build the ``PipelinePlanParams`` a validated plan body describes."""
+    from pipeline_plan import PipelinePlanParams
+
+    review_mode = body.get("review_mode")
+    eye_detect_override_body = body.get("eye_detect_override")
+    return PipelinePlanParams(
+        raw_subject_analysis=body.get("raw_subject_analysis", False),
+        collection_id=collection_id,
+        photo_ids=scope_photo_ids,
+        exclude_photo_ids=body.get("exclude_photo_ids") or [],
+        skip_classify=bool(body.get("skip_classify")),
+        skip_extract_masks=bool(body.get("skip_extract_masks")),
+        skip_eye_keypoints=bool(body.get("skip_eye_keypoints")),
+        eye_detect_override=eye_detect_override_body,
+        skip_regroup=bool(body.get("skip_regroup")),
+        model_ids=body.get("model_ids") or (
+            [body["model_id"]] if body.get("model_id") else []
+        ),
+        labels_files=body.get("labels_files") or [],
+        reclassify=bool(body.get("reclassify")),
+        source_paths=source_paths,
+        hash_duplicate_paths=hash_duplicate_paths,
+        preview_max_size=body.get("preview_max_size"),
+        review_mode=review_mode,
+    )
+
+
+def photo_scope_error(body: JsonDict, json_error: JsonError) -> ErrorResponse | None:
+    """The 400 response for a ``photo_ids`` scope no run could have, or None.
+
+    Shared by ``/api/jobs/pipeline`` and ``/api/pipeline/plan``. ``photo_ids``
+    is the exact scope, so nothing combines with it or is excluded from it. An
+    id outside SQLite's integer range would fail when it is bound.
+    ``parse_selection_photo_ids`` checks the rest.
+    """
+    others = [
+        key for key in (
+            "collection_id", "folder_ids", "source", "sources", "source_snapshot_id",
+            "source_paths", "exclude_photo_ids", "exclude_paths",
+        )
+        if body.get(key) not in (None, "", [])
+    ]
+    if others:
+        return json_error("photo_ids cannot be combined with " + ", ".join(others))
+    ids = body.get("photo_ids")
+    if isinstance(ids, list) and any(
+        isinstance(pid, int) and not _SQLITE_INT_MIN <= pid <= _SQLITE_INT_MAX for pid in ids
+    ):
+        return json_error("photo_ids contains a value outside SQLite's signed 64-bit integer range")
+    return None
+
+
 def folder_ids_error(folder_ids: object, json_error: JsonError) -> ErrorResponse | None:
     """The 400 response for a malformed ``folder_ids``, or None if valid.
 
@@ -2214,6 +2272,7 @@ class _PipelineLaunch:
         self.excluded_paths_set: set[str] = set()
         self.excluded_photo_ids_set: set[int] = set()
         self.pending_folder_collection = None
+        self.described_params: PipelinePlanParams | None = None
         self.remote_archive_config = None
         self.collection_name = None
 
@@ -2224,6 +2283,7 @@ class _PipelineLaunch:
             self.read_scope,
             self.read_exclusions,
             self.resolve_folder_scope,
+            self.resolve_photo_scope,
             self.check_required_scope,
             self.check_snapshot,
             self.check_source_dirs,
@@ -2233,6 +2293,7 @@ class _PipelineLaunch:
             self.check_local_processing,
             self.check_folder_template,
             self.check_run_flags,
+            self.check_expected_run,
         ):
             err = check()
             if err is not None:
@@ -2523,15 +2584,80 @@ class _PipelineLaunch:
             photo_ids.append(r["id"])
         return photo_ids
 
+    def resolve_photo_scope(self) -> ErrorResponse | None:
+        """Resolve ``photo_ids`` into a pending ad-hoc collection, like ``folder_ids``."""
+        if "photo_ids" not in self.body:
+            return None
+        err = photo_scope_error(self.body, self.json_error)
+        if err is not None:
+            return err
+        photo_ids, err = parse_selection_photo_ids(
+            self.db, self.body, json_error=self.json_error, limit=None,
+        )
+        if err is not None:
+            return err
+        self.pending_folder_collection = {
+            "leaf": f"{len(photo_ids)} photo{'' if len(photo_ids) == 1 else 's'}",
+            "photo_ids": photo_ids,
+        }
+        return None
+
+    def check_expected_run(self) -> ErrorResponse | None:
+        """Refuse a run that is not the one a plan described.
+
+        The run is then pinned to exactly those photos: a collection's rules
+        are evaluated when the job runs, which can be hours after it is queued,
+        so a described collection becomes an ad-hoc collection of its photos.
+        """
+        if "expected_run" not in self.body:
+            return None
+        problem = process_runs.undescribable(self.body)
+        if problem is not None:
+            return self.json_error(problem)
+        pending, err = self._described_scope()
+        if pending is None:
+            return err
+        described = plan_params(self.body, None, pending["photo_ids"], None, None)
+        mismatch = process_runs.expected_run_error(
+            self.body["expected_run"],
+            process_runs.describe_run(self.db, described, pending["photo_ids"], self.body),
+        )
+        if mismatch is not None:
+            return self.json_error(*mismatch)
+        self.pending_folder_collection = pending
+        self.collection_id = None
+        self.described_params = described
+        return None
+
+    def _described_scope(self) -> tuple[JsonDict | None, ErrorResponse | None]:
+        """The photos the run covers now, as a pending ad-hoc collection."""
+        if self.pending_folder_collection is not None:
+            return self.pending_folder_collection, None
+        from pipeline import _resolve_collection_photo_ids
+
+        db = self.db
+        collection = next(
+            (c for c in db.collections.list_all() if c["id"] == self.collection_id), None,
+        )
+        if collection is None:
+            return None, self.json_error("collection not found", 404)
+        photo_ids = _resolve_collection_photo_ids(db, self.collection_id) - self.excluded_photo_ids_set
+        return {"leaf": collection["name"], "photo_ids": sorted(photo_ids)}, None
+
+    def confirm_expected_run(self, db_path: str, collection_id: int | None) -> None:
+        """On the job's thread, before its first stage: refuse a run that changed while queued."""
+        if self.described_params is not None:
+            process_runs.refuse_changed_run(db_path, collection_id, self.described_params, self.body)
+
     def check_required_scope(self) -> ErrorResponse | None:
-        """Require a collection or folder scope."""
+        """Require a collection, folder or photo scope."""
         if (
             not self.source and not self.sources and not self.collection_id
             and not self.source_snapshot_id
             and self.pending_folder_collection is None
         ):
             return self.json_error(
-                "collection_id or folder_ids required"
+                "collection_id, folder_ids or photo_ids required"
             )
         return None
 

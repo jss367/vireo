@@ -27,6 +27,7 @@ CROSS_WORKSPACE_REVIEWS = {
     "repositories/model_runs.py:ModelRunsRepository.get_classifier_run_keys",
     "repositories/model_runs.py:ModelRunsRepository.get_classifier_run_key_gate",
     "repositories/model_runs.py:ModelRunsRepository.classifier_cache_run_filter",
+    "repositories/model_runs.py:ModelRunsRepository.reviewed_predictions",
     "repositories/model_runs.py:_runtime_predicate",
 }
 
@@ -76,6 +77,7 @@ RAW_READS = {
     'repositories/model_runs.py:ModelRunsRepository.get_match_scores_for_photo': 1,
     'repositories/model_runs.py:ModelRunsRepository.get_unscored_current_prediction_runs': 1,
     'repositories/model_runs.py:ModelRunsRepository.release_incomplete_classifier_run': 1,
+    'repositories/model_runs.py:ModelRunsRepository.reviewed_predictions': 1,
     'repositories/model_runs.py:_CACHE_HIT_OUTPUT_SQL': 1,
     'repositories/model_runs.py:_runtime_predicate': 1,
     'repositories/moves_merge.py:MovesMergeRepository.query_rule_matches': 2,

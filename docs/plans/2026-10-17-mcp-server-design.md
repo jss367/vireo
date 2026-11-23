@@ -70,13 +70,14 @@ EXIF dump, cached paths and render keys stays behind `get_photo(include_exif=tru
 | `get_edit`, `suggest_crop`, `suggest_tone`, `view_edit` | `/api/photos/<id>/edit-recipe`, `.../versions`, `.../subject-crop`, `.../auto-tone`, `/photos/<id>/edit-preview` | Reading and trying edits; nothing is saved. A recipe name the app would ignore is refused. |
 | `save_edit`, `save_edit_copy` | `PUT /api/photos/<id>/edit-recipe`, `POST .../versions` | One Undo step each. |
 | `list_export_presets`, `preview_export`, `start_export`, `get_job` | `/api/export/presets`, `/api/jobs/export/preflight`, `/api/jobs/export`, `/api/jobs/<id>` | Location metadata is included unless the caller turns it off. |
+| `list_processes`, `preview_process`, `start_process`, `cancel_process` | `/api/processes`, `/api/pipeline/plan`, `/api/jobs/pipeline`, `/api/jobs/<id>/cancel` | The scope is photos, a folder or a collection. `cancel_process` stops only Process runs. |
 | `set_flag` | `/api/batch/flag` | Optional `source` and `reason` are validated and persisted by the flag route; `get_photo` returns a trimmed current `flag_note`. |
 | `set_rating` | `/api/batch/rating` | |
 | `add_keyword`, `remove_keyword` | `/api/batch/keyword`, `/api/batch/keyword-remove` | |
 
 No tool deletes or moves photos or changes an original. Every catalog write,
 saved edits included, goes through the same routes the UI uses, so it is one
-Undo step in Vireo like a hand edit. Two rules cover what Undo cannot protect:
+Undo step in Vireo like a hand edit. Three rules cover what Undo cannot protect:
 
 - A tool never replaces the user's edit. `save_edit` refuses when the photo has
   one unless the caller names the exact recipe it saved before, and the route
@@ -89,6 +90,15 @@ Undo step in Vireo like a hand edit. Two rules cover what Undo cannot protect:
   against the catalog data it renders from and the names it would use, so a change
   after the tool's own check writes nothing either, and it claims exactly the
   previewed path or fails that photo.
+- Undo cannot restore the review results a grouping replaces, or the boxes and
+  predictions a re-classify replaces, so `start_process` takes only the one-use
+  token of a `preview_process`. The preview names what would be replaced. Every
+  stage flag, the models and the species lists are sent explicitly, so editing
+  the saved process or the workspace's choices later does not change the run.
+  The app compares the whole description (`expected_run`) at launch, as it fixes
+  the run's photos, and again when the run leaves the queue, and refuses a run
+  that differs. A review made after a re-classify begins, on a photo it has not
+  reached, is replaced like the others, as with a run started in Vireo.
 
 ## Testing
 

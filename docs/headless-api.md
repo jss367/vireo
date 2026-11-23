@@ -10,7 +10,10 @@ Vireo is also a [Model Context Protocol](https://modelcontextprotocol.io)
 server, so Claude Code, Claude Desktop and other MCP clients can work on the
 catalog on the subscription you already have: search photos, look at them,
 read burst rankings, and set flags, ratings and keywords. Every write goes
-through the same routes the app uses and is one Undo step in Vireo.
+through the same routes the app uses and is one Undo step in Vireo, with two
+exceptions that Undo cannot reverse: exported files, and the review results,
+boxes and predictions a Process run replaces. Both start only from a preview
+that says what would be written or replaced.
 
 The server runs as a subprocess of the client and talks to the running Vireo
 over the API below, so Vireo must be open (or started headless) while the
@@ -50,6 +53,10 @@ edit the photo already has, and `save_edit_copy` keeps a look beside it as a
 virtual copy. `list_export_presets`, `preview_export` and `start_export` export
 files: the preview returns a one-use token, and the export is refused when
 anything the preview described has changed. `get_job` follows any job.
+`list_processes`, `preview_process` and `start_process` run detection, species,
+masks, quality and grouping the same way: the preview says what each stage would
+do and what the run would replace, and the run covers exactly the photos it
+described. `cancel_process` stops one.
 [`skills/`](../skills/README.md) holds instructions an assistant can follow to
 do a whole task with these tools.
 `best_of_each_species` and `choose_best_photo` list and settle the best photo of

@@ -210,6 +210,28 @@ class ModelRunsRepository:
         ).fetchone()
         return row is not None
 
+    def reviewed_predictions(self, photo_ids: Iterable[int]) -> list[sqlite3.Row]:
+        """Accepted and rejected predictions on ``photo_ids``, in every workspace.
+
+        Their whole review rows and ``photo_id``, for what a re-classify can
+        delete: predictions on a box the user drew are kept, and an automatic
+        taxonomy match is not a decision.
+        """
+        rows: list[sqlite3.Row] = []
+        for chunk in chunked(sorted(set(photo_ids))):
+            rows.extend(self.conn.execute(
+                f"""SELECT pr.*, d.photo_id
+                    FROM detections d
+                    JOIN predictions p ON p.detection_id = d.id
+                    JOIN prediction_review pr ON pr.prediction_id = p.id
+                    WHERE d.photo_id IN ({','.join('?' * len(chunk))})
+                      AND d.detector_model != 'reviewer-selected'
+                      AND pr.status IN ('accepted', 'rejected')
+                      AND COALESCE(pr.individual, '') != ?""",
+                [*chunk, self.auto_match_review_marker],
+            ))
+        return rows
+
     def stale_detector_input_ids(self, photo_ids: Sequence[int]) -> set[int]:
         """Find portable MegaDetector runs whose source or focus changed, except reviewed runs.
 
