@@ -1589,7 +1589,7 @@ def _process_preview(client, body, plan, token):
         "marks_misses": run["misses"],
         "models": run["models"],
         "species_lists": [os.path.basename(path) for path in run["labels_files"]],
-        "settings": run["settings"],
+        "settings": {key: value for key, value in run["settings"].items() if key != "digest"},
         "replaces": replaces,
         "unfinished_jobs": _unfinished_jobs(client),
     }

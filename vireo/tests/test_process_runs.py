@@ -6,7 +6,7 @@ import models
 import pipeline_job
 import pytest
 from db import Database
-from services import detection_store, process_runs, workspace_config
+from services import catalog_deletion, detection_store, process_runs, workspace_config
 from wait import wait_for_job_via_client
 
 MODEL = {
@@ -171,7 +171,8 @@ def test_the_same_number_of_different_decisions_is_a_changed_run(app_and_db, one
 
 
 @pytest.mark.parametrize("change, named", [
-    ("review", "reviewed predictions"), ("species list", "species lists"), ("settings", "stage settings"),
+    ("review", "reviewed predictions"), ("species list", "species lists"), ("mask model", "stage settings"),
+    ("other setting", "stage settings"), ("deleted photo", "photos in scope"),
 ])
 def test_a_run_that_changes_in_the_queue_fails_before_its_first_stage(
     app_and_db, one_model, started, monkeypatch, change, named,
@@ -191,9 +192,11 @@ def test_a_run_that_changes_in_the_queue_fails_before_its_first_stage(
             _review(worker, prediction, "accepted")
         elif change == "species list":
             workspace_config.set_workspace_active_labels(worker, ["/lists/new.txt"])
+        elif change == "deleted photo":
+            catalog_deletion.delete_photos(worker, [ids[-1]])
         else:
-            worker.conn.execute("UPDATE workspaces SET config_overrides = ?",
-                                (json.dumps({"pipeline": {"sam2_variant": "sam2-tiny"}}),))
+            setting = {"sam2_variant": "sam2-tiny"} if change == "mask model" else {"burst_time_gap": 9}
+            worker.conn.execute("UPDATE workspaces SET config_overrides = ?", (json.dumps({"pipeline": setting}),))
             worker.commit()
         worker.close()
         return confirm(*args, **kwargs)
@@ -204,6 +207,29 @@ def test_a_run_that_changes_in_the_queue_fails_before_its_first_stage(
     job = wait_for_job_via_client(client, response.get_json()["job_id"])
     assert job["status"] == "failed" and named in json.dumps(job["errors"]), job
     assert started == []
+
+
+@pytest.mark.parametrize("change", [
+    {"skip_regroup": False}, {"skip_extract_masks": True}, {"skip_eye_keypoints": True}, {"review_mode": "species"},
+    {"raw_subject_analysis": True}, {"reclassify": True}, {"miss_enabled": True}, {"eye_detect_override": True},
+    {"preview_max_size": 0}, {"download_taxonomy": False}, {"skip_classify": True},
+])
+def test_every_option_is_part_of_the_run_described(app_and_db, one_model, started, change):
+    app, db = app_and_db
+    client = app.test_client()
+    body = {"photo_ids": _ids(db), "skip_regroup": True, "miss_enabled": False}
+    run = _run_of(client, **body)
+    response = _start(client, run, **{**body, **change})
+    assert response.status_code == 409 and "stages and options" in response.get_json()["error"]
+    assert started == []
+
+
+def test_the_default_process_is_not_a_stage_setting(app_and_db, one_model):
+    app, db = app_and_db
+    before = _run_of(app.test_client(), photo_ids=_ids(db))
+    db.conn.execute("UPDATE workspaces SET config_overrides = ?", (json.dumps({"pipeline": {"default_process_id": 2}}),))
+    db.commit()
+    assert _run_of(app.test_client(), photo_ids=_ids(db)) == before
 
 
 def test_an_unchanged_queued_run_starts(app_and_db, one_model, started):

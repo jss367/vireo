@@ -271,7 +271,7 @@ def create_pipeline_blueprint(
             params.photo_ids = sorted(_resolve_collection_photo_ids(db, params.collection_id))
         excluded = set(params.exclude_photo_ids)
         params.photo_ids = [pid for pid in params.photo_ids if pid not in excluded]
-        run = process_runs.describe_run(db, params, params.photo_ids, body.get("miss_enabled"))
+        run = process_runs.describe_run(db, params, params.photo_ids, body)
         return jsonify({**compute_plan(db, params, db_path), "run": run})
 
     @blueprint.route("/api/pipeline/plan", methods=["POST"])
@@ -2622,9 +2622,7 @@ class _PipelineLaunch:
         described = plan_params(self.body, None, pending["photo_ids"], None, None)
         mismatch = process_runs.expected_run_error(
             self.body["expected_run"],
-            process_runs.describe_run(
-                self.db, described, pending["photo_ids"], self.body.get("miss_enabled"),
-            ),
+            process_runs.describe_run(self.db, described, pending["photo_ids"], self.body),
         )
         if mismatch is not None:
             return self.json_error(*mismatch)
@@ -2651,9 +2649,7 @@ class _PipelineLaunch:
     def confirm_expected_run(self, db_path: str) -> None:
         """On the job's thread, before its first stage: refuse a run that changed while queued."""
         if self.described_params is not None:
-            process_runs.refuse_changed_run(
-                db_path, self.described_params, self.body.get("miss_enabled"), self.body["expected_run"],
-            )
+            process_runs.refuse_changed_run(db_path, self.described_params, self.body)
 
     def check_required_scope(self) -> ErrorResponse | None:
         """Require a collection, folder or photo scope."""

@@ -12,6 +12,7 @@ hours.
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
@@ -23,8 +24,24 @@ if TYPE_CHECKING:
     from pipeline_plan import PipelinePlanParams
     from services.service_types import JsonDict
 
-#: The settings a run reads from the workspace when it starts.
+#: The stage settings a description spells out; its ``digest`` covers the rest.
 _SETTINGS = ("sam2_variant", "dinov2_variant", "proxy_longest_edge")
+
+#: Every request field that decides what a run does, and the value an omitted
+#: one has. The scope, the models and the species lists are described apart.
+_OPTIONS = {
+    "skip_classify": False,
+    "skip_extract_masks": False,
+    "skip_eye_keypoints": False,
+    "skip_regroup": False,
+    "review_mode": None,
+    "miss_enabled": None,
+    "eye_detect_override": None,
+    "reclassify": False,
+    "raw_subject_analysis": False,
+    "download_taxonomy": True,
+    "preview_max_size": None,
+}
 
 #: What each part of a description is called in a refusal.
 _PART_NAMES = {
@@ -35,7 +52,7 @@ _PART_NAMES = {
     "labels_files": "the species lists",
     "label_fingerprints": "the species lists",
     "settings": "the stage settings",
-    "reclassify": "re-classify",
+    "options": "the stages and options",
     "misses": "whether misses are marked",
     "replaced_reviews": "the reviewed predictions it would replace",
 }
@@ -98,23 +115,43 @@ def _replaced_reviews(db: Database, photo_ids: Iterable[int]) -> JsonDict:
     }
 
 
+def _settings(effective: JsonDict) -> JsonDict:
+    """The settings the stages would read, all of them in ``digest``."""
+    pipeline_cfg: dict[str, Any] = dict(effective.get("pipeline", {}))
+    # Chooses what runs after an import; no stage reads it.
+    pipeline_cfg.pop("default_process_id", None)
+    read = {
+        "pipeline": pipeline_cfg,
+        "detector_confidence": config_value(effective, "detector_confidence"),
+        "preview_max_size": config_value(effective, "preview_max_size"),
+    }
+    return {
+        **{key: pipeline_cfg.get(key) for key in _SETTINGS},
+        "detector_confidence": read["detector_confidence"],
+        "digest": _digest([json.dumps(read, sort_keys=True, default=str)]),
+    }
+
+
 def describe_run(
-    db: Database, params: PipelinePlanParams, photo_ids: Iterable[int], miss_enabled: bool | None,
+    db: Database, params: PipelinePlanParams, photo_ids: Iterable[int], body: JsonDict,
 ) -> JsonDict:
     """The parts of a run over ``photo_ids`` that must not change before it starts.
 
-    ``miss_enabled`` is the run's own switch; None defers to the workspace, as
-    the misses stage does. ``replaced_reviews`` covers every workspace. Species
-    keywords those decisions saved stay on the photos.
+    ``params`` are the plan's parameters for the request ``body``. A null
+    ``miss_enabled`` defers to the workspace, as the misses stage does.
+    ``replaced_reviews`` covers every workspace. Species keywords those
+    decisions saved stay on the photos.
     """
     import config as cfg
     from pipeline_plan import run_models
 
     effective = db.get_effective_config(cfg.load())
-    pipeline_cfg: dict[str, Any] = effective.get("pipeline", {})
     ids = sorted(set(photo_ids))
     models, fingerprints = run_models(db, params)
-    misses = pipeline_cfg.get("miss_enabled", True) if miss_enabled is None else miss_enabled
+    options = {key: body.get(key, default) for key, default in _OPTIONS.items()}
+    misses = options["miss_enabled"]
+    if misses is None:
+        misses = effective.get("pipeline", {}).get("miss_enabled", True)
     return {
         "workspace_id": db.require_workspace_id(),
         "photo_count": len(ids),
@@ -122,31 +159,29 @@ def describe_run(
         "models": models,
         "labels_files": _label_files(db, params),
         "label_fingerprints": fingerprints,
-        "settings": {
-            **{key: pipeline_cfg.get(key) for key in _SETTINGS},
-            "detector_confidence": config_value(effective, "detector_confidence"),
-        },
-        "reclassify": params.reclassify,
+        "settings": _settings(effective),
+        "options": options,
         "misses": bool(misses) and bool(models) and not params.skip_regroup,
         "replaced_reviews": _replaced_reviews(db, ids if params.reclassify and models else []),
     }
 
 
-def refuse_changed_run(
-    db_path: str, params: PipelinePlanParams, miss_enabled: bool | None, expected: JsonDict,
-) -> None:
+def refuse_changed_run(db_path: str, params: PipelinePlanParams, body: JsonDict) -> None:
     """Raise ``RunChangedError`` when a run leaving the queue is not the one described.
 
-    ``params.photo_ids`` are the photos the run was pinned to at launch, and
-    ``expected`` was checked against the workspace then, so both name the run's
-    own. Runs on the job's thread, on its own connection.
+    ``params.photo_ids`` are the photos the run was pinned to at launch; one
+    deleted or taken out of the workspace since leaves the scope. The
+    ``expected_run`` in ``body`` was checked against the workspace then, so it
+    names the run's own. Runs on the job's thread, on its own connection.
     """
     from db import Database
 
+    expected = body["expected_run"]
     db = Database(db_path)
     try:
         db.set_active_workspace(expected["workspace_id"])
-        mismatch = expected_run_error(expected, describe_run(db, params, params.photo_ids or [], miss_enabled))
+        photo_ids = db.photo_visibility.visible_photo_ids(params.photo_ids or [])
+        mismatch = expected_run_error(expected, describe_run(db, params, photo_ids, body))
     finally:
         db.close()
     if mismatch is not None:
