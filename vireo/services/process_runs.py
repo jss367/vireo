@@ -131,25 +131,43 @@ def _file_state(path: str) -> list[Any]:
     return [path, stat.st_size, stat.st_mtime_ns, stat.st_ino]
 
 
+def _other_classifier_folders(selected: set[Any]) -> set[str]:
+    """The folders of classifiers this run does not use, installed or not yet."""
+    import models as model_registry
+
+    root = model_registry.DEFAULT_MODELS_DIR
+    folders = {
+        os.path.join(root, known["id"]) for known in model_registry.KNOWN_MODELS if known["id"] not in selected
+    }
+    folders.update(
+        model["weights_path"] for model in model_registry.get_models()
+        if model.get("id") not in selected and model.get("weights_path")
+    )
+    return {os.path.abspath(folder) for folder in folders}
+
+
 def _model_files_digest(models: Iterable[JsonDict]) -> str:
     """A fingerprint of the files a run's models are loaded from.
 
-    Covers the whole models folder, which holds the detector, mask, embedding
-    and eye models beside the classifiers, so no stage's model needs naming
-    here; a custom classifier's own files; and the taxonomy its names resolve
-    through. Multi-gigabyte weights make hashing contents too slow for a
-    preview.
+    Covers the models folder, which holds the detector, mask, embedding and eye
+    models beside the classifiers, so no stage's model needs naming here; a
+    custom classifier's own files; and the taxonomy its names resolve through.
+    Other classifiers are left out, so installing one does not fail a queued
+    run. Multi-gigabyte weights make hashing contents too slow for a preview.
     """
     import models as model_registry
     import taxonomy
 
+    described = [
+        {key: model.get(key) for key in ("id", "model_str", "model_type", "weights_path")} for model in models
+    ]
+    others = _other_classifier_folders({model["id"] for model in described})
     paths = [taxonomy.TAXONOMY_JSON_PATH]
-    for folder, _, names in os.walk(model_registry.DEFAULT_MODELS_DIR):
+    for folder, subfolders, names in os.walk(os.path.abspath(model_registry.DEFAULT_MODELS_DIR)):
+        subfolders[:] = [name for name in subfolders if os.path.join(folder, name) not in others]
         paths.extend(os.path.join(folder, name) for name in names)
-    described = []
-    for model in models:
-        described.append({key: model.get(key) for key in ("id", "model_str", "model_type", "weights_path")})
-        weights = model.get("weights_path") or ""
+    for model in described:
+        weights = model["weights_path"] or ""
         paths.append(weights)
         if os.path.isdir(weights):
             paths.extend(os.path.join(weights, name) for name in os.listdir(weights))

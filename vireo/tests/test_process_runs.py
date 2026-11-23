@@ -255,6 +255,24 @@ def test_replaced_model_files_are_a_changed_run(app_and_db, one_model, started, 
     assert started == []
 
 
+def test_installing_another_classifier_does_not_change_the_run(app_and_db, one_model, monkeypatch):
+    app, db = app_and_db
+    client = app.test_client()
+    before = _run_of(client, photo_ids=_ids(db))
+    known = Path(models.DEFAULT_MODELS_DIR) / models.KNOWN_MODELS[0]["id"]
+    custom = Path(models.DEFAULT_MODELS_DIR) / "somebody-elses-model"
+    for folder in (known, custom):
+        folder.mkdir(parents=True)
+        (folder / "image_encoder.onnx").write_bytes(b"new")
+    monkeypatch.setattr(models, "get_models", lambda: [MODEL, {"id": "custom", "weights_path": str(custom)}])
+    assert _run_of(client, photo_ids=_ids(db)) == before
+    # The same file in a folder no classifier owns belongs to a shared stage model.
+    shared = Path(models.DEFAULT_MODELS_DIR) / "megadetector-v6"
+    shared.mkdir()
+    (shared / "model.onnx").write_bytes(b"new")
+    assert _run_of(client, photo_ids=_ids(db))["model_files"] != before["model_files"]
+
+
 @pytest.mark.parametrize("change", [
     {"skip_regroup": False}, {"skip_extract_masks": True}, {"skip_eye_keypoints": True}, {"review_mode": "species"},
     {"raw_subject_analysis": True}, {"reclassify": True}, {"miss_enabled": True}, {"eye_detect_override": True},
