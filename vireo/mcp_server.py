@@ -42,6 +42,10 @@ BAD_TOKEN_MESSAGE = (
     "the token in runtime.json in Vireo's data folder; otherwise restart Vireo so a fresh "
     "runtime.json is written."
 )
+TIMEOUT_MESSAGE = (
+    "Vireo is running but did not answer in {seconds:g} seconds. It may still be "
+    "working on the request, so check the result in Vireo before repeating a change."
+)
 UNPAIRED_URL_MESSAGE = (
     "VIREO_URL and VIREO_TOKEN overrides must be supplied together; "
     "runtime credentials are never borrowed by an override."
@@ -58,9 +62,10 @@ Vireo is the user's wildlife photo catalog. Tools act on the active
 workspace, the same one the Vireo window shows. Photo ids are stable; folder,
 collection and keyword ids come from the list_* and search_* tools.
 
-Judging photos: never judge focus or sharpness from a thumbnail. Use
-view_photo(view="preview") for the frame and view_photo(view="subject") for
-the detected animal. quality_analyzed is true only when Vireo's subject
+Judging photos: never judge focus or sharpness from a thumbnail or a preview.
+Use view_photo(view="preview") for composition and pose,
+view_photo(view="subject") to identify the animal, and focus_crop, which shows
+unresized pixels, to judge focus. quality_analyzed is true only when Vireo's subject
 analysis is complete for the photo's current inputs and settings (the same
 readiness check Vireo's own burst ranking uses); analysis_status is not_run,
 incomplete, failed, complete or unknown (readiness could not be checked), with
@@ -69,6 +74,11 @@ subject_sharpness) can appear before analysis is complete, for example while
 a Process run is between detection and segmentation; then quality_preliminary
 is true and the numbers are not comparison evidence. get_photo adds
 analysis_explanation.
+
+Bursts: list_bursts lists a folder's bursts and burst ranks one burst's frames.
+The ranking is provisional: Vireo names no keeper, so compare the frames with
+focus_crop before flagging any. A burst with the reason unanalyzed_frames has
+frames the ranking does not cover; run Process on them before choosing.
 
 Writing: set_flag, set_rating, add_keyword and remove_keyword change the
 catalog through the same routes the UI uses, so each call is one Undo step
@@ -121,13 +131,35 @@ _EXPOSURE_TAGS = ("ExposureTime", "ShutterSpeed", "FNumber", "Aperture",
                   "FocalLength", "LensModel", "LensID", "ExposureCompensation")
 _BURST_QUALITY_KEYS = (
     "quality_pct", "quality", "focus", "focus_basis", "sharpness", "subject_detail", "exposure",
+    "crop_complete",
 )
 _BURST_CARD_KEYS = (
     "id", "filename", "rank", "role", "label", *_BURST_QUALITY_KEYS,
-    "flag", "rating", "reasons",
+    "flag", "rating", "reasons", "reject_reasons", "detection_count", "has_mask",
     "selection_eligible", "analysis_status", "analysis_reasons",
     "automatic_keep_eligible", "keep_status", "keep_reasons",
 )
+_BURST_KEYS = (
+    "seed_photo_id", "scope_method", "count", "coverage", "scored", "unscored_reason",
+    "best_photo_id", "best_filename", "best_reasons", "suggested_reject_ids", "alternate_ids",
+    "ranked_candidate_id", "ranking_status", "keep_review_message",
+)
+# The review reasons a burst can carry (``burst_evidence.AMBIGUITY_CODES``; a
+# test keeps them equal). The server process never imports the scorer.
+BURST_REASONS = (
+    "positive_keep_not_validated", "unanalyzed_frames", "close_call", "no_eye_located",
+    "subject_touches_edge", "multiple_subjects", "all_rejected", "subject_identity_uncertain",
+    "subject_identity_conflict", "multiple_matching_subjects", "subject_analysis_missing",
+    "invalid_subject_mask",
+)
+DEFAULT_BURST_PAGE = 50
+MAX_BURST_PAGE = 200
+# Side of a focus crop in unresized pixels, within the route's 128-1024.
+DEFAULT_FOCUS_SIZE = 768
+# Below this share of the original's size a decoded image is a downsized copy
+# (``focus_crop.prefer_original`` draws the same line).
+FULL_SCALE = 0.98
+FIND_HEAD = 'Find the head with view_photo(view="source") and pass its center_x and center_y.'
 _COLLECTION_KEYS = ("id", "name", "photo_count", "available_photo_count",
                     "offline_photo_count", "has_visual", "can_add_photos")
 _FOLDER_KEYS = ("id", "name", "parent_id", "path", "photo_count", "status",
@@ -220,7 +252,7 @@ class VireoClient:
         return f"http://127.0.0.1:{port}", token
 
     def request(self, method, path, params=None, json_body=None):
-        """Return ``(status, content_type, body_bytes)`` for one request."""
+        """Return ``(status, headers, body_bytes)`` for one request."""
         base_url, token = self._resolve()
         url = base_url + path
         if params:
@@ -236,21 +268,23 @@ class VireoClient:
         try:
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
             with opener.open(req, timeout=self.timeout) as resp:
-                return resp.status, resp.headers.get("Content-Type", ""), resp.read()
+                return resp.status, resp.headers, resp.read()
         except urllib.error.HTTPError as err:
-            return err.code, err.headers.get("Content-Type", ""), err.read()
-        except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as err:
+            return err.code, err.headers, err.read()
+        except TimeoutError as err:
+            raise VireoError(TIMEOUT_MESSAGE.format(seconds=self.timeout)) from err
+        except (urllib.error.URLError, ConnectionError, OSError) as err:
             raise VireoError(NOT_RUNNING_MESSAGE) from err
 
     # -- helpers over ``request`` ------------------------------------------
 
-    def _check(self, status, content_type, body):
+    def _check(self, status, headers, body):
         if 200 <= status < 300:
             return
         if status == 401:
             raise VireoError(BAD_TOKEN_MESSAGE)
         message = ""
-        if "json" in (content_type or ""):
+        if "json" in (headers.get("Content-Type") or ""):
             try:
                 message = json.loads(body.decode("utf-8")).get("error") or ""
             except (ValueError, AttributeError):
@@ -260,19 +294,24 @@ class VireoClient:
         raise VireoError(f"Vireo answered {status}: {message or 'no detail'}")
 
     def get_json(self, path, params=None):
-        status, content_type, body = self.request("GET", path, params=params)
-        self._check(status, content_type, body)
+        status, headers, body = self.request("GET", path, params=params)
+        self._check(status, headers, body)
         return json.loads(body.decode("utf-8"))
 
     def post_json(self, path, json_body=None):
-        status, content_type, body = self.request("POST", path, json_body=json_body or {})
-        self._check(status, content_type, body)
+        status, headers, body = self.request("POST", path, json_body=json_body or {})
+        self._check(status, headers, body)
         return json.loads(body.decode("utf-8")) if body else {}
 
+    def get_with_headers(self, path, params=None):
+        """``(headers, body)``, for a route that describes its image in headers."""
+        status, headers, body = self.request("GET", path, params=params)
+        self._check(status, headers, body)
+        return headers, body
+
     def get_bytes(self, path, params=None):
-        status, content_type, body = self.request("GET", path, params=params)
-        self._check(status, content_type, body)
-        return content_type, body
+        headers, body = self.get_with_headers(path, params)
+        return headers.get("Content-Type", ""), body
 
 
 # -- payload trimming ---------------------------------------------------------
@@ -295,6 +334,84 @@ def _burst_frame(card):
             if key in frame:
                 frame[key] = None
     return frame
+
+
+def _burst_entry(burst):
+    """One ``list_bursts`` row: enough to choose a burst, not to judge it."""
+    names = burst.get("filenames") or [None, None]
+    return {
+        **_pick(burst, ("seed_photo_id", "ranked_candidate_id", "scored", "flags")),
+        "first_filename": names[0],
+        "last_filename": names[-1],
+        # The ranking covers at most ``ranked_frames``; a longer run has more.
+        "frames": burst.get("burst_photo_count"),
+        "ranked_frames": burst.get("count"),
+        "analyzed_frames": (burst.get("coverage") or {}).get("with_quality"),
+        "reasons": _burst_reasons(burst),
+    }
+
+
+def _burst_reasons(burst):
+    rows = (burst.get("ambiguity") or {}).get("reasons") or []
+    return list(dict.fromkeys(row["code"] for row in rows))
+
+
+def _burst_unflagged(burst):
+    flags = burst.get("flags") or {}
+    return not flags.get("flagged") and not flags.get("rejected")
+
+
+def _header_floats(headers, name):
+    """A header's comma-separated numbers, or None when it holds none."""
+    try:
+        return [float(part) for part in headers[name].split(",")]
+    except (KeyError, AttributeError, ValueError):
+        return None
+
+
+def focus_crop_facts(headers):
+    """What a focus crop shows, read from its ``X-Vireo-Focus-*`` headers.
+
+    ``notes`` says in words what would make the crop misleading: a window
+    that misses the head, or pixels that are not the original's.
+    """
+    def value(name):
+        return headers.get(f"X-Vireo-Focus-{name}")
+
+    scale = _header_floats(headers, "X-Vireo-Focus-Original-Scale")
+    facts = {
+        "basis": value("Basis"),
+        "center": _header_floats(headers, "X-Vireo-Focus-Center"),
+        "window": _header_floats(headers, "X-Vireo-Focus-Window"),
+        "image_size": _header_floats(headers, "X-Vireo-Focus-Raster-Size"),
+        "source": value("Source"),
+        "original_scale": scale[0] if scale else None,
+        "subject_clipped": {"1": True, "0": False}.get(value("Subject-Clipped")),
+        "mask_shaded": value("Mask") == "1",
+        "detection_id": int(value("Detection-Id")) if value("Detection-Id") else None,
+        "eye_status": value("Eye-Status"),
+    }
+    facts["notes"] = _focus_notes(facts)
+    return facts
+
+
+def _focus_notes(facts):
+    notes = []
+    if facts["basis"] == "subject":
+        notes.append("Centered on the middle of the subject box, which on a perched bird is "
+                     f"usually the body. {FIND_HEAD}")
+    elif facts["basis"] == "frame":
+        notes.append(f"No subject box was used; this is the middle of the frame. {FIND_HEAD}")
+    if facts["subject_clipped"]:
+        notes.append("The crop cuts off part of the animal and may not show its head.")
+    scale = facts["original_scale"]
+    if scale is None:
+        notes.append("How these pixels compare in size with the original's is unknown.")
+    elif scale < FULL_SCALE:
+        fix = (' Pass source="original" before judging focus.' if facts["source"] == "working_copy"
+               else " Full-resolution pixels of the original are not available.")
+        notes.append(f"This image was decoded at {scale:.2f} of the original's size.{fix}")
+    return notes
 
 
 def analysis_fields(photo, readiness):
@@ -445,6 +562,7 @@ def build_server(client: VireoClient):
     _register_catalog_tools(server, client)
     _register_search_tools(server, client)
     _register_photo_tools(server, client)
+    _register_burst_tools(server, client)
     _register_species_tools(server, client)
     _register_region_tools(server, client)
     _register_best_tools(server, client)
@@ -630,17 +748,22 @@ def _register_photo_tools(server, client):
     @server.tool()
     def view_photo(photo_id: int, view: str = "preview", detection_id: int | None = None) -> Image:
         """Look at a photo. ``view`` is ``preview`` (the frame at 1920 px,
-        use this to judge a photo), ``thumbnail`` (small and fast, for
-        composition only) or ``subject`` (the detected animal cropped
-        from the frame, for identification). Supply ``detection_id`` for
+        for composition, pose and light), ``thumbnail`` (small and fast, for
+        composition only), ``source`` (the whole upright frame without
+        edits, for choosing a focus_crop center) or ``subject`` (the
+        detected animal cropped from the frame, for identification). Supply ``detection_id`` for
         the exact subject from get_species_evidence; it is valid only with
-        view="subject". Subject crops are identification views, not native
-        focus evidence."""
+        view="subject". Subject crops are identification views; use focus_crop to
+        judge focus."""
         if detection_id is not None and view != "subject":
             raise VireoError("detection_id requires view='subject'")
         if view == "preview":
             content_type, body = client.get_bytes(
                 f"/photos/{photo_id}/preview", {"size": PREVIEW_SIZE}
+            )
+        elif view == "source":
+            content_type, body = client.get_bytes(
+                f"/photos/{photo_id}/preview", {"size": PREVIEW_SIZE, "view": "source"}
             )
         elif view == "thumbnail":
             content_type, body = client.get_bytes(f"/thumbnails/{photo_id}.jpg")
@@ -649,26 +772,121 @@ def _register_photo_tools(server, client):
                 f"/photos/{photo_id}/crop", {"detection_id": detection_id}
             )
         else:
-            raise VireoError("view must be 'preview', 'thumbnail' or 'subject'")
+            raise VireoError("view must be 'preview', 'thumbnail', 'source' or 'subject'")
         fmt = "png" if "png" in (content_type or "") else "jpeg"
         return Image(data=body, format=fmt)
 
-    @server.tool()
+
+def _register_burst_tools(server, client):
+    """Walking a folder's bursts and judging their frames at 1:1."""
+    read_only = mcp_types.ToolAnnotations(read_only_hint=True)
+
+    @server.tool(annotations=read_only)
+    def list_bursts(
+        folder_id: int, reasons: list[str] | None = None, unflagged_only: bool = False,
+        offset: int = 0, limit: int = DEFAULT_BURST_PAGE,
+    ) -> dict:
+        """The bursts in one folder (not its subfolders), and why each needs
+        a reviewer. Pass a burst's ``seed_photo_id`` to ``burst`` to see its
+        frames. ``coverage`` says how many of the folder's photos have each
+        kind of analysis, and ``reason_counts`` counts bursts by reason.
+
+        ``reasons`` keeps bursts with any of these codes:
+        unanalyzed_frames (some frames have no current quality analysis),
+        close_call (the top two are nearly as sharp), no_eye_located,
+        subject_touches_edge, multiple_subjects (the wrong animal may have
+        been scored), all_rejected, invalid_subject_mask.
+        positive_keep_not_validated is on every ranked burst, because Vireo
+        names no keeper itself. ``unflagged_only`` keeps bursts whose ranked
+        frames have no pick or reject yet; list every page before flagging,
+        since a burst that gains a flag drops out and moves the offsets.
+
+        ``limit`` is at most 200; ``next_offset`` continues the list. Every
+        call ranks the whole folder again, which takes several seconds for
+        thousands of photos, so prefer one long page to many short ones.
+        Folders over 5000 photos are refused.
+        """
+        unknown = sorted(set(reasons or ()) - set(BURST_REASONS))
+        if unknown:
+            raise VireoError(f"unknown reasons {unknown}; use any of {list(BURST_REASONS)}")
+        data = client.get_json(f"/api/v1/folders/{folder_id}/bursts")
+        bursts = data.get("bursts") or []
+        counts: dict[str, int] = {}
+        for item in bursts:
+            for code in _burst_reasons(item):
+                counts[code] = counts.get(code, 0) + 1
+        matching = [
+            item for item in bursts
+            if (not reasons or set(reasons) & set(_burst_reasons(item)))
+            and (not unflagged_only or _burst_unflagged(item))
+        ]
+        offset, limit = max(0, offset), max(1, min(limit, MAX_BURST_PAGE))
+        page = matching[offset:offset + limit]
+        more = offset + len(page) < len(matching)
+        return {
+            **_pick(data, ("folder", "photo_count", "coverage", "burst_count", "photos_in_bursts")),
+            "reason_counts": counts,
+            "matching": len(matching),
+            "offset": offset,
+            "next_offset": offset + len(page) if more else None,
+            "bursts": [_burst_entry(item) for item in page],
+        }
+
+    @server.tool(annotations=read_only)
     def burst(photo_id: int) -> dict:
         """The burst of frames shot around a photo, ranked by Vireo's
         quality analysis. A provisional ranked candidate still needs manual
         review; ranking alone does not establish an automatic keeper. A frame
-        ranks only when its subject analysis is complete: each frame carries
-        selection_eligible, analysis_status and analysis_reasons, and an
-        ineligible frame's quality fields are null."""
-        data = client.get_json(f"/api/photos/{photo_id}/best-batch")
+        ranks only when its subject analysis is complete: in a scored burst
+        each frame carries selection_eligible, analysis_status and
+        analysis_reasons. An ineligible frame's quality fields are null.
+
+        ``review_reasons`` says why the ranking should not be taken at face
+        value, ``coverage`` how many frames have each kind of analysis.
+        ``scored`` is false, with ``unscored_reason``, when no ranking was
+        possible; the frames are then listed unranked. The ranking covers up
+        to 120 frames around the photo."""
+        data = client.get_json(f"/api/v1/photos/{photo_id}/burst-evidence")
         return {
-            **_pick(data, ("seed_photo_id", "best_photo_id", "best_filename",
-                           "best_reasons", "count", "scope_method",
-                           "suggested_reject_ids", "alternate_ids",
-                           "ranked_candidate_id", "ranking_status", "keep_review_message")),
+            **_pick(data, _BURST_KEYS),
+            "review_reasons": (data.get("ambiguity") or {}).get("reasons") or [],
             "frames": [_burst_frame(card) for card in data.get("cards", [])],
         }
+
+    @server.tool(annotations=read_only)
+    def focus_crop(
+        photo_id: int, center_x: float | None = None, center_y: float | None = None,
+        size: int = DEFAULT_FOCUS_SIZE, source: str = "auto", mask: bool = False,
+        detection_id: int | None = None,
+    ) -> list:
+        """Unresized pixels around the animal, for judging focus. Returns
+        facts about the crop, then the image. Read ``notes`` first: they say
+        when the crop misses the head or shows a downsized copy.
+
+        By default the crop centers on the head when the analysis located
+        it, otherwise on the subject box. To aim it, give ``center_x`` and
+        ``center_y`` as fractions (0 to 1) of the unedited frame, which
+        view_photo(view="source") shows; the edited preview may be cropped or
+        rotated. ``detection_id`` picks another animal in the photo.
+        ``size`` is the crop's side in pixels (128 to 1024). ``source`` is
+        ``auto``, ``working`` or ``original``. ``mask`` darkens everything
+        outside the subject mask, to show which animal was scored.
+        """
+        if (center_x is None) != (center_y is None):
+            raise VireoError("give both center_x and center_y")
+        if center_x is not None and detection_id is not None:
+            raise VireoError("give a center or a detection_id, not both")
+        headers, body = client.get_with_headers(f"/api/v1/photos/{photo_id}/focus-crop", {
+            "size": size,
+            "source": source,
+            "center": None if center_x is None else f"{center_x},{center_y}",
+            "mask": "1" if mask else None,
+            "detection_id": detection_id,
+            # The route reads a bare detection_id as a request for saved
+            # comparison evidence; the head basis inspects any animal.
+            "basis": "head" if detection_id is not None else None,
+        })
+        return [focus_crop_facts(headers), Image(data=body, format="jpeg")]
 
 
 def _species_assignment_payload(photo_ids, species, provenance):

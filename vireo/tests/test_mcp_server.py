@@ -7,6 +7,8 @@ spawned as an MCP client would spawn it, and a stdio session driven with the
 SDK's client.
 """
 
+import base64
+import io
 import json
 import os
 import shlex
@@ -60,7 +62,7 @@ class FlaskTransport(VireoClient):
             json=json_body,
             headers={"X-Vireo-Token": self._token},
         )
-        return response.status_code, response.content_type, response.get_data()
+        return response.status_code, response.headers, response.get_data()
 
 
 @pytest.fixture
@@ -79,6 +81,13 @@ def call(server, tool_name, **arguments):
     return result.content
 
 
+def call_blocks(server, tool_name, **arguments):
+    """Call a tool that returns several content blocks."""
+    result = anyio.run(server.call_tool, tool_name, arguments)
+    assert not result.is_error, result.content
+    return result.content
+
+
 def call_error(server, tool_name, **arguments):
     with pytest.raises(ToolError) as excinfo:
         anyio.run(server.call_tool, tool_name, arguments)
@@ -91,7 +100,7 @@ def test_tools_are_the_documented_set(mcp):
     assert names == {
         "vireo_status", "list_workspaces", "activate_workspace", "list_folders",
         "list_collections", "search_keywords", "search_photos",
-        "find_photos_by_text", "get_photo", "view_photo", "burst",
+        "find_photos_by_text", "get_photo", "view_photo", "burst", "list_bursts", "focus_crop",
         "set_flag", "set_rating", "add_keyword", "remove_keyword",
         "get_species_evidence", "preview_species_assignment", "apply_species_assignment",
         "list_assignment_conflicts", "review_species_assignment", "reject_region", "restore_region",
@@ -543,7 +552,7 @@ def test_readiness_failure_never_claims_analyzed(mcp, monkeypatch):
 
     def failing_readiness(method, path, params=None, json_body=None):
         if path == mcp_server.READINESS_PATH:
-            return 400, "application/json", json.dumps({"error": "Every selected photo must be visible"}).encode()
+            return 400, {"Content-Type": "application/json"}, json.dumps({"error": "Every selected photo must be visible"}).encode()
         return original(method, path, params, json_body)
 
     monkeypatch.setattr(transport, "request", failing_readiness)
@@ -633,7 +642,7 @@ def test_burst_exposes_provisional_candidate_without_claiming_a_keeper(mcp, monk
 
     monkeypatch.setattr(transport, "get_json", get_json)
     result = call(server, "burst", photo_id=42)
-    assert paths == ["/api/photos/42/best-batch"]
+    assert paths == ["/api/v1/photos/42/burst-evidence"]
     assert result["ranked_candidate_id"] == (42 if has_candidate else None)
     assert result["ranking_status"] == "provisional"
     if has_candidate:
@@ -704,6 +713,214 @@ def test_burst_keeps_quality_fields_on_eligible_frames(mcp, monkeypatch):
     frame = call(server, "burst", photo_id=42)["frames"][0]
     assert frame["sharpness"] == 0.5
     assert frame["quality"] == 0.72
+
+
+def test_burst_reports_unscored_frames_and_why(mcp):
+    from test_burst_evidence import _folder_id, _seed_burst
+
+    server, db, _ = mcp
+    pids = _seed_burst(db, _folder_id(db), 3069, [None, None, None])
+    result = call(server, "burst", photo_id=pids[1])
+    assert result["scored"] is False and result["unscored_reason"]
+    assert result["best_photo_id"] is None
+    assert result["coverage"]["with_quality"] == 0
+    assert [r["code"] for r in result["review_reasons"]] == ["unanalyzed_frames"]
+    assert [f["id"] for f in result["frames"]] == pids
+    assert all(f["rank"] is None and f["selection_eligible"] is False for f in result["frames"])
+
+
+def test_burst_carries_the_evidence_behind_the_ranking(mcp):
+    from test_burst_evidence import _folder_id, _seed_burst
+
+    server, db, _ = mcp
+    pids = _seed_burst(db, _folder_id(db), 3069, [50, 49])
+    result = call(server, "burst", photo_id=pids[0])
+    assert result["scored"] is True and result["ranked_candidate_id"] == pids[0]
+    assert result["best_photo_id"] is None
+    reasons = {r["code"]: r["detail"] for r in result["review_reasons"]}
+    assert set(reasons) == {"close_call", "positive_keep_not_validated"}
+    assert "DSC_3069.jpg" in reasons["close_call"]
+    frame = result["frames"][0]
+    assert frame["detection_count"] == 1 and frame["has_mask"] is True
+    assert frame["reject_reasons"] == [] and frame["crop_complete"] == 1.0
+    assert not any(key.endswith("_url") for key in frame)
+
+
+def test_burst_reasons_match_the_scorers_codes():
+    from burst_evidence import AMBIGUITY_CODES
+
+    assert mcp_server.BURST_REASONS == AMBIGUITY_CODES
+
+
+def test_list_bursts_filters_counts_and_pages(mcp):
+    from test_burst_evidence import _folder_id, _seed_burst
+
+    server, db, transport = mcp
+    folder_id = _folder_id(db)
+    clear = _seed_burst(db, folder_id, 3069, [10, 80, 30])
+    close = _seed_burst(db, folder_id, 3100, [50, 49], ts_base="2024-03-01T13:00:")
+    partial = _seed_burst(db, folder_id, 3200, [60, None], ts_base="2024-03-01T14:00:")
+    db.photo_review.set_flag(clear[0], "rejected")
+    db.commit()
+
+    data = call(server, "list_bursts", folder_id=folder_id)
+    assert transport.calls[-1][1] == f"/api/v1/folders/{folder_id}/bursts"
+    assert data["folder"]["id"] == folder_id
+    assert data["coverage"]["with_quality"] == 6
+    assert data["burst_count"] == data["matching"] == 3
+    assert data["next_offset"] is None
+    assert data["reason_counts"] == {
+        "positive_keep_not_validated": 3, "close_call": 1, "unanalyzed_frames": 1,
+    }
+    assert data["bursts"][0] == {
+        "seed_photo_id": clear[0], "ranked_candidate_id": clear[1], "scored": True,
+        "flags": {"none": 2, "flagged": 0, "rejected": 1},
+        "first_filename": "DSC_3069.jpg", "last_filename": "DSC_3071.jpg",
+        "frames": 3, "ranked_frames": 3, "analyzed_frames": 3,
+        "reasons": ["positive_keep_not_validated"],
+    }
+
+    def seeds(**kwargs):
+        return [b["seed_photo_id"] for b in call(server, "list_bursts", folder_id=folder_id, **kwargs)["bursts"]]
+
+    assert seeds(reasons=["close_call"]) == [close[0]]
+    assert seeds(reasons=["close_call", "unanalyzed_frames"]) == [close[0], partial[0]]
+    assert seeds(unflagged_only=True) == [close[0], partial[0]]
+    assert seeds(reasons=["all_rejected"]) == []
+    first = call(server, "list_bursts", folder_id=folder_id, limit=2)
+    assert first["next_offset"] == 2 and len(first["bursts"]) == 2
+    rest = call(server, "list_bursts", folder_id=folder_id, limit=2, offset=2)
+    assert [b["seed_photo_id"] for b in rest["bursts"]] == [partial[0]] and rest["next_offset"] is None
+    # Counts describe the folder, not the page or the filter.
+    assert rest["reason_counts"] == data["reason_counts"]
+    assert "unknown reasons ['close']" in call_error(server, "list_bursts", folder_id=folder_id, reasons=["close"])
+    assert "Vireo answered 404" in call_error(server, "list_bursts", folder_id=999_999)
+
+
+def _focus_photo(app, db):
+    from test_burst_evidence import _working_copy
+
+    pid = db.photos.list_page()[0]["id"]
+    _working_copy(app, db, pid)
+    return pid
+
+
+def _save_boxes(db, pid, *boxes):
+    db.detections.save(pid, [
+        {"box": dict(zip("xywh", box, strict=True)), "confidence": 0.9 - 0.1 * i, "category": "animal"}
+        for i, box in enumerate(boxes)
+    ], detector_model="MDV6")
+    db.commit()
+
+
+def _crop(server, **kwargs):
+    facts, image = call_blocks(server, "focus_crop", **kwargs)
+    assert image.type == "image" and image.mime_type == "image/jpeg"
+    with PILImage.open(io.BytesIO(base64.b64decode(image.data))) as decoded:
+        return json.loads(facts.text), decoded.size
+
+
+def test_focus_crop_returns_the_pixels_and_what_they_are(mcp, app_and_db):
+    server, db, transport = mcp
+    pid = _focus_photo(app_and_db[0], db)
+    facts, size = _crop(server, photo_id=pid, size=256)
+    assert size == (256, 256)
+    assert facts["basis"] == "frame" and facts["subject_clipped"] is None and facts["detection_id"] is None
+    assert any("middle of the frame" in note for note in facts["notes"])
+
+    _save_boxes(db, pid, (.1, .2, .2, .2))
+    facts, _ = _crop(server, photo_id=pid, size=256)
+    assert facts["basis"] == "subject" and facts["center"] == [0.2, 0.3]
+    assert facts["source"] == "working_copy" and facts["original_scale"] == 1.0
+    assert facts["image_size"] == [3000, 2000] and facts["mask_shaded"] is False
+    # The box is 600x400 pixels, so a 256-pixel window cannot hold the animal.
+    assert facts["subject_clipped"] is True
+    assert any("usually the body" in note for note in facts["notes"])
+    assert any("cuts off part of the animal" in note for note in facts["notes"])
+
+    facts, _ = _crop(server, photo_id=pid, size=256, center_x=0.75, center_y=0.25)
+    assert facts["basis"] == "point" and facts["center"] == [0.75, 0.25]
+    _, path, params, _ = transport.calls[-1]
+    assert path == f"/api/v1/photos/{pid}/focus-crop"
+    assert params["center"] == "0.75,0.25" and params["basis"] is None
+
+
+def test_focus_crop_inspects_the_chosen_animal(mcp, app_and_db):
+    server, db, _ = mcp
+    pid = _focus_photo(app_and_db[0], db)
+    _save_boxes(db, pid, (.1, .2, .1, .1), (.6, .6, .1, .1))
+    ids = [d["id"] for d in sorted(db.detections.get(pid, min_conf=0), key=lambda d: d["box_x"])]
+    for detection_id, center in zip(ids, ([.15, .25], [.65, .65]), strict=True):
+        facts, _ = _crop(server, photo_id=pid, detection_id=detection_id)
+        assert facts["detection_id"] == detection_id and facts["center"] == pytest.approx(center)
+
+
+def test_focus_crop_refuses_ambiguous_or_unavailable_requests(mcp, app_and_db):
+    server, db, transport = mcp
+    pid = _focus_photo(app_and_db[0], db)
+    before = len(transport.calls)
+    assert "both center_x and center_y" in call_error(server, "focus_crop", photo_id=pid, center_x=0.5)
+    assert "not both" in call_error(
+        server, "focus_crop", photo_id=pid, center_x=0.5, center_y=0.5, detection_id=1)
+    assert len(transport.calls) == before
+    assert "between 0 and 1" in call_error(server, "focus_crop", photo_id=pid, center_x=1.5, center_y=0.5)
+    assert "Vireo answered 404" in call_error(server, "focus_crop", photo_id=pid, mask=True)
+    assert "Vireo answered 404" in call_error(server, "focus_crop", photo_id=999_999)
+
+
+@pytest.mark.parametrize(("scale", "source", "expected"), [
+    ("0.7574", "working_copy", 'source="original"'),
+    ("0.5000", "original", "not available"),
+    ("unknown", "original", "unknown"),
+    ("0.9970", "original", None),
+])
+def test_focus_crop_notes_downsized_pixels(scale, source, expected):
+    facts = mcp_server.focus_crop_facts({
+        "X-Vireo-Focus-Basis": "head", "X-Vireo-Focus-Original-Scale": scale,
+        "X-Vireo-Focus-Source": source, "X-Vireo-Focus-Subject-Clipped": "0",
+    })
+    assert facts["original_scale"] == (None if scale == "unknown" else float(scale))
+    if expected is None:
+        assert facts["notes"] == []
+    else:
+        assert len(facts["notes"]) == 1 and expected in facts["notes"][0]
+
+
+def test_full_scale_matches_the_routes_downsized_line():
+    import inspect
+
+    from focus_crop import prefer_original
+
+    assert inspect.signature(prefer_original).parameters["downsized_below"].default == mcp_server.FULL_SCALE
+
+
+def test_view_photo_source_shows_the_unedited_frame(mcp, app_and_db):
+    server, db, transport = mcp
+    pid = _focus_photo(app_and_db[0], db)
+    content = call(server, "view_photo", photo_id=pid, view="source")
+    assert content[0].type == "image"
+    assert transport.calls[-1][1:3] == (
+        f"/photos/{pid}/preview", {"size": mcp_server.PREVIEW_SIZE, "view": "source"})
+
+
+def test_burst_tools_are_read_only(mcp):
+    server, _, _ = mcp
+    tools = {tool.name: tool for tool in anyio.run(server.list_tools)}
+    for name in ("list_bursts", "burst", "focus_crop"):
+        assert tools[name].model_dump(by_alias=True)["annotations"]["readOnlyHint"] is True
+
+
+def test_a_slow_answer_is_not_reported_as_vireo_being_closed(monkeypatch):
+    class Opener:
+        def open(self, req, timeout):
+            raise TimeoutError("timed out")
+
+    monkeypatch.setattr(mcp_server.urllib.request, "build_opener", lambda *handlers: Opener())
+    client = VireoClient(base_url="http://127.0.0.1:9", token=TOKEN, timeout=90)
+    with pytest.raises(mcp_server.VireoError) as excinfo:
+        client.get_json("/api/v1/folders/1/bursts")
+    assert "did not answer in 90 seconds" in str(excinfo.value)
+    assert NOT_RUNNING_MESSAGE not in str(excinfo.value)
 
 
 def _eagles(db):

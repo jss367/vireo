@@ -83,8 +83,9 @@ a loopback port, spawns `python vireo/app.py --mcp` with `VIREO_URL` and
 
 ## Follow-ups
 
-- When the burst-evidence PR lands, add `burst_evidence` and the 1:1
-  `focus_crop` so the adjudication skill becomes a thin prompt over the tools.
+- Done: `burst` reads the burst-evidence pack, and `list_bursts` and the 1:1
+  `focus_crop` let the adjudication skill (`skills/vireo-adjudicate-bursts`) be
+  a prompt over the tools with no script or HTTP calls of its own.
 - A Streamable HTTP transport served by the app itself would remove the
   subprocess, but Flask under waitress has no ASGI mount; revisit if a client
   that cannot spawn processes matters.
