@@ -95,9 +95,10 @@ Undo step in Vireo like a hand edit. Three rules cover what Undo cannot protect:
   token of a `preview_process`. The preview names what would be replaced. Every
   stage flag, the models and the species lists are sent explicitly, so editing
   the saved process or the workspace's choices later does not change the run.
-  It is refused when the app describes the run differently (`describe_run` in
-  the plan), and the job route checks the workspace and photos again as it fixes
-  them (`expected_run`). A queued run reads its mask settings when it starts.
+  The app compares the whole description (`expected_run`) at launch, as it fixes
+  the run's photos, and again when the run leaves the queue, and refuses a run
+  that differs. A review made after a re-classify begins, on a photo it has not
+  reached, is replaced like the others, as with a run started in Vireo.
 
 ## Testing
 

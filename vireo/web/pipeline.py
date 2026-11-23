@@ -252,36 +252,6 @@ def create_pipeline_blueprint(
             )
         return None
 
-    def _plan_params(
-        body: JsonDict, collection_id: int | None, scope_photo_ids: list[int] | None, source_paths: list[str] | None,
-        hash_duplicate_paths: list[str] | None,
-    ) -> PipelinePlanParams:
-        """Build the ``PipelinePlanParams`` a validated plan body describes."""
-        from pipeline_plan import PipelinePlanParams
-
-        review_mode = body.get("review_mode")
-        eye_detect_override_body = body.get("eye_detect_override")
-        return PipelinePlanParams(
-            raw_subject_analysis=body.get("raw_subject_analysis", False),
-            collection_id=collection_id,
-            photo_ids=scope_photo_ids,
-            exclude_photo_ids=body.get("exclude_photo_ids") or [],
-            skip_classify=bool(body.get("skip_classify")),
-            skip_extract_masks=bool(body.get("skip_extract_masks")),
-            skip_eye_keypoints=bool(body.get("skip_eye_keypoints")),
-            eye_detect_override=eye_detect_override_body,
-            skip_regroup=bool(body.get("skip_regroup")),
-            model_ids=body.get("model_ids") or (
-                [body["model_id"]] if body.get("model_id") else []
-            ),
-            labels_files=body.get("labels_files") or [],
-            reclassify=bool(body.get("reclassify")),
-            source_paths=source_paths,
-            hash_duplicate_paths=hash_duplicate_paths,
-            preview_max_size=body.get("preview_max_size"),
-            review_mode=review_mode,
-        )
-
     def _described_plan(body: JsonDict, params: PipelinePlanParams) -> ResponseReturnValue:
         """The plan with the description ``expected_run`` is checked against.
 
@@ -292,6 +262,9 @@ def create_pipeline_blueprint(
         from pipeline_plan import compute_plan
 
         db = get_db()
+        problem = process_runs.undescribable(body)
+        if problem is not None:
+            return json_error(problem)
         if params.photo_ids is None:
             if params.collection_id is None:
                 return json_error("describe_run needs photo_ids, folder_ids or collection_id")
@@ -393,7 +366,7 @@ def create_pipeline_blueprint(
             return err
         if not isinstance(body.get("raw_subject_analysis", False), bool):
             return json_error("raw_subject_analysis must be a boolean", 400)
-        params = _plan_params(
+        params = plan_params(
             body, collection_id, scope_photo_ids, source_paths,
             hash_duplicate_paths,
         )
@@ -556,6 +529,7 @@ def create_pipeline_blueprint(
         runtime_warning = launch.runtime_warning(params)
 
         def work(job: JobDict) -> JsonDict:
+            launch.confirm_expected_run(db_path)
             return run_pipeline_job(
                 job, runner, db_path, active_ws, params,
                 thumb_cache_dir=config["THUMB_CACHE_DIR"],
@@ -2185,6 +2159,37 @@ _SQLITE_INT_MIN = -(1 << 63)
 _SQLITE_INT_MAX = (1 << 63) - 1
 
 
+def plan_params(
+    body: JsonDict, collection_id: int | None, scope_photo_ids: list[int] | None, source_paths: list[str] | None,
+    hash_duplicate_paths: list[str] | None,
+) -> PipelinePlanParams:
+    """Build the ``PipelinePlanParams`` a validated plan body describes."""
+    from pipeline_plan import PipelinePlanParams
+
+    review_mode = body.get("review_mode")
+    eye_detect_override_body = body.get("eye_detect_override")
+    return PipelinePlanParams(
+        raw_subject_analysis=body.get("raw_subject_analysis", False),
+        collection_id=collection_id,
+        photo_ids=scope_photo_ids,
+        exclude_photo_ids=body.get("exclude_photo_ids") or [],
+        skip_classify=bool(body.get("skip_classify")),
+        skip_extract_masks=bool(body.get("skip_extract_masks")),
+        skip_eye_keypoints=bool(body.get("skip_eye_keypoints")),
+        eye_detect_override=eye_detect_override_body,
+        skip_regroup=bool(body.get("skip_regroup")),
+        model_ids=body.get("model_ids") or (
+            [body["model_id"]] if body.get("model_id") else []
+        ),
+        labels_files=body.get("labels_files") or [],
+        reclassify=bool(body.get("reclassify")),
+        source_paths=source_paths,
+        hash_duplicate_paths=hash_duplicate_paths,
+        preview_max_size=body.get("preview_max_size"),
+        review_mode=review_mode,
+    )
+
+
 def photo_scope_error(body: JsonDict, json_error: JsonError) -> ErrorResponse | None:
     """The 400 response for a ``photo_ids`` scope no run could have, or None.
 
@@ -2269,6 +2274,7 @@ class _PipelineLaunch:
         self.excluded_paths_set: set[str] = set()
         self.excluded_photo_ids_set: set[int] = set()
         self.pending_folder_collection = None
+        self.described_params: PipelinePlanParams | None = None
         self.remote_archive_config = None
         self.collection_name = None
 
@@ -2599,7 +2605,7 @@ class _PipelineLaunch:
         return None
 
     def check_expected_run(self) -> ErrorResponse | None:
-        """Refuse a run whose scope is not the one a plan described.
+        """Refuse a run that is not the one a plan described.
 
         The run is then pinned to exactly those photos: a collection's rules
         are evaluated when the job runs, which can be hours after it is queued,
@@ -2607,28 +2613,47 @@ class _PipelineLaunch:
         """
         if "expected_run" not in self.body:
             return None
-        db = self.db
-        pending = self.pending_folder_collection
+        problem = process_runs.undescribable(self.body)
+        if problem is not None:
+            return self.json_error(problem)
+        pending, err = self._described_scope()
         if pending is None:
-            from pipeline import _resolve_collection_photo_ids
-
-            collection = next(
-                (c for c in db.collections.list_all() if c["id"] == self.collection_id), None,
-            )
-            if collection is None:
-                return self.json_error("collection not found", 404)
-            photo_ids = sorted(
-                _resolve_collection_photo_ids(db, self.collection_id) - self.excluded_photo_ids_set
-            )
-            pending = {"leaf": collection["name"], "photo_ids": photo_ids}
+            return err
+        described = plan_params(self.body, None, pending["photo_ids"], None, None)
         mismatch = process_runs.expected_run_error(
-            self.body["expected_run"], db.active_workspace_id, pending["photo_ids"],
+            self.body["expected_run"],
+            process_runs.describe_run(
+                self.db, described, pending["photo_ids"], self.body.get("miss_enabled"),
+            ),
         )
         if mismatch is not None:
             return self.json_error(*mismatch)
         self.pending_folder_collection = pending
         self.collection_id = None
+        self.described_params = described
         return None
+
+    def _described_scope(self) -> tuple[JsonDict | None, ErrorResponse | None]:
+        """The photos the run covers now, as a pending ad-hoc collection."""
+        if self.pending_folder_collection is not None:
+            return self.pending_folder_collection, None
+        from pipeline import _resolve_collection_photo_ids
+
+        db = self.db
+        collection = next(
+            (c for c in db.collections.list_all() if c["id"] == self.collection_id), None,
+        )
+        if collection is None:
+            return None, self.json_error("collection not found", 404)
+        photo_ids = _resolve_collection_photo_ids(db, self.collection_id) - self.excluded_photo_ids_set
+        return {"leaf": collection["name"], "photo_ids": sorted(photo_ids)}, None
+
+    def confirm_expected_run(self, db_path: str) -> None:
+        """On the job's thread, before its first stage: refuse a run that changed while queued."""
+        if self.described_params is not None:
+            process_runs.refuse_changed_run(
+                db_path, self.described_params, self.body.get("miss_enabled"), self.body["expected_run"],
+            )
 
     def check_required_scope(self) -> ErrorResponse | None:
         """Require a collection, folder or photo scope."""

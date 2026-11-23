@@ -10,7 +10,10 @@ Vireo is also a [Model Context Protocol](https://modelcontextprotocol.io)
 server, so Claude Code, Claude Desktop and other MCP clients can work on the
 catalog on the subscription you already have: search photos, look at them,
 read burst rankings, and set flags, ratings and keywords. Every write goes
-through the same routes the app uses and is one Undo step in Vireo.
+through the same routes the app uses and is one Undo step in Vireo, with two
+exceptions that Undo cannot reverse: exported files, and the review results,
+boxes and predictions a Process run replaces. Both start only from a preview
+that says what would be written or replaced.
 
 The server runs as a subprocess of the client and talks to the running Vireo
 over the API below, so Vireo must be open (or started headless) while the

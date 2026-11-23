@@ -5,7 +5,9 @@ import json
 import models
 import pipeline_job
 import pytest
+from db import Database
 from services import detection_store, process_runs, workspace_config
+from wait import wait_for_job_via_client
 
 MODEL = {
     "id": "m1", "name": "Test model", "model_str": "x", "model_type": "timm",
@@ -47,8 +49,7 @@ def _run_of(client, **body):
 
 
 def _start(client, run, **body):
-    expected = {key: run[key] for key in ("workspace_id", "photo_digest")}
-    return client.post("/api/jobs/pipeline", json={"expected_run": expected, **body})
+    return client.post("/api/jobs/pipeline", json={"expected_run": run, **body})
 
 
 def _collection_ids(db, name_part):
@@ -101,7 +102,7 @@ def test_a_run_with_no_model_classifies_and_replaces_nothing(app_and_db, monkeyp
     monkeypatch.setattr(models, "get_active_model", lambda: None)
     run = _run_of(app.test_client(), photo_ids=_ids(db), reclassify=True)
     assert run["models"] == [] and run["misses"] is False
-    assert run["replaced_reviews"] == {"predictions": 0, "photos": 0}
+    assert run["replaced_reviews"]["predictions"] == 0
 
 
 @pytest.mark.parametrize("body, misses", [
@@ -123,16 +124,22 @@ def test_the_workspace_species_lists_are_named(app_and_db, one_model):
     assert run["labels_files"] == ["/lists/frogs.txt"]
 
 
-def _prediction(db, photo_id, status, detector="megadetector-v6", species="Robin"):
+def _prediction(db, photo_id, status, detector="megadetector-v6", species="Robin", x=0.1):
+    """A prediction on a box of its own, with a review; returns the prediction id."""
     det = detection_store.write_detection_batch(
         db, photo_id, detector,
-        [{"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3}, "confidence": 0.9, "category": "animal"}],
+        [{"box": {"x": x, "y": 0.1, "w": 0.3, "h": 0.3}, "confidence": 0.9, "category": "animal"}],
     )[0]
     db.predictions.add(det, species, 0.9, model="m1", labels_fingerprint="fp")
-    row = db.conn.execute("SELECT id FROM predictions WHERE detection_id = ?", (det,)).fetchone()
+    prediction = db.conn.execute("SELECT id FROM predictions WHERE detection_id = ?", (det,)).fetchone()["id"]
+    _review(db, prediction, status)
+    return prediction
+
+
+def _review(db, prediction, status):
     db.conn.execute(
         "INSERT OR REPLACE INTO prediction_review (prediction_id, workspace_id, status) VALUES (?, ?, ?)",
-        (row["id"], db.active_workspace_id, status),
+        (prediction, db.active_workspace_id, status),
     )
     db.commit()
 
@@ -144,11 +151,80 @@ def test_reclassify_counts_the_decisions_it_may_discard(app_and_db, one_model):
     _prediction(db, first, "accepted")
     _prediction(db, second, "pending")
     _prediction(db, third, "rejected", detector="reviewer-selected")
-    assert _run_of(client, photo_ids=[first, second, third], reclassify=True)["replaced_reviews"] == {
-        "predictions": 1, "photos": 1,
-    }
+    reviews = _run_of(client, photo_ids=[first, second, third], reclassify=True)["replaced_reviews"]
+    assert (reviews["predictions"], reviews["photos"]) == (1, 1)
     # Reusing earlier results discards nothing.
-    assert _run_of(client, photo_ids=[first])["replaced_reviews"] == {"predictions": 0, "photos": 0}
+    assert _run_of(client, photo_ids=[first])["replaced_reviews"]["predictions"] == 0
+
+
+def test_the_same_number_of_different_decisions_is_a_changed_run(app_and_db, one_model, started):
+    app, db = app_and_db
+    client = app.test_client()
+    ids = _ids(db)
+    accepted, pending = _prediction(db, ids[0], "accepted"), _prediction(db, ids[1], "pending")
+    run = _run_of(client, photo_ids=ids, reclassify=True)
+    _review(db, accepted, "pending")
+    _review(db, pending, "accepted")
+    response = _start(client, run, photo_ids=ids, reclassify=True)
+    assert response.status_code == 409 and "reviewed predictions" in response.get_json()["error"]
+    assert started == []
+
+
+@pytest.mark.parametrize("change, named", [
+    ("review", "reviewed predictions"), ("species list", "species lists"), ("settings", "stage settings"),
+])
+def test_a_run_that_changes_in_the_queue_fails_before_its_first_stage(
+    app_and_db, one_model, started, monkeypatch, change, named,
+):
+    app, db = app_and_db
+    client = app.test_client()
+    ids = _ids(db)
+    prediction = _prediction(db, ids[0], "pending")
+    body = {"photo_ids": ids, "reclassify": True}
+    run = _run_of(client, **body)
+    confirm = process_runs.refuse_changed_run
+
+    def change_then_confirm(*args, **kwargs):
+        worker = Database(str(app.config["DB_PATH"]))
+        worker.set_active_workspace(db.active_workspace_id)
+        if change == "review":
+            _review(worker, prediction, "accepted")
+        elif change == "species list":
+            workspace_config.set_workspace_active_labels(worker, ["/lists/new.txt"])
+        else:
+            worker.conn.execute("UPDATE workspaces SET config_overrides = ?",
+                                (json.dumps({"pipeline": {"sam2_variant": "sam2-tiny"}}),))
+            worker.commit()
+        worker.close()
+        return confirm(*args, **kwargs)
+
+    monkeypatch.setattr(process_runs, "refuse_changed_run", change_then_confirm)
+    response = _start(client, run, **body)
+    assert response.status_code == 200, response.get_json()
+    job = wait_for_job_via_client(client, response.get_json()["job_id"])
+    assert job["status"] == "failed" and named in json.dumps(job["errors"]), job
+    assert started == []
+
+
+def test_an_unchanged_queued_run_starts(app_and_db, one_model, started):
+    app, db = app_and_db
+    client = app.test_client()
+    body = {"photo_ids": _ids(db), "reclassify": True}
+    _prediction(db, body["photo_ids"][0], "accepted")
+    response = _start(client, _run_of(client, **body), **body)
+    assert wait_for_job_via_client(client, response.get_json()["job_id"])["status"] == "completed"
+    assert len(started) == 1
+
+
+@pytest.mark.parametrize("field", [{"exclude_paths": ["/photos/2024/bird1.jpg"]}, {"labels_file": "/lists/a.txt"}])
+def test_a_described_run_refuses_what_the_plan_does_not_model(app_and_db, one_model, started, field):
+    app, db = app_and_db
+    client = app.test_client()
+    body = {"folder_ids": [db.folders.id_by_path("/photos/2024")]}
+    run = _run_of(client, **body)
+    assert _plan(client, **body, **field).status_code == 400
+    assert _start(client, run, **body, **field).status_code == 400
+    assert started == []
 
 
 def test_a_photo_scope_runs_exactly_those_photos(app_and_db, one_model, started):
@@ -182,14 +258,13 @@ def test_a_changed_scope_starts_nothing(app_and_db, one_model, started):
                     (json.dumps([{"field": "photo_ids", "value": ids}]), album))
     db.commit()
     response = _start(client, run, collection_id=album)
-    assert response.status_code == 409 and "photos in scope changed" in response.get_json()["error"]
-    other = _start(client, {**run, "workspace_id": 999}, photo_ids=ids)
-    assert other.status_code == 409 and "workspace changed" in other.get_json()["error"]
+    assert response.status_code == 409 and "(the photos in scope)" in response.get_json()["error"]
+    other = _start(client, {**_run_of(client, photo_ids=ids), "workspace_id": 999}, photo_ids=ids)
+    assert other.status_code == 409 and "(the active workspace)" in other.get_json()["error"]
     assert started == [] and _collection_ids(db, "Process ") == []
 
 
-@pytest.mark.parametrize("expected", [None, [], {}, {"workspace_id": True, "photo_digest": "a"},
-                                      {"workspace_id": 1, "photo_digest": 2}])
+@pytest.mark.parametrize("expected", [None, [], {}, {"workspace_id": 1, "photo_digest": "a"}])
 def test_a_malformed_expected_run_is_refused(app_and_db, started, expected):
     app, db = app_and_db
     response = app.test_client().post("/api/jobs/pipeline", json={"photo_ids": _ids(db), "expected_run": expected})
@@ -216,6 +291,5 @@ def test_both_routes_refuse_the_same_photo_scopes(app_and_db, started, body, sta
 
 def test_an_unknown_collection_cannot_be_the_expected_run(app_and_db, started):
     app, db = app_and_db
-    expected = {"workspace_id": db.active_workspace_id, "photo_digest": process_runs.photo_digest([])}
-    response = app.test_client().post("/api/jobs/pipeline", json={"collection_id": 999, "expected_run": expected})
+    response = app.test_client().post("/api/jobs/pipeline", json={"collection_id": 999, "expected_run": {}})
     assert response.status_code == 404 and started == []

@@ -1473,14 +1473,15 @@ def test_preview_process_starts_nothing(mcp, process_model):
     assert len(db.collections.list_all()) == before and process_model == []
 
 
-def test_preview_process_says_when_the_latest_review_is_replaced(mcp, process_model, tmp_path):
+@pytest.mark.parametrize("process, skip, replaced", [
+    ("Full", [], True), ("Identify birds", [], True), ("Full", ["group"], False), ("Quick look", [], False),
+])
+def test_preview_process_says_when_the_latest_review_is_replaced(mcp, process_model, process, skip, replaced):
     server, db, _ = mcp
-    review = tmp_path / f"pipeline_results_ws{db.active_workspace_id}.json"
-    review.write_text("{}")
-    ids = sorted(db.photos.get_ids())
-    args = {"process_id": _process_id(server), "photo_ids": ids}
-    assert call(server, "preview_process", **args)["replaces"] == ["the workspace's latest review results"]
-    assert call(server, "preview_process", skip=["group"], **args)["replaces"] == []
+    preview = call(server, "preview_process", process_id=_process_id(server, process),
+                   photo_ids=sorted(db.photos.get_ids()), skip=skip)
+    assert bool(preview["replaces"]) is replaced
+    assert all("latest review results" in item for item in preview["replaces"])
 
 
 @pytest.mark.parametrize("change", ["photos", "edited process", "deleted process", "model", "workspace"])
@@ -1536,7 +1537,7 @@ def test_a_scope_that_changes_after_the_comparison_starts_nothing(mcp, process_m
         return original(method, path, params, json_body)
 
     transport.request = request
-    assert "photos in scope changed" in call_error(server, "start_process", token=preview["token"])
+    assert "(the photos in scope)" in call_error(server, "start_process", token=preview["token"])
     assert process_model == []
 
 

@@ -1572,10 +1572,10 @@ def _unfinished_jobs(client):
 
 def _process_preview(client, body, plan, token):
     run = plan["run"]
-    group = plan["stages"].get("Group", {})
     replaces = []
-    if group.get("state") == "will-run" and (group.get("detail") or {}).get("cache_exists"):
-        replaces.append("the workspace's latest review results")
+    if plan["stages"].get("Group", {}).get("state") == "will-run":
+        # Said even when there are none yet: another run can write them first.
+        replaces.append("the workspace's latest review results, if it has any by then")
     if body["reclassify"] and run["models"]:
         replaces.append(
             "the photos' detected boxes and these models' predictions, with up to "
@@ -1651,19 +1651,17 @@ def _register_process_tools(server, client):
         """Run exactly the Process run a preview_process described, when the
         user asked for it. Refused when the workspace, the photos in scope, the
         models, the species lists, the settings or the reviewed predictions it
-        would replace changed since; preview again then. A token works once. A
-        run queued behind another reads its mask settings when it starts.
+        would replace changed since; preview again then. A run that changes
+        while it waits behind another fails without running. A review made
+        after a re-classify begins, on a photo it has not reached, is replaced
+        like the others. A token works once.
         Returns the ``job_id`` to follow with get_job."""
         if token not in pending:
             raise VireoError("That token is unknown or already used. Call preview_process again.")
         body, described = pending.pop(token)
-        if _plan_process(client, body)["run"] != described:
-            raise VireoError("The run would differ from the preview now. Call preview_process again.")
-        # The app checks these as it fixes the run's photos, so a change after
-        # the comparison above starts nothing.
-        started = client.post_json("/api/jobs/pipeline", {
-            **body, "expected_run": _pick(described, ("workspace_id", "photo_digest")),
-        })
+        # The app compares its own description with this one as it fixes the
+        # run's photos, and again when the run leaves the queue.
+        started = client.post_json("/api/jobs/pipeline", {**body, "expected_run": described})
         return {"photo_count": described["photo_count"], **_pick(started, ("job_id", "model_warning"))}
 
     @server.tool(annotations=mcp_types.ToolAnnotations(read_only_hint=False, destructive_hint=False))
