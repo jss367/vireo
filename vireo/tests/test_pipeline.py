@@ -152,6 +152,28 @@ def test_load_photo_features(tmp_path):
     assert p["species_top5"][0][0] in ("robin", "eagle")
 
 
+def test_load_photo_features_checks_detector_runs_of_the_loaded_photos_only(tmp_path, monkeypatch):
+    """Loading one burst must not re-check every detector run in the catalog."""
+    from pipeline import load_photo_features
+    from repositories.model_runs import ModelRunsRepository
+
+    db, (burst, others) = _setup_db_with_photos(tmp_path)
+    for pid in burst + others:
+        db.model_runs.record_detector_run(pid, "megadetector-v6", 0)
+    db.commit()
+    checked = []
+    original = ModelRunsRepository.stale_detector_input_ids
+
+    def recording(self, photo_ids):
+        checked.extend(photo_ids)
+        return original(self, photo_ids)
+
+    monkeypatch.setattr(ModelRunsRepository, "stale_detector_input_ids", recording)
+    photos = load_photo_features(db, photo_ids=burst)
+    assert sorted(p["id"] for p in photos) == sorted(burst)
+    assert sorted(checked) == sorted(burst)
+
+
 def test_load_photo_features_empty_db(tmp_path):
     """Empty DB returns empty list."""
     from db import Database

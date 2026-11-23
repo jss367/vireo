@@ -544,7 +544,7 @@ class _FeatureLoad:
         # "subject_absent" would conflate "unknown" with "detector confirmed
         # empty" and create false asymmetric cuts in compute_s_enc.
         self.detected_photo_ids = self.db.model_runs.get_detector_run_photo_ids(
-            "megadetector-v6",
+            "megadetector-v6", photo_ids=self.photo_ids_for_dets,
         )
 
         # Photos with at least one MDV6 detection passing the workspace

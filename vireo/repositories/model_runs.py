@@ -235,8 +235,14 @@ class ModelRunsRepository:
 
     def get_detector_run_photo_ids(
         self, detector_model: str, runtime_fingerprint: str | None = None,
+        *, photo_ids: Collection[int] | None = None,
     ) -> set[int]:
         """Return the set of photo_ids with a consistent cached detector run.
+
+        ``photo_ids`` limits the answer to those photos. The staleness check
+        below parses metadata and hashes a fingerprint for every run it is
+        handed, so a caller that only asks about a burst must not pay for the
+        whole catalog.
 
         Includes empty-scene photos (box_count=0) — which is the whole point:
         without this, we'd re-run the model forever on photos with no animals.
@@ -270,18 +276,22 @@ class ModelRunsRepository:
                       )
                  )"""
             params.extend([runtime_fingerprint, self.auto_match_review_marker])
-        rows = self.conn.execute(
-            """SELECT dr.photo_id
-               FROM detector_runs dr
-               WHERE dr.detector_model = ?
-               """ + runtime_clause + """
-                 AND (dr.box_count = 0
-                      OR EXISTS (SELECT 1 FROM detections d
-                                 WHERE d.photo_id = dr.photo_id
-                                   AND d.detector_model = dr.detector_model))""",
-            params,
-        )
-        ids = {r["photo_id"] for r in rows}
+        scopes = [[]] if photo_ids is None else chunked(sorted(set(photo_ids)))
+        ids: set[int] = set()
+        for scope in scopes:
+            scope_clause = f" AND dr.photo_id IN ({','.join('?' * len(scope))})" if scope else ""
+            rows = self.conn.execute(
+                """SELECT dr.photo_id
+                   FROM detector_runs dr
+                   WHERE dr.detector_model = ?
+                   """ + runtime_clause + scope_clause + """
+                     AND (dr.box_count = 0
+                          OR EXISTS (SELECT 1 FROM detections d
+                                     WHERE d.photo_id = dr.photo_id
+                                       AND d.detector_model = dr.detector_model))""",
+                [*params, *scope],
+            )
+            ids.update(r["photo_id"] for r in rows)
         if detector_model == "megadetector-v6":
             for candidates in chunked(list(ids)):
                 ids.difference_update(self.stale_detector_input_ids(candidates))
