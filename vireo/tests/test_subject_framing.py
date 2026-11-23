@@ -41,6 +41,18 @@ def test_crop_slides_to_stay_inside_the_frame():
     assert crop["x"] == 0 and crop["y"] + crop["h"] == pytest.approx(1)
 
 
+@pytest.mark.parametrize(("box", "reduced"), [
+    (_box(0, .4, .1, .1), True), (_box(.9, .4, .1, .1), True), (_box(.4, 0, .1, .1), True),
+    (_box(.4, .9, .1, .1), True), (_box(.4, .4, .1, .1), False),
+    # Exactly enough room on the left for the padding.
+    (_box(.05, .4, .1, .1), False),
+])
+def test_padding_lost_at_an_edge_is_reported(box, reduced):
+    """A crop that slides keeps its size but not the padding on that side."""
+    out = frame_subject(box, FRAME, 0.5, (3.0, 2.0))
+    assert out["output_pixels"] == [1200, 800] and out["margin_reduced"] is reduced
+
+
 def test_crop_reports_lost_padding_and_a_cut_subject():
     padded = frame_subject(_box(.05, .05, .9, .9), FRAME, 0.35, (3.0, 2.0))
     assert padded["margin_reduced"] is True and padded["subject_cut"] is False

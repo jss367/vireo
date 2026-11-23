@@ -51,7 +51,7 @@ def frame_subject(box, frame, margin, aspect=None):
     size. The crop grows to the aspect ratio, shrinks to fit the frame when it
     must, and slides to stay inside it. Returns the crop, its pixel size, the
     subject's pixel size, and whether the frame left less than the requested
-    padding or cut the subject itself.
+    padding on any side or cut the subject itself.
     """
     width, height = frame
     box_w, box_h = box["w"] * width, box["h"] * height
@@ -70,6 +70,11 @@ def frame_subject(box, frame, margin, aspect=None):
     top = min(max((box["y"] + box["h"] / 2) * height - crop_h / 2, 0), height - crop_h)
     x, w = _span(left, crop_w, width)
     y, h = _span(top, crop_h, height)
+    margin_w, margin_h = box_w * margin, box_h * margin
+    box_left, box_top = box["x"] * width, box["y"] * height
+    # How far the requested padding reaches past each side of the final crop.
+    lost = max(left - (box_left - margin_w), top - (box_top - margin_h),
+               box_left + box_w + margin_w - (left + crop_w), box_top + box_h + margin_h - (top + crop_h))
     # Sub-pixel slack, so rounding never reads as a cut subject.
     cut = crop_w < box_w - 1 or crop_h < box_h - 1
     return {
@@ -77,6 +82,6 @@ def frame_subject(box, frame, margin, aspect=None):
         "aspect": f"{ratio_w:g}:{ratio_h:g}",
         "output_pixels": [round(crop_w), round(crop_h)],
         "subject_pixels": [round(box_w), round(box_h)],
-        "margin_reduced": shrink < 1.0,
+        "margin_reduced": lost > 1,
         "subject_cut": cut,
     }

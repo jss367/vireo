@@ -1080,6 +1080,8 @@ def test_save_edit_copy_leaves_the_photos_edit_alone(mcp):
     pid = db.photos.list_page()[0]["id"]
     db.set_photo_edit_recipe(pid, {"rotation": 90})
     db.commit()
+    for neutral in ({"adjustments": {"exposure": 0}}, {"rotation": 0}):
+        assert "neutral" in call_error(server, "save_edit_copy", photo_id=pid, name="Nothing", recipe=neutral)
     copy = call(server, "save_edit_copy", photo_id=pid, name="ID view", recipe={"adjustments": {"exposure": 1}})
     edit = call(server, "get_edit", photo_id=pid)
     assert edit["recipe"]["rotation"] == 90
@@ -1166,6 +1168,14 @@ def _change_export_input(db, pid, change, folder, out):
         db.conn.execute("UPDATE photos SET timestamp = '2020-01-01T00:00:00' WHERE id = ?", (pid,))
     elif change == "source":
         PILImage.new("RGB", (640, 480), (200, 10, 10)).save(folder / "bird1.jpg", "JPEG", quality=50)
+    elif change == "same-stat source":
+        # Other bytes with the size and modification time kept, as a sync tool can do.
+        path = folder / "bird1.jpg"
+        before = path.stat()
+        path.write_bytes(path.read_bytes()[:-1] + b"x")
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        after = path.stat()
+        assert (after.st_size, after.st_mtime_ns) == (before.st_size, before.st_mtime_ns)
     elif change == "camera":
         # Not metadata this export writes, but camera denoising renders from it.
         db.conn.execute("UPDATE photos SET iso = 12800 WHERE id = ?", (pid,))
@@ -1179,6 +1189,8 @@ def _change_export_input(db, pid, change, folder, out):
 
 @pytest.mark.parametrize("change", [
     "edit", "coordinates", "place", "species", "rating", "time", "source", "camera", "exif", "file in the way",
+    pytest.param("same-stat source", marks=pytest.mark.skipif(
+        os.name == "nt", reason="Windows reports creation time as ctime and an in-place rewrite keeps the file id")),
 ])
 def test_start_export_refuses_when_the_preview_is_stale(mcp, app_and_db, tmp_path, change):
     """The photo already has coordinates and a rating: new values count, not just presence."""

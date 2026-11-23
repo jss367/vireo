@@ -1328,7 +1328,9 @@ def _register_save_tools(server, client):
         if not recipe:
             raise VireoError("recipe is empty")
         check_recipe(recipe)
-        data = client.post_json(f"/api/photos/{photo_id}/versions", {"name": name, "recipe": recipe})
+        data = client.post_json(f"/api/photos/{photo_id}/versions", {
+            "name": name, "recipe": recipe, "require_edit": True,
+        })
         version = data.get("version") or {}
         return {"photo_id": photo_id, "version_id": version.get("id"), "name": version.get("name"),
                 "recipe": data.get("recipe")}

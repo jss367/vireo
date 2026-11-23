@@ -73,6 +73,8 @@ def _change_value(
         recipe = source_value["recipe"]
     # The editor may capture unsaved adjustments without changing its source version.
     recipe = validate_recipe(body.get("recipe", recipe), photo_id, media_dir)
+    if recipe is None and body.get("require_edit") is True:
+        raise ValueError("Every value in the recipe is neutral, so there is no edit to save.")
     value = repo.create(photo_id, recipe, body.get("name"), body.get("kind", "copy"))
     return value, ("Created virtual copy " if value["kind"] == "copy" else "Saved snapshot ") + value["name"]
 

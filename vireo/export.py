@@ -785,11 +785,17 @@ _RENDER_COLUMNS = (
 
 
 def _file_identity(path):
+    """The file at ``path`` now, so that a replacement reads as another file.
+
+    Inode and change time catch a rewrite that keeps the size and modification
+    time. The content is not hashed: an export can name hundreds of RAW files
+    on a network volume, and this runs three times per export.
+    """
     try:
         stat = os.stat(path)
     except (OSError, TypeError):
         return [path]
-    return [path, stat.st_size, stat.st_mtime_ns]
+    return [path, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_dev, stat.st_ino]
 
 
 def _export_content_key(photo, folder_path, source_path, recipe, exif_data, metadata_args):

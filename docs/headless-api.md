@@ -287,6 +287,9 @@ no edit answers 400 (clear an edit with DELETE). `source` (up to 60
 characters) and `reason` (up to 300) are recorded with the edit and show in its
 history. Without `expected_recipe` the save replaces whatever is stored.
 
+`POST /api/photos/<id>/versions` with `require_edit: true` answers 400 for a
+recipe that holds no edit, which otherwise saves an unedited virtual copy.
+
 `POST /api/jobs/export/preflight` with `list_files: true` (at most 500 photos)
 adds `files`, one entry per output with `photo_id`, `path`, `edited`,
 `has_coordinates`, `has_place_name` and `content_key` (it changes when the
