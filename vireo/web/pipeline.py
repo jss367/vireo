@@ -282,6 +282,25 @@ def create_pipeline_blueprint(
             review_mode=review_mode,
         )
 
+    def _described_plan(body: JsonDict, params: PipelinePlanParams) -> ResponseReturnValue:
+        """The plan with the description ``expected_run`` is checked against.
+
+        The scope is resolved once, so both cover the same photos: a
+        collection's rules can match more photos a moment later.
+        """
+        from pipeline import _resolve_collection_photo_ids
+        from pipeline_plan import compute_plan
+
+        db = get_db()
+        if params.photo_ids is None:
+            if params.collection_id is None:
+                return json_error("describe_run needs photo_ids, folder_ids or collection_id")
+            params.photo_ids = sorted(_resolve_collection_photo_ids(db, params.collection_id))
+        excluded = set(params.exclude_photo_ids)
+        params.photo_ids = [pid for pid in params.photo_ids if pid not in excluded]
+        run = process_runs.describe_run(db, params, params.photo_ids, body.get("miss_enabled"))
+        return jsonify({**compute_plan(db, params, db_path), "run": run})
+
     @blueprint.route("/api/pipeline/plan", methods=["POST"])
     def api_pipeline_plan() -> ResponseReturnValue:
         """Return the per-stage plan for the pipeline given current UI selections.
@@ -295,7 +314,6 @@ def create_pipeline_blueprint(
         Body mirrors a subset of the /api/jobs/pipeline body so the page
         can pass through the same selections the user is staging.
         """
-        from pipeline import _resolve_collection_photo_ids
         from pipeline_plan import compute_plan
 
         body = request.get_json(silent=True) or {}
@@ -379,18 +397,9 @@ def create_pipeline_blueprint(
             body, collection_id, scope_photo_ids, source_paths,
             hash_duplicate_paths,
         )
-        if not body.get("describe_run"):
-            return jsonify(compute_plan(db, params, db_path))
-        # Resolve the scope once, so the plan and the description cover the
-        # same photos. A collection's rules can match more photos a moment later.
-        if params.photo_ids is None:
-            if collection_id is None:
-                return json_error("describe_run needs photo_ids, folder_ids or collection_id")
-            params.photo_ids = sorted(_resolve_collection_photo_ids(db, collection_id))
-        excluded = set(params.exclude_photo_ids)
-        params.photo_ids = [pid for pid in params.photo_ids if pid not in excluded]
-        run = process_runs.describe_run(db, params, params.photo_ids, body.get("miss_enabled"))
-        return jsonify({**compute_plan(db, params, db_path), "run": run})
+        if body.get("describe_run"):
+            return _described_plan(body, params)
+        return jsonify(compute_plan(db, params, db_path))
 
     def _coerce_process_fields(body: JsonDict, *, require_name: bool) -> tuple[JsonDict, str | None]:
         """Return ``(kwargs, error_string)`` for create/update (``{}`` on error).

@@ -22,6 +22,7 @@ HELPER = "repositories/prediction_review.py"
 CROSS_WORKSPACE_REVIEWS = {
     "repositories/companion_pairing.py:CompanionPairingRepository.carry_prediction_reviews_to_survivors",
     "repositories/computation_cache.py:ComputationCacheRepository.manual_review_exists",
+    "repositories/model_runs.py:ModelRunsRepository.count_reviewed_predictions",
     "repositories/model_runs.py:ModelRunsRepository.detector_run_is_pinned",
     "repositories/model_runs.py:ModelRunsRepository.get_detector_run_photo_ids",
     "repositories/model_runs.py:ModelRunsRepository.get_classifier_run_keys",
@@ -68,6 +69,7 @@ RAW_READS = {
     'repositories/masks_features.py:MasksFeaturesRepository.list_photos_for_eye_keypoint_stage': 1,
     'repositories/model_runs.py:CACHE_PREDICTIONS_EXIST_SQL': 1,
     'repositories/model_runs.py:ModelRunsRepository.classifier_cache_run_filter': 1,
+    'repositories/model_runs.py:ModelRunsRepository.count_reviewed_predictions': 1,
     'repositories/model_runs.py:ModelRunsRepository.current_prediction_detector_confidences': 1,
     'repositories/model_runs.py:ModelRunsRepository.detector_run_is_pinned': 1,
     'repositories/model_runs.py:ModelRunsRepository.get_classifier_run_key_gate': 1,
