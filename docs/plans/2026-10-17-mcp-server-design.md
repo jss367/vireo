@@ -65,7 +65,8 @@ EXIF dump, cached paths and render keys stays behind `get_photo(include_exif=tru
 | `find_photos_by_text` | `/api/photos/search` | CLIP text search; reports `reason` when the active model cannot. |
 | `get_photo` | `/api/photos/<id>` | |
 | `view_photo` | `/thumbnails/<id>.jpg`, `/photos/<id>/preview`, `/photos/<id>/crop` | Returns the image itself (`thumbnail`, `preview` at 1920, or `subject`, the detection crop). |
-| `burst` | `/api/photos/<id>/best-batch` | The ranked burst around a photo; the app's own "run the pipeline first" error passes through. |
+| `list_bursts`, `burst` | `/api/v1/folders/<id>/bursts`, `/api/v1/photos/<id>/burst-evidence` | A folder's bursts with the reasons each needs a reviewer; the ranked burst around a photo with its evidence. |
+| `focus_crop` | `/api/v1/photos/<id>/focus-crop` | Unresized pixels for judging focus, with what the response headers say about them. |
 | `set_flag` | `/api/batch/flag` | Optional `source` and `reason` are validated and persisted by the flag route; `get_photo` returns a trimmed current `flag_note`. |
 | `set_rating` | `/api/batch/rating` | |
 | `add_keyword`, `remove_keyword` | `/api/batch/keyword`, `/api/batch/keyword-remove` | |
@@ -83,8 +84,9 @@ a loopback port, spawns `python vireo/app.py --mcp` with `VIREO_URL` and
 
 ## Follow-ups
 
-- When the burst-evidence PR lands, add `burst_evidence` and the 1:1
-  `focus_crop` so the adjudication skill becomes a thin prompt over the tools.
+- Done: `burst` reads the burst-evidence pack, and `list_bursts` and the 1:1
+  `focus_crop` let the adjudication skill (`skills/vireo-adjudicate-bursts`) be
+  a prompt over the tools with no script or HTTP calls of its own.
 - A Streamable HTTP transport served by the app itself would remove the
   subprocess, but Flask under waitress has no ASGI mount; revisit if a client
   that cannot spawn processes matters.

@@ -34,10 +34,18 @@ and the Claude Desktop JSON for the running install.
 Tools: `vireo_status`, `list_workspaces`, `activate_workspace`,
 `list_folders`, `list_collections`, `search_keywords`, `search_photos`,
 `find_photos_by_text`, `get_photo`, `view_photo` (the preview, the
-thumbnail or the detected subject as an image), `burst`, `set_flag`,
+thumbnail, the unedited source frame or the detected subject as an image),
+`list_bursts`, `burst`, `focus_crop`, `set_flag`,
 `set_rating`, `add_keyword` and `remove_keyword`. Identification tools are
 `get_species_evidence`, `preview_species_assignment` and
 `apply_species_assignment`; see [species review evidence](species-review-evidence.md).
+`list_bursts` pages through a folder's bursts with the reasons each needs a
+reviewer, `burst` returns one burst's evidence pack without its image URLs, and
+`focus_crop` returns a 1:1 crop with the facts its `X-Vireo-Focus-*` headers
+carry and notes on what would make it misleading; all three read the routes in
+[burst adjudication](#burst-adjudication).
+[`skills/`](../skills/README.md) holds instructions an assistant can follow to
+do a whole task with these tools.
 `best_of_each_species` and `choose_best_photo` list and settle the best photo of
 each species for a trip, a year or everything; see
 [the best photo of each species](#the-best-photo-of-each-species).
@@ -286,7 +294,9 @@ to find the head, then request it with `center=x,y`. `center=x,y` refers explici
 unedited upright source raster (the returned `X-Vireo-Focus-Raster-Size`),
 not the recipe-rendered `preview_url`. Locate the point on an unedited upright
 reference of that source; preview coordinates require undoing its crop/rotation
-recipe first. The endpoint does not perform that coordinate mapping.
+recipe first. The endpoint does not perform that coordinate mapping, so use
+`GET /photos/<id>/preview?view=source&size=1920` as the reference: it is the
+upright frame without the recipe.
 Subject crops first use the exact detection prompt of the current active mask,
 including a validated weak detection below the normal threshold; other weak
 boxes do not lower the workspace threshold.
