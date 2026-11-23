@@ -161,6 +161,22 @@ def _resolve_models(model_ids):
     return out
 
 
+def run_models(db, params):
+    """The models a run would classify with, and the species-list fingerprint of each.
+
+    Returns ``([{id, name}], {model_id: fingerprint})``, empty when Classify
+    would not run: it is off, or the app skips it for want of a model.
+    """
+    if not _classify_would_run_after_auto_skip(params):
+        return [], {}
+    models = _resolve_models(params.model_ids)
+    labels = _resolve_labels_for_models(models, params.labels_files, db)
+    return (
+        [{"id": m["id"], "name": m["name"]} for m in models],
+        {model_id: entry["fingerprint"] for model_id, entry in labels.items()},
+    )
+
+
 def _label_read_error(active_sets, err):
     """Name the species list(s) a failed read covered, with the error."""
     names = [

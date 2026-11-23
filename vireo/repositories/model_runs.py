@@ -210,6 +210,31 @@ class ModelRunsRepository:
         ).fetchone()
         return row is not None
 
+    def count_reviewed_predictions(self, photo_ids: Iterable[int]) -> dict[str, int]:
+        """Accepted and rejected predictions on ``photo_ids``, in every workspace.
+
+        Counts what a re-classify can delete: predictions on a box the user
+        drew are kept, and an automatic taxonomy match is not a decision.
+        """
+        predictions = 0
+        photos = 0
+        for chunk in chunked(sorted(set(photo_ids))):
+            row = self.conn.execute(
+                f"""SELECT COUNT(DISTINCT p.id) AS predictions,
+                           COUNT(DISTINCT d.photo_id) AS photos
+                    FROM detections d
+                    JOIN predictions p ON p.detection_id = d.id
+                    JOIN prediction_review pr ON pr.prediction_id = p.id
+                    WHERE d.photo_id IN ({','.join('?' * len(chunk))})
+                      AND d.detector_model != 'reviewer-selected'
+                      AND pr.status IN ('accepted', 'rejected')
+                      AND COALESCE(pr.individual, '') != ?""",
+                [*chunk, self.auto_match_review_marker],
+            ).fetchone()
+            predictions += row["predictions"]
+            photos += row["photos"]
+        return {"predictions": predictions, "photos": photos}
+
     def stale_detector_input_ids(self, photo_ids: Sequence[int]) -> set[int]:
         """Find portable MegaDetector runs whose source or focus changed, except reviewed runs.
 

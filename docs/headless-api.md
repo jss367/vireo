@@ -50,6 +50,10 @@ edit the photo already has, and `save_edit_copy` keeps a look beside it as a
 virtual copy. `list_export_presets`, `preview_export` and `start_export` export
 files: the preview returns a one-use token, and the export is refused when
 anything the preview described has changed. `get_job` follows any job.
+`list_processes`, `preview_process` and `start_process` run detection, species,
+masks, quality and grouping the same way: the preview says what each stage would
+do and what the run would replace, and the run covers exactly the photos it
+described. `cancel_process` stops one.
 [`skills/`](../skills/README.md) holds instructions an assistant can follow to
 do a whole task with these tools.
 `best_of_each_species` and `choose_best_photo` list and settle the best photo of

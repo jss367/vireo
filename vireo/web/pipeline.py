@@ -31,7 +31,7 @@ from pipeline_results import (
     rebuild_encounter_species_label,
 )
 from runtime_warnings import build_cpu_runtime_warning, runtime_warning_work_units
-from services import detection_store, saved_processes, subject_masks
+from services import detection_store, process_runs, saved_processes, subject_masks
 from services.local_folder import (
     local_copy_scan_conflict,
     stage_pending_source_paths,
@@ -42,7 +42,7 @@ from services.pipeline_launch import (
     resolve_remote_archive_target,
 )
 from services.review_group_changes import detach_review_photo
-from web.request_args import coerce_collection_id, reject_visual_collection
+from web.request_args import coerce_collection_id, parse_selection_photo_ids, reject_visual_collection
 
 if TYPE_CHECKING:
     from sqlite3 import Row
@@ -167,6 +167,18 @@ def create_pipeline_blueprint(
             )
         ], None
 
+    def _plan_scope_photo_ids(body: JsonDict) -> tuple[list[int] | None, ErrorResponse | None]:
+        """A plan's explicit photo scope, or None for a collection or whole-workspace plan."""
+        if "photo_ids" in body:
+            err = photo_scope_error(body, json_error)
+            if err is not None:
+                return None, err
+            return parse_selection_photo_ids(get_db(), body, json_error=json_error, limit=None)
+        folder_ids = body.get("folder_ids")
+        if folder_ids is None:
+            return None, None
+        return _plan_folder_scope_photo_ids(folder_ids)
+
     def _expand_plan_process(body: JsonDict) -> tuple[JsonDict, ErrorResponse | None]:
         """Merge a plan body's saved process under it: ``(body, error)``; ``{}`` on error."""
         pid = body.get("process_id")
@@ -283,6 +295,7 @@ def create_pipeline_blueprint(
         Body mirrors a subset of the /api/jobs/pipeline body so the page
         can pass through the same selections the user is staging.
         """
+        from pipeline import _resolve_collection_photo_ids
         from pipeline_plan import compute_plan
 
         body = request.get_json(silent=True) or {}
@@ -319,12 +332,9 @@ def create_pipeline_blueprint(
         # active-workspace subtree photo ids with the same guards as
         # /api/jobs/pipeline, so the plan describes exactly the photos a
         # folder-scoped run would process.
-        scope_photo_ids = None
-        folder_ids = body.get("folder_ids")
-        if folder_ids is not None:
-            scope_photo_ids, err = _plan_folder_scope_photo_ids(folder_ids)
-            if err is not None:
-                return err
+        scope_photo_ids, err = _plan_scope_photo_ids(body)
+        if err is not None:
+            return err
         # Expand a saved-process id the same way /api/jobs/pipeline does so
         # the plan describes the run the same job body would produce. Without
         # this, the Identify-birds process (skip_regroup=True + species review)
@@ -369,7 +379,18 @@ def create_pipeline_blueprint(
             body, collection_id, scope_photo_ids, source_paths,
             hash_duplicate_paths,
         )
-        return jsonify(compute_plan(db, params, db_path))
+        if not body.get("describe_run"):
+            return jsonify(compute_plan(db, params, db_path))
+        # Resolve the scope once, so the plan and the description cover the
+        # same photos. A collection's rules can match more photos a moment later.
+        if params.photo_ids is None:
+            if collection_id is None:
+                return json_error("describe_run needs photo_ids, folder_ids or collection_id")
+            params.photo_ids = sorted(_resolve_collection_photo_ids(db, collection_id))
+        excluded = set(params.exclude_photo_ids)
+        params.photo_ids = [pid for pid in params.photo_ids if pid not in excluded]
+        run = process_runs.describe_run(db, params, params.photo_ids, body.get("miss_enabled"))
+        return jsonify({**compute_plan(db, params, db_path), "run": run})
 
     def _coerce_process_fields(body: JsonDict, *, require_name: bool) -> tuple[JsonDict, str | None]:
         """Return ``(kwargs, error_string)`` for create/update (``{}`` on error).
@@ -2155,6 +2176,31 @@ _SQLITE_INT_MIN = -(1 << 63)
 _SQLITE_INT_MAX = (1 << 63) - 1
 
 
+def photo_scope_error(body: JsonDict, json_error: JsonError) -> ErrorResponse | None:
+    """The 400 response for a ``photo_ids`` scope no run could have, or None.
+
+    Shared by ``/api/jobs/pipeline`` and ``/api/pipeline/plan``. ``photo_ids``
+    is the exact scope, so nothing combines with it or is excluded from it. An
+    id outside SQLite's integer range would fail when it is bound.
+    ``parse_selection_photo_ids`` checks the rest.
+    """
+    others = [
+        key for key in (
+            "collection_id", "folder_ids", "source", "sources", "source_snapshot_id",
+            "source_paths", "exclude_photo_ids", "exclude_paths",
+        )
+        if body.get(key) not in (None, "", [])
+    ]
+    if others:
+        return json_error("photo_ids cannot be combined with " + ", ".join(others))
+    ids = body.get("photo_ids")
+    if isinstance(ids, list) and any(
+        isinstance(pid, int) and not _SQLITE_INT_MIN <= pid <= _SQLITE_INT_MAX for pid in ids
+    ):
+        return json_error("photo_ids contains a value outside SQLite's signed 64-bit integer range")
+    return None
+
+
 def folder_ids_error(folder_ids: object, json_error: JsonError) -> ErrorResponse | None:
     """The 400 response for a malformed ``folder_ids``, or None if valid.
 
@@ -2224,6 +2270,7 @@ class _PipelineLaunch:
             self.read_scope,
             self.read_exclusions,
             self.resolve_folder_scope,
+            self.resolve_photo_scope,
             self.check_required_scope,
             self.check_snapshot,
             self.check_source_dirs,
@@ -2233,6 +2280,7 @@ class _PipelineLaunch:
             self.check_local_processing,
             self.check_folder_template,
             self.check_run_flags,
+            self.check_expected_run,
         ):
             err = check()
             if err is not None:
@@ -2523,15 +2571,65 @@ class _PipelineLaunch:
             photo_ids.append(r["id"])
         return photo_ids
 
+    def resolve_photo_scope(self) -> ErrorResponse | None:
+        """Resolve ``photo_ids`` into a pending ad-hoc collection, like ``folder_ids``."""
+        if "photo_ids" not in self.body:
+            return None
+        err = photo_scope_error(self.body, self.json_error)
+        if err is not None:
+            return err
+        photo_ids, err = parse_selection_photo_ids(
+            self.db, self.body, json_error=self.json_error, limit=None,
+        )
+        if err is not None:
+            return err
+        self.pending_folder_collection = {
+            "leaf": f"{len(photo_ids)} photo{'' if len(photo_ids) == 1 else 's'}",
+            "photo_ids": photo_ids,
+        }
+        return None
+
+    def check_expected_run(self) -> ErrorResponse | None:
+        """Refuse a run whose scope is not the one a plan described.
+
+        The run is then pinned to exactly those photos: a collection's rules
+        are evaluated when the job runs, which can be hours after it is queued,
+        so a described collection becomes an ad-hoc collection of its photos.
+        """
+        if "expected_run" not in self.body:
+            return None
+        db = self.db
+        pending = self.pending_folder_collection
+        if pending is None:
+            from pipeline import _resolve_collection_photo_ids
+
+            collection = next(
+                (c for c in db.collections.list_all() if c["id"] == self.collection_id), None,
+            )
+            if collection is None:
+                return self.json_error("collection not found", 404)
+            photo_ids = sorted(
+                _resolve_collection_photo_ids(db, self.collection_id) - self.excluded_photo_ids_set
+            )
+            pending = {"leaf": collection["name"], "photo_ids": photo_ids}
+        mismatch = process_runs.expected_run_error(
+            self.body["expected_run"], db.active_workspace_id, pending["photo_ids"],
+        )
+        if mismatch is not None:
+            return self.json_error(*mismatch)
+        self.pending_folder_collection = pending
+        self.collection_id = None
+        return None
+
     def check_required_scope(self) -> ErrorResponse | None:
-        """Require a collection or folder scope."""
+        """Require a collection, folder or photo scope."""
         if (
             not self.source and not self.sources and not self.collection_id
             and not self.source_snapshot_id
             and self.pending_folder_collection is None
         ):
             return self.json_error(
-                "collection_id or folder_ids required"
+                "collection_id, folder_ids or photo_ids required"
             )
         return None
 

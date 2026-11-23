@@ -83,6 +83,11 @@ The ranking is provisional: Vireo names no keeper, so compare the frames with
 focus_crop before flagging any. A burst with the reason unanalyzed_frames has
 frames the ranking does not cover; run Process on them before choosing.
 
+Process: detection, species, masks and quality come from a Process run, which
+can take hours. preview_process says what a run would do and replace, and
+returns a token; tell the user, and call start_process only when they asked for
+the run. Its counts are estimates: report what get_job says happened.
+
 Edits: suggest_crop, suggest_tone and view_edit change nothing. Look at an edit
 with view_edit before save_edit, which is one Undo step and refuses to replace
 an edit the photo already has. That edit is the user's: export it as it is, or
@@ -201,12 +206,13 @@ MIN_EDIT_SIZE, MAX_EDIT_SIZE = 256, 2048
 OUTDATED_APP_MESSAGE = (
     "The running Vireo is older than this connector and cannot {what}. Update Vireo and try again."
 )
-# Previews a start_export can still redeem; older ones must be previewed again.
-MAX_PENDING_EXPORTS = 20
+# Previews of one kind a start tool can still redeem; older ones must be previewed again.
+MAX_PENDING_PREVIEWS = 20
 MAX_JOB_WAIT = 50
 JOB_POLL_SECONDS = 1.0
 TERMINAL_JOB_STATUSES = ("completed", "failed", "cancelled")
 _JOB_KEYS = ("id", "type", "status", "started_at", "finished_at", "current_step", "historical")
+_STEP_KEYS = ("id", "label", "status", "progress", "summary", "error", "error_count")
 _PROGRESS_KEYS = ("current", "total", "current_file", "phase")
 # Longest list a job result keeps before it is cut and its length reported.
 MAX_JOB_LIST = 50
@@ -620,8 +626,10 @@ def job_summary(job):
     progress = job.get("progress")
     errors = job.get("errors")
     errors = errors if isinstance(errors, list) else []
+    steps = job.get("steps")
     return {
         **_pick(job, _JOB_KEYS),
+        "steps": [_pick(step, _STEP_KEYS) for step in steps] if isinstance(steps, list) else [],
         "progress": _pick(progress, _PROGRESS_KEYS) if isinstance(progress, dict) else None,
         "errors": errors[:MAX_JOB_LIST],
         "error_count": len(errors),
@@ -676,6 +684,7 @@ def build_server(client: VireoClient):
     _register_edit_tools(server, client)
     _register_save_tools(server, client)
     _register_export_tools(server, client)
+    _register_process_tools(server, client)
     _register_write_tools(server, client)
     return server
 
@@ -1446,7 +1455,7 @@ def _register_export_tools(server, client):
             raise VireoError(f"No photo would be written: {data['skipped']}")
         token = secrets.token_urlsafe(16)
         pending[token] = (body, fingerprint)
-        while len(pending) > MAX_PENDING_EXPORTS:
+        while len(pending) > MAX_PENDING_PREVIEWS:
             del pending[next(iter(pending))]
         return _export_preview(body, data, token)
 
@@ -1487,6 +1496,185 @@ def _register_export_tools(server, client):
             time.sleep(JOB_POLL_SECONDS)
             job = client.get_json(path)
         return job_summary(job)
+
+
+#: Request fields that leave a stage out of a Process run.
+_STAGE_SKIPS = {
+    "classify": {"skip_classify": True},
+    "masks": {"skip_extract_masks": True},
+    "eye_keypoints": {"skip_eye_keypoints": True},
+    "group": {"skip_regroup": True, "review_mode": None},
+    "misses": {"miss_enabled": False},
+}
+_PROCESS_FLAGS = ("skip_classify", "skip_extract_masks", "skip_eye_keypoints", "skip_regroup",
+                  "miss_enabled", "review_mode")
+_PROCESS_JOB_TYPES = ("pipeline", "classify", "extract-masks", "import-photos", "import", "import-in-place",
+                      "import-full", "scan")
+
+
+def _process_stages(process):
+    """Which stages a saved process runs, by the names ``skip`` takes."""
+    return {
+        "classify": not process["skip_classify"],
+        "masks": not process["skip_extract_masks"],
+        "eye_keypoints": not (process["skip_eye_keypoints"] or process["skip_extract_masks"]),
+        "group": not process["skip_regroup"] or process["review_mode"] == "species",
+        "misses": process["miss_enabled"] and not (process["skip_regroup"] or process["skip_classify"]),
+    }
+
+
+def _process_body(client, scope, process_id, skip, reclassify, model_ids):
+    """The Process request for these choices, with every stage flag spelled out
+    so a later change to the saved process cannot change the run."""
+    given = {key: value for key, value in scope.items() if value is not None}
+    if len(given) != 1:
+        raise VireoError("give exactly one of photo_ids, folder_id and collection_id")
+    unknown = sorted(set(skip or ()) - set(_STAGE_SKIPS))
+    if unknown:
+        raise VireoError(f"no stage named {unknown}; skip takes {sorted(_STAGE_SKIPS)}")
+    processes = {p["id"]: p for p in client.get_json("/api/processes")}
+    if process_id not in processes:
+        saved = {pid: p["name"] for pid, p in processes.items()}
+        raise VireoError(f"no saved process {process_id}; saved processes: {saved}")
+    if "folder_id" in given:
+        given = {"folder_ids": [given["folder_id"]]}
+    elif "photo_ids" in given:
+        given = {"photo_ids": list(dict.fromkeys(given["photo_ids"]))}
+    body = {**given, "process_id": process_id, **_pick(processes[process_id], _PROCESS_FLAGS),
+            "reclassify": reclassify}
+    for stage in skip or ():
+        body.update(_STAGE_SKIPS[stage])
+    # The app turns eye detection on for a process that has the stage, so a
+    # skipped stage must turn the override off rather than leave it unset.
+    body["eye_detect_override"] = not body["skip_eye_keypoints"]
+    if model_ids:
+        body["model_ids"] = list(model_ids)
+    return body
+
+
+def _plan_process(client, body):
+    plan = client.post_json("/api/pipeline/plan", {**body, "describe_run": True})
+    if "run" not in plan:
+        raise VireoError(OUTDATED_APP_MESSAGE.format(what="describe a Process run"))
+    return plan
+
+
+def _unfinished_jobs(client):
+    jobs = client.get_json("/api/jobs")["active"]
+    return [
+        {**_pick(job, ("id", "type", "status", "workspace_id")),
+         "scope": (job.get("config") or {}).get("collection_name")}
+        for job in jobs
+        if job.get("type") in _PROCESS_JOB_TYPES and job.get("status") not in TERMINAL_JOB_STATUSES
+    ]
+
+
+def _process_preview(client, body, plan, token):
+    run = plan["run"]
+    group = plan["stages"].get("Group", {})
+    replaces = []
+    if group.get("state") == "will-run" and (group.get("detail") or {}).get("cache_exists"):
+        replaces.append("the workspace's latest review results")
+    if body["reclassify"] and run["models"]:
+        replaces.append(
+            "the photos' detected boxes and these models' predictions, with up to "
+            f"{run['replaced_reviews']['predictions']} accepted or rejected predictions on "
+            f"{run['replaced_reviews']['photos']} photos (saved species keywords stay)"
+        )
+    return {
+        "token": token,
+        "photo_count": run["photo_count"],
+        "stages": {name: _pick(stage, ("state", "summary")) for name, stage in plan["stages"].items()},
+        "marks_misses": run["misses"],
+        "models": run["models"],
+        "species_lists": [os.path.basename(path) for path in run["labels_files"]],
+        "settings": run["settings"],
+        "replaces": replaces,
+        "unfinished_jobs": _unfinished_jobs(client),
+    }
+
+
+def _register_process_tools(server, client):
+    """Process runs, previewed first, and stopping one."""
+    pending: dict[str, tuple[dict, dict]] = {}
+
+    @server.tool(annotations=mcp_types.ToolAnnotations(read_only_hint=True))
+    def list_processes() -> dict:
+        """The user's saved processes and the stages each runs, and the
+        workspace's default (null when none is set)."""
+        default = client.get_json("/api/pipeline/config").get("default_process_id")
+        return {
+            "default_process_id": default,
+            "processes": [{"id": p["id"], "name": p["name"], "stages": _process_stages(p)}
+                          for p in client.get_json("/api/processes")],
+        }
+
+    @server.tool(annotations=mcp_types.ToolAnnotations(read_only_hint=True))
+    def preview_process(
+        process_id: int, photo_ids: list[int] | None = None, folder_id: int | None = None,
+        collection_id: int | None = None, skip: list[str] | None = None, reclassify: bool = False,
+        model_ids: list[str] | None = None,
+    ) -> dict:
+        """What a Process run would do, and the ``token`` start_process needs.
+        Nothing runs.
+
+        Give one scope: ``photo_ids``, ``folder_id`` (with its subfolders) or
+        ``collection_id``. ``process_id`` comes from list_processes. ``skip``
+        leaves out stages it would run: classify, masks, eye_keypoints, group,
+        misses. The run covers exactly the photos in scope now.
+
+        ``replaces`` lists what the run overwrites. Grouping replaces the
+        workspace's latest review results, even for a few photos. ``reclassify``
+        detects and classifies again instead of reusing earlier results; use it
+        when the user asks, or when a run reports boxes that need it.
+        ``unfinished_jobs`` lists imports and runs already under way; do not
+        start a second run over the same photos."""
+        scope = {"photo_ids": photo_ids or None, "folder_id": folder_id, "collection_id": collection_id}
+        body = _process_body(client, scope, process_id, skip, reclassify, model_ids)
+        plan = _plan_process(client, body)
+        if not plan["run"]["photo_count"]:
+            raise VireoError("There are no photos in that scope.")
+        # Pinned, so a model or species list chosen later cannot change the run.
+        if plan["run"]["models"]:
+            body["model_ids"] = [model["id"] for model in plan["run"]["models"]]
+        if plan["run"]["labels_files"]:
+            body["labels_files"] = plan["run"]["labels_files"]
+        token = secrets.token_urlsafe(16)
+        pending[token] = (body, plan["run"])
+        while len(pending) > MAX_PENDING_PREVIEWS:
+            del pending[next(iter(pending))]
+        return _process_preview(client, body, plan, token)
+
+    @server.tool(annotations=mcp_types.ToolAnnotations(read_only_hint=False, destructive_hint=True))
+    def start_process(token: str) -> dict:
+        """Run exactly the Process run a preview_process described, when the
+        user asked for it. Refused when the workspace, the photos in scope, the
+        models, the species lists, the settings or the reviewed predictions it
+        would replace changed since; preview again then. A token works once. A
+        run queued behind another reads its mask settings when it starts.
+        Returns the ``job_id`` to follow with get_job."""
+        if token not in pending:
+            raise VireoError("That token is unknown or already used. Call preview_process again.")
+        body, described = pending.pop(token)
+        if _plan_process(client, body)["run"] != described:
+            raise VireoError("The run would differ from the preview now. Call preview_process again.")
+        # The app checks these as it fixes the run's photos, so a change after
+        # the comparison above starts nothing.
+        started = client.post_json("/api/jobs/pipeline", {
+            **body, "expected_run": _pick(described, ("workspace_id", "photo_digest")),
+        })
+        return {"photo_count": described["photo_count"], **_pick(started, ("job_id", "model_warning"))}
+
+    @server.tool(annotations=mcp_types.ToolAnnotations(read_only_hint=False, destructive_hint=False))
+    def cancel_process(job_id: str) -> dict:
+        """Stop a Process run. Results it already saved stay, and a later run
+        continues from them."""
+        quoted = urllib.parse.quote(job_id, safe="")
+        job = client.get_json(f"/api/jobs/{quoted}")
+        if job.get("type") != "pipeline":
+            raise VireoError(f"{job_id} is not a Process run (it is {job.get('type')}); stop it in Vireo.")
+        client.post_json(f"/api/jobs/{quoted}/cancel")
+        return {"job_id": job_id, "cancel_requested": True}
 
 
 def _register_write_tools(server, client):

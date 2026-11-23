@@ -108,6 +108,7 @@ def test_tools_are_the_documented_set(mcp):
         "best_of_each_species", "choose_best_photo",
         "get_edit", "suggest_crop", "suggest_tone", "view_edit", "save_edit", "save_edit_copy",
         "list_export_presets", "preview_export", "start_export", "get_job",
+        "list_processes", "preview_process", "start_process", "cancel_process",
     }
     for tool in anyio.run(server.list_tools):
         assert tool.description, f"{tool.name} has no description"
@@ -1395,6 +1396,190 @@ def test_job_summary_drops_worker_detail_and_cuts_long_lists():
     assert "_private" not in out and "config" not in out
 
 
+def test_job_summary_lists_the_steps():
+    job = {"id": "j", "status": "running", "steps": [
+        {"id": "detect", "label": "Detect", "status": "running", "progress": {"current": 1, "total": 2},
+         "started_at": "x", "summary": None, "error": None, "error_count": 0}]}
+    assert mcp_server.job_summary(job)["steps"] == [
+        {"id": "detect", "label": "Detect", "status": "running", "progress": {"current": 1, "total": 2},
+         "summary": None, "error": None, "error_count": 0}]
+    assert mcp_server.job_summary({"id": "j"})["steps"] == []
+
+
+@pytest.fixture
+def process_model(monkeypatch):
+    """One downloaded model, and Process jobs that record their params and stop."""
+    import models
+    import pipeline_job
+
+    model = {"id": "m1", "name": "Test model", "model_str": "x", "model_type": "timm",
+             "downloaded": True, "weights_path": "w"}
+    monkeypatch.setattr(models, "get_models", lambda: [model])
+    monkeypatch.setattr(models, "get_active_model", lambda: model)
+    runs = []
+
+    def fake(job, runner, db_path, workspace_id, params, **kwargs):
+        runs.append(params)
+        return {"ok": True}
+
+    monkeypatch.setattr(pipeline_job, "run_pipeline_job", fake)
+    return runs
+
+
+def _process_id(server, name="Full"):
+    return next(p["id"] for p in call(server, "list_processes")["processes"] if p["name"] == name)
+
+
+def test_list_processes_names_the_stages_each_runs(mcp):
+    server, db, _ = mcp
+    listed = call(server, "list_processes")
+    stages = {p["name"]: p["stages"] for p in listed["processes"]}
+    assert listed["default_process_id"] is None or isinstance(listed["default_process_id"], int)
+    assert stages["Full"] == {"classify": True, "masks": True, "eye_keypoints": True, "group": True, "misses": True}
+    # Its species review is written by the group stage, with grouping itself off.
+    assert stages["Identify birds"] == {
+        "classify": True, "masks": False, "eye_keypoints": False, "group": True, "misses": False}
+    assert not any(stages["Quick look"].values())
+
+
+def test_start_process_runs_what_the_preview_described(mcp, process_model):
+    server, db, transport = mcp
+    ids = sorted(db.photos.get_ids())
+    preview = call(server, "preview_process", process_id=_process_id(server), photo_ids=[*ids[:2], ids[0]],
+                   skip=["group", "eye_keypoints", "misses"], reclassify=True)
+    assert preview["photo_count"] == 2
+    assert preview["models"] == [{"id": "m1", "name": "Test model"}]
+    assert preview["marks_misses"] is False
+    assert preview["stages"]["Extract"]["state"] == "will-run"
+    assert preview["stages"]["EyeKeypoints"]["state"] == preview["stages"]["Group"]["state"] == "will-skip"
+    assert len(preview["replaces"]) == 1 and "up to 0 accepted or rejected predictions" in preview["replaces"][0]
+    started = call(server, "start_process", token=preview["token"])
+    job = call(server, "get_job", job_id=started["job_id"], wait_seconds=int(synchronization_timeout(20)))
+    assert job["status"] == "completed", job
+    params, = process_model
+    assert params.reclassify and params.model_ids == ["m1"]
+    assert params.skip_regroup and params.skip_eye_keypoints and params.eye_detect_override is False
+    assert params.miss_enabled is False and not params.skip_classify and not params.skip_extract_masks
+    rules = next(c["rules"] for c in db.collections.list_all() if c["id"] == params.collection_id)
+    assert json.loads(rules)[0]["value"] == ids[:2]
+    assert "already used" in call_error(server, "start_process", token=preview["token"])
+
+
+def test_preview_process_starts_nothing(mcp, process_model):
+    server, db, transport = mcp
+    before = len(db.collections.list_all())
+    call(server, "preview_process", process_id=_process_id(server), folder_id=db.folders.id_by_path("/photos/2024"))
+    assert not any(path.startswith("/api/jobs/pipeline") for _, path, _, _ in transport.calls)
+    assert len(db.collections.list_all()) == before and process_model == []
+
+
+def test_preview_process_says_when_the_latest_review_is_replaced(mcp, process_model, tmp_path):
+    server, db, _ = mcp
+    review = tmp_path / f"pipeline_results_ws{db.active_workspace_id}.json"
+    review.write_text("{}")
+    ids = sorted(db.photos.get_ids())
+    args = {"process_id": _process_id(server), "photo_ids": ids}
+    assert call(server, "preview_process", **args)["replaces"] == ["the workspace's latest review results"]
+    assert call(server, "preview_process", skip=["group"], **args)["replaces"] == []
+
+
+@pytest.mark.parametrize("change", ["photos", "process", "model", "workspace"])
+def test_start_process_compares_the_run_with_its_preview(mcp, process_model, monkeypatch, change):
+    import models
+
+    server, db, _ = mcp
+    ids = sorted(db.photos.get_ids())
+    album = db.collections.add("Album", json.dumps([{"field": "photo_ids", "value": ids[:2]}]))
+    db.commit()
+    process_id = _process_id(server)
+    preview = call(server, "preview_process", process_id=process_id, collection_id=album, skip=["group"])
+    if change == "photos":
+        db.conn.execute("UPDATE collections SET rules = ? WHERE id = ?",
+                        (json.dumps([{"field": "photo_ids", "value": ids}]), album))
+        db.commit()
+    elif change == "model":
+        monkeypatch.setattr(models, "get_models", lambda: [])
+    elif change == "workspace":
+        other = db.create_workspace("Other")
+        db.commit()
+        call(server, "activate_workspace", workspace_id=other)
+    else:
+        # The preview spelled the stages out, so editing the process changes nothing.
+        with db.transaction():
+            db.processes.update(process_id, db.processes.get(process_id), name="Full", skip_classify=True,
+                                skip_extract_masks=None, skip_eye_keypoints=None, skip_regroup=None,
+                                miss_enabled=None, review_mode=None)
+        started = call(server, "start_process", token=preview["token"])
+        call(server, "get_job", job_id=started["job_id"], wait_seconds=int(synchronization_timeout(20)))
+        assert process_model[0].skip_classify is False
+        return
+    assert call_error(server, "start_process", token=preview["token"])
+    assert process_model == []
+
+
+def test_a_scope_that_changes_after_the_comparison_starts_nothing(mcp, process_model):
+    server, db, transport = mcp
+    ids = sorted(db.photos.get_ids())
+    album = db.collections.add("Album", json.dumps([{"field": "photo_ids", "value": ids[:2]}]))
+    db.commit()
+    preview = call(server, "preview_process", process_id=_process_id(server), collection_id=album)
+    original = transport.request
+
+    def request(method, path, params=None, json_body=None):
+        if path == "/api/jobs/pipeline":
+            db.conn.execute("UPDATE collections SET rules = ? WHERE id = ?",
+                            (json.dumps([{"field": "photo_ids", "value": ids}]), album))
+            db.commit()
+        return original(method, path, params, json_body)
+
+    transport.request = request
+    assert "photos in scope changed" in call_error(server, "start_process", token=preview["token"])
+    assert process_model == []
+
+
+def test_preview_process_refuses_what_it_cannot_describe(mcp, process_model, monkeypatch):
+    server, db, transport = mcp
+    process_id = _process_id(server)
+    ids = sorted(db.photos.get_ids())
+    assert "exactly one" in call_error(server, "preview_process", process_id=process_id)
+    assert "exactly one" in call_error(server, "preview_process", process_id=process_id, photo_ids=ids, folder_id=1)
+    assert "no stage named" in call_error(server, "preview_process", process_id=process_id, photo_ids=ids, skip=["sam"])
+    assert "Full" in call_error(server, "preview_process", process_id=9999, photo_ids=ids)
+    empty = db.collections.add("Empty", json.dumps([{"field": "photo_ids", "value": []}]))
+    db.commit()
+    assert "no photos" in call_error(server, "preview_process", process_id=process_id, collection_id=empty)
+    plan = transport.post_json
+    monkeypatch.setattr(transport, "post_json", lambda path, body=None: {
+        key: value for key, value in plan(path, body).items() if key != "run"})
+    assert "older than this connector" in call_error(server, "preview_process", process_id=process_id, photo_ids=ids)
+
+
+def test_preview_process_lists_unfinished_imports_and_runs(mcp, process_model, monkeypatch):
+    server, db, transport = mcp
+    jobs = [
+        {"id": "a", "type": "pipeline", "status": "running", "workspace_id": 1, "config": {"collection_name": "Trip"}},
+        {"id": "b", "type": "import-photos", "status": "queued", "workspace_id": 1, "config": None},
+        {"id": "c", "type": "pipeline", "status": "completed", "workspace_id": 1},
+        {"id": "d", "type": "new_images_walk", "status": "running", "workspace_id": 1},
+    ]
+    get = transport.get_json
+    monkeypatch.setattr(transport, "get_json", lambda path, params=None: (
+        {"active": jobs} if path == "/api/jobs" else get(path, params)))
+    preview = call(server, "preview_process", process_id=_process_id(server), photo_ids=sorted(db.photos.get_ids()))
+    assert [(j["id"], j["scope"]) for j in preview["unfinished_jobs"]] == [("a", "Trip"), ("b", None)]
+
+
+def test_cancel_process_stops_only_process_runs(mcp, monkeypatch):
+    server, _, transport = mcp
+    jobs = {"/api/jobs/p1": {"id": "p1", "type": "pipeline"}, "/api/jobs/e1": {"id": "e1", "type": "export"}}
+    posted = []
+    monkeypatch.setattr(transport, "get_json", lambda path, params=None: jobs[path])
+    monkeypatch.setattr(transport, "post_json", lambda path, body=None: posted.append(path) or {})
+    assert call(server, "cancel_process", job_id="p1") == {"job_id": "p1", "cancel_requested": True}
+    assert "not a Process run" in call_error(server, "cancel_process", job_id="e1")
+    assert posted == ["/api/jobs/p1/cancel"]
+
+
 def test_get_job_reports_an_unknown_job(mcp):
     assert "Vireo answered 404" in call_error(mcp[0], "get_job", job_id="export/../nope")
 
@@ -1402,8 +1587,10 @@ def test_get_job_reports_an_unknown_job(mcp):
 def test_edit_and_export_tools_advertise_side_effects(mcp):
     tools = {tool.name: tool.model_dump(by_alias=True)["annotations"] for tool in anyio.run(mcp[0].list_tools)}
     for name in ("get_edit", "suggest_crop", "suggest_tone", "view_edit", "list_export_presets",
-                 "preview_export", "get_job"):
+                 "preview_export", "get_job", "list_processes", "preview_process"):
         assert tools[name]["readOnlyHint"] is True, name
+    assert tools["start_process"]["destructiveHint"] is True
+    assert tools["cancel_process"]["readOnlyHint"] is False
     for name in ("save_edit", "save_edit_copy", "start_export"):
         assert tools[name]["readOnlyHint"] is False and tools[name]["destructiveHint"] is False, name
 

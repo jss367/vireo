@@ -32,8 +32,8 @@ detector found the right animal. You look at those and decide.
 2. **Find the folder.** Call `list_folders(query="...")`, or ask which folder
    the user means when several match.
 3. **List its bursts.** Call `list_bursts(folder_id=..., unflagged_only=true)`.
-   Read `coverage` first. If `with_quality` is 0, stop and report that Process
-   has not analyzed the folder. Otherwise drop the bursts whose reasons include
+   Read `coverage` first. If `with_quality` is 0, stop, report that Process has
+   not analyzed the folder, and offer to run it (see below). Otherwise drop the bursts whose reasons include
    `unanalyzed_frames` and count them for the report. Continue with
    `next_offset` until it is null, and finish listing before you write any flag:
    a flagged burst leaves the list, so later offsets would skip bursts.
@@ -79,6 +79,25 @@ detector found the right animal. You look at those and decide.
 
 Work in batches of about five bursts and report after each one, so the user can
 redirect you.
+
+## Running Process first
+
+Run Process only when the user asks for it or accepts your offer.
+
+1. Call `list_processes()` and choose one that runs `classify` and `masks`.
+2. Call `preview_process(process_id=..., folder_id=...)`, or
+   `preview_process(process_id=..., photo_ids=[...])` for some bursts. Ranking a
+   burst does not need grouping, misses or eye keypoints. When `replaces` names
+   the latest review results, preview again with
+   `skip=["group", "misses", "eye_keypoints"]`.
+3. Tell the user how many photos it covers and what it replaces, and check
+   `unfinished_jobs`. Then call `start_process(token="...")`.
+4. Follow it with `get_job(job_id="...", wait_seconds=50)`. It can take hours, so
+   report the start and let the user decide whether to wait.
+5. List the bursts again and look at which still have `unanalyzed_frames`. The
+   job's result says how many masks failed and why. When it says the boxes need
+   Re-classify, preview again with `reclassify=true` and tell the user what that
+   discards. A box the user drew may have to be drawn again in Vireo.
 
 ## Report
 
