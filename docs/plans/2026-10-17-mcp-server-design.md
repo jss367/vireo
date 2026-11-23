@@ -65,7 +65,8 @@ EXIF dump, cached paths and render keys stays behind `get_photo(include_exif=tru
 | `find_photos_by_text` | `/api/photos/search` | CLIP text search; reports `reason` when the active model cannot. |
 | `get_photo` | `/api/photos/<id>` | |
 | `view_photo` | `/thumbnails/<id>.jpg`, `/photos/<id>/preview`, `/photos/<id>/crop` | Returns the image itself (`thumbnail`, `preview` at 1920, or `subject`, the detection crop). |
-| `burst` | `/api/photos/<id>/best-batch` | The ranked burst around a photo; the app's own "run the pipeline first" error passes through. |
+| `list_bursts`, `burst` | `/api/v1/folders/<id>/bursts`, `/api/v1/photos/<id>/burst-evidence` | A folder's bursts with the reasons each needs a reviewer; the ranked burst around a photo with its evidence. |
+| `focus_crop` | `/api/v1/photos/<id>/focus-crop` | Unresized pixels for judging focus, with what the response headers say about them. |
 | `set_flag` | `/api/batch/flag` | Optional `source` and `reason` are validated and persisted by the flag route; `get_photo` returns a trimmed current `flag_note`. |
 | `set_rating` | `/api/batch/rating` | |
 | `add_keyword`, `remove_keyword` | `/api/batch/keyword`, `/api/batch/keyword-remove` | |

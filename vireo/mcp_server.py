@@ -563,6 +563,7 @@ def build_server(client: VireoClient):
     _register_search_tools(server, client)
     _register_photo_tools(server, client)
     _register_burst_tools(server, client)
+    _register_focus_tools(server, client)
     _register_species_tools(server, client)
     _register_region_tools(server, client)
     _register_best_tools(server, client)
@@ -778,7 +779,7 @@ def _register_photo_tools(server, client):
 
 
 def _register_burst_tools(server, client):
-    """Walking a folder's bursts and judging their frames at 1:1."""
+    """Walking a folder's bursts and reading their rankings."""
     read_only = mcp_types.ToolAnnotations(read_only_hint=True)
 
     @server.tool(annotations=read_only)
@@ -853,7 +854,11 @@ def _register_burst_tools(server, client):
             "frames": [_burst_frame(card) for card in data.get("cards", [])],
         }
 
-    @server.tool(annotations=read_only)
+
+def _register_focus_tools(server, client):
+    """Unresized pixels for judging focus."""
+
+    @server.tool(annotations=mcp_types.ToolAnnotations(read_only_hint=True))
     def focus_crop(
         photo_id: int, center_x: float | None = None, center_y: float | None = None,
         size: int = DEFAULT_FOCUS_SIZE, source: str = "auto", mask: bool = False,
