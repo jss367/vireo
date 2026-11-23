@@ -266,8 +266,6 @@ def create_pipeline_blueprint(
         if problem is not None:
             return json_error(problem)
         if params.photo_ids is None:
-            if params.collection_id is None:
-                return json_error("describe_run needs photo_ids, folder_ids or collection_id")
             params.photo_ids = sorted(_resolve_collection_photo_ids(db, params.collection_id))
         excluded = set(params.exclude_photo_ids)
         params.photo_ids = [pid for pid in params.photo_ids if pid not in excluded]
@@ -529,7 +527,7 @@ def create_pipeline_blueprint(
         runtime_warning = launch.runtime_warning(params)
 
         def work(job: JobDict) -> JsonDict:
-            launch.confirm_expected_run(db_path)
+            launch.confirm_expected_run(db_path, params.collection_id)
             return run_pipeline_job(
                 job, runner, db_path, active_ws, params,
                 thumb_cache_dir=config["THUMB_CACHE_DIR"],
@@ -2646,10 +2644,10 @@ class _PipelineLaunch:
         photo_ids = _resolve_collection_photo_ids(db, self.collection_id) - self.excluded_photo_ids_set
         return {"leaf": collection["name"], "photo_ids": sorted(photo_ids)}, None
 
-    def confirm_expected_run(self, db_path: str) -> None:
+    def confirm_expected_run(self, db_path: str, collection_id: int | None) -> None:
         """On the job's thread, before its first stage: refuse a run that changed while queued."""
         if self.described_params is not None:
-            process_runs.refuse_changed_run(db_path, self.described_params, self.body)
+            process_runs.refuse_changed_run(db_path, collection_id, self.described_params, self.body)
 
     def check_required_scope(self) -> ErrorResponse | None:
         """Require a collection, folder or photo scope."""

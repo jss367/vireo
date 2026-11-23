@@ -188,6 +188,7 @@ def test_any_part_of_a_reviewed_decision_is_part_of_the_run(app_and_db, one_mode
 @pytest.mark.parametrize("change, named", [
     ("review", "reviewed predictions"), ("species list", "species lists"), ("mask model", "stage settings"),
     ("other setting", "stage settings"), ("root setting", "stage settings"), ("deleted photo", "photos in scope"),
+    ("collection gained a photo", "photos in scope"), ("collection deleted", "photos in scope"),
 ])
 def test_a_run_that_changes_in_the_queue_fails_before_its_first_stage(
     app_and_db, one_model, started, monkeypatch, change, named,
@@ -197,6 +198,8 @@ def test_a_run_that_changes_in_the_queue_fails_before_its_first_stage(
     ids = _ids(db)
     prediction = _prediction(db, ids[0], "pending")
     body = {"photo_ids": ids, "reclassify": True}
+    if change == "collection gained a photo":
+        body["photo_ids"] = ids[:-1]
     run = _run_of(client, **body)
     confirm = process_runs.refuse_changed_run
 
@@ -207,6 +210,14 @@ def test_a_run_that_changes_in_the_queue_fails_before_its_first_stage(
             _review(worker, prediction, "accepted")
         elif change == "species list":
             workspace_config.set_workspace_active_labels(worker, ["/lists/new.txt"])
+        elif change.startswith("collection"):
+            made = next(c["id"] for c in worker.collections.list_all() if c["name"].startswith("Process "))
+            if change == "collection deleted":
+                worker.conn.execute("DELETE FROM collections WHERE id = ?", (made,))
+            else:
+                worker.conn.execute("UPDATE collections SET rules = ? WHERE id = ?",
+                                    (json.dumps([{"field": "photo_ids", "value": ids}]), made))
+            worker.commit()
         elif change == "deleted photo":
             catalog_deletion.delete_photos(worker, [ids[-1]])
         else:
@@ -264,7 +275,10 @@ def test_installing_another_classifier_does_not_change_the_run(app_and_db, one_m
     for folder in (known, custom):
         folder.mkdir(parents=True)
         (folder / "image_encoder.onnx").write_bytes(b"new")
-    monkeypatch.setattr(models, "get_models", lambda: [MODEL, {"id": "custom", "weights_path": str(custom)}])
+    single = Path(models.DEFAULT_MODELS_DIR) / "one-file.onnx"
+    single.write_bytes(b"new")
+    monkeypatch.setattr(models, "get_models", lambda: [
+        MODEL, {"id": "custom", "weights_path": str(custom)}, {"id": "single", "weights_path": str(single)}])
     assert _run_of(client, photo_ids=_ids(db)) == before
     # The same file in a folder no classifier owns belongs to a shared stage model.
     shared = Path(models.DEFAULT_MODELS_DIR) / "megadetector-v6"
@@ -310,6 +324,18 @@ def test_excluded_settings_exist():
     assert set(config.DEFAULTS) >= process_runs.NOT_STAGE_SETTINGS
 
 
+def test_photos_on_an_offline_drive_stay_in_a_queued_run(app_and_db, one_model, started):
+    app, db = app_and_db
+    client = app.test_client()
+    body = {"photo_ids": _ids(db)}
+    run = _run_of(client, **body)
+    db.conn.execute("UPDATE folders SET status = 'missing'")
+    db.commit()
+    response = _start(client, run, **body)
+    assert response.status_code == 200, response.get_json()
+    assert wait_for_job_via_client(client, response.get_json()["job_id"])["status"] == "completed"
+
+
 def test_an_unchanged_queued_run_starts(app_and_db, one_model, started):
     app, db = app_and_db
     client = app.test_client()
@@ -320,13 +346,18 @@ def test_an_unchanged_queued_run_starts(app_and_db, one_model, started):
     assert len(started) == 1
 
 
-@pytest.mark.parametrize("field", [{"exclude_paths": ["/photos/2024/bird1.jpg"]}, {"labels_file": "/lists/a.txt"}])
-def test_a_described_run_refuses_what_the_plan_does_not_model(app_and_db, one_model, started, field):
+@pytest.mark.parametrize("field, text", [
+    ({"exclude_paths": ["/photos/2024/bird1.jpg"]}, "exclude_paths"), ({"labels_file": "/lists/a.txt"}, "labels_file"),
+    ({"collection_id": 1}, "exactly one"), ({"miss_enabled": "false"}, "miss_enabled"),
+    ({"source_paths": []}, "source_paths"), ({"hash_duplicate_paths": []}, "hash_duplicate_paths"),
+])
+def test_a_described_run_refuses_what_the_launch_would_not_run(app_and_db, one_model, started, field, text):
     app, db = app_and_db
     client = app.test_client()
     body = {"folder_ids": [db.folders.id_by_path("/photos/2024")]}
     run = _run_of(client, **body)
-    assert _plan(client, **body, **field).status_code == 400
+    plan = _plan(client, **body, **field)
+    assert plan.status_code == 400 and text in plan.get_json()["error"]
     assert _start(client, run, **body, **field).status_code == 400
     assert started == []
 

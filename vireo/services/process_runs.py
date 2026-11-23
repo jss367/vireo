@@ -11,6 +11,7 @@ hours.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -93,11 +94,21 @@ def photo_digest(photo_ids: Iterable[int]) -> str:
 def undescribable(body: JsonDict) -> str | None:
     """Why no description covers this request, or None.
 
-    These fields change the scope or the species lists in ways the plan does
-    not model, so a description that ignored them would be of another run.
+    A described run has one scope, and none of the fields that change its
+    photos or species lists in ways the plan does not model, so the description
+    cannot be of a run the launch would refuse or run differently.
     """
-    fields = [key for key in ("exclude_paths", "labels_file") if body.get(key)]
-    return f"a described run does not take {', '.join(fields)}" if fields else None
+    scopes = [key for key in ("photo_ids", "folder_ids", "collection_id") if body.get(key) is not None]
+    if len(scopes) != 1:
+        return "a described run needs exactly one of photo_ids, folder_ids and collection_id"
+    fields = [key for key in ("exclude_paths", "labels_file", "source", "sources", "source_snapshot_id")
+              if body.get(key)]
+    fields += [key for key in ("source_paths", "hash_duplicate_paths") if body.get(key) is not None]
+    if fields:
+        return f"a described run does not take {', '.join(fields)}"
+    if not isinstance(body.get("miss_enabled"), bool | None):
+        return "miss_enabled must be a boolean or null"
+    return None
 
 
 def expected_run_error(expected: object, actual: JsonDict) -> tuple[str, int] | None:
@@ -131,8 +142,8 @@ def _file_state(path: str) -> list[Any]:
     return [path, stat.st_size, stat.st_mtime_ns, stat.st_ino]
 
 
-def _other_classifier_folders(selected: set[Any]) -> set[str]:
-    """The folders of classifiers this run does not use, installed or not yet."""
+def _other_classifiers(selected: set[Any]) -> set[str]:
+    """The folders and files of classifiers this run does not use, installed or not yet."""
     import models as model_registry
 
     root = model_registry.DEFAULT_MODELS_DIR
@@ -161,16 +172,19 @@ def _model_files_digest(models: Iterable[JsonDict]) -> str:
     described = [
         {key: model.get(key) for key in ("id", "model_str", "model_type", "weights_path")} for model in models
     ]
-    others = _other_classifier_folders({model["id"] for model in described})
+    others = _other_classifiers({model["id"] for model in described})
     paths = [taxonomy.TAXONOMY_JSON_PATH]
     for folder, subfolders, names in os.walk(os.path.abspath(model_registry.DEFAULT_MODELS_DIR)):
         subfolders[:] = [name for name in subfolders if os.path.join(folder, name) not in others]
-        paths.extend(os.path.join(folder, name) for name in names)
+        files = (os.path.join(folder, name) for name in names)
+        paths.extend(path for path in files if path not in others)
     for model in described:
         weights = model["weights_path"] or ""
         paths.append(weights)
         if os.path.isdir(weights):
-            paths.extend(os.path.join(weights, name) for name in os.listdir(weights))
+            # A folder removed here leaves its own entry, so it reads as gone.
+            with contextlib.suppress(OSError):
+                paths.extend(os.path.join(weights, name) for name in os.listdir(weights))
     state = [described, [_file_state(path) for path in sorted(set(paths))]]
     return _digest([json.dumps(state, sort_keys=True, default=str)])
 
@@ -243,13 +257,15 @@ def describe_run(
     }
 
 
-def refuse_changed_run(db_path: str, params: PipelinePlanParams, body: JsonDict) -> None:
+def refuse_changed_run(db_path: str, collection_id: int | None, params: PipelinePlanParams, body: JsonDict) -> None:
     """Raise ``RunChangedError`` when a run leaving the queue is not the one described.
 
-    ``params.photo_ids`` are the photos the run was pinned to at launch; one
-    deleted or taken out of the workspace since leaves the scope. The
-    ``expected_run`` in ``body`` was checked against the workspace then, so it
-    names the run's own. Runs on the job's thread, on its own connection.
+    The stages read their photos from ``collection_id``, made at launch from the
+    described ones, so its members now are the run's scope: editing or deleting
+    it, or deleting a photo, changes the run. Photos on an offline drive stay
+    members. The ``expected_run`` in ``body`` was checked against the workspace
+    at launch, so it names the run's own. Runs on the job's thread, on its own
+    connection.
     """
     from db import Database
 
@@ -257,8 +273,8 @@ def refuse_changed_run(db_path: str, params: PipelinePlanParams, body: JsonDict)
     db = Database(db_path)
     try:
         db.set_active_workspace(expected["workspace_id"])
-        photo_ids = db.photo_visibility.visible_photo_ids(params.photo_ids or [])
-        mismatch = expected_run_error(expected, describe_run(db, params, photo_ids, body))
+        rows = db.collections.get_photos(collection_id, per_page=1_000_000, include_offline_folders=True)
+        mismatch = expected_run_error(expected, describe_run(db, params, [row["id"] for row in rows], body))
     finally:
         db.close()
     if mismatch is not None:
