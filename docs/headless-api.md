@@ -282,7 +282,8 @@ other than the primary one. The crop is in the unedited upright frame.
 
 `PUT /api/photos/<id>/edit-recipe` accepts `expected_recipe`, the recipe the
 caller believes is stored (`null` for an unedited photo). When it differs the
-save answers 409 `edit_recipe_changed` and writes nothing. `source` (up to 60
+save answers 409 `edit_recipe_changed` and writes nothing; a recipe that holds
+no edit answers 400 (clear an edit with DELETE). `source` (up to 60
 characters) and `reason` (up to 300) are recorded with the edit and show in its
 history. Without `expected_recipe` the save replaces whatever is stored.
 
@@ -291,7 +292,10 @@ adds `files`, one entry per output with `photo_id`, `path`, `edited`,
 `has_coordinates`, `has_place_name` and `content_key` (it changes when the
 source file, the edit or any metadata value the export would write does), and
 `skipped`, the photos that would not be written and why. `POST /api/jobs/export`
-with `list_files: true` puts the written paths in the job result's `files`.
+with `list_files: true` puts the written paths in the job result's `files`. With
+`expected_content`, a map of each photo id to its previewed `content_key`, the
+job checks the keys against the data it loaded and writes nothing when one
+differs; a map that does not cover exactly the photos to export answers 409.
 
 ### Burst adjudication
 

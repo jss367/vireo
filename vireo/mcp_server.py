@@ -1318,9 +1318,7 @@ def _register_save_tools(server, client):
         if source:
             body["source"] = source
         data = client.put_json(f"/api/photos/{photo_id}/edit-recipe", body)
-        if data.get("recipe") is None:
-            raise VireoError("Every value in the recipe is neutral, so the photo has no edit.")
-        return {"photo_id": photo_id, "recipe": data["recipe"]}
+        return {"photo_id": photo_id, "recipe": data.get("recipe")}
 
     @server.tool(annotations=writes)
     def save_edit_copy(photo_id: int, name: str, recipe: dict) -> dict:
@@ -1437,16 +1435,23 @@ def _register_export_tools(server, client):
         """Run exactly the export a preview_export described. Refused when
         anything it depends on changed since (an edit, the metadata it would
         write, the source file, the workspace, a file in the way); preview
-        again then. A token works once.
+        again then. A change while the job is starting fails the job with
+        nothing written. Photos the preview skipped are left out. A token
+        works once.
         Returns the ``job_id`` to follow with get_job."""
         if token not in pending:
             raise VireoError("That token is unknown or already used. Call preview_export again.")
         body, fingerprint = pending.pop(token)
-        _, current = _preflight_export(client, body)
+        data, current = _preflight_export(client, body)
         if current != fingerprint:
             raise VireoError("The export would differ from the preview now. Call preview_export again.")
-        data = client.post_json("/api/jobs/export", body)
-        return {"job_id": data.get("job_id"), "photo_count": len(body["photo_ids"])}
+        # The worker checks these keys against what it loaded, so a change
+        # after this point writes nothing either.
+        expected = {str(f["photo_id"]): f["content_key"] for f in data["files"]}
+        started = client.post_json("/api/jobs/export", {
+            **body, "photo_ids": [f["photo_id"] for f in data["files"]], "expected_content": expected,
+        })
+        return {"job_id": started.get("job_id"), "photo_count": len(expected)}
 
     @server.tool(annotations=mcp_types.ToolAnnotations(read_only_hint=True))
     def get_job(job_id: str, wait_seconds: int = 0) -> dict:

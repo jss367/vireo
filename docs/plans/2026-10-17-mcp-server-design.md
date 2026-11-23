@@ -84,7 +84,10 @@ Undo step in Vireo like a hand edit. Two rules cover what Undo cannot protect:
 - Undo cannot remove exported files, so `start_export` takes only the one-use
   token of a `preview_export`, sends exactly the previewed request, and refuses
   when the output paths, the source files, the edits, the metadata values to be
-  written or the workspace changed since (`content_key` in the preflight).
+  written or the workspace changed since (`content_key` in the preflight). The
+  keys go with the job (`expected_content`), whose worker checks them against the
+  catalog data it renders from, so a change between that check and the worker's
+  read writes nothing either.
 
 ## Testing
 

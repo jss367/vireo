@@ -1049,6 +1049,11 @@ def test_save_edit_never_replaces_an_edit_it_did_not_make(mcp, app_and_db):
                    replaces=saved["recipe"])
     assert "not the one in replaces" in call_error(
         server, "save_edit", photo_id=pid, recipe=recipe, reason="x", replaces=saved["recipe"])
+    # A neutral recipe is refused before anything is written, so it cannot clear the edit.
+    before = db.conn.execute("SELECT COUNT(*) FROM edit_history").fetchone()[0]
+    assert "neutral" in call_error(server, "save_edit", photo_id=pid, recipe={"adjustments": {"exposure": 0}},
+                                   reason="x", replaces=revised["recipe"])
+    assert db.conn.execute("SELECT COUNT(*) FROM edit_history").fetchone()[0] == before
     assert db.get_photo_edit_recipe(pid) == revised["recipe"]
     assert app_and_db[0].test_client().post("/api/undo").status_code == 200
     assert db.get_photo_edit_recipe(pid) == saved["recipe"]
@@ -1128,7 +1133,7 @@ def test_export_runs_what_the_preview_described(mcp, app_and_db, tmp_path):
         assert job["status"] == "failed" and job["result"]["files"] == []
     assert (out / "bird1.jpg").read_bytes() == b"already here"
     body = next(c[3] for c in reversed(transport.calls) if c[1] == "/api/jobs/export")
-    assert body["metadata_fields"] == ["species", "rating", "location"] and body["photo_ids"] == [pid, hidden]
+    assert body["metadata_fields"] == ["species", "rating", "location"] and body["photo_ids"] == [pid]
     assert "unknown or already used" in call_error(server, "start_export", token=preview["token"])
 
 
@@ -1182,6 +1187,44 @@ def test_start_export_refuses_when_the_preview_is_stale(mcp, app_and_db, tmp_pat
     _change_export_input(db, pid, change, folder, out)
     assert "differ from the preview" in call_error(server, "start_export", token=preview["token"])
     assert not any(c[1] == "/api/jobs/export" for c in transport.calls)
+
+
+@pytest.mark.parametrize("change", ["edit", "coordinates", "species", "source"])
+def test_a_change_after_the_last_check_writes_nothing(mcp, app_and_db, tmp_path, monkeypatch, change):
+    """The worker checks what it loaded, so the gap before its read is closed too."""
+    server, db, transport = mcp
+    _preset(app_and_db[0])
+    pid, folder = _editable_photo(db, tmp_path)
+    out = tmp_path / "out"
+    preview = call(server, "preview_export", photo_ids=[pid], preset="Main", destination=str(out))
+    original = transport.post_json
+
+    def changed_first(path, body=None):
+        if path == "/api/jobs/export":
+            _change_export_input(db, pid, change, folder, out)
+        return original(path, body)
+
+    monkeypatch.setattr(transport, "post_json", changed_first)
+    job = _finished(server, call(server, "start_export", token=preview["token"])["job_id"])
+    assert job["status"] == "failed" and job["result"]["exported"] == 0
+    assert "changed since the export was previewed" in job["result"]["errors"][0]
+    assert not out.exists()
+
+
+def test_export_refuses_when_a_previewed_photo_left_the_workspace(mcp, tmp_path, monkeypatch):
+    server, db, transport = mcp
+    pid, _ = _editable_photo(db, tmp_path)
+    preview = call(server, "preview_export", photo_ids=[pid], destination=str(tmp_path / "out"))
+    original = transport.post_json
+
+    def with_another_photo(path, body=None):
+        if path == "/api/jobs/export":
+            body = {**body, "photo_ids": [*body["photo_ids"], *(p["id"] for p in db.photos.list_page())]}
+        return original(path, body)
+
+    monkeypatch.setattr(transport, "post_json", with_another_photo)
+    message = call_error(server, "start_export", token=preview["token"])
+    assert "409" in message and "differ from the previewed ones" in message
 
 
 def test_metadata_left_out_of_an_export_does_not_stale_its_preview(mcp, tmp_path):

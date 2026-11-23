@@ -28,6 +28,7 @@ def _photo_export_work(
     options: JsonDict, reveal_after_export: bool, list_files: bool,
 ) -> Callable[..., JsonDict]:
     """The ``export`` job's work function for an already-validated request."""
+    options = {**options, "collect_files": reveal_after_export or list_files}
 
     def work(job: JobDict) -> JsonDict:
         from export import export_photos, reveal_exported_files
@@ -92,6 +93,27 @@ def _preflight_listing(
         "skipped": [*({"photo_id": pid, "reason": "not visible in this workspace"} for pid in hidden),
                     *preview["skipped"]],
     }
+
+
+def _expected_content(body: JsonDict, photo_ids: list[int]) -> dict[int, str] | None:
+    """The previewed content key of each photo, when the body has them.
+
+    The keys must cover exactly the photos to export, so a photo that left
+    the workspace since the preview is refused, not silently dropped. Raises
+    ``ValueError`` when they do not, or are malformed.
+    """
+    raw = body.get("expected_content")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or not all(isinstance(key, str) for key in raw.values()):
+        raise ValueError("expected_content must map photo ids to content keys")
+    try:
+        expected = {int(pid): key for pid, key in raw.items()}
+    except ValueError:
+        raise ValueError("expected_content must map photo ids to content keys") from None
+    if set(expected) != set(photo_ids):
+        raise ValueError("The photos to export differ from the previewed ones.")
+    return expected
 
 
 def create_export_blueprint(
@@ -395,6 +417,7 @@ def create_export_blueprint(
             return json_error("no exportable photos in current workspace")
         try:
             version_options = export_version_options(db, photo_ids, body, media_root(config["THUMB_CACHE_DIR"]))
+            expected_content = _expected_content(body, photo_ids)
         except ValueError as exc:
             return json_error(str(exc), 409)
         vireo_dir = media_root(config["THUMB_CACHE_DIR"])
@@ -404,10 +427,9 @@ def create_export_blueprint(
         # perfected render over a fresh libraw decode of the RAW.
         developed_dir = effective_cfg.get("darktable_output_dir", "") or ""
 
-        list_files = body.get("list_files") is True
         work = _photo_export_work(
             ctx, photo_ids, destination, vireo_dir=vireo_dir,
-            reveal_after_export=reveal_after_export, list_files=list_files,
+            reveal_after_export=reveal_after_export, list_files=body.get("list_files") is True,
             options={
                 "naming_template": naming_template,
                 "max_size": max_size,
@@ -418,7 +440,7 @@ def create_export_blueprint(
                 "metadata_fields": metadata_fields,
                 "export_to_subfolder": export_to_subfolder,
                 "subfolder_name": subfolder_name,
-                "collect_files": reveal_after_export or list_files,
+                "expected_content": expected_content,
                 **version_options,
             },
         )

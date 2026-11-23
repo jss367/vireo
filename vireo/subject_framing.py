@@ -13,6 +13,8 @@ import math
 AUTO_WIDE = (3.0, 2.0)
 AUTO_TALL = (4.0, 5.0)
 MAX_MARGIN = 5.0
+#: The longest shape a crop can be asked for, either way round.
+MAX_ASPECT = 100.0
 
 
 def parse_aspect(raw):
@@ -26,7 +28,20 @@ def parse_aspect(raw):
         raise ValueError("aspect must be auto or W:H, such as 3:2") from None
     if not all(math.isfinite(v) and v > 0 for v in (width, height)):
         raise ValueError("aspect must be auto or W:H, such as 3:2")
+    if not 1 / MAX_ASPECT <= width / height <= MAX_ASPECT:
+        raise ValueError(f"aspect must be between 1:{MAX_ASPECT:g} and {MAX_ASPECT:g}:1")
     return width, height
+
+
+def _span(start, length, total):
+    """``(start, length)`` as six-place fractions that end inside the frame.
+
+    Rounding each on its own can pass 1.0 when both land on a midpoint, and a
+    recipe refuses a crop that does.
+    """
+    begin = min(round(start / total, 6), 1 - 1e-6)
+    size = min(round(length / total, 6), round(1 - begin, 6))
+    return begin, max(size, 1e-6)
 
 
 def frame_subject(box, frame, margin, aspect=None):
@@ -53,11 +68,12 @@ def frame_subject(box, frame, margin, aspect=None):
     crop_w, crop_h = crop_w * shrink, crop_h * shrink
     left = min(max((box["x"] + box["w"] / 2) * width - crop_w / 2, 0), width - crop_w)
     top = min(max((box["y"] + box["h"] / 2) * height - crop_h / 2, 0), height - crop_h)
+    x, w = _span(left, crop_w, width)
+    y, h = _span(top, crop_h, height)
     # Sub-pixel slack, so rounding never reads as a cut subject.
     cut = crop_w < box_w - 1 or crop_h < box_h - 1
     return {
-        "crop": {"x": round(left / width, 6), "y": round(top / height, 6),
-                 "w": round(crop_w / width, 6), "h": round(crop_h / height, 6)},
+        "crop": {"x": x, "y": y, "w": w, "h": h},
         "aspect": f"{ratio_w:g}:{ratio_h:g}",
         "output_pixels": [round(crop_w), round(crop_h)],
         "subject_pixels": [round(box_w), round(box_h)],

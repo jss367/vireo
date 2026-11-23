@@ -61,6 +61,20 @@ def test_every_crop_is_a_valid_recipe():
         normalize_recipe({"crop": crop})
 
 
+@pytest.mark.parametrize("box", [
+    # Both the start and the size of these land on a six-place midpoint.
+    _box(.9989985, .2, .0010015, .0010015), _box(.2, .9989985, .0010015, .0010015),
+    _box(.9999999, .9999999, .0000001, .0000001),
+])
+def test_a_crop_at_the_frames_edge_is_a_valid_recipe(box):
+    from edit_recipe import normalize_recipe
+
+    for aspect in (None, (1.0, 1.0), (100.0, 1.0)):
+        crop = frame_subject(box, FRAME, 0, aspect)["crop"]
+        assert crop["w"] > 0 and crop["h"] > 0
+        assert normalize_recipe({"crop": crop})["crop"] == crop
+
+
 @pytest.mark.parametrize(("box", "frame"), [(_box(0, 0, 0, .1), FRAME), (_box(0, 0, .1, .1), (0, 0))])
 def test_unusable_geometry_is_refused(box, frame):
     with pytest.raises(ValueError, match="unusable"):
@@ -70,6 +84,6 @@ def test_unusable_geometry_is_refused(box, frame):
 def test_parse_aspect():
     assert parse_aspect(None) is None and parse_aspect("AUTO") is None
     assert parse_aspect("16:9") == (16.0, 9.0)
-    for bad in ("3", "a:b", "0:1", "nan:1", "1:2:3", "-3:2"):
+    for bad in ("3", "a:b", "0:1", "nan:1", "1:2:3", "-3:2", "1e-300:1e300", "1e300:1e-300", "1:1000"):
         with pytest.raises(ValueError, match="aspect must be"):
             parse_aspect(bad)

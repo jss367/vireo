@@ -294,7 +294,8 @@ def create_photo_edit_recipes_blueprint(
 
         ``expected_recipe``, when the body has it, must be the recipe stored
         now (``null`` for an unedited photo) or the save answers 409, so a
-        caller cannot overwrite an edit it has not seen. ``source`` and
+        caller cannot overwrite an edit it has not seen. Such a save must hold
+        an edit: clearing one is DELETE. ``source`` and
         ``reason`` say who made the edit and why, and show in its history.
         """
         db = get_db()
@@ -320,6 +321,8 @@ def create_photo_edit_recipes_blueprint(
             expected = recipe_to_json(normalize_recipe(body.get("expected_recipe"))) or ""
         except RecipeError as e:
             return json_error(str(e))
+        if "expected_recipe" in body and normalized is None:
+            return json_error("Every value in the recipe is neutral, so there is no edit to save.")
         local: JsonDict | None = (normalized or {}).get("local")
         if local:
             import local_masks
