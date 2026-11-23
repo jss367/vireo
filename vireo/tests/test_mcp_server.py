@@ -36,7 +36,7 @@ from mcp_server import (
     server_command,
 )
 from PIL import Image as PILImage
-from services import keyword_tagging
+from services import keyword_tagging, photo_ingest
 from testing.waits import synchronization_timeout
 
 TOKEN = "test-token-123"
@@ -1166,13 +1166,19 @@ def _change_export_input(db, pid, change, folder, out):
         db.conn.execute("UPDATE photos SET timestamp = '2020-01-01T00:00:00' WHERE id = ?", (pid,))
     elif change == "source":
         PILImage.new("RGB", (640, 480), (200, 10, 10)).save(folder / "bird1.jpg", "JPEG", quality=50)
+    elif change == "camera":
+        # Not metadata this export writes, but camera denoising renders from it.
+        db.conn.execute("UPDATE photos SET iso = 12800 WHERE id = ?", (pid,))
+    elif change == "exif":
+        db.conn.execute("UPDATE photos SET exif_data = ? WHERE id = ?", ('{"EXIF": {"LensModel": "x"}}', pid))
     else:
+        out.mkdir(exist_ok=True)
         (out / "bird1.jpg").write_bytes(b"in the way")
     db.commit()
 
 
 @pytest.mark.parametrize("change", [
-    "edit", "coordinates", "place", "species", "rating", "time", "source", "file in the way",
+    "edit", "coordinates", "place", "species", "rating", "time", "source", "camera", "exif", "file in the way",
 ])
 def test_start_export_refuses_when_the_preview_is_stale(mcp, app_and_db, tmp_path, change):
     """The photo already has coordinates and a rating: new values count, not just presence."""
@@ -1189,7 +1195,7 @@ def test_start_export_refuses_when_the_preview_is_stale(mcp, app_and_db, tmp_pat
     assert not any(c[1] == "/api/jobs/export" for c in transport.calls)
 
 
-@pytest.mark.parametrize("change", ["edit", "coordinates", "species", "source"])
+@pytest.mark.parametrize("change", ["edit", "coordinates", "species", "source", "camera", "file in the way"])
 def test_a_change_after_the_last_check_writes_nothing(mcp, app_and_db, tmp_path, monkeypatch, change):
     """The worker checks what it loaded, so the gap before its read is closed too."""
     server, db, transport = mcp
@@ -1208,7 +1214,60 @@ def test_a_change_after_the_last_check_writes_nothing(mcp, app_and_db, tmp_path,
     job = _finished(server, call(server, "start_export", token=preview["token"])["job_id"])
     assert job["status"] == "failed" and job["result"]["exported"] == 0
     assert "changed since the export was previewed" in job["result"]["errors"][0]
-    assert not out.exists()
+    assert sorted(p.name for p in out.glob("*")) == (["bird1.jpg"] if change == "file in the way" else [])
+
+
+def test_a_file_that_appears_during_the_run_fails_that_photo(mcp, tmp_path, monkeypatch):
+    """Past the worker's own check, the previewed path is still the only one it may write."""
+    import export
+
+    server, db, _ = mcp
+    pid, _ = _editable_photo(db, tmp_path)
+    out = tmp_path / "out"
+    preview = call(server, "preview_export", photo_ids=[pid], destination=str(out), include_location=False)
+    original = export.load_export_image
+
+    def late_file(*args, **kwargs):
+        (out / "bird1.jpg").write_bytes(b"in the way")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(export, "load_export_image", late_file)
+    job = _finished(server, call(server, "start_export", token=preview["token"])["job_id"])
+    assert job["status"] == "failed" and job["result"]["exported"] == 0
+    assert "appeared after the export was previewed" in job["result"]["errors"][0]
+    assert [(p.name, p.read_bytes()) for p in out.iterdir()] == [("bird1.jpg", b"in the way")]
+
+
+def test_export_of_several_photos_writes_every_previewed_path(mcp, tmp_path):
+    """Names that collide within one export are planned the same way twice."""
+    server, db, _ = mcp
+    pid, folder = _editable_photo(db, tmp_path)
+    row = db.photos.get(pid)
+    ids = [pid]
+    for name in ("bird8.jpg", "bird9.jpg"):
+        PILImage.new("RGB", (64, 48)).save(folder / name, "JPEG")
+        ids.append(photo_ingest.add_photo(db, folder_id=row["folder_id"], filename=name, extension=".jpg",
+                                          file_size=10, file_mtime=1.0))
+    db.commit()
+    transport_preset = {"name": "Seq", "settings": {"naming_template": "{folder}/shot"}}
+    mcp[2].post_json("/api/export/presets", transport_preset)
+    preview = call(server, "preview_export", photo_ids=ids, preset="Seq", destination=str(tmp_path / "out"),
+                   include_location=False)
+    assert len({f["path"] for f in preview["files"]}) == 3
+    job = _finished(server, call(server, "start_export", token=preview["token"])["job_id"])
+    assert job["status"] == "completed", job
+    assert job["result"]["files"] == [f["path"] for f in preview["files"]]
+
+
+@pytest.mark.parametrize("bad", [
+    [], {"x": {"path": "a", "content_key": "b"}}, {"1": "key"}, {"1": {"path": "a"}},
+])
+def test_export_route_refuses_malformed_expected_content(mcp, tmp_path, bad):
+    _, db, transport = mcp
+    pid, _ = _editable_photo(db, tmp_path)
+    with pytest.raises(mcp_server.VireoError, match="expected_content must map"):
+        transport.post_json("/api/jobs/export", {
+            "photo_ids": [pid], "destination": str(tmp_path / "out"), "expected_content": bad})
 
 
 def test_export_refuses_when_a_previewed_photo_left_the_workspace(mcp, tmp_path, monkeypatch):

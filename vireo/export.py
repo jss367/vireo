@@ -694,9 +694,11 @@ def export_photos(db, vireo_dir, photo_ids, destination=None, options=None,
                 file. Supported values are species, capture_date,
                 capture_time, rating, location, and camera. The default is an
                 empty list, preserving the existing metadata-free export.
-            expected_content: dict -- photo id to the ``content_key``
-                ``describe_export_files`` gave it; when any differs now, the
-                run writes nothing and reports each changed photo.
+            expected_content: dict -- photo id to the ``(path, content_key)``
+                ``describe_export_files`` gave it. When any differs now, the
+                run writes nothing and reports each changed photo; a file that
+                appears at a path during the run fails that photo instead of
+                renaming its output.
             export_to_subfolder: bool -- create a subfolder beneath the
                 shared destination or each original photo's folder.
             subfolder_name: str -- name of that subfolder (a single path
@@ -773,24 +775,42 @@ def _export_location_map(db, photo_ids):
     return locations
 
 
-def _export_content_key(source_path, recipe, metadata_args):
-    """A digest of everything that decides one output's pixels and metadata."""
+#: The photo columns a render reads: its frame, its fallback companion, and the
+#: camera and lens identity behind camera denoising and lens correction. The
+#: photo's EXIF is the other input, and is digested whole.
+_RENDER_COLUMNS = (
+    "filename", "extension", "width", "height", "companion_path", "camera_make", "camera_model",
+    "iso", "lens", "focal_length", "aperture",
+)
+
+
+def _file_identity(path):
     try:
-        stat = os.stat(source_path)
-        source = [source_path, stat.st_size, stat.st_mtime_ns]
+        stat = os.stat(path)
     except (OSError, TypeError):
-        source = [source_path]
-    state = json.dumps([source, recipe_to_json(recipe), metadata_args], default=str)
-    return hashlib.sha256(state.encode()).hexdigest()[:16]
+        return [path]
+    return [path, stat.st_size, stat.st_mtime_ns]
+
+
+def _export_content_key(photo, folder_path, source_path, recipe, exif_data, metadata_args):
+    """A digest of everything that decides one output's pixels and metadata."""
+    companion = _photo_value(photo, "companion_path")
+    state = [
+        _file_identity(source_path),
+        _file_identity(os.path.join(folder_path, companion)) if companion else None,
+        [_photo_value(photo, column) for column in _RENDER_COLUMNS],
+        exif_data, recipe_to_json(recipe), metadata_args,
+    ]
+    return hashlib.sha256(json.dumps(state, default=str).encode()).hexdigest()[:16]
 
 
 def describe_export_files(db, files, metadata_fields, recipe_overrides=None):
     """What each previewed output would carry, with a key over all of it.
 
     ``files`` are ``preview_export``'s entries. ``content_key`` digests the
-    source file's identity, the edit and the exact metadata values the export
-    would write, so any catalog or file change that would alter an output
-    alters its key.
+    source files' identity, the edit, what the renderer reads from the catalog
+    and the exact metadata values the export would write, so any catalog or
+    file change that would alter an output alters its key.
     """
     ids = [entry["photo_id"] for entry in files]
     fields = normalize_metadata_fields(metadata_fields)
@@ -800,6 +820,7 @@ def describe_export_files(db, files, metadata_fields, recipe_overrides=None):
     camera = _get_photo_camera_data(db, ids) if "camera" in fields else {}
     locations = _export_location_map(db, ids)
     recipes = {**db.edits.get_photo_recipes(ids), **(recipe_overrides or {})}
+    folders = db.workspace_folders.visible_folder_paths(db.require_workspace_id())
 
     def described(entry):
         pid = entry["photo_id"]
@@ -813,7 +834,10 @@ def describe_export_files(db, files, metadata_fields, recipe_overrides=None):
             "photo_id": pid, "path": entry["path"], "edited": recipe_to_json(edit) is not None,
             "has_coordinates": location.get("latitude") is not None and location.get("longitude") is not None,
             "has_place_name": bool(location.get("hierarchy")),
-            "content_key": _export_content_key(entry["source_path"], edit, metadata),
+            "content_key": _export_content_key(
+                photos[pid], folders.get(photos[pid]["folder_id"], ""), entry["source_path"], edit,
+                exif.get(pid), metadata,
+            ),
         }
 
     return [described(entry) for entry in files]
@@ -933,33 +957,65 @@ class _PhotoExportBatch:
     def _refuse_changed_content(self):
         """Whether any photo differs from what the caller previewed.
 
-        Compares the loaded catalog data this run renders from, so nothing is
-        written when an edit, a metadata value or a source file changed after
-        the preview. Each changed photo is an error.
+        Compares the loaded catalog data this run renders from and the output
+        paths it would use, so nothing is written when an edit, a metadata
+        value, a source file or a name changed after the preview. Each changed
+        photo is an error.
         """
         if self.expected_content is None:
             return False
-        for pid in self.photo_ids:
-            photo = self.photos_map.get(pid)
-            if photo is None or self._content_key(photo) != self.expected_content.get(pid):
-                name = photo["filename"] if photo is not None else f"Photo {pid}"
-                self.errors.append(f"{name}: changed since the export was previewed; nothing was exported")
+        seq_counters = {}
+        reservations = {}
+        try:
+            for pid in self.photo_ids:
+                photo = self.photos_map.get(pid)
+                planned = self._planned_output(photo, seq_counters, reservations) if photo is not None else None
+                if planned is None or planned != self.expected_content.get(pid):
+                    name = photo["filename"] if photo is not None else f"Photo {pid}"
+                    self.errors.append(f"{name}: changed since the export was previewed; nothing was exported")
+        finally:
+            for group in reservations.values():
+                for reservation in group:
+                    reservation.close()
         return bool(self.errors)
 
-    def _content_key(self, photo):
+    def _planned_output(self, photo, seq_counters, reservations):
+        """This photo's ``(path, content key)`` now, or None when it would not be written."""
         pid = photo["id"]
+        folder_path = self.folders.get(photo["folder_id"], "")
+        recipe, exif_data = self.edit_recipes.get(pid), self.exif_data_map.get(pid)
+        species = self.species_map.get(pid, [])
         source_path = _select_export_source(
-            photo=photo, folder_path=self.folders.get(photo["folder_id"], ""), folders=self.folders,
-            recipe=self.edit_recipes.get(pid), max_size=self.max_size, wc_max=self.wc_max,
-            vireo_dir=self.vireo_dir, developed_dir=self.developed_dir,
-            developed_index=self.developed_index, output_ext=self.output_ext,
-            exif_data=self.exif_data_map.get(pid),
+            photo=photo, folder_path=folder_path, folders=self.folders, recipe=recipe,
+            max_size=self.max_size, wc_max=self.wc_max, vireo_dir=self.vireo_dir,
+            developed_dir=self.developed_dir, developed_index=self.developed_index,
+            output_ext=self.output_ext, exif_data=exif_data,
         )
+        requested, _base, reason = _preview_requested_path(
+            photo, folder_path, source_path, self.destination, self.subfolder, self.template,
+            self.output_ext, species, seq_counters,
+        )
+        if reason:
+            return None
         metadata = _export_metadata_args(
-            self.metadata_fields, photo, self.species_map.get(pid, []), self.camera_data_map.get(pid, {}),
-            self.location_map.get(pid, {}), source_metadata=self.exif_data_map.get(pid),
+            self.metadata_fields, photo, species, self.camera_data_map.get(pid, {}),
+            self.location_map.get(pid, {}), source_metadata=exif_data,
         )
-        return _export_content_key(source_path, self.edit_recipes.get(pid), metadata)
+        return (
+            _reserve_preview_export_path(requested, reservations),
+            _export_content_key(photo, folder_path, source_path, recipe, exif_data, metadata),
+        )
+
+    def _claim_output(self, pid, out_path):
+        """Open the output to write: the previewed path exactly, when there was a preview."""
+        if self.expected_content is None:
+            return _claim_export_path(out_path)
+        path = self.expected_content[pid][0]
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        try:
+            return path, open(path, "xb")
+        except FileExistsError:
+            raise FileExistsError(f"{path} appeared after the export was previewed") from None
 
     def _export_photo(self, photo):
         """Resolve the destination and safe output name for one photo."""
@@ -1017,7 +1073,7 @@ class _PhotoExportBatch:
                 developed_index=self.developed_index, output_ext=self.output_ext,
             )
             try:
-                out_path, output_stream = _claim_export_path(out_path)
+                out_path, output_stream = self._claim_output(pid, out_path)
                 claimed_out_path = out_path
                 try:
                     _save_export_image(

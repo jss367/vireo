@@ -95,23 +95,26 @@ def _preflight_listing(
     }
 
 
-def _expected_content(body: JsonDict, photo_ids: list[int]) -> dict[int, str] | None:
-    """The previewed content key of each photo, when the body has them.
+def _expected_content(body: JsonDict, photo_ids: list[int]) -> dict[int, tuple[str, str]] | None:
+    """Each photo's previewed ``(path, content key)``, when the body has them.
 
-    The keys must cover exactly the photos to export, so a photo that left
-    the workspace since the preview is refused, not silently dropped. Raises
-    ``ValueError`` when they do not, or are malformed.
+    They must cover exactly the photos to export, once each, so a photo that
+    left the workspace since the preview is refused, not silently dropped.
+    Raises ``ValueError`` when they do not, or are malformed.
     """
     raw = body.get("expected_content")
     if raw is None:
         return None
-    if not isinstance(raw, dict) or not all(isinstance(key, str) for key in raw.values()):
-        raise ValueError("expected_content must map photo ids to content keys")
-    try:
-        expected = {int(pid): key for pid, key in raw.items()}
-    except ValueError:
-        raise ValueError("expected_content must map photo ids to content keys") from None
-    if set(expected) != set(photo_ids):
+    malformed = ValueError("expected_content must map photo ids to a previewed path and content_key")
+    if not isinstance(raw, dict):
+        raise malformed
+    expected = {}
+    for pid, entry in raw.items():
+        values = (entry.get("path"), entry.get("content_key")) if isinstance(entry, dict) else (None, None)
+        if not pid.isdecimal() or not all(isinstance(value, str) for value in values):
+            raise malformed
+        expected[int(pid)] = values
+    if sorted(expected) != sorted(photo_ids):
         raise ValueError("The photos to export differ from the previewed ones.")
     return expected
 

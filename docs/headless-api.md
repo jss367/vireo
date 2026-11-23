@@ -290,12 +290,15 @@ history. Without `expected_recipe` the save replaces whatever is stored.
 `POST /api/jobs/export/preflight` with `list_files: true` (at most 500 photos)
 adds `files`, one entry per output with `photo_id`, `path`, `edited`,
 `has_coordinates`, `has_place_name` and `content_key` (it changes when the
-source file, the edit or any metadata value the export would write does), and
+source files, the edit, the camera data a render reads or any metadata value
+the export would write does), and
 `skipped`, the photos that would not be written and why. `POST /api/jobs/export`
 with `list_files: true` puts the written paths in the job result's `files`. With
-`expected_content`, a map of each photo id to its previewed `content_key`, the
-job checks the keys against the data it loaded and writes nothing when one
-differs; a map that does not cover exactly the photos to export answers 409.
+`expected_content`, a map of each photo id to its previewed `path` and
+`content_key`, the job checks both against the data it loaded and the names it
+would use, and writes nothing when one differs. A file that appears at a
+previewed path during the run fails that photo instead of renaming its output. A
+map that does not cover exactly the photos to export, once each, answers 409.
 
 ### Burst adjudication
 

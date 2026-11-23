@@ -1436,7 +1436,8 @@ def _register_export_tools(server, client):
         anything it depends on changed since (an edit, the metadata it would
         write, the source file, the workspace, a file in the way); preview
         again then. A change while the job is starting fails the job with
-        nothing written. Photos the preview skipped are left out. A token
+        nothing written, and no file is ever written under another name.
+        Photos the preview skipped are left out. A token
         works once.
         Returns the ``job_id`` to follow with get_job."""
         if token not in pending:
@@ -1445,9 +1446,9 @@ def _register_export_tools(server, client):
         data, current = _preflight_export(client, body)
         if current != fingerprint:
             raise VireoError("The export would differ from the preview now. Call preview_export again.")
-        # The worker checks these keys against what it loaded, so a change
-        # after this point writes nothing either.
-        expected = {str(f["photo_id"]): f["content_key"] for f in data["files"]}
+        # The worker checks these against what it loaded and where it would
+        # write, so a change after this point writes nothing either.
+        expected = {str(f["photo_id"]): _pick(f, ("path", "content_key")) for f in data["files"]}
         started = client.post_json("/api/jobs/export", {
             **body, "photo_ids": [f["photo_id"] for f in data["files"]], "expected_content": expected,
         })
