@@ -1245,7 +1245,7 @@ def _register_edit_tools(server, client):
         unedited upright frame). ``margin`` is the padding on each side as a
         fraction of the animal's box, ``aspect`` is ``auto`` (3:2 or 4:5) or
         ``W:H``, and ``detection_id`` picks an animal other than the primary.
-        ``output_pixels`` is the size an export would have."""
+        ``output_pixels`` is about the size an export would have."""
         return client.get_json(f"/api/photos/{photo_id}/subject-crop", {
             "margin": margin, "aspect": aspect, "detection_id": detection_id,
         })
