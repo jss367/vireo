@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
@@ -66,6 +67,7 @@ _PART_NAMES = {
     "photo_count": "the photos in scope",
     "photo_digest": "the photos in scope",
     "models": "the models",
+    "model_files": "the installed model files",
     "labels_files": "the species lists",
     "label_fingerprints": "the species lists",
     "settings": "the stage settings",
@@ -118,6 +120,41 @@ def _label_files(db: Database, params: PipelinePlanParams) -> list[str]:
     from labels import get_active_labels
 
     return [entry["labels_file"] for entry in get_active_labels()]
+
+
+def _file_state(path: str) -> list[Any]:
+    """What changes when a file is replaced, rewritten or removed; its contents are not read."""
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return [path, None]
+    return [path, stat.st_size, stat.st_mtime_ns, stat.st_ino]
+
+
+def _model_files_digest(models: Iterable[JsonDict]) -> str:
+    """A fingerprint of the files a run's models are loaded from.
+
+    Covers the whole models folder, which holds the detector, mask, embedding
+    and eye models beside the classifiers, so no stage's model needs naming
+    here; a custom classifier's own files; and the taxonomy its names resolve
+    through. Multi-gigabyte weights make hashing contents too slow for a
+    preview.
+    """
+    import models as model_registry
+    import taxonomy
+
+    paths = [taxonomy.TAXONOMY_JSON_PATH]
+    for folder, _, names in os.walk(model_registry.DEFAULT_MODELS_DIR):
+        paths.extend(os.path.join(folder, name) for name in names)
+    described = []
+    for model in models:
+        described.append({key: model.get(key) for key in ("id", "model_str", "model_type", "weights_path")})
+        weights = model.get("weights_path") or ""
+        paths.append(weights)
+        if os.path.isdir(weights):
+            paths.extend(os.path.join(weights, name) for name in os.listdir(weights))
+    state = [described, [_file_state(path) for path in sorted(set(paths))]]
+    return _digest([json.dumps(state, sort_keys=True, default=str)])
 
 
 def _replaced_reviews(db: Database, photo_ids: Iterable[int]) -> JsonDict:
@@ -177,7 +214,8 @@ def describe_run(
         "workspace_id": db.require_workspace_id(),
         "photo_count": len(ids),
         "photo_digest": photo_digest(ids),
-        "models": models,
+        "models": [{"id": m["id"], "name": m["name"]} for m in models],
+        "model_files": _model_files_digest(models),
         "labels_files": _label_files(db, params),
         "label_fingerprints": fingerprints,
         "settings": _settings(effective),

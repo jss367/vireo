@@ -1,6 +1,7 @@
 """Describing a Process run and starting exactly the run described."""
 
 import json
+from pathlib import Path
 
 import config
 import models
@@ -224,6 +225,33 @@ def test_a_run_that_changes_in_the_queue_fails_before_its_first_stage(
     assert response.status_code == 200, response.get_json()
     job = wait_for_job_via_client(client, response.get_json()["job_id"])
     assert job["status"] == "failed" and named in json.dumps(job["errors"]), job
+    assert started == []
+
+
+@pytest.mark.parametrize("change", ["mask model", "custom classifier", "model definition", "taxonomy"])
+def test_replaced_model_files_are_a_changed_run(app_and_db, one_model, started, monkeypatch, tmp_path, change):
+    import taxonomy
+
+    app, db = app_and_db
+    client = app.test_client()
+    body = {"photo_ids": _ids(db)}
+    masks = Path(models.DEFAULT_MODELS_DIR) / "sam2-small" / "encoder.onnx"
+    weights = tmp_path / "custom" / "model.onnx"
+    for path in (masks, weights):
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"one")
+    entry = {**MODEL, "weights_path": str(weights.parent)}
+    monkeypatch.setattr(models, "get_models", lambda: [entry])
+    run = _run_of(client, **body)
+    assert _run_of(client, **body) == run
+    if change == "model definition":
+        entry["model_str"] = "another"
+    else:
+        path = {"mask model": masks, "custom classifier": weights,
+                "taxonomy": Path(taxonomy.TAXONOMY_JSON_PATH)}[change]
+        path.write_bytes(b"a replacement")
+    response = _start(client, run, **body)
+    assert response.status_code == 409 and "installed model files" in response.get_json()["error"]
     assert started == []
 
 
