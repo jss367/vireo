@@ -36,7 +36,8 @@ from mcp_server import (
     server_command,
 )
 from PIL import Image as PILImage
-from services import keyword_tagging
+from services import keyword_tagging, photo_ingest
+from testing.waits import synchronization_timeout
 
 TOKEN = "test-token-123"
 REPO = Path(__file__).resolve().parents[2]
@@ -105,6 +106,8 @@ def test_tools_are_the_documented_set(mcp):
         "get_species_evidence", "preview_species_assignment", "apply_species_assignment",
         "list_assignment_conflicts", "review_species_assignment", "reject_region", "restore_region",
         "best_of_each_species", "choose_best_photo",
+        "get_edit", "suggest_crop", "suggest_tone", "view_edit", "save_edit", "save_edit_copy",
+        "list_export_presets", "preview_export", "start_export", "get_job",
     }
     for tool in anyio.run(server.list_tools):
         assert tool.description, f"{tool.name} has no description"
@@ -953,6 +956,456 @@ def test_a_slow_answer_is_not_reported_as_vireo_being_closed(monkeypatch):
         client.get_json("/api/v1/folders/1/bursts")
     assert "did not answer in 90 seconds" in str(excinfo.value)
     assert NOT_RUNNING_MESSAGE not in str(excinfo.value)
+
+
+# -- edits and exports --------------------------------------------------------
+
+
+def _editable_photo(db, tmp_path, filename="bird1.jpg", size=(640, 480)):
+    """A catalog photo whose original exists; returns ``(id, folder)``."""
+    row = db.conn.execute("SELECT id, folder_id FROM photos WHERE filename = ?", (filename,)).fetchone()
+    folder = tmp_path / "originals"
+    folder.mkdir(exist_ok=True)
+    PILImage.new("RGB", size, (90, 110, 70)).save(folder / filename, "JPEG")
+    db.conn.execute("UPDATE folders SET path = ? WHERE id = ?", (str(folder), row["folder_id"]))
+    db.conn.execute("UPDATE photos SET width = ?, height = ? WHERE id = ?", (*size, row["id"]))
+    db.commit()
+    return row["id"], folder
+
+
+def test_recipe_names_match_the_apps():
+    import inspect
+    import re
+
+    import edit_recipe
+
+    source = inspect.getsource(edit_recipe._normalize_adjustments)
+    read = set(re.findall(r'adjustments\.get\("([a-z_]+)"', source))
+    read |= set(re.findall(r'adjustments\.get\("([a-z_]+)"', inspect.getsource(edit_recipe._normalize_white_balance)))
+    known = read | set(edit_recipe._ADJUSTMENT_RANGES) | set(edit_recipe._WHITE_BALANCE_RANGES)
+    assert set(mcp_server.ADJUSTMENT_KEYS) == known
+    top = inspect.getsource(edit_recipe.normalize_recipe) + inspect.getsource(edit_recipe._normalize_geometry)
+    local = inspect.getsource(edit_recipe._normalize_local)
+    nested = {
+        "crop": set(re.findall(r'crop\["([a-z]+)"\]', inspect.getsource(edit_recipe._normalize_crop))),
+        "flip": set(re.findall(r'\("(horizontal)", "(vertical)"\)', top)[0]),
+        "adjustments.white_balance": set(edit_recipe._WHITE_BALANCE_RANGES),
+        "local": set(re.findall(r'local\.get\("([a-z_]+)"', local)),
+        "local.mask": set(re.findall(r'mask_in\.get\("([a-z_]+)"', local)),
+        "local.regions": set(re.findall(r'entry\.get\("([a-z_]+)"', local)),
+    }
+    assert {path: set(names) for path, names in mcp_server.NESTED_RECIPE_KEYS.items()} == nested
+    assert set(mcp_server.RECIPE_KEYS) == set(re.findall(r'recipe\.get\("([a-z_]+)"', top)) | {"version"}
+
+
+@pytest.mark.parametrize("recipe", [
+    {"exposure": 1}, {"adjustments": {"exposre": 1}},
+    {"adjustments": {"exposure": 1, "white_balance": {"temprature": 20}}},
+    {"crop": {"x": 0, "y": 0, "w": .5, "h": .5, "aspect": 1}}, {"flip": {"horizontl": True}},
+    {"local": {"background_denose": 5}}, {"local": {"mask": {"feathr": 1}}},
+    {"local": {"regions": [{"region": "subject", "adjustment": {}}]}},
+])
+def test_edit_tools_refuse_names_the_app_would_ignore(mcp, recipe):
+    server, db, transport = mcp
+    pid = db.photos.list_page()[0]["id"]
+    before = len(transport.calls)
+    for name, extra in (("view_edit", {}), ("save_edit", {"reason": "test"}), ("save_edit_copy", {"name": "x"}),
+                        ("suggest_tone", {})):
+        assert "no recipe setting named" in call_error(server, name, photo_id=pid, recipe=recipe, **extra)
+    assert len(transport.calls) == before
+
+
+def test_suggest_crop_frames_the_chosen_animal(mcp, tmp_path):
+    server, db, _ = mcp
+    pid, _ = _editable_photo(db, tmp_path)
+    assert "No animal was detected" in call_error(server, "suggest_crop", photo_id=pid)
+    _save_boxes(db, pid, (.4, .4, .1, .1), (.1, .1, .1, .1))
+    first = call(server, "suggest_crop", photo_id=pid, margin=0, aspect="1:1")
+    assert first["output_pixels"] == [64, 64] and first["subject_pixels"] == [64, 48]
+    assert first["crop"]["x"] == pytest.approx(.4) and first["subject_cut"] is False
+    other = next(d["id"] for d in db.detections.get(pid, min_conf=0) if d["id"] != first["detection_id"])
+    second = call(server, "suggest_crop", photo_id=pid, margin=0, aspect="1:1", detection_id=other)
+    assert second["detection_id"] == other and second["crop"]["x"] == pytest.approx(.1)
+    assert "No such animal" in call_error(server, "suggest_crop", photo_id=pid, detection_id=1)
+    assert "aspect must be" in call_error(server, "suggest_crop", photo_id=pid, aspect="wide")
+
+
+def test_view_edit_renders_without_saving(mcp, tmp_path):
+    server, db, _ = mcp
+    pid, _ = _editable_photo(db, tmp_path)
+    crop = {"crop": {"x": 0, "y": 0, "w": .5, "h": 1}}
+
+    def rendered(**kwargs):
+        facts, image = call_blocks(server, "view_edit", photo_id=pid, recipe=crop, **kwargs)
+        assert json.loads(facts.text)["photo_id"] == pid
+        with PILImage.open(io.BytesIO(base64.b64decode(image.data))) as decoded:
+            return decoded.size
+
+    assert rendered() == (320, 480)
+    assert rendered(whole_frame=True) == (640, 480)
+    assert db.get_photo_edit_recipe(pid) is None
+    tone = call(server, "suggest_tone", photo_id=pid, recipe=crop)
+    assert set(tone["adjustments"]) <= set(mcp_server.ADJUSTMENT_KEYS) and tone["style"] == "subject"
+
+
+def test_save_edit_never_replaces_an_edit_it_did_not_make(mcp, app_and_db):
+    server, db, transport = mcp
+    pid = db.photos.list_page()[0]["id"]
+    recipe = {"adjustments": {"exposure": 0.5}}
+    assert "reason" in call_error(server, "save_edit", photo_id=pid, recipe=recipe, reason=" ")
+    assert "empty" in call_error(server, "save_edit", photo_id=pid, recipe={}, reason="x")
+    saved = call(server, "save_edit", photo_id=pid, recipe=recipe, reason="show wing bars", source="test-model")
+    assert db.get_photo_edit_recipe(pid) == saved["recipe"]
+    history = db.conn.execute("SELECT description, source, reason FROM edit_history ORDER BY id DESC").fetchone()
+    assert tuple(history) == ("Saved photo edit — test-model: show wing bars", "test-model", "show wing bars")
+
+    # Its own edit can be revised; a stale or absent claim to it cannot.
+    assert "already has an edit" in call_error(server, "save_edit", photo_id=pid, recipe=recipe, reason="x")
+    revised = call(server, "save_edit", photo_id=pid, recipe={"adjustments": {"exposure": 0.7}}, reason="brighter",
+                   replaces=saved["recipe"])
+    assert "not the one in replaces" in call_error(
+        server, "save_edit", photo_id=pid, recipe=recipe, reason="x", replaces=saved["recipe"])
+    # A neutral recipe is refused before anything is written, so it cannot clear the edit.
+    before = db.conn.execute("SELECT COUNT(*) FROM edit_history").fetchone()[0]
+    assert "neutral" in call_error(server, "save_edit", photo_id=pid, recipe={"adjustments": {"exposure": 0}},
+                                   reason="x", replaces=revised["recipe"])
+    assert db.conn.execute("SELECT COUNT(*) FROM edit_history").fetchone()[0] == before
+    assert db.get_photo_edit_recipe(pid) == revised["recipe"]
+    assert app_and_db[0].test_client().post("/api/undo").status_code == 200
+    assert db.get_photo_edit_recipe(pid) == saved["recipe"]
+
+
+def test_save_edit_loses_to_an_edit_made_between_its_check_and_its_write(mcp, monkeypatch):
+    server, db, transport = mcp
+    pid = db.photos.list_page()[0]["id"]
+    original = transport.put_json
+
+    def edited_first(path, body):
+        db.set_photo_edit_recipe(pid, {"rotation": 90})
+        db.commit()
+        return original(path, body)
+
+    monkeypatch.setattr(transport, "put_json", edited_first)
+    message = call_error(server, "save_edit", photo_id=pid, recipe={"adjustments": {"exposure": 1}}, reason="x")
+    assert "409" in message and "edit changed" in message
+    assert db.get_photo_edit_recipe(pid)["rotation"] == 90
+
+
+def test_save_edit_copy_leaves_the_photos_edit_alone(mcp):
+    server, db, _ = mcp
+    pid = db.photos.list_page()[0]["id"]
+    db.set_photo_edit_recipe(pid, {"rotation": 90})
+    db.commit()
+    for neutral in ({"adjustments": {"exposure": 0}}, {"rotation": 0}):
+        assert "neutral" in call_error(server, "save_edit_copy", photo_id=pid, name="Nothing", recipe=neutral)
+    copy = call(server, "save_edit_copy", photo_id=pid, name="ID view", recipe={"adjustments": {"exposure": 1}})
+    edit = call(server, "get_edit", photo_id=pid)
+    assert edit["recipe"]["rotation"] == 90
+    assert [(v["id"], v["name"], v["kind"]) for v in edit["versions"]] == [(copy["version_id"], "ID view", "copy")]
+
+
+def _preset(app, **settings):
+    response = app.test_client().post("/api/export/presets", json={
+        "name": "Main", "settings": {"metadata_fields": ["species", "rating"], "quality": 85, **settings}})
+    assert response.status_code == 200, response.get_json()
+
+
+def _finished(server, job_id):
+    for _ in range(int(synchronization_timeout(20))):
+        job = call(server, "get_job", job_id=job_id, wait_seconds=1)
+        if job["status"] in mcp_server.TERMINAL_JOB_STATUSES:
+            return job
+    raise AssertionError(job)
+
+
+def test_export_runs_what_the_preview_described(mcp, app_and_db, tmp_path):
+    from metadata import find_exiftool
+
+    server, db, transport = mcp
+    _preset(app_and_db[0])
+    pid, _ = _editable_photo(db, tmp_path)
+    db.conn.execute("UPDATE photos SET latitude = 34.1, longitude = -118.2 WHERE id = ?", (pid,))
+    db.commit()
+    hidden = 999_999
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "bird1.jpg").write_bytes(b"already here")
+
+    preview = call(server, "preview_export", photo_ids=[pid, hidden, pid], preset="Main", destination=str(out))
+    assert preview["metadata"]["requested_fields"] == ["species", "rating", "location"]
+    assert preview["settings"]["quality"] == 85
+    assert preview["file_count"] == preview["with_coordinates"] == 1 and preview["without_coordinates"] == []
+    assert preview["files"] == [{"photo_id": pid, "path": str(out / "bird1_2.jpg"), "edited": False}]
+    assert preview["renamed"][0]["export_name"] == "bird1_2.jpg"
+    assert preview["skipped"] == [{"photo_id": hidden, "reason": "not visible in this workspace"}]
+    assert sorted(p.name for p in out.iterdir()) == ["bird1.jpg"]
+
+    started = call(server, "start_export", token=preview["token"])
+    job = _finished(server, started["job_id"])
+    if find_exiftool():
+        assert job["status"] == "completed", job
+        assert job["result"]["files"] == [str(out / "bird1_2.jpg")]
+        assert job["result"]["metadata"]["categories"]["location"]["written"] == 1
+    else:
+        # The selected metadata cannot be written, so the file is not kept.
+        assert job["status"] == "failed" and job["result"]["files"] == []
+    assert (out / "bird1.jpg").read_bytes() == b"already here"
+    body = next(c[3] for c in reversed(transport.calls) if c[1] == "/api/jobs/export")
+    assert body["metadata_fields"] == ["species", "rating", "location"] and body["photo_ids"] == [pid]
+    assert "unknown or already used" in call_error(server, "start_export", token=preview["token"])
+
+
+def test_export_without_metadata_writes_the_listed_files(mcp, tmp_path):
+    server, db, _ = mcp
+    pid, _ = _editable_photo(db, tmp_path)
+    out = tmp_path / "out"
+    preview = call(server, "preview_export", photo_ids=[pid], destination=str(out), subfolder="Robin 2024-01-15",
+                   include_location=False)
+    assert preview["metadata"]["metadata_free"] is True
+    assert preview["without_coordinates"] == [pid]
+    job = _finished(server, call(server, "start_export", token=preview["token"])["job_id"])
+    assert job["status"] == "completed", job
+    assert job["result"]["files"] == [f["path"] for f in preview["files"]]
+    assert (out / "Robin 2024-01-15" / "bird1.jpg").is_file()
+
+
+def _change_export_input(db, pid, change, folder, out):
+    if change == "edit":
+        db.set_photo_edit_recipe(pid, {"rotation": 90})
+    elif change == "coordinates":
+        db.conn.execute("UPDATE photos SET latitude = 3, longitude = 4 WHERE id = ?", (pid,))
+    elif change == "place":
+        keyword_tagging.tag_photo(db, pid, db.keywords.add("Lake Two", kw_type="location"))
+    elif change == "species":
+        keyword_tagging.tag_photo(db, pid, db.keywords.add("Bald Eagle", is_species=True))
+    elif change == "rating":
+        db.conn.execute("UPDATE photos SET rating = 5 WHERE id = ?", (pid,))
+    elif change == "time":
+        db.conn.execute("UPDATE photos SET timestamp = '2020-01-01T00:00:00' WHERE id = ?", (pid,))
+    elif change == "source":
+        PILImage.new("RGB", (640, 480), (200, 10, 10)).save(folder / "bird1.jpg", "JPEG", quality=50)
+    elif change == "same-stat source":
+        # Other bytes with the size and modification time kept, as a sync tool can do.
+        path = folder / "bird1.jpg"
+        before = path.stat()
+        path.write_bytes(path.read_bytes()[:-1] + b"x")
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        after = path.stat()
+        assert (after.st_size, after.st_mtime_ns) == (before.st_size, before.st_mtime_ns)
+    elif change == "camera":
+        # Not metadata this export writes, but camera denoising renders from it.
+        db.conn.execute("UPDATE photos SET iso = 12800 WHERE id = ?", (pid,))
+    elif change == "exif":
+        db.conn.execute("UPDATE photos SET exif_data = ? WHERE id = ?", ('{"EXIF": {"LensModel": "x"}}', pid))
+    else:
+        out.mkdir(exist_ok=True)
+        (out / "bird1.jpg").write_bytes(b"in the way")
+    db.commit()
+
+
+@pytest.mark.parametrize("change", [
+    "edit", "coordinates", "place", "species", "rating", "time", "source", "camera", "exif", "file in the way",
+    pytest.param("same-stat source", marks=pytest.mark.skipif(
+        os.name == "nt", reason="Windows reports creation time as ctime and an in-place rewrite keeps the file id")),
+])
+def test_start_export_refuses_when_the_preview_is_stale(mcp, app_and_db, tmp_path, change):
+    """The photo already has coordinates and a rating: new values count, not just presence."""
+    server, db, transport = mcp
+    _preset(app_and_db[0], metadata_fields=["species", "rating", "capture_date", "capture_time"])
+    pid, folder = _editable_photo(db, tmp_path)
+    db.conn.execute("UPDATE photos SET latitude = 1, longitude = 2, rating = 3 WHERE id = ?", (pid,))
+    db.commit()
+    out = tmp_path / "out"
+    out.mkdir()
+    preview = call(server, "preview_export", photo_ids=[pid], preset="Main", destination=str(out))
+    _change_export_input(db, pid, change, folder, out)
+    assert "differ from the preview" in call_error(server, "start_export", token=preview["token"])
+    assert not any(c[1] == "/api/jobs/export" for c in transport.calls)
+
+
+@pytest.mark.parametrize("change", ["edit", "coordinates", "species", "source", "camera", "file in the way"])
+def test_a_change_after_the_last_check_writes_nothing(mcp, app_and_db, tmp_path, monkeypatch, change):
+    """The worker checks what it loaded, so the gap before its read is closed too."""
+    server, db, transport = mcp
+    _preset(app_and_db[0])
+    pid, folder = _editable_photo(db, tmp_path)
+    out = tmp_path / "out"
+    preview = call(server, "preview_export", photo_ids=[pid], preset="Main", destination=str(out))
+    original = transport.post_json
+
+    def changed_first(path, body=None):
+        if path == "/api/jobs/export":
+            _change_export_input(db, pid, change, folder, out)
+        return original(path, body)
+
+    monkeypatch.setattr(transport, "post_json", changed_first)
+    job = _finished(server, call(server, "start_export", token=preview["token"])["job_id"])
+    assert job["status"] == "failed" and job["result"]["exported"] == 0
+    assert "changed since the export was previewed" in job["result"]["errors"][0]
+    assert sorted(p.name for p in out.glob("*")) == (["bird1.jpg"] if change == "file in the way" else [])
+
+
+def test_a_file_that_appears_during_the_run_fails_that_photo(mcp, tmp_path, monkeypatch):
+    """Past the worker's own check, the previewed path is still the only one it may write."""
+    import export
+
+    server, db, _ = mcp
+    pid, _ = _editable_photo(db, tmp_path)
+    out = tmp_path / "out"
+    preview = call(server, "preview_export", photo_ids=[pid], destination=str(out), include_location=False)
+    original = export.load_export_image
+
+    def late_file(*args, **kwargs):
+        (out / "bird1.jpg").write_bytes(b"in the way")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(export, "load_export_image", late_file)
+    job = _finished(server, call(server, "start_export", token=preview["token"])["job_id"])
+    assert job["status"] == "failed" and job["result"]["exported"] == 0
+    assert "appeared after the export was previewed" in job["result"]["errors"][0]
+    assert [(p.name, p.read_bytes()) for p in out.iterdir()] == [("bird1.jpg", b"in the way")]
+
+
+def _add_photo(db, folder, like, name):
+    PILImage.new("RGB", (64, 48)).save(folder / name, "JPEG")
+    pid = photo_ingest.add_photo(db, folder_id=db.photos.get(like)["folder_id"], filename=name, extension=".jpg",
+                                 file_size=10, file_mtime=1.0)
+    db.commit()
+    return pid
+
+
+@pytest.mark.parametrize("when", ["before its turn", "while it decodes"])
+def test_a_source_replaced_during_the_run_fails_that_photo(mcp, tmp_path, monkeypatch, when):
+    import export
+
+    server, db, _ = mcp
+    first, folder = _editable_photo(db, tmp_path)
+    second = _add_photo(db, folder, first, "bird8.jpg")
+    out = tmp_path / "out"
+    preview = call(server, "preview_export", photo_ids=[first, second], destination=str(out), include_location=False)
+    original = export.load_export_image
+
+    def replacing(photo, *args, **kwargs):
+        image = original(photo, *args, **kwargs)
+        if photo["id"] == (first if when == "before its turn" else second):
+            PILImage.new("RGB", (64, 48), (250, 0, 0)).save(folder / "bird8.jpg", "JPEG")
+        return image
+
+    monkeypatch.setattr(export, "load_export_image", replacing)
+    job = _finished(server, call(server, "start_export", token=preview["token"])["job_id"])
+    assert job["status"] == "failed" and job["result"]["exported"] == 1
+    assert job["result"]["errors"] == ["bird8.jpg: source file changed since the export was previewed"]
+    assert [p.name for p in out.iterdir()] == ["bird1.jpg"]
+
+
+def test_export_of_several_photos_writes_every_previewed_path(mcp, tmp_path):
+    """Names that collide within one export are planned the same way twice."""
+    server, db, _ = mcp
+    pid, folder = _editable_photo(db, tmp_path)
+    ids = [pid, _add_photo(db, folder, pid, "bird8.jpg"), _add_photo(db, folder, pid, "bird9.jpg")]
+    transport_preset = {"name": "Seq", "settings": {"naming_template": "{folder}/shot"}}
+    mcp[2].post_json("/api/export/presets", transport_preset)
+    preview = call(server, "preview_export", photo_ids=ids, preset="Seq", destination=str(tmp_path / "out"),
+                   include_location=False)
+    assert len({f["path"] for f in preview["files"]}) == 3
+    job = _finished(server, call(server, "start_export", token=preview["token"])["job_id"])
+    assert job["status"] == "completed", job
+    assert job["result"]["files"] == [f["path"] for f in preview["files"]]
+
+
+@pytest.mark.parametrize("bad", [
+    [], {"x": {"path": "a", "content_key": "b"}}, {"1": "key"}, {"1": {"path": "a"}},
+])
+def test_export_route_refuses_malformed_expected_content(mcp, tmp_path, bad):
+    _, db, transport = mcp
+    pid, _ = _editable_photo(db, tmp_path)
+    with pytest.raises(mcp_server.VireoError, match="expected_content must map"):
+        transport.post_json("/api/jobs/export", {
+            "photo_ids": [pid], "destination": str(tmp_path / "out"), "expected_content": bad})
+
+
+def test_export_refuses_when_a_previewed_photo_left_the_workspace(mcp, tmp_path, monkeypatch):
+    server, db, transport = mcp
+    pid, _ = _editable_photo(db, tmp_path)
+    preview = call(server, "preview_export", photo_ids=[pid], destination=str(tmp_path / "out"))
+    original = transport.post_json
+
+    def with_another_photo(path, body=None):
+        if path == "/api/jobs/export":
+            body = {**body, "photo_ids": [*body["photo_ids"], *(p["id"] for p in db.photos.list_page())]}
+        return original(path, body)
+
+    monkeypatch.setattr(transport, "post_json", with_another_photo)
+    message = call_error(server, "start_export", token=preview["token"])
+    assert "409" in message and "differ from the previewed ones" in message
+
+
+def test_metadata_left_out_of_an_export_does_not_stale_its_preview(mcp, tmp_path):
+    server, db, transport = mcp
+    pid, _ = _editable_photo(db, tmp_path)
+    preview = call(server, "preview_export", photo_ids=[pid], destination=str(tmp_path / "out"),
+                   include_location=False)
+    db.conn.execute("UPDATE photos SET rating = 5 WHERE id = ?", (pid,))
+    db.commit()
+    assert call(server, "start_export", token=preview["token"])["job_id"]
+
+
+def test_preview_export_refuses_what_it_cannot_describe(mcp, app_and_db, tmp_path, monkeypatch):
+    server, db, transport = mcp
+    _preset(app_and_db[0])
+    pid, folder = _editable_photo(db, tmp_path)
+    assert "at least one" in call_error(server, "preview_export", photo_ids=[])
+    assert "['Main']" in call_error(server, "preview_export", photo_ids=[pid], preset="Other")
+    assert "one photo" in call_error(server, "preview_export", photo_ids=[pid, pid + 1], version_id="x")
+    assert "absolute" in call_error(server, "preview_export", photo_ids=[pid], destination="exports")
+    (folder / "bird1.jpg").unlink()
+    assert "no readable original" in call_error(
+        server, "preview_export", photo_ids=[pid], destination=str(tmp_path / "out"))
+    monkeypatch.setattr(transport, "post_json", lambda path, body: {"renames": [], "metadata": {}})
+    assert "older than this connector" in call_error(
+        server, "preview_export", photo_ids=[pid], destination=str(tmp_path / "out"))
+
+
+def test_export_of_a_virtual_copy_names_that_version(mcp, tmp_path):
+    server, db, transport = mcp
+    pid, _ = _editable_photo(db, tmp_path)
+    copy = call(server, "save_edit_copy", photo_id=pid, name="ID view", recipe={"adjustments": {"exposure": 1}})
+    preview = call(server, "preview_export", photo_ids=[pid], destination=str(tmp_path / "out"),
+                   version_id=copy["version_id"])
+    assert preview["files"][0]["edited"] is True
+    body = next(c[3] for c in reversed(transport.calls) if c[1] == "/api/jobs/export/preflight")
+    assert body["version_id"] == copy["version_id"] and body["version_revision"]
+
+
+def test_list_export_presets(mcp, app_and_db):
+    _preset(app_and_db[0])
+    presets = call(mcp[0], "list_export_presets")["presets"]
+    assert [p["name"] for p in presets] == ["Main"]
+
+
+def test_job_summary_drops_worker_detail_and_cuts_long_lists():
+    job = {"id": "j", "type": "export", "status": "failed", "_private": 1, "config": {"photo_ids": [1]},
+           "progress": {"current": 2, "total": 3, "current_file": "a.jpg", "noise": 1},
+           "errors": [f"e{i}" for i in range(60)], "result": {"exported": 1, "files": list(range(60))}}
+    out = mcp_server.job_summary(job)
+    assert out["progress"] == {"current": 2, "total": 3, "current_file": "a.jpg"}
+    assert len(out["errors"]) == mcp_server.MAX_JOB_LIST and out["error_count"] == 60
+    assert len(out["result"]["files"]) == mcp_server.MAX_JOB_LIST and out["result"]["files_total"] == 60
+    assert out["result"]["exported"] == 1
+    assert "_private" not in out and "config" not in out
+
+
+def test_get_job_reports_an_unknown_job(mcp):
+    assert "Vireo answered 404" in call_error(mcp[0], "get_job", job_id="export/../nope")
+
+
+def test_edit_and_export_tools_advertise_side_effects(mcp):
+    tools = {tool.name: tool.model_dump(by_alias=True)["annotations"] for tool in anyio.run(mcp[0].list_tools)}
+    for name in ("get_edit", "suggest_crop", "suggest_tone", "view_edit", "list_export_presets",
+                 "preview_export", "get_job"):
+        assert tools[name]["readOnlyHint"] is True, name
+    for name in ("save_edit", "save_edit_copy", "start_export"):
+        assert tools[name]["readOnlyHint"] is False and tools[name]["destructiveHint"] is False, name
 
 
 def _eagles(db):

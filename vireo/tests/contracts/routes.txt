@@ -122,6 +122,7 @@ GET          /api/photos/<int:photo_id>/edit-recipe
 GET          /api/photos/<int:photo_id>/mask-reviews/<int:review_id>.png
 GET          /api/photos/<int:photo_id>/pipeline
 GET          /api/photos/<int:photo_id>/similar
+GET          /api/photos/<int:photo_id>/subject-crop
 GET          /api/photos/<int:photo_id>/subjects
 GET          /api/photos/<int:photo_id>/versions/<version_id>/history
 GET          /api/photos/<int:pid>/masks

@@ -25,9 +25,10 @@ if TYPE_CHECKING:
 
 def _photo_export_work(
     ctx: JobLaunch, photo_ids: list[int], destination: str, *, vireo_dir: str,
-    options: JsonDict, reveal_after_export: bool,
+    options: JsonDict, reveal_after_export: bool, list_files: bool,
 ) -> Callable[..., JsonDict]:
     """The ``export`` job's work function for an already-validated request."""
+    options = {**options, "collect_files": reveal_after_export or list_files}
 
     def work(job: JobDict) -> JsonDict:
         from export import export_photos, reveal_exported_files
@@ -68,11 +69,54 @@ def _photo_export_work(
             and not ctx.runner.is_cancelled(job["id"])
             and reveal_exported_files(exported_files)
         )
+        if list_files:
+            result["files"] = exported_files
         # Per-photo export failures fail the job (the runner folds them in).
         result["ok"] = not result.get("errors")
         return result
 
     return work
+
+
+#: Most photos a preflight will list file by file (``list_files``).
+MAX_LISTED_FILES = 500
+
+
+def _preflight_listing(
+    db: Database, preview: JsonDict, hidden: list[int], fields: list[str], version_options: JsonDict,
+) -> JsonDict:
+    """Every output with what it would carry, and why other photos are left out."""
+    from export import describe_export_files
+
+    return {
+        "files": describe_export_files(db, preview["files"], fields, version_options.get("recipe_overrides")),
+        "skipped": [*({"photo_id": pid, "reason": "not visible in this workspace"} for pid in hidden),
+                    *preview["skipped"]],
+    }
+
+
+def _expected_content(body: JsonDict, photo_ids: list[int]) -> dict[int, tuple[str, str]] | None:
+    """Each photo's previewed ``(path, content key)``, when the body has them.
+
+    They must cover exactly the photos to export, once each, so a photo that
+    left the workspace since the preview is refused, not silently dropped.
+    Raises ``ValueError`` when they do not, or are malformed.
+    """
+    raw = body.get("expected_content")
+    if raw is None:
+        return None
+    malformed = ValueError("expected_content must map photo ids to a previewed path and content_key")
+    if not isinstance(raw, dict):
+        raise malformed
+    expected = {}
+    for pid, entry in raw.items():
+        values = (entry.get("path"), entry.get("content_key")) if isinstance(entry, dict) else (None, None)
+        if not pid.isdecimal() or not all(isinstance(value, str) for value in values):
+            raise malformed
+        expected[int(pid)] = values
+    if sorted(expected) != sorted(photo_ids):
+        raise ValueError("The photos to export differ from the previewed ones.")
+    return expected
 
 
 def create_export_blueprint(
@@ -216,7 +260,11 @@ def create_export_blueprint(
 
     @blueprint.route("/api/jobs/export/preflight", methods=["POST"])
     def api_job_export_preflight() -> ResponseReturnValue:
-        """Preview filenames, destinations and the explicit metadata selection."""
+        """Preview filenames, destinations and the explicit metadata selection.
+
+        ``list_files`` adds every output path with its location and edit state,
+        and the photos that would not be written.
+        """
         body = request.get_json(silent=True) or {}
         raw_ids = body.get("photo_ids", [])
         destination = body.get("destination", "")
@@ -261,7 +309,11 @@ def create_export_blueprint(
             return json_error(str(exc))
 
         db = get_db()
+        list_files = body.get("list_files") is True
+        if list_files and len(photo_ids) > MAX_LISTED_FILES:
+            return json_error(f"list_files covers at most {MAX_LISTED_FILES} photos")
         visible_set = set(db.photo_visibility.visible_photo_ids(photo_ids))
+        hidden = [pid for pid in photo_ids if pid not in visible_set]
         photo_ids = [pid for pid in photo_ids if pid in visible_set]
         if not photo_ids:
             return json_error("no exportable photos in current workspace")
@@ -294,6 +346,8 @@ def create_export_blueprint(
             )
         except ExportPreflightError as exc:
             return json_error(str(exc), status=409)
+        listing = (_preflight_listing(db, preview, hidden, metadata["requested_fields"], version_options)
+                   if list_files else {})
         renames = preview["renames"]
         destination_folders = preview["destination_folders"]
         return jsonify({
@@ -303,6 +357,7 @@ def create_export_blueprint(
             "destination_folder_count": len(destination_folders),
             "destination_folders": destination_folders[:20],
             "metadata": metadata,
+            **listing,
         })
 
     @blueprint.route("/api/jobs/export", methods=["POST"])
@@ -365,6 +420,7 @@ def create_export_blueprint(
             return json_error("no exportable photos in current workspace")
         try:
             version_options = export_version_options(db, photo_ids, body, media_root(config["THUMB_CACHE_DIR"]))
+            expected_content = _expected_content(body, photo_ids)
         except ValueError as exc:
             return json_error(str(exc), 409)
         vireo_dir = media_root(config["THUMB_CACHE_DIR"])
@@ -376,7 +432,7 @@ def create_export_blueprint(
 
         work = _photo_export_work(
             ctx, photo_ids, destination, vireo_dir=vireo_dir,
-            reveal_after_export=reveal_after_export,
+            reveal_after_export=reveal_after_export, list_files=body.get("list_files") is True,
             options={
                 "naming_template": naming_template,
                 "max_size": max_size,
@@ -387,7 +443,7 @@ def create_export_blueprint(
                 "metadata_fields": metadata_fields,
                 "export_to_subfolder": export_to_subfolder,
                 "subfolder_name": subfolder_name,
-                "collect_files": reveal_after_export,
+                "expected_content": expected_content,
                 **version_options,
             },
         )

@@ -19,6 +19,8 @@ SKILL_FILES = sorted(SKILLS.glob("*/SKILL.md"))
 def _tool_calls(text):
     """``(name, {parameter})`` for each call written as inline code."""
     calls = []
+    # A fence's own backticks would pair with the next inline span's.
+    text = re.sub(r"^```.*?^```", "", text, flags=re.DOTALL | re.MULTILINE)
     for span in re.findall(r"`([^`]+)`", text):
         if re.fullmatch(r"[a-z_]+\(.*\)", span, re.DOTALL) is None:
             continue

@@ -2,6 +2,7 @@
 
 import contextlib
 import hashlib
+import json
 import logging
 import os
 import re
@@ -12,6 +13,7 @@ import tempfile
 import time
 
 from config import config_value
+from edit_recipe import recipe_to_json
 from export_metadata import export_metadata_args as _export_metadata_args
 from export_metadata import timestamp_parts
 from image_edits import apply_recipe_to_loaded_image
@@ -692,6 +694,11 @@ def export_photos(db, vireo_dir, photo_ids, destination=None, options=None,
                 file. Supported values are species, capture_date,
                 capture_time, rating, location, and camera. The default is an
                 empty list, preserving the existing metadata-free export.
+            expected_content: dict -- photo id to the ``(path, content_key)``
+                ``describe_export_files`` gave it. When any differs now, the
+                run writes nothing and reports each changed photo; a file that
+                appears at a path during the run fails that photo instead of
+                renaming its output, and so does a source file that changes.
             export_to_subfolder: bool -- create a subfolder beneath the
                 shared destination or each original photo's folder.
             subfolder_name: str -- name of that subfolder (a single path
@@ -752,6 +759,103 @@ def _export_requested_path(photo, folder_path, photo_destination, template,
     return requested_path
 
 
+def _export_location_map(db, photo_ids):
+    """Each photo's coordinates and named place, as export metadata writes them."""
+    locations = db.locations.get_effective(photo_ids, verify_workspace=False)
+    leaves = db.locations.get_photo_leaves(photo_ids)
+    paths = db.locations.get_photo_paths(leaves)
+    cached = db.locations.cached_place_details([
+        row["place_id"] for row in leaves.values() if row["place_id"]
+    ])
+    for pid, row in leaves.items():
+        locations.setdefault(pid, {}).update({
+            "hierarchy": paths[pid], "place_id": row["place_id"],
+            "place_details": cached.get(row["place_id"]),
+        })
+    return locations
+
+
+#: The photo columns a render reads: its frame, its fallback companion, and the
+#: camera and lens identity behind camera denoising and lens correction. The
+#: photo's EXIF is the other input, and is digested whole.
+_RENDER_COLUMNS = (
+    "filename", "extension", "width", "height", "companion_path", "camera_make", "camera_model",
+    "iso", "lens", "focal_length", "aperture",
+)
+
+
+def _file_identity(path):
+    """The file at ``path`` now, so that a replacement reads as another file.
+
+    Inode and change time catch a rewrite that keeps the size and modification
+    time. The content is not hashed: an export can name hundreds of RAW files
+    on a network volume, and this runs three times per export.
+    """
+    try:
+        stat = os.stat(path)
+    except (OSError, TypeError):
+        return [path]
+    return [path, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_dev, stat.st_ino]
+
+
+def _source_identities(photo, folder_path, source_path):
+    """The selected source and the companion a RAW render can fall back to."""
+    companion = _photo_value(photo, "companion_path")
+    return [
+        _file_identity(source_path),
+        _file_identity(os.path.join(folder_path, companion)) if companion else None,
+    ]
+
+
+def _export_content_key(photo, folder_path, source_path, recipe, exif_data, metadata_args):
+    """A digest of everything that decides one output's pixels and metadata."""
+    state = [
+        _source_identities(photo, folder_path, source_path),
+        [_photo_value(photo, column) for column in _RENDER_COLUMNS],
+        exif_data, recipe_to_json(recipe), metadata_args,
+    ]
+    return hashlib.sha256(json.dumps(state, default=str).encode()).hexdigest()[:16]
+
+
+def describe_export_files(db, files, metadata_fields, recipe_overrides=None):
+    """What each previewed output would carry, with a key over all of it.
+
+    ``files`` are ``preview_export``'s entries. ``content_key`` digests the
+    source files' identity, the edit, what the renderer reads from the catalog
+    and the exact metadata values the export would write, so any catalog or
+    file change that would alter an output alters its key.
+    """
+    ids = [entry["photo_id"] for entry in files]
+    fields = normalize_metadata_fields(metadata_fields)
+    photos = db.photos.get_by_ids(ids)
+    species = db.photo_species.get_species_for_photos(ids)
+    exif = _get_photo_exif_data(db, ids)
+    camera = _get_photo_camera_data(db, ids) if "camera" in fields else {}
+    locations = _export_location_map(db, ids)
+    recipes = {**db.edits.get_photo_recipes(ids), **(recipe_overrides or {})}
+    folders = db.workspace_folders.visible_folder_paths(db.require_workspace_id())
+
+    def described(entry):
+        pid = entry["photo_id"]
+        location = locations.get(pid, {})
+        edit = recipes.get(pid)
+        metadata = _export_metadata_args(
+            fields, photos[pid], species.get(pid, []), camera.get(pid, {}), location,
+            source_metadata=exif.get(pid),
+        )
+        return {
+            "photo_id": pid, "path": entry["path"], "edited": recipe_to_json(edit) is not None,
+            "has_coordinates": location.get("latitude") is not None and location.get("longitude") is not None,
+            "has_place_name": bool(location.get("hierarchy")),
+            "content_key": _export_content_key(
+                photos[pid], folders.get(photos[pid]["folder_id"], ""), entry["source_path"], edit,
+                exif.get(pid), metadata,
+            ),
+        }
+
+    return [described(entry) for entry in files]
+
+
 class _PhotoExportBatch:
     """Per-run catalog inputs, output accounting, and metadata completion."""
 
@@ -785,9 +889,8 @@ class _PhotoExportBatch:
             if options.get("export_to_subfolder") else ""
         )
         collect_files = bool(options.get("collect_files", False))
-
-        if self.destination:
-            os.makedirs(self.destination, exist_ok=True)
+        self.expected_content = options.get("expected_content")
+        self.previewed_sources = {}
 
         self._load_catalog(db)
 
@@ -835,20 +938,8 @@ class _PhotoExportBatch:
             _get_photo_camera_data(db, self.photo_ids) if "camera" in self.metadata_fields else {}
         )
         self.location_map = (
-            db.locations.get_effective(self.photo_ids, verify_workspace=False)
-            if "location" in self.metadata_fields else {}
+            _export_location_map(db, self.photo_ids) if "location" in self.metadata_fields else {}
         )
-        if "location" in self.metadata_fields:
-            leaves = db.locations.get_photo_leaves(self.photo_ids)
-            paths = db.locations.get_photo_paths(leaves)
-            cached = db.locations.cached_place_details([
-                row["place_id"] for row in leaves.values() if row["place_id"]
-            ])
-            for pid, row in leaves.items():
-                self.location_map.setdefault(pid, {}).update({
-                    "hierarchy": paths[pid], "place_id": row["place_id"],
-                    "place_details": cached.get(row["place_id"]),
-                })
 
         # Get species keywords for all photos in one query
         self.species_map = db.photo_species.get_species_for_photos(self.photo_ids)
@@ -857,6 +948,10 @@ class _PhotoExportBatch:
 
     def run(self):
         """Export each photo, then finish queued metadata writes."""
+        if self._refuse_changed_content():
+            return self._result()
+        if self.destination:
+            os.makedirs(self.destination, exist_ok=True)
         for i, pid in enumerate(self.photo_ids):
             if self.cancel_check and self.cancel_check():
                 break
@@ -872,6 +967,89 @@ class _PhotoExportBatch:
                 self.progress_cb(i + 1, len(self.photo_ids), photo["filename"])
         self._finish_metadata()
         return self._result()
+
+    def _refuse_changed_content(self):
+        """Whether any photo differs from what the caller previewed.
+
+        Compares the loaded catalog data this run renders from and the output
+        paths it would use, so nothing is written when an edit, a metadata
+        value, a source file or a name changed after the preview. Each changed
+        photo is an error.
+        """
+        if self.expected_content is None:
+            return False
+        seq_counters = {}
+        reservations = {}
+        try:
+            for pid in self.photo_ids:
+                photo = self.photos_map.get(pid)
+                planned = self._planned_output(photo, seq_counters, reservations) if photo is not None else None
+                if planned is None or planned != self.expected_content.get(pid):
+                    name = photo["filename"] if photo is not None else f"Photo {pid}"
+                    self.errors.append(f"{name}: changed since the export was previewed; nothing was exported")
+        finally:
+            for group in reservations.values():
+                for reservation in group:
+                    reservation.close()
+        return bool(self.errors)
+
+    def _planned_output(self, photo, seq_counters, reservations):
+        """This photo's ``(path, content key)`` now, or None when it would not be written."""
+        pid = photo["id"]
+        folder_path = self.folders.get(photo["folder_id"], "")
+        recipe, exif_data = self.edit_recipes.get(pid), self.exif_data_map.get(pid)
+        species = self.species_map.get(pid, [])
+        # Taken before the key, so a change between the two fails the later check.
+        self.previewed_sources[pid] = self._source_files(photo)
+        source_path = self._source_path(photo)
+        requested, _base, reason = _preview_requested_path(
+            photo, folder_path, source_path, self.destination, self.subfolder, self.template,
+            self.output_ext, species, seq_counters,
+        )
+        if reason:
+            return None
+        metadata = _export_metadata_args(
+            self.metadata_fields, photo, species, self.camera_data_map.get(pid, {}),
+            self.location_map.get(pid, {}), source_metadata=exif_data,
+        )
+        return (
+            _reserve_preview_export_path(requested, reservations),
+            _export_content_key(photo, folder_path, source_path, recipe, exif_data, metadata),
+        )
+
+    def _source_path(self, photo):
+        pid = photo["id"]
+        return _select_export_source(
+            photo=photo, folder_path=self.folders.get(photo["folder_id"], ""), folders=self.folders,
+            recipe=self.edit_recipes.get(pid), max_size=self.max_size, wc_max=self.wc_max,
+            vireo_dir=self.vireo_dir, developed_dir=self.developed_dir,
+            developed_index=self.developed_index, output_ext=self.output_ext,
+            exif_data=self.exif_data_map.get(pid),
+        )
+
+    def _source_files(self, photo):
+        """The identity of every file this photo's pixels can come from."""
+        folder_path = self.folders.get(photo["folder_id"], "")
+        return _source_identities(photo, folder_path, self._source_path(photo))
+
+    def _claim_output(self, photo, out_path):
+        """Open the output for pixels that are already decoded.
+
+        With a preview, the files they came from must still be the previewed
+        ones: checked after decoding, this also catches a source replaced or
+        a working copy evicted while earlier photos rendered. Only the
+        previewed path is written.
+        """
+        if self.expected_content is None:
+            return _claim_export_path(out_path)
+        if self._source_files(photo) != self.previewed_sources[photo["id"]]:
+            raise ValueError("source file changed since the export was previewed")
+        path = self.expected_content[photo["id"]][0]
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        try:
+            return path, open(path, "xb")
+        except FileExistsError:
+            raise FileExistsError(f"{path} appeared after the export was previewed") from None
 
     def _export_photo(self, photo):
         """Resolve the destination and safe output name for one photo."""
@@ -929,7 +1107,7 @@ class _PhotoExportBatch:
                 developed_index=self.developed_index, output_ext=self.output_ext,
             )
             try:
-                out_path, output_stream = _claim_export_path(out_path)
+                out_path, output_stream = self._claim_output(photo, out_path)
                 claimed_out_path = out_path
                 try:
                     _save_export_image(
@@ -2160,11 +2338,28 @@ def _reserve_preview_export_path(requested_path, destination_reservations):
     return export_path
 
 
+def _preview_requested_path(photo, folder_path, source_path, destination, subfolder,
+                            template, output_ext, species_list, seq_counters):
+    """``(path, destination_base, None)``, or why this photo would not be written."""
+    if not source_path or not os.path.isfile(source_path):
+        return None, None, "no readable original or working copy"
+    base = destination or folder_path
+    if not base or (not destination and not os.path.isdir(base)):
+        return None, None, "original folder is not reachable"
+    photo_destination = os.path.normpath(os.path.join(base, subfolder) if subfolder else base)
+    path = _export_requested_path(
+        photo, folder_path, photo_destination, template, output_ext,
+        species_list[0] if species_list else None, seq_counters,
+    )
+    return (path, base, None) if path is not None else (None, None, "unsafe output path")
+
+
 def preview_export(db, photo_ids, destination=None, options=None):
     """Preview where an export would write and which names it would change.
 
-    Returns ``{"renames": [...], "destination_folders": [...]}``, with distinct
-    template roots listed in export order, before any export subfolder.
+    Returns ``{"renames", "destination_folders", "files", "skipped"}``: the
+    distinct template roots in export order, before any export subfolder, one
+    ``files`` entry per output, and why each other photo would not be written.
     Source, naming, sequence and deduplication rules match export without
     rendering files. Later filesystem changes can still introduce collisions.
     """
@@ -2197,12 +2392,15 @@ def preview_export(db, photo_ids, destination=None, options=None):
     seq_counters = {}
     destination_reservations = {}
     renames = []
+    files = []
+    skipped = []
     destination_folders = []
     seen_destination_folders = set()
 
     for pid in photo_ids:
         photo = photos_map.get(pid)
         if not photo:
+            skipped.append({"photo_id": pid, "reason": "not in the catalog"})
             continue
 
         folder_path = folders.get(photo["folder_id"], "")
@@ -2219,31 +2417,18 @@ def preview_export(db, photo_ids, destination=None, options=None):
             output_ext=output_ext,
             exif_data=exif_data_map.get(pid),
         )
-        if not source_path or not os.path.isfile(source_path):
-            continue
-
-        destination_base = destination or folder_path
-        if not destination_base:
-            continue
-        if not destination and not os.path.isdir(destination_base):
-            continue
-        photo_destination = os.path.normpath(
-            os.path.join(destination_base, subfolder)
-            if subfolder else destination_base
+        requested_path, destination_base, reason = _preview_requested_path(
+            photo, folder_path, source_path, destination, subfolder, template,
+            output_ext, species_map.get(pid, []), seq_counters,
         )
-
-        species_list = species_map.get(pid, [])
-        species = species_list[0] if species_list else None
-        requested_path = _export_requested_path(
-            photo, folder_path, photo_destination, template, output_ext,
-            species, seq_counters,
-        )
-        if requested_path is None:
+        if reason:
+            skipped.append({"photo_id": pid, "reason": reason})
             continue
 
         export_path = _reserve_preview_export_path(
             requested_path, destination_reservations,
         )
+        files.append({"photo_id": pid, "path": export_path, "source_path": source_path})
         destination_folder = os.path.normpath(destination_base)
         if destination_folder not in seen_destination_folders:
             seen_destination_folders.add(destination_folder)
@@ -2259,4 +2444,5 @@ def preview_export(db, photo_ids, destination=None, options=None):
     for reservation_group in destination_reservations.values():
         for reservations in reservation_group:
             reservations.close()
-    return {"renames": renames, "destination_folders": destination_folders}
+    return {"renames": renames, "destination_folders": destination_folders,
+            "files": files, "skipped": skipped}

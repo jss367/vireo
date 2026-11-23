@@ -1407,6 +1407,35 @@ def test_job_export_preflight_reports_destination_folders(
     assert data["destination_folder_count"] == 1
     assert data["destination_folders"] == [str(tmp_path / "out")]
 
+def test_job_export_preflight_lists_files_only_when_asked(app_and_db, tmp_path, monkeypatch):
+    import web.export as web_export
+
+    app, db = app_and_db
+    client = app.test_client()
+    photo = db.conn.execute("SELECT id, folder_id FROM photos WHERE filename = 'bird1.jpg'").fetchone()
+    Image.new("RGB", (20, 20)).save(tmp_path / "bird1.jpg", "JPEG")
+    db.conn.execute("UPDATE folders SET path = ? WHERE id = ?", (str(tmp_path), photo["folder_id"]))
+    db.commit()
+    body = {"photo_ids": [photo["id"], 999_999], "destination": str(tmp_path / "out")}
+    plain = client.post("/api/jobs/export/preflight", json=body).get_json()
+    assert "files" not in plain and "skipped" not in plain
+
+    body["list_files"] = True
+    listed = client.post("/api/jobs/export/preflight", json=body).get_json()
+    key = listed["files"][0].pop("content_key")
+    assert listed["files"] == [{
+        "photo_id": photo["id"], "path": str(tmp_path / "out" / "bird1.jpg"), "edited": False,
+        "has_coordinates": False, "has_place_name": False,
+    }]
+    assert listed["skipped"] == [{"photo_id": 999_999, "reason": "not visible in this workspace"}]
+    db.set_photo_edit_recipe(photo["id"], {"rotation": 90})
+    db.commit()
+    edited = client.post("/api/jobs/export/preflight", json=body).get_json()["files"][0]
+    assert edited["edited"] is True and edited["content_key"] != key
+    monkeypatch.setattr(web_export, "MAX_LISTED_FILES", 1)
+    assert client.post("/api/jobs/export/preflight", json=body).status_code == 400
+
+
 def test_job_export_preflight_reports_unverifiable_destination(
     app_and_db, monkeypatch,
 ):

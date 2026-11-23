@@ -17,11 +17,14 @@ Design: ``docs/plans/2026-10-17-mcp-server-design.md``.
 """
 
 import contextlib
+import hashlib
 import ipaddress
 import json
 import os
+import secrets
 import shlex
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -79,6 +82,16 @@ Bursts: list_bursts lists a folder's bursts and burst ranks one burst's frames.
 The ranking is provisional: Vireo names no keeper, so compare the frames with
 focus_crop before flagging any. A burst with the reason unanalyzed_frames has
 frames the ranking does not cover; run Process on them before choosing.
+
+Edits: suggest_crop, suggest_tone and view_edit change nothing. Look at an edit
+with view_edit before save_edit, which is one Undo step and refuses to replace
+an edit the photo already has. That edit is the user's: export it as it is, or
+put another look in save_edit_copy, which leaves it alone.
+
+Exports: Undo cannot remove exported files. preview_export reports what would
+be written and returns a token; show the user the destination, and call
+start_export with that token. Follow the job with get_job and report what it
+wrote, not what was asked for.
 
 Writing: set_flag, set_rating, add_keyword and remove_keyword change the
 catalog through the same routes the UI uses, so each call is one Undo step
@@ -163,6 +176,40 @@ DEFAULT_FOCUS_SIZE = 768
 # Below this share of the original's size a decoded image is a downsized copy
 # (``focus_crop.prefer_original`` draws the same line).
 FULL_SCALE = 0.98
+# The names a recipe may use (``edit_recipe``; tests keep them equal). The app
+# ignores a name it does not know, so a misspelled one would save nothing.
+RECIPE_KEYS = ("version", "crop", "rotation", "straighten", "flip", "adjustments", "local")
+ADJUSTMENT_KEYS = (
+    "exposure", "highlights", "shadows", "whites", "blacks", "contrast", "vibrance", "saturation",
+    "texture", "clarity", "dehaze", "sharpen", "sharpen_radius", "noise_reduction", "denoise_mode",
+    "distortion", "vignetting", "defringe_purple", "defringe_green", "lens_profile",
+    "white_balance", "temperature", "tint", "tone_curve", "point_curves", "point_color", "hsl",
+    "color_grading",
+)
+# Names inside the objects the app reads without refusing unknown ones; it
+# refuses them itself in the other nested adjustments and local adjustments.
+NESTED_RECIPE_KEYS = {
+    "crop": ("x", "y", "w", "h"),
+    "flip": ("horizontal", "vertical"),
+    "adjustments.white_balance": ("temperature", "tint"),
+    "local": ("mask", "regions", "background_denoise"),
+    "local.mask": ("ref", "source_digest", "corrected", "feather"),
+    "local.regions": ("region", "adjustments"),
+}
+DEFAULT_EDIT_SIZE = 1600
+MIN_EDIT_SIZE, MAX_EDIT_SIZE = 256, 2048
+OUTDATED_APP_MESSAGE = (
+    "The running Vireo is older than this connector and cannot {what}. Update Vireo and try again."
+)
+# Previews a start_export can still redeem; older ones must be previewed again.
+MAX_PENDING_EXPORTS = 20
+MAX_JOB_WAIT = 50
+JOB_POLL_SECONDS = 1.0
+TERMINAL_JOB_STATUSES = ("completed", "failed", "cancelled")
+_JOB_KEYS = ("id", "type", "status", "started_at", "finished_at", "current_step", "historical")
+_PROGRESS_KEYS = ("current", "total", "current_file", "phase")
+# Longest list a job result keeps before it is cut and its length reported.
+MAX_JOB_LIST = 50
 FIND_HEAD = 'Find the head with view_photo(view="source") and pass its center_x and center_y.'
 _COLLECTION_KEYS = ("id", "name", "photo_count", "available_photo_count",
                     "offline_photo_count", "has_visual", "can_add_photos")
@@ -302,10 +349,16 @@ class VireoClient:
         self._check(status, headers, body)
         return json.loads(body.decode("utf-8"))
 
-    def post_json(self, path, json_body=None):
-        status, headers, body = self.request("POST", path, json_body=json_body or {})
+    def _send_json(self, method, path, json_body):
+        status, headers, body = self.request(method, path, json_body=json_body or {})
         self._check(status, headers, body)
         return json.loads(body.decode("utf-8")) if body else {}
+
+    def post_json(self, path, json_body=None):
+        return self._send_json("POST", path, json_body)
+
+    def put_json(self, path, json_body=None):
+        return self._send_json("PUT", path, json_body)
 
     def get_with_headers(self, path, params=None):
         """``(headers, body)``, for a route that describes its image in headers."""
@@ -540,6 +593,55 @@ def photo_detail(photo, include_exif=False, readiness=None):
     return out
 
 
+def check_recipe(recipe):
+    """Refuse a recipe holding a name the app would silently ignore."""
+    adjustments = recipe.get("adjustments") or {}
+    if not isinstance(adjustments, dict):
+        raise VireoError("adjustments must be an object")
+    unknown = [key for key in recipe if key not in RECIPE_KEYS]
+    unknown += [f"adjustments.{key}" for key in adjustments if key not in ADJUSTMENT_KEYS]
+    for path, names in NESTED_RECIPE_KEYS.items():
+        value = recipe
+        for part in path.split("."):
+            value = value.get(part) if isinstance(value, dict) else None
+        for entry in value if isinstance(value, list) else [value]:
+            if isinstance(entry, dict):
+                unknown += [f"{path}.{key}" for key in entry if key not in names]
+    if unknown:
+        raise VireoError(
+            f"Vireo has no recipe setting named {unknown}. A recipe holds {list(RECIPE_KEYS)}; "
+            f"adjustments holds {list(ADJUSTMENT_KEYS)}; "
+            + "; ".join(f"{path} holds {list(names)}" for path, names in NESTED_RECIPE_KEYS.items()) + "."
+        )
+
+
+def job_summary(job):
+    """A job without its worker detail; long result lists are cut and counted."""
+    progress = job.get("progress")
+    errors = job.get("errors")
+    errors = errors if isinstance(errors, list) else []
+    return {
+        **_pick(job, _JOB_KEYS),
+        "progress": _pick(progress, _PROGRESS_KEYS) if isinstance(progress, dict) else None,
+        "errors": errors[:MAX_JOB_LIST],
+        "error_count": len(errors),
+        "result": _cut_lists(job.get("result")),
+    }
+
+
+def _cut_lists(value):
+    if isinstance(value, dict):
+        out = {}
+        for key, item in value.items():
+            out[key] = _cut_lists(item)
+            if isinstance(item, list) and len(item) > MAX_JOB_LIST:
+                out[f"{key}_total"] = len(item)
+        return out
+    if isinstance(value, list):
+        return [_cut_lists(item) for item in value[:MAX_JOB_LIST]]
+    return value
+
+
 def keyword_paths(rows):
     """Each keyword with ``path``: its ancestors joined with `` / ``."""
     by_id = {row["id"]: row for row in rows}
@@ -571,6 +673,9 @@ def build_server(client: VireoClient):
     _register_species_tools(server, client)
     _register_region_tools(server, client)
     _register_best_tools(server, client)
+    _register_edit_tools(server, client)
+    _register_save_tools(server, client)
+    _register_export_tools(server, client)
     _register_write_tools(server, client)
     return server
 
@@ -1133,6 +1238,255 @@ def _register_best_tools(server, client):
             body["source"] = source
         data = client.post_json("/api/species-best/choose", body)
         return _pick(data, ("choice_id", "species", "photo_id", "over", "source", "reason", "superseded"))
+
+
+def _register_edit_tools(server, client):
+    """Reading, suggesting and looking at edits; none of these saves anything."""
+    read_only = mcp_types.ToolAnnotations(read_only_hint=True)
+
+    @server.tool(annotations=read_only)
+    def get_edit(photo_id: int) -> dict:
+        """The photo's saved edit and its virtual copies and snapshots.
+        ``recipe`` is null when the photo is unedited."""
+        data = client.get_json(f"/api/photos/{photo_id}/edit-recipe")
+        versions = client.get_json(f"/api/photos/{photo_id}/versions").get("versions") or []
+        return {
+            **_pick(data, ("photo_id", "recipe")),
+            "versions": [_pick(v, ("id", "name", "kind", "recipe")) for v in versions],
+        }
+
+    @server.tool(annotations=read_only)
+    def suggest_crop(
+        photo_id: int, margin: float = 0.35, aspect: str = "auto", detection_id: int | None = None,
+    ) -> dict:
+        """A crop around one animal, as a recipe ``crop`` (fractions of the
+        unedited upright frame). ``margin`` is the padding on each side as a
+        fraction of the animal's box, ``aspect`` is ``auto`` (3:2 or 4:5) or
+        ``W:H``, and ``detection_id`` picks an animal other than the primary.
+        ``output_pixels`` is about the size an export would have."""
+        return client.get_json(f"/api/photos/{photo_id}/subject-crop", {
+            "margin": margin, "aspect": aspect, "detection_id": detection_id,
+        })
+
+    @server.tool(annotations=read_only)
+    def suggest_tone(photo_id: int, recipe: dict | None = None, style: str = "subject") -> dict:
+        """Tone values Vireo fits to the photo as framed by ``recipe`` (its
+        crop matters, its tone does not), for a recipe's ``adjustments``.
+        ``style`` is ``subject`` (meters the animal), ``balanced`` or
+        ``gentle``. The notes say what was metered."""
+        check_recipe(recipe or {})
+        return client.get_json(f"/api/photos/{photo_id}/auto-tone", {
+            "recipe": json.dumps(recipe or {}), "style": style,
+        })
+
+    @server.tool(annotations=read_only)
+    def view_edit(
+        photo_id: int, recipe: dict, size: int = DEFAULT_EDIT_SIZE, whole_frame: bool = False,
+    ) -> list:
+        """Render a recipe without saving it. Returns where the pixels came
+        from, then the image. ``size`` is the long edge (256 to 2048);
+        ``whole_frame`` ignores the recipe's crop. To check sharpening halos
+        and noise at 1:1, use a crop as many pixels wide as ``size``.
+
+        A recipe holds ``crop`` (``x``, ``y``, ``w``, ``h``) and
+        ``adjustments`` such as exposure, highlights, shadows, whites, blacks,
+        contrast, texture, clarity, sharpen, sharpen_radius and
+        noise_reduction."""
+        check_recipe(recipe)
+        headers, body = client.get_with_headers(f"/photos/{photo_id}/edit-preview", {
+            "recipe": json.dumps(recipe),
+            "size": max(MIN_EDIT_SIZE, min(size, MAX_EDIT_SIZE)),
+            "apply_crop": None if whole_frame else "1",
+        })
+        facts = {"photo_id": photo_id, "pixels_from": headers.get("X-Vireo-Preview-Origin")}
+        return [facts, Image(data=body, format="jpeg")]
+
+
+def _register_save_tools(server, client):
+    """Saving an edit, each one Undo step."""
+    writes = mcp_types.ToolAnnotations(read_only_hint=False, destructive_hint=False)
+
+    @server.tool(annotations=writes)
+    def save_edit(
+        photo_id: int, recipe: dict, reason: str, source: str | None = None,
+        replaces: dict | None = None,
+    ) -> dict:
+        """Save ``recipe`` as the photo's edit. Refused when the photo already
+        has one, because that edit is the user's: use save_edit_copy instead.
+        To revise an edit you saved yourself, pass the recipe that save
+        returned as ``replaces``; it is refused if the edit changed since.
+        ``reason`` says what the edit is for and ``source`` who made it; both
+        show in Vireo's history. Vireo queues the edit for its XMP sidecar
+        like any other."""
+        if not recipe:
+            raise VireoError("recipe is empty; save_edit does not clear edits")
+        check_recipe(recipe)
+        if not isinstance(reason, str) or not reason.strip():
+            raise VireoError("reason must say what the edit is for")
+        current = client.get_json(f"/api/photos/{photo_id}/edit-recipe").get("recipe")
+        if current is not None and replaces is None:
+            raise VireoError(
+                f"Photo {photo_id} already has an edit. Export it as it is, or keep yours "
+                "beside it with save_edit_copy."
+            )
+        if replaces is not None and current != replaces:
+            raise VireoError(f"Photo {photo_id}'s edit is not the one in replaces. Read it with get_edit.")
+        body = {"recipe": recipe, "expected_recipe": replaces, "description": "Saved photo edit",
+                "reason": reason}
+        if source:
+            body["source"] = source
+        data = client.put_json(f"/api/photos/{photo_id}/edit-recipe", body)
+        return {"photo_id": photo_id, "recipe": data.get("recipe")}
+
+    @server.tool(annotations=writes)
+    def save_edit_copy(photo_id: int, name: str, recipe: dict) -> dict:
+        """Save ``recipe`` as a named virtual copy, leaving the photo's own
+        edit unchanged. Export it alone with preview_export's
+        ``version_id``."""
+        if not recipe:
+            raise VireoError("recipe is empty")
+        check_recipe(recipe)
+        data = client.post_json(f"/api/photos/{photo_id}/versions", {
+            "name": name, "recipe": recipe, "require_edit": True,
+        })
+        version = data.get("version") or {}
+        return {"photo_id": photo_id, "version_id": version.get("id"), "name": version.get("name"),
+                "recipe": data.get("recipe")}
+
+
+def _export_body(client, photo_ids, preset, destination, subfolder, include_location, max_size, version_id):
+    """The export request for these choices over the preset's settings."""
+    presets = {p["name"]: p["settings"] for p in client.get_json("/api/export/presets")["presets"]}
+    if preset is not None and preset not in presets:
+        raise VireoError(f"no export preset named {preset!r}; saved presets: {sorted(presets)}")
+    body = dict(presets[preset]) if preset is not None else {}
+    fields = [field for field in body.get("metadata_fields") or [] if field != "location"]
+    body["metadata_fields"] = [*fields, "location"] if include_location else fields
+    if destination is not None:
+        body["destination"] = os.path.expanduser(destination)
+    if subfolder is not None:
+        body.update(export_to_subfolder=True, subfolder_name=subfolder)
+    if max_size is not None:
+        body["max_size"] = max_size
+    body.update(photo_ids=list(dict.fromkeys(photo_ids)), list_files=True)
+    if version_id is not None:
+        quoted = urllib.parse.quote(version_id, safe="")
+        version = client.get_json(f"/api/photos/{photo_ids[0]}/versions/{quoted}")["version"]
+        body.update(version_id=version_id, version_revision=version["revision"])
+    return body
+
+
+def _preflight_export(client, body):
+    """The app's preflight for ``body`` and a fingerprint of all it depends on."""
+    data = client.post_json("/api/jobs/export/preflight", body)
+    if "files" not in data:
+        raise VireoError(OUTDATED_APP_MESSAGE.format(what="list an export's files"))
+    workspace = client.get_json("/api/workspaces/active", {"include_folders": "0"}).get("id")
+    state = json.dumps([workspace, body, data], sort_keys=True)
+    return data, hashlib.sha256(state.encode()).hexdigest()
+
+
+def _export_preview(body, data, token):
+    files = data["files"]
+    return {
+        "token": token,
+        "destination": body.get("destination") or "beside each original",
+        "destination_folders": data.get("destination_folders"),
+        "settings": _pick(body, ("format", "quality", "max_size", "naming_template",
+                                 "export_to_subfolder", "subfolder_name", "reveal_after_export")),
+        "metadata": data["metadata"],
+        "file_count": len(files),
+        "edited_count": sum(1 for f in files if f["edited"]),
+        "with_coordinates": sum(1 for f in files if f["has_coordinates"]),
+        "without_coordinates": [f["photo_id"] for f in files if not f["has_coordinates"]],
+        "skipped": data["skipped"],
+        "renamed": data["renames"],
+        "files": [_pick(f, ("photo_id", "path", "edited")) for f in files],
+    }
+
+
+def _register_export_tools(server, client):
+    """Exporting files, previewed first, and following the job."""
+    pending: dict[str, tuple[dict, str]] = {}
+
+    @server.tool(annotations=mcp_types.ToolAnnotations(read_only_hint=True))
+    def list_export_presets() -> dict:
+        """The user's saved export presets and their settings. An empty
+        ``destination`` means beside each original."""
+        return _pick(client.get_json("/api/export/presets"), ("presets",))
+
+    @server.tool(annotations=mcp_types.ToolAnnotations(read_only_hint=True))
+    def preview_export(
+        photo_ids: list[int], preset: str | None = None, destination: str | None = None,
+        subfolder: str | None = None, include_location: bool = True, max_size: int | None = None,
+        version_id: str | None = None,
+    ) -> dict:
+        """What an export would write, and the ``token`` start_export needs.
+        Nothing is written.
+
+        ``preset`` starts from a saved preset's settings; presets are not
+        applied otherwise. ``destination`` is an absolute folder (``~`` works)
+        and overrides the preset's; ``subfolder`` adds one folder inside it.
+        Location metadata is included unless ``include_location`` is false,
+        and ``without_coordinates`` lists photos that have none to include.
+        ``max_size`` limits the long edge in pixels. ``version_id`` exports a
+        virtual copy and takes exactly one photo.
+
+        Existing files are never overwritten: ``renamed`` lists the names that
+        would change instead. ``skipped`` lists photos that would not be
+        written, and why. At most 500 photos."""
+        if not photo_ids:
+            raise VireoError("give at least one photo id")
+        if version_id is not None and len(photo_ids) != 1:
+            raise VireoError("version_id exports one photo at a time")
+        body = _export_body(client, photo_ids, preset, destination, subfolder,
+                            include_location, max_size, version_id)
+        data, fingerprint = _preflight_export(client, body)
+        if not data["files"]:
+            raise VireoError(f"No photo would be written: {data['skipped']}")
+        token = secrets.token_urlsafe(16)
+        pending[token] = (body, fingerprint)
+        while len(pending) > MAX_PENDING_EXPORTS:
+            del pending[next(iter(pending))]
+        return _export_preview(body, data, token)
+
+    @server.tool(annotations=mcp_types.ToolAnnotations(read_only_hint=False, destructive_hint=False))
+    def start_export(token: str) -> dict:
+        """Run exactly the export a preview_export described. Refused when
+        anything it depends on changed since (an edit, the metadata it would
+        write, the source file, the workspace, a file in the way); preview
+        again then. A change while the job is starting fails the job with
+        nothing written. During the run, a photo whose source changes or
+        whose file name is taken fails and is not written. Photos the preview skipped are left out. A token
+        works once.
+        Returns the ``job_id`` to follow with get_job."""
+        if token not in pending:
+            raise VireoError("That token is unknown or already used. Call preview_export again.")
+        body, fingerprint = pending.pop(token)
+        data, current = _preflight_export(client, body)
+        if current != fingerprint:
+            raise VireoError("The export would differ from the preview now. Call preview_export again.")
+        # The worker checks these against what it loaded and where it would
+        # write, so a change after this point writes nothing either.
+        expected = {str(f["photo_id"]): _pick(f, ("path", "content_key")) for f in data["files"]}
+        started = client.post_json("/api/jobs/export", {
+            **body, "photo_ids": [f["photo_id"] for f in data["files"]], "expected_content": expected,
+        })
+        return {"job_id": started.get("job_id"), "photo_count": len(expected)}
+
+    @server.tool(annotations=mcp_types.ToolAnnotations(read_only_hint=True))
+    def get_job(job_id: str, wait_seconds: int = 0) -> dict:
+        """A background job's status, progress, errors and result.
+        ``wait_seconds`` (up to 50) waits that long for it to finish; call
+        again while ``status`` is not completed, failed or cancelled. A failed
+        job can still have done part of its work: read ``result``."""
+        path = f"/api/jobs/{urllib.parse.quote(job_id, safe='')}"
+        deadline = time.monotonic() + max(0, min(wait_seconds, MAX_JOB_WAIT))
+        job = client.get_json(path)
+        while job.get("status") not in TERMINAL_JOB_STATUSES and time.monotonic() < deadline:
+            time.sleep(JOB_POLL_SECONDS)
+            job = client.get_json(path)
+        return job_summary(job)
 
 
 def _register_write_tools(server, client):

@@ -44,6 +44,12 @@ reviewer, `burst` returns one burst's evidence pack without its image URLs, and
 `focus_crop` returns a 1:1 crop with the facts its `X-Vireo-Focus-*` headers
 carry and notes on what would make it misleading; all three read the routes in
 [burst adjudication](#burst-adjudication).
+`get_edit`, `suggest_crop`, `suggest_tone` and `view_edit` read and try edits
+without saving; `save_edit` saves one as an Undo step and refuses to replace an
+edit the photo already has, and `save_edit_copy` keeps a look beside it as a
+virtual copy. `list_export_presets`, `preview_export` and `start_export` export
+files: the preview returns a one-use token, and the export is refused when
+anything the preview described has changed. `get_job` follows any job.
 [`skills/`](../skills/README.md) holds instructions an assistant can follow to
 do a whole task with these tools.
 `best_of_each_species` and `choose_best_photo` list and settle the best photo of
@@ -266,6 +272,36 @@ uses this path. `POST /api/photos/<id>/subjects/analyze` measures retained
 boxes for crop and exposure suggestions. With a `detection_id`, it also
 computes or reuses comparison evidence for that detection. The job returns
 the detection and verified generation in `result.photos` on success.
+
+### Edits and export previews for scripts
+
+`GET /api/photos/<id>/subject-crop` returns a recipe crop framing one animal
+without saving it: `margin` (0 to 5, default 0.35) pads its box on each side,
+`aspect` is `auto` (3:2 or 4:5) or `W:H`, and `detection_id` picks an animal
+other than the primary one. The crop is in the unedited upright frame.
+
+`PUT /api/photos/<id>/edit-recipe` accepts `expected_recipe`, the recipe the
+caller believes is stored (`null` for an unedited photo). When it differs the
+save answers 409 `edit_recipe_changed` and writes nothing; a recipe that holds
+no edit answers 400 (clear an edit with DELETE). `source` (up to 60
+characters) and `reason` (up to 300) are recorded with the edit and show in its
+history. Without `expected_recipe` the save replaces whatever is stored.
+
+`POST /api/photos/<id>/versions` with `require_edit: true` answers 400 for a
+recipe that holds no edit, which otherwise saves an unedited virtual copy.
+
+`POST /api/jobs/export/preflight` with `list_files: true` (at most 500 photos)
+adds `files`, one entry per output with `photo_id`, `path`, `edited`,
+`has_coordinates`, `has_place_name` and `content_key` (it changes when the
+source files, the edit, the camera data a render reads or any metadata value
+the export would write does), and
+`skipped`, the photos that would not be written and why. `POST /api/jobs/export`
+with `list_files: true` puts the written paths in the job result's `files`. With
+`expected_content`, a map of each photo id to its previewed `path` and
+`content_key`, the job checks both against the data it loaded and the names it
+would use, and writes nothing when one differs. A file that appears at a
+previewed path during the run fails that photo instead of renaming its output,
+and so does a source file that changes before its pixels are written. A map that does not cover exactly the photos to export, once each, answers 409.
 
 ### Burst adjudication
 

@@ -2408,6 +2408,45 @@ def test_set_edit_recipe_removes_regeneration_sidecar(app_and_db, tmp_path):
     )
 
 
+def test_save_edit_recipe_checks_the_expected_recipe(app_and_db):
+    """A caller that says which edit it saw never overwrites another one."""
+    app, db = app_and_db
+    client = app.test_client()
+    pid = db.photos.list_page()[0]["id"]
+    url = f"/api/photos/{pid}/edit-recipe"
+    recipe = {"adjustments": {"exposure": 0.5}}
+
+    saved = client.put(url, json={"recipe": recipe, "expected_recipe": None})
+    assert saved.status_code == 200
+    stale = client.put(url, json={"recipe": {"rotation": 90}, "expected_recipe": None})
+    assert stale.status_code == 409 and stale.get_json()["code"] == "edit_recipe_changed"
+    assert db.get_photo_edit_recipe(pid) == saved.get_json()["recipe"]
+    # An equivalent spelling of the stored recipe matches it.
+    assert client.put(url, json={"recipe": {"rotation": 90}, "expected_recipe": recipe}).status_code == 200
+    # Callers that do not say, such as the editor, are unaffected.
+    assert client.put(url, json={"recipe": recipe}).status_code == 200
+    assert client.put(url, json={"recipe": recipe, "expected_recipe": {"rotation": 45}}).status_code == 400
+    assert client.put(url, json={"recipe": recipe, "source": "x" * 61}).status_code == 400
+
+
+def test_subject_crop_uses_the_upright_frame(app_and_db):
+    """A portrait photo stores sensor axes; its crop must use display ones."""
+    import json as json_module
+
+    app, db = app_and_db
+    client = app.test_client()
+    pid = db.photos.list_page()[0]["id"]
+    db.conn.execute("UPDATE photos SET width = 6000, height = 4000, exif_data = ? WHERE id = ?",
+                    (json_module.dumps({"EXIF": {"Orientation": 6}}), pid))
+    db.detections.save(pid, [{"box": {"x": .4, "y": .4, "w": .12, "h": .12}, "confidence": .9,
+                              "category": "animal"}], detector_model="MDV6")
+    db.commit()
+    data = client.get(f"/api/photos/{pid}/subject-crop?margin=0").get_json()
+    assert data["subject_pixels"] == [480, 720] and data["aspect"] == "4:5"
+    assert client.get(f"/api/photos/{pid}/subject-crop?margin=-1").status_code == 400
+    assert client.get("/api/photos/999999/subject-crop").status_code == 404
+
+
 def _enable_location_keyword_writes(db):
     """Turn on location keyword writes for the active workspace."""
     import config as cfg
