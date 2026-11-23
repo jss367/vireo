@@ -1422,14 +1422,16 @@ def test_job_export_preflight_lists_files_only_when_asked(app_and_db, tmp_path, 
 
     body["list_files"] = True
     listed = client.post("/api/jobs/export/preflight", json=body).get_json()
+    key = listed["files"][0].pop("content_key")
     assert listed["files"] == [{
-        "photo_id": photo["id"], "path": str(tmp_path / "out" / "bird1.jpg"),
-        "has_coordinates": False, "has_place_name": False, "edit_key": None,
+        "photo_id": photo["id"], "path": str(tmp_path / "out" / "bird1.jpg"), "edited": False,
+        "has_coordinates": False, "has_place_name": False,
     }]
     assert listed["skipped"] == [{"photo_id": 999_999, "reason": "not visible in this workspace"}]
     db.set_photo_edit_recipe(photo["id"], {"rotation": 90})
     db.commit()
-    assert client.post("/api/jobs/export/preflight", json=body).get_json()["files"][0]["edit_key"]
+    edited = client.post("/api/jobs/export/preflight", json=body).get_json()["files"][0]
+    assert edited["edited"] is True and edited["content_key"] != key
     monkeypatch.setattr(web_export, "MAX_LISTED_FILES", 1)
     assert client.post("/api/jobs/export/preflight", json=body).status_code == 400
 

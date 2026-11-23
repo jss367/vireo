@@ -287,8 +287,9 @@ characters) and `reason` (up to 300) are recorded with the edit and show in its
 history. Without `expected_recipe` the save replaces whatever is stored.
 
 `POST /api/jobs/export/preflight` with `list_files: true` (at most 500 photos)
-adds `files`, one entry per output with `photo_id`, `path`, `has_coordinates`,
-`has_place_name` and `edit_key` (it changes when the photo's edit does), and
+adds `files`, one entry per output with `photo_id`, `path`, `edited`,
+`has_coordinates`, `has_place_name` and `content_key` (it changes when the
+source file, the edit or any metadata value the export would write does), and
 `skipped`, the photos that would not be written and why. `POST /api/jobs/export`
 with `list_files: true` puts the written paths in the job result's `files`.
 

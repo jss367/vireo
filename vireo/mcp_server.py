@@ -1378,12 +1378,12 @@ def _export_preview(body, data, token):
                                  "export_to_subfolder", "subfolder_name", "reveal_after_export")),
         "metadata": data["metadata"],
         "file_count": len(files),
-        "edited_count": sum(1 for f in files if f["edit_key"]),
+        "edited_count": sum(1 for f in files if f["edited"]),
         "with_coordinates": sum(1 for f in files if f["has_coordinates"]),
         "without_coordinates": [f["photo_id"] for f in files if not f["has_coordinates"]],
         "skipped": data["skipped"],
         "renamed": data["renames"],
-        "files": [{"photo_id": f["photo_id"], "path": f["path"], "edited": bool(f["edit_key"])} for f in files],
+        "files": [_pick(f, ("photo_id", "path", "edited")) for f in files],
     }
 
 
@@ -1435,8 +1435,9 @@ def _register_export_tools(server, client):
     @server.tool(annotations=mcp_types.ToolAnnotations(read_only_hint=False, destructive_hint=False))
     def start_export(token: str) -> dict:
         """Run exactly the export a preview_export described. Refused when
-        anything it depends on changed since (an edit, a location, the
-        workspace, a file in the way); preview again then. A token works once.
+        anything it depends on changed since (an edit, the metadata it would
+        write, the source file, the workspace, a file in the way); preview
+        again then. A token works once.
         Returns the ``job_id`` to follow with get_job."""
         if token not in pending:
             raise VireoError("That token is unknown or already used. Call preview_export again.")

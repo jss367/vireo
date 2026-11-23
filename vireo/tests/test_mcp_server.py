@@ -1146,22 +1146,52 @@ def test_export_without_metadata_writes_the_listed_files(mcp, tmp_path):
     assert (out / "Robin 2024-01-15" / "bird1.jpg").is_file()
 
 
-@pytest.mark.parametrize("change", ["edit", "file", "location"])
-def test_start_export_refuses_when_the_preview_is_stale(mcp, tmp_path, change):
-    server, db, transport = mcp
-    pid, _ = _editable_photo(db, tmp_path)
-    out = tmp_path / "out"
-    out.mkdir()
-    preview = call(server, "preview_export", photo_ids=[pid], destination=str(out))
+def _change_export_input(db, pid, change, folder, out):
     if change == "edit":
         db.set_photo_edit_recipe(pid, {"rotation": 90})
-    elif change == "location":
-        db.conn.execute("UPDATE photos SET latitude = 1, longitude = 2 WHERE id = ?", (pid,))
+    elif change == "coordinates":
+        db.conn.execute("UPDATE photos SET latitude = 3, longitude = 4 WHERE id = ?", (pid,))
+    elif change == "place":
+        keyword_tagging.tag_photo(db, pid, db.keywords.add("Lake Two", kw_type="location"))
+    elif change == "species":
+        keyword_tagging.tag_photo(db, pid, db.keywords.add("Bald Eagle", is_species=True))
+    elif change == "rating":
+        db.conn.execute("UPDATE photos SET rating = 5 WHERE id = ?", (pid,))
+    elif change == "time":
+        db.conn.execute("UPDATE photos SET timestamp = '2020-01-01T00:00:00' WHERE id = ?", (pid,))
+    elif change == "source":
+        PILImage.new("RGB", (640, 480), (200, 10, 10)).save(folder / "bird1.jpg", "JPEG", quality=50)
     else:
         (out / "bird1.jpg").write_bytes(b"in the way")
     db.commit()
+
+
+@pytest.mark.parametrize("change", [
+    "edit", "coordinates", "place", "species", "rating", "time", "source", "file in the way",
+])
+def test_start_export_refuses_when_the_preview_is_stale(mcp, app_and_db, tmp_path, change):
+    """The photo already has coordinates and a rating: new values count, not just presence."""
+    server, db, transport = mcp
+    _preset(app_and_db[0], metadata_fields=["species", "rating", "capture_date", "capture_time"])
+    pid, folder = _editable_photo(db, tmp_path)
+    db.conn.execute("UPDATE photos SET latitude = 1, longitude = 2, rating = 3 WHERE id = ?", (pid,))
+    db.commit()
+    out = tmp_path / "out"
+    out.mkdir()
+    preview = call(server, "preview_export", photo_ids=[pid], preset="Main", destination=str(out))
+    _change_export_input(db, pid, change, folder, out)
     assert "differ from the preview" in call_error(server, "start_export", token=preview["token"])
     assert not any(c[1] == "/api/jobs/export" for c in transport.calls)
+
+
+def test_metadata_left_out_of_an_export_does_not_stale_its_preview(mcp, tmp_path):
+    server, db, transport = mcp
+    pid, _ = _editable_photo(db, tmp_path)
+    preview = call(server, "preview_export", photo_ids=[pid], destination=str(tmp_path / "out"),
+                   include_location=False)
+    db.conn.execute("UPDATE photos SET rating = 5 WHERE id = ?", (pid,))
+    db.commit()
+    assert call(server, "start_export", token=preview["token"])["job_id"]
 
 
 def test_preview_export_refuses_what_it_cannot_describe(mcp, app_and_db, tmp_path, monkeypatch):

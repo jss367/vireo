@@ -82,35 +82,13 @@ MAX_LISTED_FILES = 500
 
 
 def _preflight_listing(
-    db: Database, preview: JsonDict, hidden: list[int], recipe_overrides: dict[int, JsonDict | None],
+    db: Database, preview: JsonDict, hidden: list[int], fields: list[str], version_options: JsonDict,
 ) -> JsonDict:
-    """Each output with what it will carry, and why other photos are left out.
-
-    ``edit_key`` changes when the photo's edit does, so a caller can tell that
-    an export it previewed would now render something else.
-    """
-    import hashlib
-
-    from edit_recipe import recipe_to_json
-
-    ids = [entry["photo_id"] for entry in preview["files"]]
-    locations = db.locations.get_effective(ids, verify_workspace=False)
-    places = db.locations.get_photo_leaves(ids)
-    recipes = {**db.edits.get_photo_recipes(ids), **recipe_overrides}
-
-    def described(entry: JsonDict) -> JsonDict:
-        pid = entry["photo_id"]
-        location = locations.get(pid) or {}
-        edit = recipe_to_json(recipes.get(pid))
-        return {
-            **entry,
-            "has_coordinates": location.get("latitude") is not None and location.get("longitude") is not None,
-            "has_place_name": pid in places,
-            "edit_key": hashlib.sha256(edit.encode()).hexdigest()[:16] if edit else None,
-        }
+    """Every output with what it would carry, and why other photos are left out."""
+    from export import describe_export_files
 
     return {
-        "files": [described(entry) for entry in preview["files"]],
+        "files": describe_export_files(db, preview["files"], fields, version_options.get("recipe_overrides")),
         "skipped": [*({"photo_id": pid, "reason": "not visible in this workspace"} for pid in hidden),
                     *preview["skipped"]],
     }
@@ -343,6 +321,8 @@ def create_export_blueprint(
             )
         except ExportPreflightError as exc:
             return json_error(str(exc), status=409)
+        listing = (_preflight_listing(db, preview, hidden, metadata["requested_fields"], version_options)
+                   if list_files else {})
         renames = preview["renames"]
         destination_folders = preview["destination_folders"]
         return jsonify({
@@ -352,8 +332,7 @@ def create_export_blueprint(
             "destination_folder_count": len(destination_folders),
             "destination_folders": destination_folders[:20],
             "metadata": metadata,
-            **(_preflight_listing(db, preview, hidden, version_options.get("recipe_overrides") or {})
-               if list_files else {}),
+            **listing,
         })
 
     @blueprint.route("/api/jobs/export", methods=["POST"])

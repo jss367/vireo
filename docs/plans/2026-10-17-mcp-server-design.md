@@ -83,7 +83,8 @@ Undo step in Vireo like a hand edit. Two rules cover what Undo cannot protect:
   checks that inside the write's transaction (`expected_recipe`).
 - Undo cannot remove exported files, so `start_export` takes only the one-use
   token of a `preview_export`, sends exactly the previewed request, and refuses
-  when the preflight, the photos' edits or the workspace changed since.
+  when the output paths, the source files, the edits, the metadata values to be
+  written or the workspace changed since (`content_key` in the preflight).
 
 ## Testing
 

@@ -2,6 +2,7 @@
 
 import contextlib
 import hashlib
+import json
 import logging
 import os
 import re
@@ -12,6 +13,7 @@ import tempfile
 import time
 
 from config import config_value
+from edit_recipe import recipe_to_json
 from export_metadata import export_metadata_args as _export_metadata_args
 from export_metadata import timestamp_parts
 from image_edits import apply_recipe_to_loaded_image
@@ -752,6 +754,63 @@ def _export_requested_path(photo, folder_path, photo_destination, template,
     return requested_path
 
 
+def _export_location_map(db, photo_ids):
+    """Each photo's coordinates and named place, as export metadata writes them."""
+    locations = db.locations.get_effective(photo_ids, verify_workspace=False)
+    leaves = db.locations.get_photo_leaves(photo_ids)
+    paths = db.locations.get_photo_paths(leaves)
+    cached = db.locations.cached_place_details([
+        row["place_id"] for row in leaves.values() if row["place_id"]
+    ])
+    for pid, row in leaves.items():
+        locations.setdefault(pid, {}).update({
+            "hierarchy": paths[pid], "place_id": row["place_id"],
+            "place_details": cached.get(row["place_id"]),
+        })
+    return locations
+
+
+def describe_export_files(db, files, metadata_fields, recipe_overrides=None):
+    """What each previewed output would carry, with a key over all of it.
+
+    ``files`` are ``preview_export``'s entries. ``content_key`` digests the
+    source file's identity, the edit and the exact metadata values the export
+    would write, so any catalog or file change that would alter an output
+    alters its key.
+    """
+    ids = [entry["photo_id"] for entry in files]
+    fields = normalize_metadata_fields(metadata_fields)
+    photos = db.photos.get_by_ids(ids)
+    species = db.photo_species.get_species_for_photos(ids)
+    exif = _get_photo_exif_data(db, ids)
+    camera = _get_photo_camera_data(db, ids) if "camera" in fields else {}
+    locations = _export_location_map(db, ids)
+    recipes = {**db.edits.get_photo_recipes(ids), **(recipe_overrides or {})}
+
+    def described(entry):
+        pid = entry["photo_id"]
+        location = locations.get(pid, {})
+        edit = recipe_to_json(recipes.get(pid))
+        try:
+            stat = os.stat(entry["source_path"])
+            source = [entry["source_path"], stat.st_size, stat.st_mtime_ns]
+        except OSError:
+            source = [entry["source_path"]]
+        metadata = _export_metadata_args(
+            fields, photos[pid], species.get(pid, []), camera.get(pid, {}), location,
+            source_metadata=exif.get(pid),
+        )
+        state = json.dumps([source, edit, metadata], default=str)
+        return {
+            "photo_id": pid, "path": entry["path"], "edited": edit is not None,
+            "has_coordinates": location.get("latitude") is not None and location.get("longitude") is not None,
+            "has_place_name": bool(location.get("hierarchy")),
+            "content_key": hashlib.sha256(state.encode()).hexdigest()[:16],
+        }
+
+    return [described(entry) for entry in files]
+
+
 class _PhotoExportBatch:
     """Per-run catalog inputs, output accounting, and metadata completion."""
 
@@ -835,20 +894,8 @@ class _PhotoExportBatch:
             _get_photo_camera_data(db, self.photo_ids) if "camera" in self.metadata_fields else {}
         )
         self.location_map = (
-            db.locations.get_effective(self.photo_ids, verify_workspace=False)
-            if "location" in self.metadata_fields else {}
+            _export_location_map(db, self.photo_ids) if "location" in self.metadata_fields else {}
         )
-        if "location" in self.metadata_fields:
-            leaves = db.locations.get_photo_leaves(self.photo_ids)
-            paths = db.locations.get_photo_paths(leaves)
-            cached = db.locations.cached_place_details([
-                row["place_id"] for row in leaves.values() if row["place_id"]
-            ])
-            for pid, row in leaves.items():
-                self.location_map.setdefault(pid, {}).update({
-                    "hierarchy": paths[pid], "place_id": row["place_id"],
-                    "place_details": cached.get(row["place_id"]),
-                })
 
         # Get species keywords for all photos in one query
         self.species_map = db.photo_species.get_species_for_photos(self.photo_ids)
@@ -2250,7 +2297,7 @@ def preview_export(db, photo_ids, destination=None, options=None):
         export_path = _reserve_preview_export_path(
             requested_path, destination_reservations,
         )
-        files.append({"photo_id": pid, "path": export_path})
+        files.append({"photo_id": pid, "path": export_path, "source_path": source_path})
         destination_folder = os.path.normpath(destination_base)
         if destination_folder not in seen_destination_folders:
             seen_destination_folders.add(destination_folder)
