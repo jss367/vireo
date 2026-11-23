@@ -698,7 +698,7 @@ def export_photos(db, vireo_dir, photo_ids, destination=None, options=None,
                 ``describe_export_files`` gave it. When any differs now, the
                 run writes nothing and reports each changed photo; a file that
                 appears at a path during the run fails that photo instead of
-                renaming its output.
+                renaming its output, and so does a source file that changes.
             export_to_subfolder: bool -- create a subfolder beneath the
                 shared destination or each original photo's folder.
             subfolder_name: str -- name of that subfolder (a single path
@@ -798,12 +798,19 @@ def _file_identity(path):
     return [path, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_dev, stat.st_ino]
 
 
-def _export_content_key(photo, folder_path, source_path, recipe, exif_data, metadata_args):
-    """A digest of everything that decides one output's pixels and metadata."""
+def _source_identities(photo, folder_path, source_path):
+    """The selected source and the companion a RAW render can fall back to."""
     companion = _photo_value(photo, "companion_path")
-    state = [
+    return [
         _file_identity(source_path),
         _file_identity(os.path.join(folder_path, companion)) if companion else None,
+    ]
+
+
+def _export_content_key(photo, folder_path, source_path, recipe, exif_data, metadata_args):
+    """A digest of everything that decides one output's pixels and metadata."""
+    state = [
+        _source_identities(photo, folder_path, source_path),
         [_photo_value(photo, column) for column in _RENDER_COLUMNS],
         exif_data, recipe_to_json(recipe), metadata_args,
     ]
@@ -883,6 +890,7 @@ class _PhotoExportBatch:
         )
         collect_files = bool(options.get("collect_files", False))
         self.expected_content = options.get("expected_content")
+        self.previewed_sources = {}
 
         self._load_catalog(db)
 
@@ -991,12 +999,9 @@ class _PhotoExportBatch:
         folder_path = self.folders.get(photo["folder_id"], "")
         recipe, exif_data = self.edit_recipes.get(pid), self.exif_data_map.get(pid)
         species = self.species_map.get(pid, [])
-        source_path = _select_export_source(
-            photo=photo, folder_path=folder_path, folders=self.folders, recipe=recipe,
-            max_size=self.max_size, wc_max=self.wc_max, vireo_dir=self.vireo_dir,
-            developed_dir=self.developed_dir, developed_index=self.developed_index,
-            output_ext=self.output_ext, exif_data=exif_data,
-        )
+        # Taken before the key, so a change between the two fails the later check.
+        self.previewed_sources[pid] = self._source_files(photo)
+        source_path = self._source_path(photo)
         requested, _base, reason = _preview_requested_path(
             photo, folder_path, source_path, self.destination, self.subfolder, self.template,
             self.output_ext, species, seq_counters,
@@ -1012,11 +1017,34 @@ class _PhotoExportBatch:
             _export_content_key(photo, folder_path, source_path, recipe, exif_data, metadata),
         )
 
-    def _claim_output(self, pid, out_path):
-        """Open the output to write: the previewed path exactly, when there was a preview."""
+    def _source_path(self, photo):
+        pid = photo["id"]
+        return _select_export_source(
+            photo=photo, folder_path=self.folders.get(photo["folder_id"], ""), folders=self.folders,
+            recipe=self.edit_recipes.get(pid), max_size=self.max_size, wc_max=self.wc_max,
+            vireo_dir=self.vireo_dir, developed_dir=self.developed_dir,
+            developed_index=self.developed_index, output_ext=self.output_ext,
+            exif_data=self.exif_data_map.get(pid),
+        )
+
+    def _source_files(self, photo):
+        """The identity of every file this photo's pixels can come from."""
+        folder_path = self.folders.get(photo["folder_id"], "")
+        return _source_identities(photo, folder_path, self._source_path(photo))
+
+    def _claim_output(self, photo, out_path):
+        """Open the output for pixels that are already decoded.
+
+        With a preview, the files they came from must still be the previewed
+        ones: checked after decoding, this also catches a source replaced or
+        a working copy evicted while earlier photos rendered. Only the
+        previewed path is written.
+        """
         if self.expected_content is None:
             return _claim_export_path(out_path)
-        path = self.expected_content[pid][0]
+        if self._source_files(photo) != self.previewed_sources[photo["id"]]:
+            raise ValueError("source file changed since the export was previewed")
+        path = self.expected_content[photo["id"]][0]
         os.makedirs(os.path.dirname(path), exist_ok=True)
         try:
             return path, open(path, "xb")
@@ -1079,7 +1107,7 @@ class _PhotoExportBatch:
                 developed_index=self.developed_index, output_ext=self.output_ext,
             )
             try:
-                out_path, output_stream = self._claim_output(pid, out_path)
+                out_path, output_stream = self._claim_output(photo, out_path)
                 claimed_out_path = out_path
                 try:
                     _save_export_image(

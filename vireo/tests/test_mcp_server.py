@@ -985,10 +985,26 @@ def test_recipe_names_match_the_apps():
     known = read | set(edit_recipe._ADJUSTMENT_RANGES) | set(edit_recipe._WHITE_BALANCE_RANGES)
     assert set(mcp_server.ADJUSTMENT_KEYS) == known
     top = inspect.getsource(edit_recipe.normalize_recipe) + inspect.getsource(edit_recipe._normalize_geometry)
+    local = inspect.getsource(edit_recipe._normalize_local)
+    nested = {
+        "crop": set(re.findall(r'crop\["([a-z]+)"\]', inspect.getsource(edit_recipe._normalize_crop))),
+        "flip": set(re.findall(r'\("(horizontal)", "(vertical)"\)', top)[0]),
+        "adjustments.white_balance": set(edit_recipe._WHITE_BALANCE_RANGES),
+        "local": set(re.findall(r'local\.get\("([a-z_]+)"', local)),
+        "local.mask": set(re.findall(r'mask_in\.get\("([a-z_]+)"', local)),
+        "local.regions": set(re.findall(r'entry\.get\("([a-z_]+)"', local)),
+    }
+    assert {path: set(names) for path, names in mcp_server.NESTED_RECIPE_KEYS.items()} == nested
     assert set(mcp_server.RECIPE_KEYS) == set(re.findall(r'recipe\.get\("([a-z_]+)"', top)) | {"version"}
 
 
-@pytest.mark.parametrize("recipe", [{"exposure": 1}, {"adjustments": {"exposre": 1}}])
+@pytest.mark.parametrize("recipe", [
+    {"exposure": 1}, {"adjustments": {"exposre": 1}},
+    {"adjustments": {"exposure": 1, "white_balance": {"temprature": 20}}},
+    {"crop": {"x": 0, "y": 0, "w": .5, "h": .5, "aspect": 1}}, {"flip": {"horizontl": True}},
+    {"local": {"background_denose": 5}}, {"local": {"mask": {"feathr": 1}}},
+    {"local": {"regions": [{"region": "subject", "adjustment": {}}]}},
+])
 def test_edit_tools_refuse_names_the_app_would_ignore(mcp, recipe):
     server, db, transport = mcp
     pid = db.photos.list_page()[0]["id"]
@@ -1250,17 +1266,43 @@ def test_a_file_that_appears_during_the_run_fails_that_photo(mcp, tmp_path, monk
     assert [(p.name, p.read_bytes()) for p in out.iterdir()] == [("bird1.jpg", b"in the way")]
 
 
+def _add_photo(db, folder, like, name):
+    PILImage.new("RGB", (64, 48)).save(folder / name, "JPEG")
+    pid = photo_ingest.add_photo(db, folder_id=db.photos.get(like)["folder_id"], filename=name, extension=".jpg",
+                                 file_size=10, file_mtime=1.0)
+    db.commit()
+    return pid
+
+
+@pytest.mark.parametrize("when", ["before its turn", "while it decodes"])
+def test_a_source_replaced_during_the_run_fails_that_photo(mcp, tmp_path, monkeypatch, when):
+    import export
+
+    server, db, _ = mcp
+    first, folder = _editable_photo(db, tmp_path)
+    second = _add_photo(db, folder, first, "bird8.jpg")
+    out = tmp_path / "out"
+    preview = call(server, "preview_export", photo_ids=[first, second], destination=str(out), include_location=False)
+    original = export.load_export_image
+
+    def replacing(photo, *args, **kwargs):
+        image = original(photo, *args, **kwargs)
+        if photo["id"] == (first if when == "before its turn" else second):
+            PILImage.new("RGB", (64, 48), (250, 0, 0)).save(folder / "bird8.jpg", "JPEG")
+        return image
+
+    monkeypatch.setattr(export, "load_export_image", replacing)
+    job = _finished(server, call(server, "start_export", token=preview["token"])["job_id"])
+    assert job["status"] == "failed" and job["result"]["exported"] == 1
+    assert job["result"]["errors"] == ["bird8.jpg: source file changed since the export was previewed"]
+    assert [p.name for p in out.iterdir()] == ["bird1.jpg"]
+
+
 def test_export_of_several_photos_writes_every_previewed_path(mcp, tmp_path):
     """Names that collide within one export are planned the same way twice."""
     server, db, _ = mcp
     pid, folder = _editable_photo(db, tmp_path)
-    row = db.photos.get(pid)
-    ids = [pid]
-    for name in ("bird8.jpg", "bird9.jpg"):
-        PILImage.new("RGB", (64, 48)).save(folder / name, "JPEG")
-        ids.append(photo_ingest.add_photo(db, folder_id=row["folder_id"], filename=name, extension=".jpg",
-                                          file_size=10, file_mtime=1.0))
-    db.commit()
+    ids = [pid, _add_photo(db, folder, pid, "bird8.jpg"), _add_photo(db, folder, pid, "bird9.jpg")]
     transport_preset = {"name": "Seq", "settings": {"naming_template": "{folder}/shot"}}
     mcp[2].post_json("/api/export/presets", transport_preset)
     preview = call(server, "preview_export", photo_ids=ids, preset="Seq", destination=str(tmp_path / "out"),

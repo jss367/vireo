@@ -300,8 +300,8 @@ with `list_files: true` puts the written paths in the job result's `files`. With
 `expected_content`, a map of each photo id to its previewed `path` and
 `content_key`, the job checks both against the data it loaded and the names it
 would use, and writes nothing when one differs. A file that appears at a
-previewed path during the run fails that photo instead of renaming its output. A
-map that does not cover exactly the photos to export, once each, answers 409.
+previewed path during the run fails that photo instead of renaming its output,
+and so does a source file that changes before its pixels are written. A map that does not cover exactly the photos to export, once each, answers 409.
 
 ### Burst adjudication
 

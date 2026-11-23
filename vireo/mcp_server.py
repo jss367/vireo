@@ -186,6 +186,16 @@ ADJUSTMENT_KEYS = (
     "white_balance", "temperature", "tint", "tone_curve", "point_curves", "point_color", "hsl",
     "color_grading",
 )
+# Names inside the objects the app reads without refusing unknown ones; it
+# refuses them itself in the other nested adjustments and local adjustments.
+NESTED_RECIPE_KEYS = {
+    "crop": ("x", "y", "w", "h"),
+    "flip": ("horizontal", "vertical"),
+    "adjustments.white_balance": ("temperature", "tint"),
+    "local": ("mask", "regions", "background_denoise"),
+    "local.mask": ("ref", "source_digest", "corrected", "feather"),
+    "local.regions": ("region", "adjustments"),
+}
 DEFAULT_EDIT_SIZE = 1600
 MIN_EDIT_SIZE, MAX_EDIT_SIZE = 256, 2048
 OUTDATED_APP_MESSAGE = (
@@ -590,10 +600,18 @@ def check_recipe(recipe):
         raise VireoError("adjustments must be an object")
     unknown = [key for key in recipe if key not in RECIPE_KEYS]
     unknown += [f"adjustments.{key}" for key in adjustments if key not in ADJUSTMENT_KEYS]
+    for path, names in NESTED_RECIPE_KEYS.items():
+        value = recipe
+        for part in path.split("."):
+            value = value.get(part) if isinstance(value, dict) else None
+        for entry in value if isinstance(value, list) else [value]:
+            if isinstance(entry, dict):
+                unknown += [f"{path}.{key}" for key in entry if key not in names]
     if unknown:
         raise VireoError(
             f"Vireo has no recipe setting named {unknown}. A recipe holds {list(RECIPE_KEYS)}; "
-            f"adjustments holds {list(ADJUSTMENT_KEYS)}."
+            f"adjustments holds {list(ADJUSTMENT_KEYS)}; "
+            + "; ".join(f"{path} holds {list(names)}" for path, names in NESTED_RECIPE_KEYS.items()) + "."
         )
 
 
@@ -1438,8 +1456,8 @@ def _register_export_tools(server, client):
         anything it depends on changed since (an edit, the metadata it would
         write, the source file, the workspace, a file in the way); preview
         again then. A change while the job is starting fails the job with
-        nothing written, and no file is ever written under another name.
-        Photos the preview skipped are left out. A token
+        nothing written. During the run, a photo whose source changes or
+        whose file name is taken fails and is not written. Photos the preview skipped are left out. A token
         works once.
         Returns the ``job_id`` to follow with get_job."""
         if token not in pending:
