@@ -255,6 +255,42 @@ def test_detector_input_checks_only_parse_cache_candidates_in_bounded_batches(db
     assert sorted(map(int, parsed)) == list(candidate_ids)
 
 
+def test_detector_run_photo_ids_for_given_photos_never_check_the_rest(db):
+    """A burst-sized question must not parse the whole catalog's metadata."""
+    from cache_identity import catalog_detector_input
+
+    model = "megadetector-v6"
+    file_hash = "a" * 64
+    _, fingerprint = catalog_detector_input(file_hash, model, None)
+    parsed = []
+    db.conn.create_function("vireo_focus_area", 1, parsed.append)
+    stale, torn, last = 2, 3, 1500
+    for pid in range(1, last + 1):
+        db.conn.execute(
+            "INSERT INTO photos (id, file_hash, exif_data) VALUES (?, ?, ?)", (pid, file_hash, str(pid)),
+        )
+        db.model_runs.record_detector_run(
+            pid, model, 1 if pid == torn else 0, runtime_fingerprint="current",
+            input_fingerprint="b" * 64 if pid == stale else fingerprint,
+        )
+    db.commit()
+
+    asked = [5, stale, torn, 1, 5]
+    for runtime in (None, "current"):
+        parsed.clear()
+        assert db.model_runs.get_detector_run_photo_ids(model, runtime, photo_ids=asked) == {1, 5}
+        assert {int(pid) for pid in parsed} <= set(asked)
+    parsed.clear()
+    assert db.model_runs.get_detector_run_photo_ids(model, photo_ids=[]) == set()
+    assert parsed == []
+    # A selection past SQLite's parameter limit gives the unscoped answer.
+    db.conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+    everything = db.model_runs.get_detector_run_photo_ids(model, "current")
+    assert everything == set(range(1, last + 1)) - {stale, torn}
+    assert db.model_runs.get_detector_run_photo_ids(
+        model, "current", photo_ids=range(1, last + 1)) == everything
+
+
 # -- classifier runs ----------------------------------------------------------
 
 

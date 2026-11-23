@@ -230,9 +230,10 @@ class FeatureReader:
 
         return TaxaRepository(self.conn)
 
-    def get_detector_run_photo_ids(self, detector_model):
+    def get_detector_run_photo_ids(self, detector_model, *, photo_ids=None):
         # Evaluation always loads explicit session IDs. The production loader
-        # stages this scope before requesting detector completion evidence.
+        # stages this scope before requesting detector completion evidence, and
+        # names its photos; historical loaders name none.
         rows = self.conn.execute(
             """SELECT dr.photo_id FROM detector_runs dr WHERE dr.detector_model = ?
             AND dr.photo_id IN (SELECT id FROM pipeline_scope_ids)
@@ -240,7 +241,8 @@ class FeatureReader:
                 WHERE d.photo_id = dr.photo_id AND d.detector_model = dr.detector_model))""",
             (detector_model,),
         )
-        return {r[0] for r in rows}
+        found = {r[0] for r in rows}
+        return found if photo_ids is None else found & set(photo_ids)
 
 
 def timestamp(value):
