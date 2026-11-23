@@ -2,6 +2,7 @@
 
 import json
 
+import config
 import models
 import pipeline_job
 import pytest
@@ -170,9 +171,22 @@ def test_the_same_number_of_different_decisions_is_a_changed_run(app_and_db, one
     assert started == []
 
 
+@pytest.mark.parametrize("column, value", [("group_id", "g2"), ("individual", "Ana"), ("vote_count", 4),
+                                           ("total_votes", 9), ("reviewed_at", "2026-01-01")])
+def test_any_part_of_a_reviewed_decision_is_part_of_the_run(app_and_db, one_model, column, value):
+    app, db = app_and_db
+    ids = _ids(db)
+    prediction = _prediction(db, ids[0], "accepted")
+    before = _run_of(app.test_client(), photo_ids=ids, reclassify=True)["replaced_reviews"]
+    db.conn.execute(f"UPDATE prediction_review SET {column} = ? WHERE prediction_id = ?", (value, prediction))
+    db.commit()
+    after = _run_of(app.test_client(), photo_ids=ids, reclassify=True)["replaced_reviews"]
+    assert after["predictions"] == before["predictions"] == 1 and after["digest"] != before["digest"]
+
+
 @pytest.mark.parametrize("change, named", [
     ("review", "reviewed predictions"), ("species list", "species lists"), ("mask model", "stage settings"),
-    ("other setting", "stage settings"), ("deleted photo", "photos in scope"),
+    ("other setting", "stage settings"), ("root setting", "stage settings"), ("deleted photo", "photos in scope"),
 ])
 def test_a_run_that_changes_in_the_queue_fails_before_its_first_stage(
     app_and_db, one_model, started, monkeypatch, change, named,
@@ -195,8 +209,12 @@ def test_a_run_that_changes_in_the_queue_fails_before_its_first_stage(
         elif change == "deleted photo":
             catalog_deletion.delete_photos(worker, [ids[-1]])
         else:
-            setting = {"sam2_variant": "sam2-tiny"} if change == "mask model" else {"burst_time_gap": 9}
-            worker.conn.execute("UPDATE workspaces SET config_overrides = ?", (json.dumps({"pipeline": setting}),))
+            overrides = {
+                "mask model": {"pipeline": {"sam2_variant": "sam2-tiny"}},
+                "other setting": {"pipeline": {"burst_time_gap": 9}},
+                "root setting": {"similarity_threshold": 0.31},
+            }[change]
+            worker.conn.execute("UPDATE workspaces SET config_overrides = ?", (json.dumps(overrides),))
             worker.commit()
         worker.close()
         return confirm(*args, **kwargs)
@@ -230,6 +248,20 @@ def test_the_default_process_is_not_a_stage_setting(app_and_db, one_model):
     db.conn.execute("UPDATE workspaces SET config_overrides = ?", (json.dumps({"pipeline": {"default_process_id": 2}}),))
     db.commit()
     assert _run_of(app.test_client(), photo_ids=_ids(db)) == before
+
+
+def test_settings_no_stage_reads_do_not_change_the_run(app_and_db, one_model):
+    app, db = app_and_db
+    before = _run_of(app.test_client(), photo_ids=_ids(db))
+    overrides = {"photos_per_page": 7, "browse_stack_time_gap": 9, "inat_token": "x", "unknown_record": 1}
+    db.conn.execute("UPDATE workspaces SET config_overrides = ?", (json.dumps(overrides),))
+    db.commit()
+    assert _run_of(app.test_client(), photo_ids=_ids(db)) == before
+
+
+def test_excluded_settings_exist():
+    """A setting renamed in the defaults would otherwise become part of every run unnoticed."""
+    assert set(config.DEFAULTS) >= process_runs.NOT_STAGE_SETTINGS
 
 
 def test_an_unchanged_queued_run_starts(app_and_db, one_model, started):

@@ -27,6 +27,23 @@ if TYPE_CHECKING:
 #: The stage settings a description spells out; its ``digest`` covers the rest.
 _SETTINGS = ("sam2_variant", "dinov2_variant", "proxy_longest_edge")
 
+#: Settings no Process stage reads: credentials, other programs, imports, syncing,
+#: cache limits, culling and what pages show. Every other setting is part of a
+#: run, so one added later is until it is listed here.
+NOT_STAGE_SETTINGS = frozenset({
+    "move_keep_visible_in_other_workspaces", "keyword_case", "sync_flags_to_xmp",
+    "write_assigned_location_to_xmp", "write_location_keywords_to_xmp", "max_edit_history",
+    "grouping_history_max_mb", "retained_cache_max_mb", "retained_cache_max_age_days",
+    "inat_token", "hf_token", "google_maps_api_key", "google_maps_prefer_english",
+    "scan_roots", "scan_workers", "setup_complete", "rsync_bin", "ssh_bin", "remote_targets",
+    "darktable_bin", "external_editor", "external_editors", "export_presets", "report_url",
+    "darktable_style", "darktable_output_format", "darktable_output_dir", "darktable_auto_convert_dng",
+    "dng_converter_bin", "open_in_browser", "time_format", "browse_card_fields", "filter_shortcuts",
+    "photos_per_page", "working_copy_cache_max_mb", "preview_cache_max_mb", "browse_thumb_default",
+    "browse_stack_time_gap", "browse_stack_split_mode", "cull_time_window", "cull_phash_threshold",
+    "ingest", "numbered_navigation_mode", "keyboard_shortcuts",
+})
+
 #: Every request field that decides what a run does, and the value an omitted
 #: one has. The scope, the models and the species lists are described apart.
 _OPTIONS = {
@@ -104,30 +121,34 @@ def _label_files(db: Database, params: PipelinePlanParams) -> list[str]:
 
 
 def _replaced_reviews(db: Database, photo_ids: Iterable[int]) -> JsonDict:
-    """The accepted and rejected predictions a re-classify may discard: how many, and which."""
+    """The accepted and rejected predictions a re-classify may discard: how many, and
+    a fingerprint of their whole review rows."""
     rows = db.model_runs.reviewed_predictions(photo_ids)
     return {
         "predictions": len({row["prediction_id"] for row in rows}),
         "photos": len({row["photo_id"] for row in rows}),
         "digest": _digest(sorted(
-            f"{row['prediction_id']}:{row['workspace_id']}:{row['status']}" for row in rows
+            json.dumps(dict(row), sort_keys=True, default=str) for row in rows
         )),
     }
 
 
 def _settings(effective: JsonDict) -> JsonDict:
     """The settings the stages would read, all of them in ``digest``."""
+    import config as cfg
+
+    # ``display`` is an older home of the thumbnail size, which the media stage
+    # still reads. Keys outside the defaults are the app's own records.
+    read = {
+        key: effective.get(key) for key in ("display", *cfg.DEFAULTS) if key not in NOT_STAGE_SETTINGS
+    }
     pipeline_cfg: dict[str, Any] = dict(effective.get("pipeline", {}))
     # Chooses what runs after an import; no stage reads it.
     pipeline_cfg.pop("default_process_id", None)
-    read = {
-        "pipeline": pipeline_cfg,
-        "detector_confidence": config_value(effective, "detector_confidence"),
-        "preview_max_size": config_value(effective, "preview_max_size"),
-    }
+    read["pipeline"] = pipeline_cfg
     return {
         **{key: pipeline_cfg.get(key) for key in _SETTINGS},
-        "detector_confidence": read["detector_confidence"],
+        "detector_confidence": config_value(effective, "detector_confidence"),
         "digest": _digest([json.dumps(read, sort_keys=True, default=str)]),
     }
 
