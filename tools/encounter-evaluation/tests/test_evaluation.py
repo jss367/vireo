@@ -404,6 +404,7 @@ def test_detector_run_reads_follow_each_loaded_session(library):
         assert reader.model_runs.get_detector_run_photo_ids("megadetector-v6") == {1, 6}
         load_photo_features(reader, photo_ids=[7, 12], effective_config={})
         assert reader.model_runs.get_detector_run_photo_ids("megadetector-v6") == {7, 12}
+        assert reader.model_runs.get_detector_run_photo_ids("megadetector-v6", photo_ids=[7, 1]) == {7}
         assert reader.model_runs.get_detector_run_photo_ids("another-detector") == set()
     finally:
         conn.close()
