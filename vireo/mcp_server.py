@@ -1524,8 +1524,9 @@ def _process_stages(process):
 
 
 def _process_body(client, scope, process_id, skip, reclassify, model_ids):
-    """The Process request for these choices, with every stage flag spelled out
-    so a later change to the saved process cannot change the run."""
+    """The Process request for these choices. It spells out every stage flag and
+    does not name the saved process, so editing or deleting that process later
+    cannot change or block the run."""
     given = {key: value for key, value in scope.items() if value is not None}
     if len(given) != 1:
         raise VireoError("give exactly one of photo_ids, folder_id and collection_id")
@@ -1540,12 +1541,12 @@ def _process_body(client, scope, process_id, skip, reclassify, model_ids):
         given = {"folder_ids": [given["folder_id"]]}
     elif "photo_ids" in given:
         given = {"photo_ids": list(dict.fromkeys(given["photo_ids"]))}
-    body = {**given, "process_id": process_id, **_pick(processes[process_id], _PROCESS_FLAGS),
+    body = {**given, **_pick(processes[process_id], _PROCESS_FLAGS),
             "reclassify": reclassify}
     for stage in skip or ():
         body.update(_STAGE_SKIPS[stage])
-    # The app turns eye detection on for a process that has the stage, so a
-    # skipped stage must turn the override off rather than leave it unset.
+    # A saved process with the eye stage opts into eye detection, as the app
+    # does when it expands one itself.
     body["eye_detect_override"] = not body["skip_eye_keypoints"]
     if model_ids:
         body["model_ids"] = list(model_ids)

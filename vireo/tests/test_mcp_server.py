@@ -1483,7 +1483,7 @@ def test_preview_process_says_when_the_latest_review_is_replaced(mcp, process_mo
     assert call(server, "preview_process", skip=["group"], **args)["replaces"] == []
 
 
-@pytest.mark.parametrize("change", ["photos", "process", "model", "workspace"])
+@pytest.mark.parametrize("change", ["photos", "edited process", "deleted process", "model", "workspace"])
 def test_start_process_compares_the_run_with_its_preview(mcp, process_model, monkeypatch, change):
     import models
 
@@ -1504,11 +1504,14 @@ def test_start_process_compares_the_run_with_its_preview(mcp, process_model, mon
         db.commit()
         call(server, "activate_workspace", workspace_id=other)
     else:
-        # The preview spelled the stages out, so editing the process changes nothing.
+        # The preview spelled the stages out, so the saved process no longer matters.
         with db.transaction():
-            db.processes.update(process_id, db.processes.get(process_id), name="Full", skip_classify=True,
-                                skip_extract_masks=None, skip_eye_keypoints=None, skip_regroup=None,
-                                miss_enabled=None, review_mode=None)
+            if change == "deleted process":
+                db.processes.delete(process_id)
+            else:
+                db.processes.update(process_id, db.processes.get(process_id), name="Full", skip_classify=True,
+                                    skip_extract_masks=None, skip_eye_keypoints=None, skip_regroup=None,
+                                    miss_enabled=None, review_mode=None)
         started = call(server, "start_process", token=preview["token"])
         call(server, "get_job", job_id=started["job_id"], wait_seconds=int(synchronization_timeout(20)))
         assert process_model[0].skip_classify is False
