@@ -154,6 +154,10 @@ BURST_REASONS = (
 )
 DEFAULT_BURST_PAGE = 50
 MAX_BURST_PAGE = 200
+# Frames one ranking covers: the route's default, and the most it accepts.
+DEFAULT_RANKED_FRAMES = 120
+MAX_RANKED_FRAMES = 500
+DEFAULT_FRAME_PAGE = 50
 # Side of a focus crop in unresized pixels, within the route's 128-1024.
 DEFAULT_FOCUS_SIZE = 768
 # Below this share of the original's size a decoded image is a downsized copy
@@ -343,7 +347,7 @@ def _burst_entry(burst):
         **_pick(burst, ("seed_photo_id", "ranked_candidate_id", "scored", "flags")),
         "first_filename": names[0],
         "last_filename": names[-1],
-        # The ranking covers at most ``ranked_frames``; a longer run has more.
+        # This listing ranked ``ranked_frames`` of them; ``burst`` can rank more.
         "frames": burst.get("burst_photo_count"),
         "ranked_frames": burst.get("count"),
         "analyzed_frames": (burst.get("coverage") or {}).get("with_quality"),
@@ -798,7 +802,8 @@ def _register_burst_tools(server, client):
         subject_touches_edge, multiple_subjects (the wrong animal may have
         been scored), all_rejected, invalid_subject_mask.
         positive_keep_not_validated is on every ranked burst, because Vireo
-        names no keeper itself. ``unflagged_only`` keeps bursts whose ranked
+        names no keeper itself. A burst's reasons and flags describe the
+        ``ranked_frames`` (at most 120) of its ``frames``. ``unflagged_only`` keeps bursts whose ranked
         frames have no pick or reject yet; list every page before flagging,
         since a burst that gains a flag drops out and moves the offsets.
 
@@ -834,7 +839,10 @@ def _register_burst_tools(server, client):
         }
 
     @server.tool(annotations=read_only)
-    def burst(photo_id: int) -> dict:
+    def burst(
+        photo_id: int, max_photos: int = DEFAULT_RANKED_FRAMES,
+        offset: int = 0, limit: int = DEFAULT_FRAME_PAGE,
+    ) -> dict:
         """The burst of frames shot around a photo, ranked by Vireo's
         quality analysis. A provisional ranked candidate still needs manual
         review; ranking alone does not establish an automatic keeper. A frame
@@ -845,13 +853,27 @@ def _register_burst_tools(server, client):
         ``review_reasons`` says why the ranking should not be taken at face
         value, ``coverage`` how many frames have each kind of analysis.
         ``scored`` is false, with ``unscored_reason``, when no ranking was
-        possible; the frames are then listed unranked. The ranking covers up
-        to 120 frames around the photo."""
-        data = client.get_json(f"/api/v1/photos/{photo_id}/burst-evidence")
+        possible; the frames are then listed unranked.
+
+        The ranking, ``coverage`` and ``review_reasons`` cover up to
+        ``max_photos`` frames around the photo (at most 500), and ``count``
+        says how many. Frames past that are not considered, so for a burst
+        list_bursts reports with more ``frames``, pass that number.
+        ``frames`` holds ``limit`` of them in rank order, unranked last;
+        ``next_offset`` continues."""
+        data = client.get_json(
+            f"/api/v1/photos/{photo_id}/burst-evidence", {"max_photos": max_photos},
+        )
+        cards = data.get("cards") or []
+        offset, limit = max(0, offset), max(1, min(limit, MAX_BURST_PAGE))
+        page = cards[offset:offset + limit]
+        more = offset + len(page) < len(cards)
         return {
             **_pick(data, _BURST_KEYS),
             "review_reasons": (data.get("ambiguity") or {}).get("reasons") or [],
-            "frames": [_burst_frame(card) for card in data.get("cards", [])],
+            "offset": offset,
+            "next_offset": offset + len(page) if more else None,
+            "frames": [_burst_frame(card) for card in page],
         }
 
 

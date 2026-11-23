@@ -636,7 +636,7 @@ def test_burst_exposes_provisional_candidate_without_claiming_a_keeper(mcp, monk
     review_ranked_suggestions(response)
     paths = []
 
-    def get_json(path):
+    def get_json(path, params=None):
         paths.append(path)
         return response
 
@@ -685,7 +685,7 @@ def test_burst_nulls_quality_fields_on_ineligible_frames(mcp, monkeypatch):
         }],
     }
     review_ranked_suggestions(response)
-    monkeypatch.setattr(transport, "get_json", lambda path: response)
+    monkeypatch.setattr(transport, "get_json", lambda path, params=None: response)
     frame = call(server, "burst", photo_id=42)["frames"][0]
     assert frame["selection_eligible"] is False
     for key in ("quality", "quality_pct", "focus", "focus_basis",
@@ -709,7 +709,7 @@ def test_burst_keeps_quality_fields_on_eligible_frames(mcp, monkeypatch):
         }],
     }
     review_ranked_suggestions(response)
-    monkeypatch.setattr(transport, "get_json", lambda path: response)
+    monkeypatch.setattr(transport, "get_json", lambda path, params=None: response)
     frame = call(server, "burst", photo_id=42)["frames"][0]
     assert frame["sharpness"] == 0.5
     assert frame["quality"] == 0.72
@@ -744,6 +744,38 @@ def test_burst_carries_the_evidence_behind_the_ranking(mcp):
     assert frame["detection_count"] == 1 and frame["has_mask"] is True
     assert frame["reject_reasons"] == [] and frame["crop_complete"] == 1.0
     assert not any(key.endswith("_url") for key in frame)
+
+
+def test_burst_reaches_every_frame_of_a_long_burst(mcp):
+    from test_burst_evidence import _folder_id, _seed_burst
+
+    server, db, transport = mcp
+    pids = _seed_burst(db, _folder_id(db), 3001, list(range(10, 140)))
+    db.conn.executemany(
+        "UPDATE photos SET timestamp = '2024-03-01T12:00:00' WHERE id = ?", [(pid,) for pid in pids])
+    db.commit()
+    listed = call(server, "list_bursts", folder_id=_folder_id(db))["bursts"][0]
+    assert (listed["frames"], listed["ranked_frames"]) == (130, 120)
+
+    assert call(server, "burst", photo_id=pids[0])["count"] == 120
+    seen, offset = [], 0
+    while offset is not None:
+        page = call(server, "burst", photo_id=pids[0], max_photos=listed["frames"], offset=offset)
+        assert page["count"] == 130 and page["coverage"]["with_quality"] == 130
+        assert len(page["frames"]) <= mcp_server.DEFAULT_FRAME_PAGE
+        seen += [frame["id"] for frame in page["frames"]]
+        offset = page["next_offset"]
+    assert sorted(seen) == sorted(pids) and len(seen) == 130
+    assert transport.calls[-1][2] == {"max_photos": 130}
+    assert "between 2 and 500" in call_error(
+        server, "burst", photo_id=pids[0], max_photos=mcp_server.MAX_RANKED_FRAMES + 1)
+    call(server, "burst", photo_id=pids[0], max_photos=mcp_server.MAX_RANKED_FRAMES)
+
+
+def test_burst_default_matches_the_scorers_window():
+    from best_batch import DEFAULT_BEST_BATCH_MAX_PHOTOS
+
+    assert mcp_server.DEFAULT_RANKED_FRAMES == DEFAULT_BEST_BATCH_MAX_PHOTOS
 
 
 def test_burst_reasons_match_the_scorers_codes():

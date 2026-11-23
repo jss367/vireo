@@ -41,9 +41,13 @@ detector found the right animal. You look at those and decide.
    `positive_keep_not_validated`, because those have a specific doubt to
    settle. Every ranked burst carries that one, so it says nothing about a
    particular burst.
-5. **Look at one burst.** Call `burst(photo_id=...)` with its seed. Read
-   `review_reasons`. For a burst longer than its `ranked_frames`, also look at
-   the frames outside the ranking, or say that you did not.
+5. **Look at one burst.** Call `burst(photo_id=...)` with its seed, and follow
+   `next_offset` until you have every frame. When the list gave the burst more
+   `frames` than `ranked_frames`, call `burst(photo_id=..., max_photos=...)` with
+   that larger number, so the ranking covers the whole burst. Check that `count`
+   matches it and read `review_reasons` again, because `unanalyzed_frames` can
+   appear only now. Leave a burst of more than 500 frames undecided and report
+   it: the tool cannot rank all of it.
 6. **Compare the frames at 1:1.** Call `focus_crop(photo_id=...)` on every
    frame that is not labeled `REJECT`. Read `notes` before the image.
    - When the crop misses the head, call
