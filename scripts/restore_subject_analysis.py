@@ -63,6 +63,7 @@ _SAME_FILE = ("l.file_hash IS o.file_hash AND l.file_size IS o.file_size "
 
 _CANDIDATES = f"""
     SELECT m.photo_id, m.variant, m.path, d.id AS detection_id,
+           lf.path AS folder_path, l.filename,
            EXISTS (SELECT 1 FROM main.photo_masks x
                     WHERE x.photo_id = m.photo_id AND x.variant = m.variant) AS has_mask,
            d.frame_id IS NOT NULL AS redetected,
@@ -77,6 +78,7 @@ _CANDIDATES = f"""
       JOIN bak.detections od ON od.photo_id = m.photo_id AND od.detector_model = m.detector_model
            AND (od.box_x, od.box_y, od.box_w, od.box_h) = (m.prompt_x, m.prompt_y, m.prompt_w, m.prompt_h)
       LEFT JOIN main.photos l ON l.id = m.photo_id
+      LEFT JOIN main.folders lf ON lf.id = l.folder_id
       LEFT JOIN main.detections d ON d.id = od.id AND d.photo_id = m.photo_id
            AND d.detector_model = od.detector_model
            AND d.runtime_fingerprint IN (od.runtime_fingerprint, '{COMPANION_FRAME_RUNTIME}')
@@ -105,11 +107,42 @@ def _mask_problem(path: str, masks_dir: Path, shared: set[str]) -> str | None:
         with Image.open(path) as mask:
             # A file rewritten since carries the frame it belongs to, and
             # the old measurements do not describe it.
-            return None if mask.info.get("vireo_subject_frame_id") is None else "mask file was rewritten"
+            if mask.info.get("vireo_subject_frame_id") is not None:
+                return "mask file was rewritten"
+            # Pillow opens PNGs lazily, so a header-valid file with
+            # truncated pixels passes Image.open; decode now so the
+            # unreadable branch catches it.
+            mask.load()
+            return None
     except FileNotFoundError:
         return "mask file missing"
     except (OSError, ValueError, SyntaxError, Image.DecompressionBombError):
         return "mask file unreadable"
+
+
+def _frame_holds_mask(photo_path: Path, mask_path: str) -> bool:
+    """Whether today's aligned decode of ``photo_path`` holds the mask at ``mask_path``.
+
+    A mask saved before frame identities existed is good only where every
+    decode of the original gives the same frame (``decoded_frame``). For a
+    RAW, that fails when the embedded camera JPEG is now rejected (too small
+    or absent): the aligned decode demosaics the sensor, and the old mask
+    was made against another rendition. Non-RAW files always decode as the
+    camera-rendered image, which is a shared rendition, so they skip the
+    check.
+    """
+    from decoded_frame import DecodedFrame
+    from image_loader import RAW_DECODE_ALIGNED, RAW_EXTENSIONS, load_image
+
+    if photo_path.suffix.lower() not in RAW_EXTENSIONS:
+        return True
+    with Image.open(mask_path) as mask:
+        mask_size = mask.size
+    image = load_image(photo_path, max_size=max(mask_size), raw_decode=RAW_DECODE_ALIGNED)
+    if image is None:
+        return False
+    with image:
+        return DecodedFrame.of(image).holds_mask(None, mask_size)
 
 
 def plan_masks(conn: sqlite3.Connection, masks_dir: Path) -> tuple[list[sqlite3.Row], dict[str, int]]:
@@ -122,6 +155,10 @@ def plan_masks(conn: sqlite3.Connection, masks_dir: Path) -> tuple[list[sqlite3.
     for row in conn.execute(_CANDIDATES):
         reason = next((text for column, text in _REASONS if row[column]), None)
         reason = reason or _mask_problem(row["path"], masks_dir, shared)
+        if reason is None and row["folder_path"]:
+            photo_path = Path(row["folder_path"]) / row["filename"]
+            if not _frame_holds_mask(photo_path, row["path"]):
+                reason = "today's decoded frame does not hold the mask"
         if reason:
             skipped[reason] = skipped.get(reason, 0) + 1
         else:
@@ -138,12 +175,15 @@ def restore_masks(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> None:
     )
 
 
-def restore_projections(conn: sqlite3.Connection, rows: list[sqlite3.Row], floor: float, weak_floor: float) -> int:
+def restore_projections(conn: sqlite3.Connection, rows: list[sqlite3.Row], floor: float) -> int:
     """Make a restored mask active again where it was, if its region is still the primary.
 
-    The primary is resolved as ``set_active_variant`` resolves it. A photo
-    whose primary moved since keeps the restored mask inactive, and Process
-    masks the region that is primary now.
+    The primary is resolved as ``set_active_variant`` resolves it at the
+    workspace's floor; ``set_active_variant`` reserves below-floor activation
+    for the pipeline's validated contextual rescue, so this bulk restore
+    never drops below ``floor``. A photo whose primary moved since keeps
+    the restored mask inactive, and Process masks the region that is
+    primary now.
     """
     primary = (
         "SELECT id FROM main.detections WHERE photo_id=? AND detector_confidence>=? AND subject_verdict IS NULL "
@@ -159,8 +199,7 @@ def restore_projections(conn: sqlite3.Connection, rows: list[sqlite3.Row], floor
     restored = 0
     for row in rows:
         photo_id = row["photo_id"]
-        top = conn.execute(primary, (photo_id, floor)).fetchone() or conn.execute(
-            primary, (photo_id, weak_floor)).fetchone()
+        top = conn.execute(primary, (photo_id, floor)).fetchone()
         if top is None or top["id"] != row["detection_id"]:
             continue
         state = conn.execute(
@@ -212,11 +251,11 @@ def _save_copy(conn: sqlite3.Connection, live: Path) -> Path:
     return saved
 
 
-def apply(conn: sqlite3.Connection, rows: list[sqlite3.Row], floor: float, weak_floor: float) -> int:
+def apply(conn: sqlite3.Connection, rows: list[sqlite3.Row], floor: float) -> int:
     conn.execute("BEGIN EXCLUSIVE")
     try:
         restore_masks(conn, rows)
-        active = restore_projections(conn, rows, floor, weak_floor)
+        active = restore_projections(conn, rows, floor)
     except BaseException:
         conn.execute("ROLLBACK")
         raise
@@ -230,7 +269,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("backup", type=Path)
     parser.add_argument("--masks-dir", type=Path, help="default: the masks folder beside the catalog")
     parser.add_argument("--detector-confidence", type=float, default=0.2)
-    parser.add_argument("--weak-confidence", type=float, default=0.12)
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args(argv)
     masks_dir = (args.masks_dir or args.live.parent / "masks").resolve()
@@ -248,7 +286,7 @@ def main(argv: list[str] | None = None) -> int:
         if not args.apply:
             print("Nothing was changed. Pass --apply to restore them.")
             return 0
-        active = apply(conn, rows, args.detector_confidence, args.weak_confidence)
+        active = apply(conn, rows, args.detector_confidence)
         print(f"Restored {len(rows)} masks; {active} photos have their measurements back.")
     return 0
 

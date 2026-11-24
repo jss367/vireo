@@ -42,10 +42,10 @@ class Catalogs:
         self.folder = workspace_folders.add_folder(self.db, str(tmp_path / "photos"))
         self.boxes = {}
 
-    def photo(self, name, boxes=(BOX,), *, runtime="legacy"):
+    def photo(self, name, boxes=(BOX,), *, runtime="legacy", extension=".jpg"):
         from services import detection_store, photo_ingest
 
-        pid = photo_ingest.add_photo(self.db, self.folder, name, ".nef", 100, 1.0)
+        pid = photo_ingest.add_photo(self.db, self.folder, name, extension, 100, 1.0)
         dids = detection_store.write_detection_batch(self.db, pid, "megadetector-v6", [
             {"box": box, "confidence": .9 - i / 10, "category": "animal"} for i, box in enumerate(boxes)], runtime)
         path = self.masks / f"{pid}.{VARIANT}.png"
@@ -96,7 +96,7 @@ def catalogs(tmp_path):
 
 
 def test_restores_the_mask_and_its_measurements_but_not_the_detail(catalogs, restore, capsys):
-    pid = catalogs.photo("a.nef")
+    pid = catalogs.photo("a.jpg")
     catalogs.lose()
     assert catalogs.row(pid)["mask_path"] is None
     assert catalogs.run(restore) == 0
@@ -118,7 +118,7 @@ def test_restores_the_mask_and_its_measurements_but_not_the_detail(catalogs, res
 
 
 def test_user_decisions_made_since_are_untouched(catalogs, restore):
-    pid = catalogs.photo("a.nef")
+    pid = catalogs.photo("a.jpg")
     catalogs.lose()
     catalogs.db.conn.execute("UPDATE photos SET rating=4, flag='flagged' WHERE id=?", (pid,))
     catalogs.run(restore, "--apply")
@@ -178,6 +178,16 @@ def _truncated_png(catalogs, pid):
     (catalogs.masks / f"{pid}.{VARIANT}.png").write_bytes(b"not a png")
 
 
+def _header_valid_truncated_png(catalogs, pid):
+    """A PNG whose header opens cleanly but whose pixel data is truncated."""
+    path = catalogs.masks / f"{pid}.{VARIANT}.png"
+    data = path.read_bytes()
+    # PNG signature (8) + IHDR chunk (25) is enough for Image.open to
+    # report the size; dropping the IDAT and IEND chunks after that makes
+    # a lazy open succeed while load() fails on missing pixels.
+    path.write_bytes(data[:33])
+
+
 def _deleted_photo(catalogs, pid):
     catalogs.db.conn.execute("DELETE FROM photos WHERE id=?", (pid,))
 
@@ -194,10 +204,11 @@ def _deleted_photo(catalogs, pid):
     (_missing_png, "mask file missing"),
     (_rewritten_png, "mask file was rewritten"),
     (_truncated_png, "mask file unreadable"),
+    (_header_valid_truncated_png, "mask file unreadable"),
     (_deleted_photo, "no longer in the catalog"),
 ])
 def test_leaves_alone_what_no_longer_describes_the_photo(catalogs, restore, capsys, change, reason):
-    changed, intact = catalogs.photo("changed.nef"), catalogs.photo("intact.nef")
+    changed, intact = catalogs.photo("changed.jpg"), catalogs.photo("intact.jpg")
     catalogs.lose()
     change(catalogs, changed)
     before = dict(catalogs.mask(changed)) if catalogs.mask(changed) else None
@@ -212,7 +223,7 @@ def test_leaves_alone_what_no_longer_describes_the_photo(catalogs, restore, caps
 
 def test_a_moved_primary_gets_its_old_mask_back_inactive(catalogs, restore):
     other = {"x": .6, "y": .6, "w": .2, "h": .2}
-    pid = catalogs.photo("two.nef", (BOX, other))
+    pid = catalogs.photo("two.jpg", (BOX, other))
     catalogs.lose()
     catalogs.db.subjects.set_choice(pid, catalogs.boxes[pid][1])
     catalogs.run(restore, "--apply")
@@ -222,7 +233,7 @@ def test_a_moved_primary_gets_its_old_mask_back_inactive(catalogs, restore):
 
 
 def test_an_embedding_from_another_model_is_not_restored(catalogs, restore):
-    pid = catalogs.photo("a.nef")
+    pid = catalogs.photo("a.jpg")
     catalogs.lose()
     catalogs.db.conn.execute("UPDATE photos SET dino_embedding_variant='vit-l14' WHERE id=?", (pid,))
     catalogs.run(restore, "--apply")
@@ -231,7 +242,7 @@ def test_an_embedding_from_another_model_is_not_restored(catalogs, restore):
 
 
 def test_refuses_while_vireo_is_running_and_when_the_backup_is_too_new(catalogs, restore):
-    pid = catalogs.photo("a.nef")
+    pid = catalogs.photo("a.jpg")
     catalogs.lose()
     with pytest.raises(SystemExit, match="Quit Vireo"):
         restore.main([str(catalogs.live), str(catalogs.backup), "--apply"])
@@ -244,8 +255,39 @@ def test_refuses_while_vireo_is_running_and_when_the_backup_is_too_new(catalogs,
     catalogs.db = Database(str(catalogs.live))
 
 
+def test_a_raw_without_a_near_full_preview_is_left_alone(catalogs, restore, capsys, monkeypatch):
+    """A RAW whose aligned decode rejects the embedded preview cannot reuse the old mask.
+
+    ``DecodedFrame.holds_mask`` refuses an unmarked mask on a demosaiced
+    aligned frame (``every_decode_agrees`` is False). The restore must
+    detect that at plan time so the projected measurements, which were
+    taken against a potentially different rendition, stay off the photo.
+    """
+    changed = catalogs.photo("rejected.nef", extension=".nef")
+    intact = catalogs.photo("intact.jpg")
+    catalogs.lose()
+
+    def fake_load_image(path, *, max_size=None, raw_decode=None, **_kwargs):
+        if str(path).endswith(".nef"):
+            # A RAW whose preview is now rejected: aligned decode demosaics
+            # the sensor and marks the rendition as ``sensor``, which is
+            # not a shared rendition.
+            image = Image.new("RGB", (max_size or 30, max_size or 20))
+            image.info["vireo_aligned_rendition"] = "sensor"
+            image.info["vireo_native_size"] = image.size
+            return image
+        return None
+
+    monkeypatch.setattr("image_loader.load_image", fake_load_image)
+    catalogs.run(restore, "--apply")
+    assert "today's decoded frame does not hold the mask" in capsys.readouterr().out
+    assert catalogs.row(changed)["mask_path"] is None
+    assert catalogs.row(changed)["quality_score"] is None
+    assert catalogs.row(intact)["quality_score"] == .8
+
+
 def test_a_failure_part_way_changes_nothing(catalogs, restore, monkeypatch):
-    pid = catalogs.photo("a.nef")
+    pid = catalogs.photo("a.jpg")
     catalogs.lose()
     monkeypatch.setattr(restore, "restore_projections", lambda *_args: 1 / 0)
     with pytest.raises(ZeroDivisionError):
