@@ -67,6 +67,7 @@ class Catalogs:
         self.db.conn.execute(
             "UPDATE photo_masks SET subject_tenengrad=120, subject_detail=5000, subject_detail_px=300 "
             "WHERE photo_id=?", (pid,))
+        self.db.subjects.set_primary_state(pid, dids[0], .2)
         self.boxes[pid] = dids
         return pid
 
@@ -328,6 +329,48 @@ def test_restore_requires_mask_dimensions_to_match_the_original_frame(
     assert (row["mask_path"] is not None) is eligible
     for column, value in MEASURED.items():
         assert row[column] == (value if eligible and not column.startswith("subject_detail") else None)
+
+
+@pytest.mark.parametrize("extension", [".jpg", ".nef"])
+@pytest.mark.parametrize("missing", ["folder", "null_path", "empty_path"])
+def test_an_unresolved_source_never_bypasses_frame_validation(
+        catalogs, restore, monkeypatch, capsys, extension, missing):
+    pid = catalogs.photo("synthetic" + extension, extension=extension)
+    catalogs.lose()
+    if missing == "folder":
+        catalogs.db.conn.execute("UPDATE photos SET folder_id=NULL WHERE id=?", (pid,))
+    else:
+        catalogs.db.conn.execute("UPDATE folders SET path=? WHERE id=?",
+                                 (None if missing == "null_path" else "", catalogs.folder))
+
+    def unresolved_decode(*args, **kwargs):
+        pytest.fail("an unresolved source must be skipped before decoding")
+
+    monkeypatch.setattr("image_loader.load_image", unresolved_decode)
+    catalogs.db.commit()
+    catalogs.db.close()
+    # Read with SQLite directly: application startup repairs folder metadata
+    # and cannot open the deliberately NULL folder path in this fixture.
+    for options in ([], ["--apply"]):
+        restore.main([str(catalogs.live), str(catalogs.backup), *options])
+        with closing(sqlite3.connect(catalogs.live)) as live:
+            live.row_factory = sqlite3.Row
+            assert live.execute("SELECT 1 FROM photo_masks WHERE photo_id=?", (pid,)).fetchone() is None
+            row = live.execute("SELECT * FROM photos WHERE id=?", (pid,)).fetchone()
+            assert all(row[key] is None for key in MEASURED)
+    assert "source path unavailable" in capsys.readouterr().out
+
+
+def test_missing_primary_state_keeps_an_eligible_mask_inactive(catalogs, restore):
+    pid = catalogs.photo("legacy.jpg")
+    catalogs.lose()
+    catalogs.db.conn.execute("DELETE FROM photo_subject_state WHERE photo_id=?", (pid,))
+    catalogs.run(restore, "--apply")
+    assert catalogs.mask(pid) is not None
+    assert catalogs.row(pid)["mask_path"] is None
+    assert all(catalogs.row(pid)[key] is None for key in MEASURED)
+    assert catalogs.db.subjects.primary_state(pid) is None
+    assert catalogs.db.audit.subject_findings(.2) == []
 
 
 def test_a_failure_part_way_changes_nothing(catalogs, restore, monkeypatch):

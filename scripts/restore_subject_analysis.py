@@ -18,6 +18,8 @@ Nothing is replaced. A row is restored only when
 
 ``subject_detail`` is left unmeasured: it was read from mixed renderings, and
 Process measures it again from the cached mask without running SAM.
+Photos without a saved primary state get an eligible mask back inactive;
+Process must establish their measurement provenance before projecting it.
 
 Without ``--apply`` it only reports. Quit Vireo first; --apply refuses while
 another process holds the catalog, and saves a copy of it beside itself.
@@ -152,7 +154,9 @@ def plan_masks(conn: sqlite3.Connection, masks_dir: Path) -> tuple[list[sqlite3.
     for row in conn.execute(_CANDIDATES):
         reason = next((text for column, text in _REASONS if row[column]), None)
         reason = reason or _mask_problem(row["path"], masks_dir, shared)
-        if reason is None and row["folder_path"]:
+        if reason is None and not (row["folder_path"] and row["filename"]):
+            reason = "source path unavailable"
+        if reason is None:
             photo_path = Path(row["folder_path"]) / row["filename"]
             if not _frame_holds_mask(photo_path, row["path"]):
                 reason = "today's decoded frame does not hold the mask"
@@ -180,7 +184,8 @@ def restore_projections(conn: sqlite3.Connection, rows: list[sqlite3.Row], floor
     for the pipeline's validated contextual rescue, so this bulk restore
     never drops below ``floor``. A photo whose primary moved since keeps
     the restored mask inactive, and Process masks the region that is
-    primary now.
+    primary now. Without a saved primary state, leave the mask inactive:
+    selecting a detection alone does not prove its historical measurements.
     """
     primary = (
         "SELECT id FROM main.detections WHERE photo_id=? AND detector_confidence>=? AND subject_verdict IS NULL "
@@ -201,7 +206,7 @@ def restore_projections(conn: sqlite3.Connection, rows: list[sqlite3.Row], floor
             continue
         state = conn.execute(
             "SELECT detection_id FROM main.photo_subject_state WHERE photo_id=?", (photo_id,)).fetchone()
-        if state is not None and state["detection_id"] != row["detection_id"]:
+        if state is None or state["detection_id"] != row["detection_id"]:
             continue
         restored += conn.execute(
             f"UPDATE main.photos SET {assignments}, subject_detail=NULL, subject_detail_px=NULL, "
