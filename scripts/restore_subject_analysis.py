@@ -33,6 +33,7 @@ import argparse
 import contextlib
 import os
 import sqlite3
+import stat
 import sys
 import time
 from pathlib import Path
@@ -59,13 +60,13 @@ MASK_COLUMNS = (
     "bg_separation", "phash_crop", "noise_estimate",
 )
 
-# The source file, so a photo rescanned after an outside change is left alone.
+# Catalog changes are checked here; current disk identity is checked below.
 _SAME_FILE = ("l.file_hash IS o.file_hash AND l.file_size IS o.file_size "
               "AND l.file_mtime IS o.file_mtime AND l.filename IS o.filename")
 
 _CANDIDATES = f"""
     SELECT m.photo_id, m.variant, m.path, d.id AS detection_id,
-           lf.path AS folder_path, l.filename,
+           lf.path AS folder_path, l.filename, l.file_size, l.file_mtime, l.file_hash,
            EXISTS (SELECT 1 FROM main.photo_masks x
                     WHERE x.photo_id = m.photo_id AND x.variant = m.variant) AS has_mask,
            d.frame_id IS NOT NULL AS redetected,
@@ -144,6 +145,36 @@ def _frame_holds_mask(photo_path: Path, mask_path: str) -> bool:
         return DecodedFrame.of(image).holds_mask(None, mask_size)
 
 
+def _file_generation(value: os.stat_result) -> tuple[int, int, int, int, int]:
+    return value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns
+
+
+def _source_problem(photo_path: Path, row: sqlite3.Row) -> str | None:
+    """Check the current original, not just two copies of its catalog metadata.
+
+    Match scanner size/mtime semantics and compare SHA-256 when recorded.
+    Without a historical hash, unchanged size/mtime is the available proof.
+    Bind hashing and frame decoding to one unchanged filesystem generation.
+    """
+    from scanner.hashing import compute_file_hash
+
+    try:
+        before = photo_path.stat()
+        if not stat.S_ISREG(before.st_mode):
+            return "source file unavailable"
+        if before.st_size != row["file_size"] or before.st_mtime != row["file_mtime"]:
+            return "source file changed on disk"
+        if row["file_hash"] and compute_file_hash(photo_path) != row["file_hash"]:
+            return "source file changed on disk"
+        if not _frame_holds_mask(photo_path, row["path"]):
+            return "today's decoded frame does not hold the mask"
+        if _file_generation(photo_path.stat()) != _file_generation(before):
+            return "source file changed during validation"
+    except (OSError, ValueError):
+        return "source file unavailable"
+    return None
+
+
 def plan_masks(conn: sqlite3.Connection, masks_dir: Path) -> tuple[list[sqlite3.Row], dict[str, int]]:
     """The backup masks to restore, and how many are left alone for each reason."""
     skipped: dict[str, int] = {}
@@ -158,8 +189,7 @@ def plan_masks(conn: sqlite3.Connection, masks_dir: Path) -> tuple[list[sqlite3.
             reason = "source path unavailable"
         if reason is None:
             photo_path = Path(row["folder_path"]) / row["filename"]
-            if not _frame_holds_mask(photo_path, row["path"]):
-                reason = "today's decoded frame does not hold the mask"
+            reason = _source_problem(photo_path, row)
         if reason:
             skipped[reason] = skipped.get(reason, 0) + 1
         else:

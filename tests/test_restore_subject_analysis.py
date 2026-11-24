@@ -1,5 +1,7 @@
 """The one-off restore puts back only measurements that still describe the photo."""
+import hashlib
 import importlib.util
+import os
 import sqlite3
 import sys
 from contextlib import closing
@@ -49,13 +51,20 @@ class Catalogs:
         self.masks = tmp_path / "masks"
         self.masks.mkdir()
         self.db = Database(str(self.live))
-        self.folder = workspace_folders.add_folder(self.db, str(tmp_path / "photos"))
+        self.sources = tmp_path / "photos"
+        self.sources.mkdir()
+        self.folder = workspace_folders.add_folder(self.db, str(self.sources))
         self.boxes = {}
 
     def photo(self, name, boxes=(BOX,), *, runtime="legacy", extension=".jpg"):
         from services import detection_store, photo_ingest
 
+        source = self.sources / name
+        source.write_bytes((name.encode() * 100)[:100])
+        os.utime(source, (1, 1))
         pid = photo_ingest.add_photo(self.db, self.folder, name, extension, 100, 1.0)
+        self.db.conn.execute("UPDATE photos SET file_hash=? WHERE id=?",
+                             (hashlib.sha256(source.read_bytes()).hexdigest(), pid))
         dids = detection_store.write_detection_batch(self.db, pid, "megadetector-v6", [
             {"box": box, "confidence": .9 - i / 10, "category": "animal"} for i, box in enumerate(boxes)], runtime)
         path = self.masks / f"{pid}.{VARIANT}.png"
@@ -371,6 +380,55 @@ def test_missing_primary_state_keeps_an_eligible_mask_inactive(catalogs, restore
     assert all(catalogs.row(pid)[key] is None for key in MEASURED)
     assert catalogs.db.subjects.primary_state(pid) is None
     assert catalogs.db.audit.subject_findings(.2) == []
+
+
+@pytest.mark.parametrize("change", ["mtime", "size", "same_metadata_bytes", "missing"])
+def test_unrescanned_source_changes_restore_neither_mask_nor_measurements(catalogs, restore, change):
+    pid = catalogs.photo("synthetic.jpg")
+    catalogs.lose()
+    source = catalogs.sources / "synthetic.jpg"
+    if change == "mtime":
+        os.utime(source, (2, 2))
+    elif change == "missing":
+        source.unlink()
+    else:
+        source.write_bytes(b"x" * (101 if change == "size" else 100))
+        os.utime(source, (1, 1))
+    catalogs.run(restore, "--apply")
+    assert catalogs.mask(pid) is None
+    assert all(catalogs.row(pid)[key] is None for key in MEASURED)
+
+
+@pytest.mark.parametrize("changed", [False, True])
+def test_unhashed_sources_still_require_matching_metadata(catalogs, restore, changed):
+    pid = catalogs.photo("unhashed.jpg")
+    catalogs.db.conn.execute("UPDATE photos SET file_hash=NULL WHERE id=?", (pid,))
+    catalogs.lose()
+    if changed:
+        os.utime(catalogs.sources / "unhashed.jpg", (2, 2))
+    catalogs.run(restore, "--apply")
+    assert (catalogs.mask(pid) is not None) is not changed
+    assert (catalogs.row(pid)["quality_score"] == .8) is not changed
+
+
+def test_source_substitution_during_decode_is_not_restored(catalogs, restore, monkeypatch):
+    import image_loader
+
+    pid = catalogs.photo("racing.jpg")
+    catalogs.lose()
+    decode = image_loader.load_image
+
+    def substitute(path, **options):
+        replacement = Path(path).with_suffix(".replacement")
+        replacement.write_bytes(b"x" * 100)
+        os.utime(replacement, (1, 1))
+        replacement.replace(path)
+        return decode(path, **options)
+
+    monkeypatch.setattr(image_loader, "load_image", substitute)
+    catalogs.run(restore, "--apply")
+    assert catalogs.mask(pid) is None
+    assert all(catalogs.row(pid)[key] is None for key in MEASURED)
 
 
 def test_a_failure_part_way_changes_nothing(catalogs, restore, monkeypatch):
