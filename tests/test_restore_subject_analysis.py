@@ -80,8 +80,12 @@ class Catalogs:
         self.boxes[pid] = dids
         return pid
 
-    def lose(self):
-        """Take the snapshot, then do to the live catalog what migration 54 did."""
+    def lose(self, *, measurements=True):
+        """Retire the masks; optionally seed compatible live box measurements.
+
+        The default models a catalog whose canonical box analysis was already
+        recomputed after migration. Missing-evidence tests leave it retired.
+        """
         from schema import _retire_unbound_detector_caches
 
         self.db.commit()
@@ -90,6 +94,10 @@ class Catalogs:
             copy.execute("ALTER TABLE detections DROP COLUMN frame_id")
             copy.commit()
         _retire_unbound_detector_caches(self.db.conn)
+        if measurements:
+            self.db.subjects.save_analyses("synthetic-current-source", [
+                {"detection_id": ids[0], "crop": BOX, "quality_score": .8, "exposure_ev": 0,
+                 "features": {"subject_sharpness": 9.0}} for ids in self.boxes.values()])
         self.db.commit()
 
     def run(self, restore, *args):
@@ -429,6 +437,30 @@ def test_source_substitution_during_decode_is_not_restored(catalogs, restore, mo
     catalogs.run(restore, "--apply")
     assert catalogs.mask(pid) is None
     assert all(catalogs.row(pid)[key] is None for key in MEASURED)
+
+
+@pytest.mark.parametrize("evidence", ["missing", "other_detection", "quality", "sharpness", "invalid", "matching"])
+def test_only_compatible_existing_measurements_allow_projection(catalogs, restore, evidence):
+    other = {"x": .6, "y": .6, "w": .2, "h": .2}
+    pid = catalogs.photo("evidence.jpg", (BOX, other))
+    catalogs.lose(measurements=False)
+    did = catalogs.boxes[pid][0]
+    if evidence != "missing":
+        catalogs.db.subjects.save_analyses("synthetic-current-source", [{
+            "detection_id": catalogs.boxes[pid][1] if evidence == "other_detection" else did,
+            "crop": BOX, "quality_score": .7 if evidence == "quality" else .8, "exposure_ev": 0,
+            "features": {"subject_sharpness": 8.0 if evidence == "sharpness" else 9.0}}])
+    if evidence == "invalid":
+        catalogs.db.conn.execute("UPDATE detection_subjects SET features='not json' WHERE detection_id=?", (did,))
+    before = catalogs.db.subjects.analyses_for_photo(pid)
+    catalogs.run(restore, "--apply")
+    assert catalogs.mask(pid) is not None
+    row = catalogs.row(pid)
+    assert (row["mask_path"] is not None) is (evidence == "matching")
+    for column, value in MEASURED.items():
+        assert row[column] == (value if evidence == "matching" and not column.startswith("subject_detail") else None)
+    assert catalogs.db.subjects.analyses_for_photo(pid) == before, "never fabricate or replace measurement evidence"
+    assert catalogs.db.audit.subject_findings(.2) == []
 
 
 def test_a_failure_part_way_changes_nothing(catalogs, restore, monkeypatch):

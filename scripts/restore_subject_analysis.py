@@ -18,8 +18,9 @@ Nothing is replaced. A row is restored only when
 
 ``subject_detail`` is left unmeasured: it was read from mixed renderings, and
 Process measures it again from the cached mask without running SAM.
-Photos without a saved primary state get an eligible mask back inactive;
-Process must establish their measurement provenance before projecting it.
+An eligible mask is restored inactive unless both its primary state and
+compatible canonical measurements still exist. Process re-establishes
+missing measurement provenance.
 
 Without ``--apply`` it only reports. Quit Vireo first; --apply refuses while
 another process holds the catalog, and saves a copy of it beside itself.
@@ -216,6 +217,8 @@ def restore_projections(conn: sqlite3.Connection, rows: list[sqlite3.Row], floor
     the restored mask inactive, and Process masks the region that is
     primary now. Without a saved primary state, leave the mask inactive:
     selecting a detection alone does not prove its historical measurements.
+    Existing canonical measurements must also agree with the quality and
+    sharpness being projected, as ``subjects._project_primary`` projects them.
     """
     primary = (
         "SELECT id FROM main.detections WHERE photo_id=? AND detector_confidence>=? AND subject_verdict IS NULL "
@@ -241,8 +244,12 @@ def restore_projections(conn: sqlite3.Connection, rows: list[sqlite3.Row], floor
         restored += conn.execute(
             f"UPDATE main.photos SET {assignments}, subject_detail=NULL, subject_detail_px=NULL, "
             "quality_input_recipe=o.quality_input_recipe FROM bak.photos o WHERE o.id=photos.id AND photos.id=? "
-            "AND photos.mask_path IS NULL AND o.active_mask_variant=? AND o.mask_path=?",
-            (photo_id, row["variant"], row["path"]),
+            "AND photos.mask_path IS NULL AND o.active_mask_variant=? AND o.mask_path=? "
+            "AND EXISTS (SELECT 1 FROM main.detection_subjects measured WHERE measured.detection_id=? "
+            "AND measured.quality_score=o.quality_score "
+            "AND CASE WHEN json_valid(measured.features) "
+            "THEN json_extract(measured.features, '$.subject_sharpness') END=o.subject_sharpness)",
+            (photo_id, row["variant"], row["path"], row["detection_id"]),
         ).rowcount
     return restored
 
