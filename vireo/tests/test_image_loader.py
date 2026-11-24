@@ -2121,6 +2121,7 @@ def test_load_working_image_decode_is_not_serialized_by_the_eviction_guard(
 ])
 def test_focus_masks_follow_the_camera_frame_at_both_scales(tmp_path, monkeypatch, sensor, preview):
     import numpy as np
+    from decoded_frame import DecodedFrame
     from focus_crop import focus_window
     from image_loader import RAW_DECODE_CAMERA_RENDERED, extract_working_copy
     from masking import cached_mask_frame_matches, render_proxy, write_mask_png
@@ -2147,6 +2148,7 @@ def test_focus_masks_follow_the_camera_frame_at_both_scales(tmp_path, monkeypatc
         pixels = np.asarray(proxy)
         red = pixels[:, :, 1] < 80
         frame_id = proxy.info["vireo_subject_frame_id"]
+        frame = DecodedFrame.of(proxy)
         mask_bytes = []
         for right in (False, True):
             encoded = io.BytesIO()
@@ -2165,10 +2167,13 @@ def test_focus_masks_follow_the_camera_frame_at_both_scales(tmp_path, monkeypatc
                 assert _focus_masked_crop(image, window, mask_bytes[other], True).getpixel((96, 64))[0] < 100
     saved = tmp_path / "subject.png"
     saved.write_bytes(mask_bytes[0])
-    assert cached_mask_frame_matches(saved, frame_id)
-    assert not cached_mask_frame_matches(saved, "other-frame")
-    Image.new("L", (1024, 683), 255).save(saved)
-    assert not cached_mask_frame_matches(saved, frame_id)
+    assert cached_mask_frame_matches(saved, frame)
+    assert not cached_mask_frame_matches(saved, DecodedFrame("other-frame", frame.native_size, frame.rendition))
+    # A mask saved before frame identities is known only by the size it must have.
+    Image.new("L", proxy.size, 255).save(saved)
+    assert cached_mask_frame_matches(saved, frame)
+    Image.new("L", (1024, 640), 255).save(saved)
+    assert not cached_mask_frame_matches(saved, frame)
     # A working copy demosaiced from the same NEF has a different frame.
     assert extract_working_copy(path, copy, max_size=2048)
     image, _ = _focus_source_image(config, photo, folder, "working", True)

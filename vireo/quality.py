@@ -489,6 +489,10 @@ def measure_subject_detail(mask, *, source_path, frame_size=None, expected_frame
 
 def saved_mask_matches_frame(mask_size, mask_frame, image, *, prompt_frame=None, mask_frame_id=None):
     """Can the saved proxy mask be mapped to this rendering by resizing alone?"""
+    from decoded_frame import DecodedFrame
+
+    if mask_frame_id is None and DecodedFrame.of(image).holds_mask(None, mask_size):
+        return True
     needs_identity = mask_frame_id is not None or image.info.get("vireo_aligned_rendition")
     if needs_identity and (not mask_frame_id or mask_frame_id != image.info.get("vireo_subject_frame_id")):
         return False

@@ -1133,7 +1133,7 @@ class _MaskPass:
             return False
         from masking import cached_mask_frame_matches
 
-        frame_id = self.require_original_reviewer_frame(
+        frame = self.require_original_reviewer_frame(
             item.image_path, item.detector_runtime,
             detector_model=item.entry.get("detector_model"), verify_mask_frame=True,
         )
@@ -1146,7 +1146,7 @@ class _MaskPass:
                 and cached_prompt == entry["prompt"]
                 and existing["path"]
                 and os.path.isfile(existing["path"])
-                and cached_mask_frame_matches(existing["path"], frame_id)):
+                and cached_mask_frame_matches(existing["path"], frame)):
             return False
         # The cheap skip (re-activate only) is correct
         # ONLY when the photos row is already fully
