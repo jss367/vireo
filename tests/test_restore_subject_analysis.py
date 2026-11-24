@@ -20,11 +20,21 @@ MEASURED = {"quality_score": .8, "subject_sharpness": 9.0, "subject_tenengrad": 
 
 
 @pytest.fixture
-def restore():
+def restore(monkeypatch):
     spec = importlib.util.spec_from_file_location(
         "restore_subject_analysis", ROOT / "scripts" / "restore_subject_analysis.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+
+    def fake_load_image(path, *, max_size, raw_decode):
+        from image_loader import RAW_DECODE_ALIGNED
+
+        assert raw_decode == RAW_DECODE_ALIGNED
+        image = Image.new("RGB", (30, 20))
+        image.info.update(vireo_native_size=image.size, vireo_aligned_rendition="image")
+        return image
+
+    monkeypatch.setattr("image_loader.load_image", fake_load_image)
     return module
 
 
@@ -276,7 +286,9 @@ def test_a_raw_without_a_near_full_preview_is_left_alone(catalogs, restore, caps
             image.info["vireo_aligned_rendition"] = "sensor"
             image.info["vireo_native_size"] = image.size
             return image
-        return None
+        image = Image.new("RGB", (30, 20))
+        image.info.update(vireo_native_size=image.size, vireo_aligned_rendition="image")
+        return image
 
     monkeypatch.setattr("image_loader.load_image", fake_load_image)
     catalogs.run(restore, "--apply")
@@ -284,6 +296,38 @@ def test_a_raw_without_a_near_full_preview_is_left_alone(catalogs, restore, caps
     assert catalogs.row(changed)["mask_path"] is None
     assert catalogs.row(changed)["quality_score"] is None
     assert catalogs.row(intact)["quality_score"] == .8
+
+
+@pytest.mark.parametrize(("extension", "rendition", "native", "eligible"), [
+    (".jpg", "image", (30, 20), True),
+    (".jpg", "image", (60, 40), True),
+    (".jpg", "image", (30, 21), False),
+    (".nef", "embedded-preview", (60, 40), True),
+    (".nef", "embedded-preview", (30, 21), False),
+])
+def test_restore_requires_mask_dimensions_to_match_the_original_frame(
+        catalogs, restore, monkeypatch, extension, rendition, native, eligible):
+    pid = catalogs.photo("synthetic" + extension, extension=extension)
+    catalogs.lose()
+
+    def fake_load_image(path, *, max_size, raw_decode):
+        from image_loader import RAW_DECODE_ALIGNED
+
+        assert Path(path).name == "synthetic" + extension
+        assert max_size == 30 and raw_decode == RAW_DECODE_ALIGNED
+        image = Image.new("RGB", native)
+        image.info.update(vireo_native_size=native, vireo_aligned_rendition=rendition)
+        return image
+
+    monkeypatch.setattr("image_loader.load_image", fake_load_image)
+    catalogs.run(restore)
+    assert catalogs.mask(pid) is None, "reporting must not restore anything"
+    catalogs.run(restore, "--apply")
+    assert (catalogs.mask(pid) is not None) is eligible
+    row = catalogs.row(pid)
+    assert (row["mask_path"] is not None) is eligible
+    for column, value in MEASURED.items():
+        assert row[column] == (value if eligible and not column.startswith("subject_detail") else None)
 
 
 def test_a_failure_part_way_changes_nothing(catalogs, restore, monkeypatch):

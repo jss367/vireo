@@ -127,15 +127,12 @@ def _frame_holds_mask(photo_path: Path, mask_path: str) -> bool:
     decode of the original gives the same frame (``decoded_frame``). For a
     RAW, that fails when the embedded camera JPEG is now rejected (too small
     or absent): the aligned decode demosaics the sensor, and the old mask
-    was made against another rendition. Non-RAW files always decode as the
-    camera-rendered image, which is a shared rendition, so they skip the
-    check.
+    was made against another rendition. Ordinary images share their frame
+    across decodes, but their mask dimensions must still match that frame.
     """
     from decoded_frame import DecodedFrame
-    from image_loader import RAW_DECODE_ALIGNED, RAW_EXTENSIONS, load_image
+    from image_loader import RAW_DECODE_ALIGNED, load_image
 
-    if photo_path.suffix.lower() not in RAW_EXTENSIONS:
-        return True
     with Image.open(mask_path) as mask:
         mask_size = mask.size
     image = load_image(photo_path, max_size=max(mask_size), raw_decode=RAW_DECODE_ALIGNED)
