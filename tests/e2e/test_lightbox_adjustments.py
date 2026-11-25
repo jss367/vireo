@@ -10,6 +10,7 @@ import pytest
 from PIL import Image
 from playwright.sync_api import expect
 from services import photo_ingest, subject_masks, workspace_folders
+from testing.waits import synchronization_timeout
 
 
 @pytest.fixture
@@ -66,6 +67,20 @@ def test_exposure_preview_is_identical_after_saved_round_trip(
         )
         live_server["db"].commit()
     _open(page, live_server, adjustment_photo)
+    # A source that arrives after the debounced save has reloaded the image is
+    # discarded without rendering, and starting the preview worker can take
+    # longer than the debounce.
+    assert page.evaluate("""async timeoutMs => {
+      let timer;
+      try {
+        return await Promise.race([
+          _lbAdjustmentSource.ready,
+          new Promise(resolve => { timer = setTimeout(() => resolve(false), timeoutMs); }),
+        ]);
+      } finally {
+        clearTimeout(timer);
+      }
+    }""", int(synchronization_timeout(30) * 1000)), 'neutral preview source did not load'
     page.evaluate("""() => {
       window.previewFrames = [];
       const render = VireoToneGL.render;
