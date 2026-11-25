@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Put back the masks and subject measurements migration 54 retired.
+"""Put back the masks and mask measurements migration 54 retired.
 
 Migration 54 deleted every MegaDetector mask and cleared the measurements
 projected from them, because none recorded which decoded frame it was made in.
@@ -7,23 +7,35 @@ projected from them, because none recorded which decoded frame it was made in.
 in today's frame, so this copies them back from the snapshot Vireo took before
 migrating (``vireo.db.pre-v57.bak``).
 
-Nothing is replaced. A row is restored only when
+Nothing is replaced. A mask is restored only when
 
-* the live catalog has no mask for that photo and SAM variant, and, for the
-  photo's own columns, no active mask;
+* the live catalog has no mask for that photo and SAM variant;
 * the same detection (id, box and detector runtime) is still there, unrejected,
   and has not been written again by a frame-aware detector run;
-* the photo's file is unchanged and it has no JPEG companion; and
-* the mask PNG is still on disk and is not referenced by another photo.
+* the original is on disk with the size and modified time both catalogs record,
+  and it has no JPEG companion;
+* the mask PNG is still on disk and is not referenced by another photo; and
+* today's decode of the original holds the mask. An ordinary image is decoded to
+  find out. RAWs are grouped by camera, sensor size and mask size, and a sample
+  of each group is decoded: whether the camera's JPEG is near-full is a property
+  of the camera and its frame, and Process proves each file's own frame again
+  before it reuses that file's mask.
 
-``subject_detail`` is left unmeasured: it was read from mixed renderings, and
-Process measures it again from the cached mask without running SAM.
-An eligible mask is restored inactive unless both its primary state and
-compatible canonical measurements still exist. Process re-establishes
-missing measurement provenance.
+The mask becomes active again, with the values measured from it, where it was
+active before and its region is still the primary. Process only reuses an active
+mask; it runs SAM again over an inactive one.
+
+Four kinds of value are left unmeasured for Process, which needs no SAM for any:
+
+* ``quality_score``, ``subject_sharpness`` and the ``detection_subjects`` rows
+  they come from. They are measured in the detector box, and analysis versions
+  before 4 read another rendition: on boxes measured both ways none agree;
+* ``subject_detail``, which was read from mixed renderings; and
+* the eye values, which nothing has compared with today's.
 
 Without ``--apply`` it only reports. Quit Vireo first; --apply refuses while
-another process holds the catalog, and saves a copy of it beside itself.
+another process holds the catalog, and saves a copy of it beside itself. Checking
+every original takes a while over a network share (about 15 minutes for 61,000).
 
     python scripts/restore_subject_analysis.py ~/.vireo/vireo.db ~/.vireo/vireo.db.pre-v57.bak
 """
@@ -37,23 +49,26 @@ import sqlite3
 import stat
 import sys
 import time
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "vireo"))
 
 from detection_id import COMPANION_FRAME_RUNTIME  # noqa: E402
+from image_loader import RAW_EXTENSIONS  # noqa: E402
 from PIL import Image  # noqa: E402
 from repositories.subject_order import primary_order_sql  # noqa: E402
 
 DETECTOR = "megadetector-v6"
-#: Migration 54 projected measurements away through ``clear_primary_features``;
-#: these are the columns it emptied, less the detail that must be remeasured.
+#: The columns ``clear_primary_features`` emptied that were measured from the mask.
 PHOTO_COLUMNS = (
-    "mask_path", "active_mask_variant", "quality_score", "subject_sharpness", "subject_size",
-    "subject_clip_high", "subject_clip_low", "subject_y_median", "subject_tenengrad", "bg_tenengrad",
-    "crop_complete", "bg_separation", "phash_crop", "noise_estimate", "eye_x", "eye_y", "eye_conf",
-    "eye_tenengrad", "eye_kp_fingerprint", "dino_subject_embedding",
+    "mask_path", "active_mask_variant", "subject_size", "subject_clip_high", "subject_clip_low",
+    "subject_y_median", "subject_tenengrad", "bg_tenengrad", "crop_complete", "bg_separation",
+    "phash_crop", "noise_estimate", "dino_subject_embedding",
 )
+#: Originals decoded for each group of RAWs that share a camera, frame and mask size.
+SAMPLES_PER_GROUP = 12
 MASK_COLUMNS = (
     "photo_id", "variant", "path", "created_at", "detector_model", "prompt_x", "prompt_y", "prompt_w",
     "prompt_h", "subject_size", "subject_tenengrad", "bg_tenengrad", "crop_complete",
@@ -61,13 +76,13 @@ MASK_COLUMNS = (
     "bg_separation", "phash_crop", "noise_estimate",
 )
 
-# Catalog changes are checked here; current disk identity is checked below.
+# The catalogs are compared here; the file on disk is checked by ``_source_problem``.
 _SAME_FILE = ("l.file_hash IS o.file_hash AND l.file_size IS o.file_size "
               "AND l.file_mtime IS o.file_mtime AND l.filename IS o.filename")
 
 _CANDIDATES = f"""
     SELECT m.photo_id, m.variant, m.path, d.id AS detection_id,
-           lf.path AS folder_path, l.filename, l.file_size, l.file_mtime, l.file_hash,
+           lf.path AS folder_path, l.filename, l.file_size, l.file_mtime, l.camera_model, l.width, l.height,
            EXISTS (SELECT 1 FROM main.photo_masks x
                     WHERE x.photo_id = m.photo_id AND x.variant = m.variant) AS has_mask,
            d.frame_id IS NOT NULL AS redetected,
@@ -102,100 +117,107 @@ _REASONS = (
 )
 
 
-def _mask_problem(path: str, masks_dir: Path, shared: set[str]) -> str | None:
+def _mask_problem(path: str, masks_dir: Path, shared: set[str]) -> tuple[str | None, tuple[int, int] | None]:
+    """Why the mask at ``path`` cannot be restored, or its size."""
     if path in shared:
-        return "mask file used by more than one photo"
+        return "mask file used by more than one photo", None
     if not Path(path).resolve().is_relative_to(masks_dir):
-        return "mask outside the catalog's masks folder"
+        return "mask outside the catalog's masks folder", None
     try:
         with Image.open(path) as mask:
             # A file rewritten since carries the frame it belongs to, and
             # the old measurements do not describe it.
             if mask.info.get("vireo_subject_frame_id") is not None:
-                return "mask file was rewritten"
-            # Pillow opens PNGs lazily, so a header-valid file with
-            # truncated pixels passes Image.open; decode now so the
-            # unreadable branch catches it.
+                return "mask file was rewritten", None
+            # Opening reads only the header; truncated pixels fail here.
             mask.load()
-            return None
+            return None, mask.size
     except FileNotFoundError:
-        return "mask file missing"
+        return "mask file missing", None
     except (OSError, ValueError, SyntaxError, Image.DecompressionBombError):
-        return "mask file unreadable"
+        return "mask file unreadable", None
 
 
-def _frame_holds_mask(photo_path: Path, mask_path: str) -> bool:
-    """Whether today's aligned decode of ``photo_path`` holds the mask at ``mask_path``.
+def _source_path(row: sqlite3.Row) -> Path:
+    return Path(row["folder_path"]) / row["filename"]
 
-    A mask saved before frame identities existed is good only where every
-    decode of the original gives the same frame (``decoded_frame``). For a
-    RAW, that fails when the embedded camera JPEG is now rejected (too small
-    or absent): the aligned decode demosaics the sensor, and the old mask
-    was made against another rendition. Ordinary images share their frame
-    across decodes, but their mask dimensions must still match that frame.
-    """
+
+def _source_problem(row: sqlite3.Row) -> str | None:
+    """Why the original on disk is not the file both catalogs describe."""
+    if not (row["folder_path"] and row["filename"]):
+        return "original's path unknown"
+    try:
+        found = _source_path(row).stat()
+    except (OSError, ValueError):
+        return "original not found on disk"
+    if not stat.S_ISREG(found.st_mode):
+        return "original not found on disk"
+    if found.st_size != row["file_size"] or found.st_mtime != row["file_mtime"]:
+        return "original changed on disk since it was scanned"
+    return None
+
+
+def _frame_holds_mask(row: sqlite3.Row, mask_size: tuple[int, int]) -> bool | None:
+    """Whether today's aligned decode of the original holds its mask; None when it cannot be decoded."""
     from decoded_frame import DecodedFrame
     from image_loader import RAW_DECODE_ALIGNED, load_image
 
-    with Image.open(mask_path) as mask:
-        mask_size = mask.size
-    image = load_image(photo_path, max_size=max(mask_size), raw_decode=RAW_DECODE_ALIGNED)
+    image = load_image(_source_path(row), max_size=max(mask_size), raw_decode=RAW_DECODE_ALIGNED)
     if image is None:
-        return False
+        return None
     with image:
         return DecodedFrame.of(image).holds_mask(None, mask_size)
 
 
-def _file_generation(value: os.stat_result) -> tuple[int, int, int, int, int]:
-    return value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns
+def _group_holds_masks(rows: list[sqlite3.Row], mask_size: tuple[int, int]) -> bool:
+    """Whether a spread sample of ``rows`` decodes, and every decoded one holds its mask."""
+    step = max(len(rows) // SAMPLES_PER_GROUP, 1)
+    answers = [_frame_holds_mask(row, mask_size) for row in rows[::step][:SAMPLES_PER_GROUP]]
+    return True in answers and False not in answers
 
 
-def _source_problem(photo_path: Path, row: sqlite3.Row) -> str | None:
-    """Check the current original, not just two copies of its catalog metadata.
-
-    Match scanner size/mtime semantics and compare SHA-256 when recorded.
-    Without a historical hash, unchanged size/mtime is the available proof.
-    Bind hashing and frame decoding to one unchanged filesystem generation.
-    """
-    from scanner.hashing import compute_file_hash
-
-    try:
-        before = photo_path.stat()
-        if not stat.S_ISREG(before.st_mode):
-            return "source file unavailable"
-        if before.st_size != row["file_size"] or before.st_mtime != row["file_mtime"]:
-            return "source file changed on disk"
-        if row["file_hash"] and compute_file_hash(photo_path) != row["file_hash"]:
-            return "source file changed on disk"
-        if not _frame_holds_mask(photo_path, row["path"]):
-            return "today's decoded frame does not hold the mask"
-        if _file_generation(photo_path.stat()) != _file_generation(before):
-            return "source file changed during validation"
-    except (OSError, ValueError):
-        return "source file unavailable"
-    return None
+def _frame_group(row: sqlite3.Row, mask_size: tuple[int, int]) -> tuple[object, ...]:
+    """What decides whether a mask lies in today's frame; ordinary images each decide for themselves."""
+    extension = Path(row["filename"]).suffix.lower()
+    if extension not in RAW_EXTENSIONS:
+        return (row["photo_id"], mask_size)
+    return (extension, row["camera_model"], row["width"], row["height"], mask_size)
 
 
 def plan_masks(conn: sqlite3.Connection, masks_dir: Path) -> tuple[list[sqlite3.Row], dict[str, int]]:
     """The backup masks to restore, and how many are left alone for each reason."""
-    skipped: dict[str, int] = {}
-    chosen: dict[tuple[int, str], sqlite3.Row] = {}
+    skipped: dict[str, int] = defaultdict(int)
     shared = {row[0] for row in conn.execute(
         f"SELECT path FROM (SELECT path, photo_id FROM bak.photo_masks WHERE detector_model='{DETECTOR}' "
         "UNION SELECT path, photo_id FROM main.photo_masks) GROUP BY path HAVING COUNT(DISTINCT photo_id) > 1")}
+    intact: dict[tuple[int, str], tuple[sqlite3.Row, tuple[int, int]]] = {}
     for row in conn.execute(_CANDIDATES):
         reason = next((text for column, text in _REASONS if row[column]), None)
-        reason = reason or _mask_problem(row["path"], masks_dir, shared)
-        if reason is None and not (row["folder_path"] and row["filename"]):
-            reason = "source path unavailable"
+        size = None
         if reason is None:
-            photo_path = Path(row["folder_path"]) / row["filename"]
-            reason = _source_problem(photo_path, row)
-        if reason:
-            skipped[reason] = skipped.get(reason, 0) + 1
+            reason, size = _mask_problem(row["path"], masks_dir, shared)
+        if size is None:
+            skipped[reason or "mask file unreadable"] += 1
         else:
-            chosen[row["photo_id"], row["variant"]] = row
-    return list(chosen.values()), skipped
+            intact[row["photo_id"], row["variant"]] = (row, size)
+    originals = {row["photo_id"]: row for row, _ in intact.values()}
+    print(f"Checking {len(originals)} originals...", flush=True)
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        problems = dict(zip(originals, pool.map(_source_problem, originals.values()), strict=True))
+    groups: dict[tuple[object, ...], list[sqlite3.Row]] = defaultdict(list)
+    for row, size in intact.values():
+        problem = problems[row["photo_id"]]
+        if problem:
+            skipped[problem] += 1
+        else:
+            groups[_frame_group(row, size)].append(row)
+    chosen: list[sqlite3.Row] = []
+    for key, rows in groups.items():
+        if _group_holds_masks(rows, key[-1]):
+            chosen += rows
+        else:
+            skipped["today's decoded frame does not hold the mask"] += len(rows)
+    return chosen, dict(skipped)
 
 
 def restore_masks(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> None:
@@ -211,14 +233,11 @@ def restore_projections(conn: sqlite3.Connection, rows: list[sqlite3.Row], floor
     """Make a restored mask active again where it was, if its region is still the primary.
 
     The primary is resolved as ``set_active_variant`` resolves it at the
-    workspace's floor; ``set_active_variant`` reserves below-floor activation
-    for the pipeline's validated contextual rescue, so this bulk restore
-    never drops below ``floor``. A photo whose primary moved since keeps
-    the restored mask inactive, and Process masks the region that is
-    primary now. Without a saved primary state, leave the mask inactive:
-    selecting a detection alone does not prove its historical measurements.
-    Existing canonical measurements must also agree with the quality and
-    sharpness being projected, as ``subjects._project_primary`` projects them.
+    workspace's floor; below-floor activation belongs to the pipeline's
+    contextual rescue, which this has no evidence for. A photo whose primary
+    moved, or whose primary Vireo has forgotten since, keeps the restored mask
+    inactive, and Process masks the region that is primary now. A catalog old
+    enough never to have recorded a primary needs none here.
     """
     primary = (
         "SELECT id FROM main.detections WHERE photo_id=? AND detector_confidence>=? AND subject_verdict IS NULL "
@@ -237,19 +256,16 @@ def restore_projections(conn: sqlite3.Connection, rows: list[sqlite3.Row], floor
         top = conn.execute(primary, (photo_id, floor)).fetchone()
         if top is None or top["id"] != row["detection_id"]:
             continue
-        state = conn.execute(
-            "SELECT detection_id FROM main.photo_subject_state WHERE photo_id=?", (photo_id,)).fetchone()
-        if state is None or state["detection_id"] != row["detection_id"]:
+        then, now = (conn.execute(
+            f"SELECT detection_id FROM {catalog}.photo_subject_state WHERE photo_id=?", (photo_id,)).fetchone()
+            for catalog in ("bak", "main"))
+        if (now is None and then is not None) or (now is not None and now["detection_id"] != row["detection_id"]):
             continue
         restored += conn.execute(
             f"UPDATE main.photos SET {assignments}, subject_detail=NULL, subject_detail_px=NULL, "
             "quality_input_recipe=o.quality_input_recipe FROM bak.photos o WHERE o.id=photos.id AND photos.id=? "
-            "AND photos.mask_path IS NULL AND o.active_mask_variant=? AND o.mask_path=? "
-            "AND EXISTS (SELECT 1 FROM main.detection_subjects measured WHERE measured.detection_id=? "
-            "AND measured.quality_score=o.quality_score "
-            "AND CASE WHEN json_valid(measured.features) "
-            "THEN json_extract(measured.features, '$.subject_sharpness') END=o.subject_sharpness)",
-            (photo_id, row["variant"], row["path"], row["detection_id"]),
+            "AND photos.mask_path IS NULL AND o.active_mask_variant=? AND o.mask_path=?",
+            (photo_id, row["variant"], row["path"]),
         ).rowcount
     return restored
 
@@ -314,10 +330,9 @@ def main(argv: list[str] | None = None) -> int:
     with open_catalogs(args.live, args.backup, write=args.apply) as conn:
         if args.apply:
             # Exclusive locking mode keeps the lock after the rollback, so
-            # nothing can change the catalog between the copy and the writes.
+            # nothing can change the catalog between the checks and the writes.
             _lock_exclusively(conn)
             conn.execute("ROLLBACK")
-            print(f"Saved the catalog as {_save_copy(conn, args.live)}")
         rows, skipped = plan_masks(conn, masks_dir)
         print(f"{len(rows)} masks on {len({row['photo_id'] for row in rows})} photos can be restored.")
         for reason, count in sorted(skipped.items(), key=lambda item: -item[1]):
@@ -325,8 +340,11 @@ def main(argv: list[str] | None = None) -> int:
         if not args.apply:
             print("Nothing was changed. Pass --apply to restore them.")
             return 0
+        if not rows:
+            return 0
+        print(f"Saved the catalog as {_save_copy(conn, args.live)}")
         active = apply(conn, rows, args.detector_confidence)
-        print(f"Restored {len(rows)} masks; {active} photos have their measurements back.")
+        print(f"Restored {len(rows)} masks; {active} are active again. Run Process to measure the rest.")
     return 0
 
 

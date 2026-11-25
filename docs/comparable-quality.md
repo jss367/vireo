@@ -262,7 +262,8 @@ mask saved without a frame identity must also have exactly the size that frame
 scales to. Any other RAW (a rejected or missing preview) requires Re-classify on
 the original, and boxes from a JPEG companion or an unverified reviewer selection
 keep their own rules. Portable detector imports without original-frame proof
-follow the same rule. `scripts/restore_subject_analysis.py` copies the masks and
-measurements migration 54 retired back from the snapshot taken before it. Recipe 9 includes
+follow the same rule. `scripts/restore_subject_analysis.py` copies the masks
+migration 54 retired, and the values measured from them, back from the snapshot
+taken before it; box scores, subject detail and eye values are measured again. Recipe 9 includes
 the detector frame in comparison keys. Migration 52 preserves main's reviewed
 GPS migration across branch catalogs whose version 44 had another meaning.
