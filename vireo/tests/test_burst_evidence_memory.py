@@ -1,4 +1,4 @@
-"""Selected AST; invented SQLite and fake images only. No product imports."""
+"""Selected AST; invented SQLite and fake images only. The one product import does no I/O."""
 
 import ast
 import builtins
@@ -12,6 +12,8 @@ import sqlite3
 import types
 from datetime import datetime
 from pathlib import Path
+
+from decoded_frame import DecodedFrame
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -274,6 +276,7 @@ def focus(photo=None, args=None, size=(3000, 2000), enabled=True, mask_path=None
             comparison_analysis=lambda *args: (None, None, {}),
             source_path=forbidden,
         ),
+        "decoded_frame": types.SimpleNamespace(DecodedFrame=DecodedFrame),
         "detection_id": types.SimpleNamespace(detection_prompt_runtime=lambda row: None, prompt_frame_id=lambda runtime: None),
         "image_loader": types.SimpleNamespace(
             RAW_EXTENSIONS={".nef"}, RAW_DECODE_ALIGNED="aligned_camera_rendered",

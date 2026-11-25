@@ -254,8 +254,16 @@ coordinates. Detail reloads must match that same frame identity. Fresh bound
 detection writes retire prior detector mask rows, including when a runtime
 replacement deleted the old detection first. Migration 54 retires unproven
 detector measurements and adds the nullable frame field without fabricating
-proof for historical boxes. Those boxes/predictions remain browsable and require
-Re-classify on the original before coordinate analysis. Portable detector
-imports without original-frame proof follow the same rule. Recipe 9 includes
+proof for historical boxes. Those boxes/predictions remain browsable. One is used
+for coordinate analysis only where every decode of the original gives the same
+frame (`vireo/decoded_frame.py`): an ordinary image, or a RAW whose near-full
+camera JPEG is what both the old JPEG-first reads and the aligned read return. A
+mask saved without a frame identity must also have exactly the size that frame
+scales to. Any other RAW (a rejected or missing preview) requires Re-classify on
+the original, and boxes from a JPEG companion or an unverified reviewer selection
+keep their own rules. Portable detector imports without original-frame proof
+follow the same rule. `scripts/restore_subject_analysis.py` copies the masks
+migration 54 retired, and the values measured from them, back from the snapshot
+taken before it; box scores, subject detail and eye values are measured again. Recipe 9 includes
 the detector frame in comparison keys. Migration 52 preserves main's reviewed
 GPS migration across branch catalogs whose version 44 had another meaning.

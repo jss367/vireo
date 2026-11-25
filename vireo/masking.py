@@ -464,12 +464,15 @@ def require_aligned_detector_prompt(image, detector_runtime, *, detector_model=N
     """Refuse unproven old boxes when RAW preview and sensor frames differ.
 
     The current detector runtime uses the same camera-rendered frame as SAM.
-    Historical runtimes can describe either the preview or the tiled sensor
-    pass; their boxes have no crop transform. Preserve those reviewed boxes
-    and require an explicit detector rerun instead of guessing a mapping.
+    A box saved without a frame identity is accepted only where every decode
+    of the original gives one frame (``decoded_frame``). Elsewhere it can
+    describe either the preview or the tiled sensor pass, with no crop
+    transform; preserve it and require an explicit detector rerun instead of
+    guessing a mapping.
     """
     require_original_box(detector_runtime)
     from computation_cache import megadetector_runtime_fingerprint
+    from decoded_frame import DecodedFrame
     from detection_id import ALIGNED_REVIEWER_RUNTIME, prompt_frame_id
 
     frame_id = prompt_frame_id(detector_runtime)
@@ -480,6 +483,8 @@ def require_aligned_detector_prompt(image, detector_runtime, *, detector_model=N
     if detector_model == "full-image":
         return  # Whole-frame regions are invariant to the normalized coordinate frame.
     if detector_model == "megadetector-v6":
+        if DecodedFrame.of(image).every_decode_agrees:
+            return
         raise PromptFrameError("Detector coordinates lack original-frame proof; enable Re-classify to rerun detection on the original")
     if detector_runtime in ("reviewer-v1", ALIGNED_REVIEWER_RUNTIME):
         raise PromptFrameError("This reviewer box uses an unverified original frame. Open Subjects and draw the box again on the original.")
@@ -491,7 +496,8 @@ def require_aligned_detector_prompt(image, detector_runtime, *, detector_model=N
 
 
 def require_original_reviewer_frame(image_path, runtime, *, detector_model=None, verify_mask_frame=False):
-    """Validate the prompt and return the decoded identity for cached-mask checks."""
+    """Validate the prompt and return the decoded frame for cached-mask checks."""
+    from decoded_frame import DecodedFrame
     from detection_id import prompt_frame_id
     from image_loader import RAW_EXTENSIONS
 
@@ -509,16 +515,16 @@ def require_original_reviewer_frame(image_path, runtime, *, detector_model=None,
         raise PromptFrameError("Original prompt frame unavailable; reconnect the original before analysis")
     with image:
         require_aligned_detector_prompt(image, runtime, detector_model=detector_model)
-        return image.info.get("vireo_subject_frame_id")
+        return DecodedFrame.of(image)
 
 
-def cached_mask_frame_matches(path, frame_id):
+def cached_mask_frame_matches(path, frame):
     """A validated prompt may still have an older mask at the same box."""
-    if frame_id is None:
+    if frame is None or frame.frame_id is None:
         return True
     try:
         with Image.open(path) as mask:
-            return mask.info.get("vireo_subject_frame_id") == frame_id
+            return frame.holds_mask(mask.info.get("vireo_subject_frame_id"), mask.size)
     except (OSError, ValueError, Image.DecompressionBombError):
         return False
 

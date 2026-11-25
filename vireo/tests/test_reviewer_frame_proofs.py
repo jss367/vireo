@@ -390,7 +390,7 @@ def test_history_retires_masks_from_a_different_verified_rendition(original_phot
 
 
 @pytest.mark.parametrize("version", [51, 52, 53])
-def test_detector_frame_upgrade_preserves_choices_but_requires_original_redetection(original_photo, version):
+def test_detector_frame_upgrade_retires_measurements_and_keeps_choices_and_boxes(original_photo, version):
     import schema
     from reviewer_helpers import original_frame_detections
     from services.detection_store import write_detection_batch
@@ -413,8 +413,9 @@ def test_detector_frame_upgrade_preserves_choices_but_requires_original_redetect
     assert db.photos.get(pid)["rating"] == 5
     assert db.photos.get(pid)["quality_score"] is None
     assert db.subjects.analysis(did) is None
-    with pytest.raises(ValueError, match="lack original-frame proof"):
-        analyze_photo(db, pid, str(source))
+    # An ordinary image has one frame, so the old box is measured again as it stands.
+    assert analyze_photo(db, pid, str(source)) == 1
+    assert db.photos.get(pid)["quality_score"] is not None
     assert write_detection_batch(db, pid, "megadetector-v6", original_frame_detections(source, rows)) == [did]
     assert db.conn.execute("SELECT species FROM predictions WHERE detection_id=?", (did,)).fetchone()[0] == "Synthetic bird"
     assert analyze_photo(db, pid, str(source)) == 1

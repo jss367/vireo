@@ -455,7 +455,7 @@ class _MaskExtractionRun:
             return False
         from masking import cached_mask_frame_matches
 
-        frame_id = self.deps.require_original_reviewer_frame(
+        frame = self.deps.require_original_reviewer_frame(
             item.image_path, photo.get("detector_runtime"),
             detector_model=photo.get("detector_model"), verify_mask_frame=True,
         )
@@ -468,7 +468,7 @@ class _MaskExtractionRun:
                 and cached_prompt == photo["prompt"]
                 and existing["path"]
                 and os.path.isfile(existing["path"])
-                and cached_mask_frame_matches(existing["path"], frame_id)):
+                and cached_mask_frame_matches(existing["path"], frame)):
             return False
         state = thread_db.masks_features.photo_mask_state(item.photo_id)
         if (state is not None

@@ -145,6 +145,7 @@ def _focus_mask_bytes(db_path: str, db: Database, photo_id: int, boxes: Sequence
 
 def _focus_masked_crop(img: Image.Image, window: tuple[int, int, int, int], mask_bytes: bytes | None,
                        require_frame_id: bool = False) -> Image.Image:
+    from decoded_frame import DecodedFrame
     from focus_crop import shade_focus_mask
     from PIL import Image
 
@@ -152,7 +153,7 @@ def _focus_masked_crop(img: Image.Image, window: tuple[int, int, int, int], mask
     if mask_bytes is not None:
         try:
             crop = shade_focus_mask(crop, mask_bytes, img.size, window, Image,
-                                    frame_id=img.info.get("vireo_subject_frame_id"), require_frame_id=require_frame_id)
+                                    frame=DecodedFrame.of(img), require_frame_id=require_frame_id)
         except (OSError, ValueError, Image.DecompressionBombError) as exc:
             raise ValueError("Subject mask is unavailable: unreadable or incompatible with the source raster") from exc
     return crop
