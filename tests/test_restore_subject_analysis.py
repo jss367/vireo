@@ -66,7 +66,9 @@ class Catalogs:
         source.write_bytes((name.encode() * 100)[:100])
         os.utime(source, (1, 1))
         pid = photo_ingest.add_photo(self.db, self.folder, name, extension, 100, 1.0)
-        self.db.conn.execute("UPDATE photos SET camera_model='CAMERA', width=60, height=40 WHERE id=?", (pid,))
+        self.db.conn.execute(
+            "UPDATE photos SET camera_model='CAMERA', width=60, height=40, "
+            """exif_data='{"EXIF": {"JpgFromRawLength": 2870816}}' WHERE id=?""", (pid,))
         dids = detection_store.write_detection_batch(self.db, pid, "megadetector-v6", [
             {"box": box, "confidence": .9 - i / 10, "category": "animal"} for i, box in enumerate(boxes)], runtime)
         path = self.masks / f"{pid}.{VARIANT}.png"
@@ -426,6 +428,20 @@ def test_one_refused_sample_leaves_its_whole_group_alone(catalogs, restore, monk
     assert len(asked) == restore.SAMPLES_PER_GROUP + 1, "a sample, not every original"
     assert not any(catalogs.mask(pid) for pid in raws)
     assert catalogs.active(other)
+
+
+@pytest.mark.parametrize("exif", [None, "not json", "{}", '{"EXIF": {"JpgFromRawLength": 0}}'])
+def test_a_raw_with_no_recorded_full_size_jpeg_answers_for_itself(catalogs, restore, monkeypatch, exif):
+    raws = [catalogs.photo(f"{i}.nef", extension=".nef") for i in range(30)]
+    unrecorded = {f"{i}.nef": raws[i] for i in (13, 29)}
+    for pid in unrecorded.values():
+        catalogs.db.conn.execute("UPDATE photos SET exif_data=? WHERE id=?", (exif, pid))
+    catalogs.lose()
+    asked = _decodes(monkeypatch, lambda name: ((60, 40), "sensor" if name == "29.nef" else "embedded-preview"))
+    catalogs.run(restore, "--apply")
+    assert set(unrecorded) <= set(asked)
+    assert len(asked) == restore.SAMPLES_PER_GROUP + len(unrecorded)
+    assert [catalogs.active(pid) for pid in raws] == [True] * 29 + [False]
 
 
 def test_an_undecodable_sample_does_not_answer_for_its_group(catalogs, restore, monkeypatch):

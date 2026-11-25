@@ -15,11 +15,12 @@ Nothing is replaced. A mask is restored only when
 * the original is on disk with the size and modified time both catalogs record,
   and it has no JPEG companion;
 * the mask PNG is still on disk and is not referenced by another photo; and
-* today's decode of the original holds the mask. An ordinary image is decoded to
-  find out. RAWs are grouped by camera, sensor size and mask size, and a sample
-  of each group is decoded: whether the camera's JPEG is near-full is a property
-  of the camera and its frame, and Process proves each file's own frame again
-  before it reuses that file's mask.
+* today's decode of the original holds the mask. A RAW whose full-size camera JPEG
+  (``JpgFromRaw``) the scanner recorded shares an answer with the others of its
+  camera, sensor size and mask size, of which a sample is decoded: how near to
+  full that JPEG is, is a property of the camera and its frame. Every other
+  original is decoded. Process proves each file's own frame again before it
+  reuses that file's mask.
 
 The mask becomes active again, with the values measured from it, where it was
 active before and its region is still the primary. Process only reuses an active
@@ -83,6 +84,8 @@ _SAME_FILE = ("l.file_hash IS o.file_hash AND l.file_size IS o.file_size "
 _CANDIDATES = f"""
     SELECT m.photo_id, m.variant, m.path, d.id AS detection_id,
            lf.path AS folder_path, l.filename, l.file_size, l.file_mtime, l.camera_model, l.width, l.height,
+           CASE WHEN json_valid(l.exif_data) THEN json_extract(l.exif_data, '$.EXIF.JpgFromRawLength') END
+               AS embedded_jpeg,
            EXISTS (SELECT 1 FROM main.photo_masks x
                     WHERE x.photo_id = m.photo_id AND x.variant = m.variant) AS has_mask,
            d.frame_id IS NOT NULL AS redetected,
@@ -189,9 +192,13 @@ def _rows_in_frame(rows: list[sqlite3.Row], mask_size: tuple[int, int]) -> list[
 
 
 def _frame_group(row: sqlite3.Row) -> tuple[object, ...]:
-    """With the mask's size, what decides whether it lies in today's frame; ordinary images each decide for themselves."""
+    """With the mask's size, what decides whether it lies in today's frame.
+
+    An ordinary image, or a RAW with no full-size camera JPEG on record, decides
+    for itself.
+    """
     extension = Path(row["filename"]).suffix.lower()
-    if extension not in RAW_EXTENSIONS:
+    if extension not in RAW_EXTENSIONS or not row["embedded_jpeg"]:
         return (row["photo_id"],)
     return (extension, row["camera_model"], row["width"], row["height"])
 
