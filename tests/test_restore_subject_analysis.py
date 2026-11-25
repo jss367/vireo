@@ -435,8 +435,27 @@ def test_an_undecodable_sample_does_not_answer_for_its_group(catalogs, restore, 
     catalogs.lose()
     _decodes(monkeypatch, lambda name: None if name in ("1.nef", "lost.nef") else ((60, 40), "embedded-preview"))
     catalogs.run(restore, "--apply")
-    assert all(catalogs.active(pid) for pid in raws)
+    assert [catalogs.mask(pid) is not None for pid in raws] == [True, False, True], "unread, so unproven"
     assert catalogs.mask(lost) is None, "a group with no decoded sample has no answer"
+
+
+def test_an_original_replaced_while_it_is_decoded_says_nothing(catalogs, restore, monkeypatch):
+    raced, raw, steady = catalogs.photo("raced.jpg"), catalogs.photo("raced.nef", extension=".nef"), catalogs.photo("a.jpg")
+    other = catalogs.photo("other.nef", extension=".nef")
+    catalogs.lose()
+
+    def decode(name):
+        if name.startswith("raced"):
+            (catalogs.sources / name).write_bytes(b"x" * 101)
+            # The replacement's own frame would not hold the RAW's mask.
+            return (60, 40), "image" if name.endswith(".jpg") else "sensor"
+        return (60, 40), "image" if name.endswith(".jpg") else "embedded-preview"
+
+    _decodes(monkeypatch, decode)
+    catalogs.run(restore, "--apply")
+    assert catalogs.mask(raced) is None
+    assert (catalogs.active(steady), catalogs.active(other)) == (True, True)
+    assert catalogs.mask(raw) is None, "its group's answer is about the other files"
 
 
 def test_each_ordinary_image_answers_for_itself(catalogs, restore, monkeypatch):

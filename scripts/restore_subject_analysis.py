@@ -158,7 +158,11 @@ def _source_problem(row: sqlite3.Row) -> str | None:
 
 
 def _frame_holds_mask(row: sqlite3.Row, mask_size: tuple[int, int]) -> bool | None:
-    """Whether today's aligned decode of the original holds its mask; None when it cannot be decoded."""
+    """Whether today's aligned decode of the original holds its mask.
+
+    None when it cannot be decoded, or is not the file that was checked: it is
+    checked again after the decode, so a file replaced meanwhile says nothing.
+    """
     from decoded_frame import DecodedFrame
     from image_loader import RAW_DECODE_ALIGNED, load_image
 
@@ -166,22 +170,30 @@ def _frame_holds_mask(row: sqlite3.Row, mask_size: tuple[int, int]) -> bool | No
     if image is None:
         return None
     with image:
+        if _source_problem(row):
+            return None
         return DecodedFrame.of(image).holds_mask(None, mask_size)
 
 
-def _group_holds_masks(rows: list[sqlite3.Row], mask_size: tuple[int, int]) -> bool:
-    """Whether a spread sample of ``rows`` decodes, and every decoded one holds its mask."""
+def _rows_in_frame(rows: list[sqlite3.Row], mask_size: tuple[int, int]) -> list[sqlite3.Row]:
+    """The ``rows`` of one group whose masks lie in today's frame, judged by a spread sample.
+
+    One refusal, or no answer at all, leaves the whole group alone. A sampled
+    original that gave no answer is left alone itself.
+    """
     step = max(len(rows) // SAMPLES_PER_GROUP, 1)
-    answers = [_frame_holds_mask(row, mask_size) for row in rows[::step][:SAMPLES_PER_GROUP]]
-    return True in answers and False not in answers
+    answers = {row["photo_id"]: _frame_holds_mask(row, mask_size) for row in rows[::step][:SAMPLES_PER_GROUP]}
+    if False in answers.values() or True not in answers.values():
+        return []
+    return [row for row in rows if answers.get(row["photo_id"], True)]
 
 
-def _frame_group(row: sqlite3.Row, mask_size: tuple[int, int]) -> tuple[object, ...]:
-    """What decides whether a mask lies in today's frame; ordinary images each decide for themselves."""
+def _frame_group(row: sqlite3.Row) -> tuple[object, ...]:
+    """With the mask's size, what decides whether it lies in today's frame; ordinary images each decide for themselves."""
     extension = Path(row["filename"]).suffix.lower()
     if extension not in RAW_EXTENSIONS:
-        return (row["photo_id"], mask_size)
-    return (extension, row["camera_model"], row["width"], row["height"], mask_size)
+        return (row["photo_id"],)
+    return (extension, row["camera_model"], row["width"], row["height"])
 
 
 def plan_masks(conn: sqlite3.Connection, masks_dir: Path) -> tuple[list[sqlite3.Row], dict[str, int]]:
@@ -204,19 +216,19 @@ def plan_masks(conn: sqlite3.Connection, masks_dir: Path) -> tuple[list[sqlite3.
     print(f"Checking {len(originals)} originals...", flush=True)
     with ThreadPoolExecutor(max_workers=16) as pool:
         problems = dict(zip(originals, pool.map(_source_problem, originals.values()), strict=True))
-    groups: dict[tuple[object, ...], list[sqlite3.Row]] = defaultdict(list)
+    groups: dict[tuple[tuple[object, ...], tuple[int, int]], list[sqlite3.Row]] = defaultdict(list)
     for row, size in intact.values():
         problem = problems[row["photo_id"]]
         if problem:
             skipped[problem] += 1
         else:
-            groups[_frame_group(row, size)].append(row)
+            groups[_frame_group(row), size].append(row)
     chosen: list[sqlite3.Row] = []
-    for key, rows in groups.items():
-        if _group_holds_masks(rows, key[-1]):
-            chosen += rows
-        else:
-            skipped["today's decoded frame does not hold the mask"] += len(rows)
+    for (_, size), rows in groups.items():
+        held = _rows_in_frame(rows, size)
+        chosen += held
+        if len(held) < len(rows):
+            skipped["today's decoded frame does not hold the mask"] += len(rows) - len(held)
     return chosen, dict(skipped)
 
 
