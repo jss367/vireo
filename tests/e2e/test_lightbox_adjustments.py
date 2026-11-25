@@ -66,6 +66,10 @@ def test_exposure_preview_is_identical_after_saved_round_trip(
         )
         live_server["db"].commit()
     _open(page, live_server, adjustment_photo)
+    # A source that arrives after the debounced save has reloaded the image is
+    # discarded without rendering, and starting the preview worker can take
+    # longer than the debounce.
+    assert page.evaluate('() => _lbAdjustmentSource.ready')
     page.evaluate("""() => {
       window.previewFrames = [];
       const render = VireoToneGL.render;
