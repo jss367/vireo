@@ -23078,11 +23078,14 @@ def _run_review_accept(html, payload, call):
     assert start != -1 and end > start, (
         "Review's accept actions could not be located"
     )
-    grid_start = html.find("function getVisibleItems(")
+    # From the per-render row cache through ``getVisibleItems``, which reads
+    # the rows through ``reviewVisibleRows``.
+    grid_start = html.find("var reviewVisibleRowsCache = null;")
     grid_end = html.find("function renderGrid(")
     assert grid_start != -1 and grid_end > grid_start, (
         "Review's getVisibleItems could not be located"
     )
+    assert "function getVisibleItems(" in html[grid_start:grid_end]
     evidence_start = html.find('// Subject evidence and saved uncertainty')
     evidence_end = html.find('</script>', evidence_start)
     assert evidence_start != -1 and evidence_end > evidence_start
