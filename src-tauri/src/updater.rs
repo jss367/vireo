@@ -877,7 +877,7 @@ fn run_countdown(app: &AppHandle, generation: u64) -> CountdownOutcome {
         }
         FinalStep::Ask => {
             let message = match &readiness {
-                Ok(_) => jobs_finished_message(&version, check.shared),
+                Ok(readiness) => jobs_finished_message(&version, &readiness.paused, check.shared),
                 Err(_) => ready_message(&version, None, check.shared),
             };
             set_update_menu_text(app, RESTART_TEXT);
@@ -915,20 +915,27 @@ enum FinalStep {
 
 /// Decide the last step from how the countdown ended and what holds now. A
 /// restart nobody answered needs all of it: a page showed the warning, the
-/// job check answered with nothing running, the window is still on screen
-/// and no other Vireo window shares the backend. The user's own Restart Now
-/// is honored unless new jobs appeared.
+/// job check answered with nothing running or paused, the window is still on
+/// screen and no other Vireo window shares the backend. The user's own
+/// Restart Now is honored unless new jobs appeared, or a paused job or
+/// another window would be affected that the banner did not name.
 fn final_step(
     end: &CountdownEnd,
     readiness: &Result<Readiness, String>,
     check: &UnattendedCheck,
 ) -> FinalStep {
     let busy = matches!(readiness, Ok(r) if !r.idle);
+    // A paused job or another Vireo window is something a restart would stop
+    // or replace that the banner never mentioned, so it always asks.
+    let paused = matches!(readiness, Ok(r) if !r.paused.is_empty());
     match end {
         CountdownEnd::UserChoseNow if busy => FinalStep::AskAboutNewJobs,
+        CountdownEnd::UserChoseNow if paused || check.shared => FinalStep::Ask,
         CountdownEnd::UserChoseNow => FinalStep::Restart,
         _ if busy => FinalStep::KeepWaiting,
-        CountdownEnd::Expired if readiness.is_ok() && check.allowed() => FinalStep::Restart,
+        CountdownEnd::Expired if readiness.is_ok() && !paused && check.allowed() => {
+            FinalStep::Restart
+        }
         CountdownEnd::Expired | CountdownEnd::AskNatively => FinalStep::Ask,
     }
 }
@@ -1063,10 +1070,11 @@ fn ready_message(version: &str, readiness: Option<&Readiness>, shared: bool) -> 
     )
 }
 
-fn jobs_finished_message(version: &str, shared: bool) -> String {
+fn jobs_finished_message(version: &str, paused: &[ReadinessJob], shared: bool) -> String {
     format!(
         "Your jobs have finished, and Vireo v{version} is ready to install.\n\n\
-         Restart Vireo now to finish updating, or choose Later to keep working.{LATER_NOTE}{}",
+         Restart Vireo now to finish updating, or choose Later to keep working.{LATER_NOTE}{}{}",
+        paused_note(paused),
         shared_note(shared)
     )
 }
@@ -1480,6 +1488,27 @@ mod tests {
             final_step(&CountdownEnd::AskNatively, &busy(), &ok),
             FinalStep::KeepWaiting
         );
+        // A paused job stops on restart, so an unanswered expiry asks.
+        let paused = || {
+            Ok(Readiness {
+                idle: true,
+                blocking: vec![],
+                paused: vec![job("Process run", "paused")],
+            })
+        };
+        assert_eq!(
+            final_step(&CountdownEnd::Expired, &paused(), &ok),
+            FinalStep::Ask
+        );
+        // Restart Now asks again for what the banner never named.
+        assert_eq!(
+            final_step(&CountdownEnd::UserChoseNow, &paused(), &ok),
+            FinalStep::Ask
+        );
+        assert_eq!(
+            final_step(&CountdownEnd::UserChoseNow, &idle(), &shared),
+            FinalStep::Ask
+        );
         // The user's Restart Now stands, unless new work appeared.
         assert_eq!(
             final_step(&CountdownEnd::UserChoseNow, &failed(), &hidden),
@@ -1493,8 +1522,12 @@ mod tests {
 
     #[test]
     fn jobs_finished_message_warns_about_a_shared_backend() {
-        assert!(jobs_finished_message("1.2.3", true).contains("Another Vireo window"));
-        assert!(!jobs_finished_message("1.2.3", false).contains("Another Vireo window"));
+        assert!(jobs_finished_message("1.2.3", &[], true).contains("Another Vireo window"));
+        assert!(!jobs_finished_message("1.2.3", &[], false).contains("Another Vireo window"));
+        assert!(
+            jobs_finished_message("1.2.3", &[job("Process run", "paused")], false)
+                .contains("Paused jobs stop when Vireo restarts: Process run.")
+        );
     }
 
     #[test]
