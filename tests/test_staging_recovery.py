@@ -368,6 +368,33 @@ def test_archive_path_that_is_the_staged_file_itself_is_not_a_second_copy(db, tm
     assert staged.exists()
 
 
+def test_copy_in_another_staging_folder_is_not_an_archive_copy(db, tmp_path):
+    """A cataloged photo under the staging base is waiting for its own
+    transfer or cleanup, so it cannot vouch for this staged file."""
+    vireo_dir = tmp_path / "vireo"
+    root = vireo_dir / "staging" / "pipeline-a"
+    staged = _write(root / "USA" / "a.nef")
+    other = _write(vireo_dir / "staging" / "import-kept-locally" / "USA" / "a.nef")
+    _catalog_photo(db, other.parent, "a.nef", staged.stat().st_size)
+
+    result = verify_orphaned_staging(db, str(vireo_dir), str(root))
+
+    assert result["verified"] == 0
+    assert result["unaccounted"] == 1
+    delete_verified_staging(db, str(vireo_dir), str(root))
+    assert staged.exists()
+
+
+def test_only_pipeline_folders_directly_under_staging_are_accepted(db, tmp_path):
+    vireo_dir = tmp_path / "vireo"
+    nested = vireo_dir / "staging" / "import-kept-locally" / "pipeline-inside"
+    kept = _write(nested / "a.nef")
+
+    with pytest.raises(ValueError, match="not a pipeline staging directory"):
+        delete_verified_staging(db, str(vireo_dir), str(nested))
+    assert kept.exists()
+
+
 def test_file_that_changes_after_its_comparison_is_kept(db, tmp_path, monkeypatch):
     vireo_dir, root, staged, _archive_file = _staged_with_archive(db, tmp_path, "changed")
     real_compare = staging_recovery._compare_contents

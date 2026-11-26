@@ -59,7 +59,7 @@ def test_cleanup_deletes_only_files_identical_to_the_archive(live_server, page, 
 
     meta = row.locator(".staging-meta")
     expect(meta).to_contain_text("1 identical to the archive copy")
-    expect(meta).to_contain_text("2 not in archive")
+    expect(meta).to_contain_text("2 without an identical archive copy")
     details = row.locator(".staging-details li")
     expect(details.filter(has_text="b.nef")).to_contain_text("different contents")
     expect(details.filter(has_text="notes.txt")).to_contain_text("no cataloged archive photo")

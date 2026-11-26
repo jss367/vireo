@@ -131,7 +131,7 @@ function appendStagingDetail(row, result, heading) {
 /** @param {ImportStaging} result */
 function stagingProblemParts(result) {
   const parts = [];
-  if (result.unaccounted) parts.push(result.unaccounted + ' not in archive');
+  if (result.unaccounted) parts.push(result.unaccounted + ' without an identical archive copy');
   if (result.unreachable) parts.push(result.unreachable + ' archive unreachable');
   if (result.unchecked) parts.push(result.unchecked + ' could not be checked');
   if (result.delete_failed) parts.push(result.delete_failed + ' could not be deleted');

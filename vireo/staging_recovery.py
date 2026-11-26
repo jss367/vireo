@@ -504,8 +504,12 @@ class _StagingPass:
             "reason": "no cataloged archive photo matches this filename and size",
             "archive_path": None,
         }
+        # A cataloged photo anywhere under the staging base is not in the
+        # archive: it is another staging folder, or an import still waiting
+        # for its transfer. The cleanup root sits directly under that base.
         candidates = _catalog_candidates(
-            self.db, os.path.basename(staged.path), staged.size, self.entry.cleanup_root,
+            self.db, os.path.basename(staged.path), staged.size,
+            os.path.dirname(self.entry.cleanup_root),
         )
         expected_suffix = _expected_archive_suffix(self.entry, staged.path)
         saw_unreachable = False
