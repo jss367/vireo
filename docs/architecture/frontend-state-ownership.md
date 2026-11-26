@@ -10,7 +10,7 @@ No build tool or framework is required.
 | Controller | Owns | Receives from its host |
 | --- | --- | --- |
 | `VireoBrowseCompare` in `static/vireo-browse-compare.js` | Selection snapshot, pair navigation, zoom and pan, request generations, original-image probes, Escape token and interaction listeners | `open(ids)`, `findPhoto(id)`, `fetch`, `showToast`, and the browser window/Keymap |
-| `VireoWorkspaceSwitcher` in `static/vireo-workspace-switcher.js` | Workspace menu visibility, active identity, request generation, dismissal timer, workspace creation dialog | `fetch`, `navigate(path)`, `clearWorkspaceCursors()`, and the browser window |
+| `VireoWorkspaceSwitcher` in `static/vireo-workspace-switcher.js` | Workspace menu visibility, active identity, the loaded workspace list with its search text and highlighted row, request generation, dismissal timer, workspace creation dialog | `fetch`, `navigate(path)`, `clearWorkspaceCursors()`, and the browser window |
 
 Browse's page scripts (`static/browse/*.js`) own the live browse selection and
 photo cache. Their Compare entry point passes the current selection to `open(ids)`, which copies the array.
