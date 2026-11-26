@@ -747,8 +747,11 @@ fn run_countdown(app: &AppHandle, generation: u64) -> CountdownOutcome {
     };
     let started = Instant::now();
     // The banner is a visible warning only in a visible window; a window
-    // closed to the tray, or browser mode, gets the native dialog.
-    let page_can_show = !crate::tray::is_browser_mode(app) && main_window_visible(app);
+    // closed to the tray, or browser mode, gets the native dialog. So does a
+    // backend shared with another Vireo window: installing replaces the app
+    // that window runs, so the restart needs the user's answer, never a timer.
+    let shared = crate::sidecar::other_gui_clients_attached();
+    let page_can_show = !shared && !crate::tray::is_browser_mode(app) && main_window_visible(app);
     if page_can_show {
         notify_page(app);
     }
@@ -817,10 +820,7 @@ fn run_countdown(app: &AppHandle, generation: u64) -> CountdownOutcome {
         set_update_menu_text(app, RESTART_TEXT);
         let restart = app
             .dialog()
-            .message(format!(
-                "Your jobs have finished, and Vireo v{version} is ready to install.\n\n\
-                 Restart Vireo now to finish updating, or choose Later to keep working.{LATER_NOTE}"
-            ))
+            .message(jobs_finished_message(&version, shared))
             .title("Update Ready")
             .kind(MessageDialogKind::Info)
             .buttons(MessageDialogButtons::OkCancelCustom(
@@ -938,6 +938,19 @@ fn ready_message(version: &str, readiness: Option<&Readiness>) -> String {
     format!(
         "Vireo v{version} has been downloaded and is ready to install.\n\n\
          Restart Vireo to finish updating, or choose Later to keep working.{LATER_NOTE}{note}"
+    )
+}
+
+fn jobs_finished_message(version: &str, shared: bool) -> String {
+    let shared_note = if shared {
+        "\n\nAnother Vireo window shares this one's backend. Installing replaces the \
+         application it is running, so quit that window before you restart."
+    } else {
+        ""
+    };
+    format!(
+        "Your jobs have finished, and Vireo v{version} is ready to install.\n\n\
+         Restart Vireo now to finish updating, or choose Later to keep working.{LATER_NOTE}{shared_note}"
     )
 }
 
@@ -1232,6 +1245,12 @@ mod tests {
             paused: vec![],
         };
         assert!(!ready_message("1.2.3", Some(&idle)).contains("couldn't check"));
+    }
+
+    #[test]
+    fn jobs_finished_message_warns_about_a_shared_backend() {
+        assert!(jobs_finished_message("1.2.3", true).contains("Another Vireo window"));
+        assert!(!jobs_finished_message("1.2.3", false).contains("Another Vireo window"));
     }
 
     #[test]

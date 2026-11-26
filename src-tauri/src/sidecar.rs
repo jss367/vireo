@@ -365,11 +365,17 @@ fn remove_gui_client(marker: &Option<std::path::PathBuf>) {
 }
 
 fn live_gui_client_count() -> usize {
+    live_gui_client_pids().len()
+}
+
+/// The process ids of the GUI clients registered on the shared backend that
+/// are still running. Markers of exited clients are removed on the way.
+fn live_gui_client_pids() -> Vec<u32> {
     let Some(dir) = gui_clients_dir() else {
-        return 0;
+        return Vec::new();
     };
     let Ok(entries) = std::fs::read_dir(&dir) else {
-        return 0;
+        return Vec::new();
     };
 
     entries
@@ -381,13 +387,20 @@ fn live_gui_client_count() -> usize {
                 .and_then(|name| name.to_str())
                 .and_then(|name| name.parse::<u32>().ok())?;
             if process_is_alive(pid) {
-                Some(())
+                Some(pid)
             } else {
                 let _ = std::fs::remove_file(path);
                 None
             }
         })
-        .count()
+        .collect()
+}
+
+/// Whether a Vireo window in another process shares this backend. Installing
+/// an update replaces the application files that window is running.
+pub fn other_gui_clients_attached() -> bool {
+    let own = std::process::id();
+    with_gui_clients_lock(|| live_gui_client_pids().into_iter().any(|pid| pid != own))
 }
 
 #[cfg(unix)]
