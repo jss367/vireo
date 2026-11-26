@@ -409,6 +409,8 @@ pub fn run() {
             sync_navigation_shortcuts,
             set_job_progress,
             open_external_url,
+            updater::update_restart_countdown,
+            updater::respond_update_restart,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -423,6 +425,7 @@ pub fn run() {
                 if let Some(state) = app_handle.try_state::<SidecarState>() {
                     sidecar::stop_sidecar(&state);
                 }
+                updater::install_pending_on_exit(app_handle);
             }
         });
 }
