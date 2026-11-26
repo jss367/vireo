@@ -153,7 +153,7 @@ def test_trash_failure_asks_before_deleting_permanently(live_server, page):
     expect(page.locator(DIALOG)).to_be_visible()
     expect(page.locator(f"{DIALOG} h3")).to_have_text("Delete permanently instead?")
     expect(page.locator(f"{DIALOG} .vireo-confirm-details li")).to_have_text(
-        ["/photos/park/hawk1.jpg"]
+        ["/photos/park/hawk1.jpg \u2014 Trash unavailable"]
     )
     # Nothing is deleted while the question is open...
     assert server.permanent_requests == []

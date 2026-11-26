@@ -233,23 +233,28 @@ function updateDeleteProgress(/** @type {LightboxDeleteProgress} */ data) {
   if (detail) detail.textContent = parts.join(' · ');
 }
 
-// Ask before deleting, for good, the files the Trash refused. The answer is
+// Ask before deleting, for good, the photos the Trash refused. The answer is
 // the only thing between a failed Trash and an unrecoverable delete, so it is
-// asked in the page: the desktop app never shows a native confirm().
-/** @param {{path?: string, error?: string}[]} trashFailed @param {number} photoCount @returns {Promise<boolean>} */
-export function confirmPermanentDelete(trashFailed, photoCount) {
-  var paths = trashFailed.map(function(f) { return f.path || ''; }).filter(Boolean);
-  var shown = paths.slice(0, 5);
-  if (paths.length > shown.length) shown.push('… and ' + (paths.length - shown.length) + ' more');
-  var files = paths.length === 1 ? '1 file' : paths.length + ' files';
-  var photos = photoCount === 1 ? '1 photo was' : photoCount + ' photos were';
+// asked in the page: the desktop app never shows a native confirm(). Each
+// row names a file that stopped a photo and the server's reason for it.
+/** @param {{path?: string, error?: string}[]} trashFailed @param {number} photoCount @param {boolean} includeCompanions @returns {Promise<boolean>} */
+export function confirmPermanentDelete(trashFailed, photoCount, includeCompanions) {
+  var rows = trashFailed.map(function(f) {
+    return [f.path, f.error].filter(Boolean).join(' \u2014 ');
+  }).filter(Boolean);
+  var shown = rows.slice(0, 5);
+  if (rows.length > shown.length) shown.push('\u2026 and ' + (rows.length - shown.length) + ' more');
+  var one = photoCount === 1;
   return Vireo.confirm({
     title: 'Delete permanently instead?',
-    message: 'Vireo could not move ' + files + ' to the Trash, so ' + photos + ' kept.\n\n' +
-      'Deleting permanently removes the files from disk now. They will not be in the Trash and cannot be recovered.',
+    message: (one ? '1 photo' : photoCount + ' photos') + ' could not be moved to the Trash and ' +
+      (one ? 'was' : 'were') + ' kept.\n\n' +
+      'Deleting permanently removes ' + (one ? 'its' : 'their') + ' files from disk now' +
+      (includeCompanions ? ', companion files included' : '') +
+      '. They will not be in the Trash and cannot be recovered.',
     details: shown,
     confirmLabel: 'Delete permanently',
-    cancelLabel: 'Keep the files',
+    cancelLabel: one ? 'Keep the photo' : 'Keep the photos',
     danger: true,
   });
 }
@@ -275,7 +280,7 @@ async function handleDeleteJobComplete(/** @type {LightboxDeleteCompletion} */ e
   });
   var permanentlyDeleted = 0;
   if (data.trash_failed && data.trash_failed.length > 0 && failedIds.length) {
-    if (await confirmPermanentDelete(data.trash_failed, failedIds.length)) {
+    if (await confirmPermanentDelete(data.trash_failed, failedIds.length, !!includeCompanions)) {
       try {
         // The server retains catalog rows whose Trash operation failed, so
         // retry by photo id and let it remove each row only after its

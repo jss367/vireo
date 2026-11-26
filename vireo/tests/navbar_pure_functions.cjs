@@ -584,7 +584,9 @@ test('a partly failed delete job keeps its retained photos and reports both coun
   await run();
   // The permanent-delete fallback is offered for the retained file, naming it...
   assert.equal(calls.questions.length, 1);
-  assert.deepEqual(Array.from(calls.questions[0].details), ['/a/2.jpg']);
+  assert.deepEqual(Array.from(calls.questions[0].details), ['/a/2.jpg \u2014 SMB Trash unavailable']);
+  assert.match(calls.questions[0].message, /^1 photo could not be moved to the Trash and was kept\./);
+  assert.match(calls.questions[0].message, /companion files included/);
   assert.equal(calls.questions[0].confirmLabel, 'Delete permanently');
   assert.equal(calls.questions[0].danger, true);
   // ...and declining it deletes nothing more.
@@ -613,11 +615,13 @@ test('the permanent-delete question lists five files and counts the rest', () =>
     Vireo: {confirm: options => { asked.push(options); return Promise.resolve(false); }},
   });
   const failures = [1, 2, 3, 4, 5, 6, 7].map(n => ({path: '/a/' + n + '.jpg'}));
-  ctx.confirmPermanentDelete(failures, 4);
+  ctx.confirmPermanentDelete(failures, 4, false);
   assert.equal(asked[0].details.length, 6);
-  assert.equal(asked[0].details[5], '… and 2 more');
-  assert.match(asked[0].message, /could not move 7 files to the Trash, so 4 photos were kept/);
-  assert.match(asked[0].message, /cannot be recovered/);
+  assert.equal(asked[0].details[0], '/a/1.jpg');
+  assert.equal(asked[0].details[5], '\u2026 and 2 more');
+  assert.match(asked[0].message, /^4 photos could not be moved to the Trash and were kept\./);
+  assert.match(asked[0].message, /removes their files from disk now\. They will not be in the Trash and cannot be recovered\./);
+  assert.equal(asked[0].cancelLabel, 'Keep the photos');
 });
 
 test('a delete job that failed outright reports the failure and runs no callback', () => {
