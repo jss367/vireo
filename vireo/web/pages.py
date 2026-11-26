@@ -179,11 +179,11 @@ def create_pages_blueprint(get_db: GetDb) -> Blueprint:
 
     @blueprint.route("/welcome")
     def welcome() -> ResponseReturnValue:
-        if request.args.get("force"):
-            return render_template("welcome.html")
-        if classification_readiness(get_db())["ready"] or cfg.load().get("setup_complete"):
+        if not request.args.get("force") and (
+            classification_readiness(get_db())["ready"] or cfg.load().get("setup_complete")
+        ):
             return redirect("/browse")
-        return render_template("welcome.html")
+        return render_template("welcome.html", config_recovery=cfg.config_recovery_notice())
 
     @blueprint.route("/favicon.ico")
     def favicon() -> ResponseReturnValue:

@@ -1,8 +1,28 @@
 import json
 import re
+from pathlib import Path
 
 import pytest
 from playwright.sync_api import expect
+
+
+def test_corrupt_config_warns_once_after_settings_are_saved(live_server, page):
+    import config as cfg
+
+    Path(cfg.CONFIG_PATH).write_text("{broken")
+    cfg.set("classification_threshold", 0.31)
+    setup = page.request.get(live_server["url"] + "/welcome?force=1")
+    assert "Vireo could not read config.json" in setup.text()
+    page.goto(live_server["url"] + "/settings")
+    warning = page.locator(".notification-toast").filter(has_text="default settings")
+    expect(warning).to_contain_text(cfg.CONFIG_PATH + ".corrupt")
+    warning.get_by_role("button", name="Dismiss").click()
+    with page.expect_response(lambda response: response.url.endswith("/api/config")):
+        page.reload()
+    page.locator("#notificationsToggle").click()
+    history = page.locator("#notificationList li").filter(has_text="default settings")
+    expect(history).to_have_count(1)
+    expect(warning).to_have_count(0)
 
 
 @pytest.mark.parametrize("state", ["ok", "unverified"])

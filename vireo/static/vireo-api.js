@@ -38,12 +38,32 @@
     return next;
   }
 
+  var lastRecovery = '';
+  /** @param {Response} response */
+  function showConfigRecovery(response) {
+    var notice = response.headers?.get('X-Vireo-Config-Recovery');
+    if (!notice || notice === lastRecovery || typeof global.showToast !== 'function') return response;
+    try {
+      var recovery = JSON.parse(notice);
+      lastRecovery = notice;
+      var key = 'vireo.configRecovery';
+      try { if (global.localStorage.getItem(key) === notice) return response; } catch (_) {}
+      global.showToast(recovery.message, 'warning');
+      try { global.localStorage.setItem(key, notice); } catch (_) {}
+    } catch (_) { /* A notice must never interrupt the request. */ }
+    return response;
+  }
+
   /** @param {RequestInfo | URL} input @param {RequestInit} [init] */
   function browserFetch(input, init) {
     var next = withBrowserHeader(input, init);
-    var send = function() { return nativeFetch(input, next); };
+    var sameOrigin = isSameOrigin(input);
+    var send = function() {
+      var response = nativeFetch(input, next);
+      return sameOrigin ? response.then(showConfigRecovery) : response;
+    };
     var historyRequest = Vireo.api && Vireo.api.trackHistoryRequest;
-    if (isSameOrigin(input) && typeof historyRequest === 'function') {
+    if (sameOrigin && typeof historyRequest === 'function') {
       return historyRequest(input, next, send);
     }
     return send();

@@ -1412,6 +1412,7 @@ def test_patch_global_preserves_corrupt_config_before_overwrite(app_and_db):
     app, _ = app_and_db
     import config as cfg
 
+    assert "X-Vireo-Config-Recovery" not in app.test_client().get("/api/config").headers
     corrupt_body = '{"classification_threshold": 0.9, TRUNCATED'
     with open(cfg.CONFIG_PATH, "w") as f:
         f.write(corrupt_body)
@@ -1422,6 +1423,7 @@ def test_patch_global_preserves_corrupt_config_before_overwrite(app_and_db):
         json={"key": "classification_threshold", "value": 0.31},
     )
     assert resp.status_code == 200
+    assert cfg.CONFIG_PATH + ".corrupt" in json.loads(resp.headers["X-Vireo-Config-Recovery"])["message"]
     # New value landed on disk.
     assert cfg.load()["classification_threshold"] == 0.31
     # The pre-corruption bytes survive next to the file so the user isn't

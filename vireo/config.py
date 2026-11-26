@@ -317,7 +317,7 @@ def config_value(values: Mapping[str, Any] | None, key: str, section: str | None
 _deep_merge = deep_merge
 
 
-def _preserve_corrupt_config():
+def _preserve_corrupt_config() -> bool:
     """Copy an unreadable config file to ``<path>.corrupt`` before callers
     fall back to defaults — the next ``save()`` overwrites the original,
     which would otherwise silently destroy whatever the user had."""
@@ -330,11 +330,43 @@ def _preserve_corrupt_config():
         # equal-or-older timestamp than an unrelated older backup, and the
         # current bytes would then be discarded.
         if os.path.exists(backup) and filecmp.cmp(backup, CONFIG_PATH, shallow=False):
-            return
+            return True
         shutil.copy2(CONFIG_PATH, backup)
         log.warning("Config file is unreadable; preserved a copy at %s", backup)
+        return True
     except OSError:
         log.warning("Could not back up the unreadable config file to %s", backup, exc_info=True)
+        return False
+
+
+# Keep the last fallback available after a migration or settings save replaces
+# the unreadable file, including when this happens before the first page load.
+_recovery_notice: tuple[str, str, str] | None = None
+
+
+def _record_config_fallback() -> None:
+    global _recovery_notice
+    try:
+        stat = os.stat(CONFIG_PATH)
+        revision = f"{stat.st_ctime_ns}-{stat.st_mtime_ns}"
+    except OSError:
+        revision = "unreadable"
+    saved = _preserve_corrupt_config()
+    detail = (
+        f"A copy of the unreadable file was saved to {CONFIG_PATH}.corrupt."
+        if saved else "Vireo could not save a backup of the unreadable file."
+    )
+    _recovery_notice = (CONFIG_PATH, revision, detail)
+
+
+def config_recovery_notice() -> dict[str, str] | None:
+    notice = _recovery_notice
+    if notice and notice[0] == CONFIG_PATH:
+        return {
+            "id": notice[1],
+            "message": f"Vireo could not read config.json and used the default settings. {notice[2]}",
+        }
+    return None
 
 
 # Old Rapid Review bindings remain per-view overrides only when customized.
@@ -405,7 +437,7 @@ def load():
             # at startup, and a corrupt file must fall back to defaults rather
             # than take the app down (the original is preserved first).
             log.warning("Failed to read config, using defaults", exc_info=True)
-            _preserve_corrupt_config()
+            _record_config_fallback()
     return _repair_types(config)
 
 
@@ -480,13 +512,13 @@ def _read_raw():
     try:
         with open(CONFIG_PATH) as f:
             raw = json.load(f)
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         # Write paths save() right after this read, so an unpreserved
         # corrupt file would be clobbered with near-defaults.
-        _preserve_corrupt_config()
+        _record_config_fallback()
         return {}
     if not isinstance(raw, dict):
-        _preserve_corrupt_config()
+        _record_config_fallback()
         return {}
     return raw
 

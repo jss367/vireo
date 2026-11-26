@@ -179,6 +179,9 @@
 {% include '_page_find.html' %}
 
 <div class="setup-card">
+  {% if config_recovery %}
+  <p role="alert">{{ config_recovery.message }}</p>
+  {% endif %}
 
   <!-- Step 1: download the classification model -->
   <div id="stepModel">
