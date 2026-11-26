@@ -216,6 +216,8 @@ class _MaskExtractionRun:
         # ``detail_unreadable`` so the job result does not claim
         # completion with planned work pending.
         self.detail_measured = 0
+        # Masks an upgrade set aside that this run proved and reused without SAM.
+        self.set_aside_reused = 0
         self.detail_unreadable = 0
         # Cached mask PNGs that failed to decode this run: see
         # ``_measure_cached_detail`` for how the drop is done and why
@@ -470,6 +472,16 @@ class _MaskExtractionRun:
                 and os.path.isfile(existing["path"])
                 and cached_mask_frame_matches(existing["path"], frame)):
             return False
+        if existing["set_aside_by"] is not None:
+            # An upgrade set this mask aside; the checks above are the proof
+            # it needs. One that was not the photo's active mask stays set
+            # aside, and SAM replaces it below.
+            if not thread_db.masks_features.reactivate_set_aside(
+                item.photo_id, self.sam2_variant, self.min_detector_conf,
+            ):
+                return False
+            thread_db.commit_with_retry()
+            self.set_aside_reused += 1
         state = thread_db.masks_features.photo_mask_state(item.photo_id)
         if (state is not None
                 and state["active_mask_variant"]
@@ -713,6 +725,7 @@ class _MaskExtractionRun:
         return {"masked": self.masked, "skipped": self.skipped,
                 "failed": failed, "unreadable": unreadable, "total": total,
                 "detail_measured": self.detail_measured,
+                "set_aside_reused": self.set_aside_reused,
                 "detail_unreadable": self.detail_unreadable,
                 "mask_cache_invalidated": self.mask_cache_invalidated,
                 "ok": not job_errors, "errors": job_errors}

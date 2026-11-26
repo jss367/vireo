@@ -887,12 +887,28 @@ def _extract_no_eligible_plan(params, photo_ids, new_count):
     }
 
 
-def _extract_summary(work, detail_pending, new_count, eligible):
+def _set_aside_note(set_aside):
+    """What the stage does with masks an upgrade set aside, or ""."""
+    if not set_aside:
+        return ""
+    if set_aside == 1:
+        return (
+            ". 1 of them has a mask an upgrade set aside: it is checked against "
+            "the original and reused without SAM if it still matches"
+        )
+    return (
+        f". {set_aside} of them have a mask an upgrade set aside: each is checked "
+        "against the original and reused without SAM if it still matches"
+    )
+
+
+def _extract_summary(work, detail_pending, new_count, eligible, set_aside=0):
     """The Extract pill's text: masks to make, cached masks to measure, both."""
     measure = (
         f" and measure subject detail for {detail_pending} cached "
         f"mask{_plural(detail_pending)}"
     ) if detail_pending else ""
+    note = _set_aside_note(set_aside)
     if new_count > 0:
         # Up-to-N new imports will need masks once classify produces
         # detections for them. Treat them as eligible+pending so the pill
@@ -900,7 +916,7 @@ def _extract_summary(work, detail_pending, new_count, eligible):
         return (
             f"Will extract masks for {work} existing + up to "
             f"{new_count} new photo{_plural(new_count)}{measure} "
-            f"({eligible + new_count} eligible)"
+            f"({eligible + new_count} eligible){note}"
         )
     if work == 0:
         return (
@@ -909,7 +925,7 @@ def _extract_summary(work, detail_pending, new_count, eligible):
         )
     return (
         f"Will extract masks for {work} "
-        f"photo{_plural(work)}{measure} ({eligible} eligible)"
+        f"photo{_plural(work)}{measure} ({eligible} eligible){note}"
     )
 
 
@@ -975,12 +991,18 @@ def _extract_plan(db, params, photo_ids, effective_cfg, new_count=0):
     # a complete active row. Without those gates, interrupted rows would land
     # in both buckets and inflate work past eligible.
     work = pending + stale
-    summary = _extract_summary(work, detail_pending, new_count, eligible)
+    # Pending photos whose mask an upgrade set aside: checked, and reused
+    # without SAM where the mask still matches the original.
+    set_aside = stage_counts.count_set_aside_masks(
+        db, sam2_variant, photo_ids, detector_confidence=min_conf, rescue_floors=rescue_floors,
+    )
+    summary = _extract_summary(work, detail_pending, new_count, eligible, set_aside)
     detail = {
         "eligible": eligible + new_count,
         "pending": work + detail_pending + new_count,
         "stale": stale,
         "detail_pending": detail_pending,
+        "set_aside": set_aside,
         "fingerprint_outdated": stale > 0,
     }
     if sam_warning:

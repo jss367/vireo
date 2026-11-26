@@ -52,12 +52,29 @@ export async function loadMasksCard(storageData) {
       });
       inner += '</div>';
     }
+    inner += setAsideMasksNote(data.set_aside || []);
     inner += '</div>';
     card.innerHTML = inner;
   } catch(e) {
     card.innerHTML = '<div style="background:var(--bg-tertiary);border-radius:6px;padding:14px 16px;">' +
       '<span style="color:var(--danger);font-size:12px;">Failed to load mask info</span></div>';
   }
+}
+
+/**
+ * Masks an upgrade stopped trusting and kept: how many, why, and what happens to them.
+ * @param {StorageSetAsideMasks[]} groups
+ */
+function setAsideMasksNote(groups) {
+  return groups.map(function(group) {
+    var count = group.masks || 0;
+    return '<div style="font-size:11px;color:var(--warning);margin-top:8px;">' +
+      count.toLocaleString() + ' mask' + (count === 1 ? ' was' : 's were') +
+      ' set aside by an upgrade (schema ' + storageEscapeHtml(String(group.set_aside_by)) + '): ' +
+      storageEscapeHtml(group.set_aside_reason || '') +
+      '. Nothing was deleted. The next Process run checks each against its original, ' +
+      'reuses the ones that still match and makes the rest again.</div>';
+  }).join('');
 }
 
 export function openMasksModal() {
