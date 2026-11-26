@@ -1,8 +1,8 @@
 {
  "upward_edges": [
+  "catalog_backups -> file_replace",
   "repositories.duplicates -> volume_reachability",
   "repositories.sync -> sidecar_identity",
-  "schema -> file_replace",
   "species_identity -> taxonomy"
  ],
  "cycles": [

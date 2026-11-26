@@ -5,6 +5,12 @@ All notable changes to Vireo are documented in this file.
 ## Unreleased
 
 ### Changed
+- **Vireo keeps three catalog backups, and can keep them on another drive.**
+  The copy of the catalog saved before an update changes its structure is no
+  longer deleted at the next such update: Vireo keeps the last three. A new
+  **Catalog backup folder** setting (Settings → Paths) moves them to an
+  external drive or NAS after launch, and waits for the drive when it is
+  disconnected.
 - **RAW edits retain more image information.** The built-in editor now keeps
   decoded RAW pixels in floating point through tone, color, and detail edits,
   with exposure recovery before mapping highlights to the display. RAW TIFF

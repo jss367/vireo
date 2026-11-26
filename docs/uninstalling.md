@@ -51,6 +51,26 @@ tree includes previews alongside working copies, offline originals, pending
 imports, and external editor files; do not treat the data folder as disposable.
 Custom thumbnail directories keep their existing sibling media layout.
 
+## Catalog backups before upgrades
+
+When an update changes the catalog's structure, Vireo first saves a copy of
+the catalog next to it, named after the schema version the update moves to
+(for example `vireo.db.pre-v57.bak`). Vireo keeps the copies from the last
+three such updates and removes older ones, so a problem noticed a release or
+two later still has a catalog from before it to restore. To restore one, quit
+Vireo, rename the current `vireo.db` out of the way, and copy the backup to
+`vireo.db`; an older catalog then upgrades again on the next launch.
+
+To keep these copies off the startup disk, set **Settings → Paths → Catalog
+backup folder** to a folder on an external drive or NAS. Vireo still writes
+each copy next to the catalog first, so an update never waits on a slow or
+disconnected drive. After launch it copies each one to the backup folder,
+reads the copy back to check it, and only then deletes the copy next to the
+catalog. The three most recent copies are counted across both places. Vireo
+never creates the backup folder: while the drive is unplugged, new copies stay
+next to the catalog, the move shows as a failed job, and they move the next
+time Vireo starts with the drive connected.
+
 ## Opt-in migration of an existing installation
 
 Back up your catalog and settings, finish pending transfers, and quit Vireo and
