@@ -41,8 +41,27 @@ function reviewCategoryBadge(pred) {
 /** @type {Map<number, number>} */ var skippedPredictionOrder = new Map();
 var predictionSkipSequence = 0;
 
-/** @param {boolean} [includeGroupMembers] @param {boolean} [includeAllStatuses] */
-function getVisibleItems(includeGroupMembers, includeAllStatuses) {
+/**
+ * Filtered and sorted rows with their card index, shared by the calls of one
+ * renderAll(). The heading, the tabs, Accept All and the grid each ask for
+ * the visible rows; a whole-workspace queue takes about a second to filter,
+ * sort and index, so one render does it once per status view.
+ * @type {Map<string, {rows: ReviewPrediction[], index: Map<number, ReviewPrediction[]>}>|null}
+ */
+var reviewVisibleRowsCache = null;
+
+/** @param {boolean} [includeAllStatuses] */
+function reviewVisibleRows(includeAllStatuses) {
+  var statusView = includeAllStatuses ? 'all' : currentTab;
+  var cached = reviewVisibleRowsCache?.get(statusView);
+  if (cached) {
+    // Card lookups read the index of the latest view asked for, so a
+    // status view brings back the index that was built with its rows.
+    reviewCardMemberIndex = cached.index;
+    reviewCardIndexRows = predictions;
+    reviewCardIndexScope = reviewCardScopeKey();
+    return cached.rows;
+  }
   var filtered = predictions.slice(); // copy for sorting
 
   if (reviewEvidenceFilter !== 'all') {
@@ -70,8 +89,8 @@ function getVisibleItems(includeGroupMembers, includeAllStatuses) {
   }
 
   // Filter by status tab
-  if (!includeAllStatuses && currentTab !== 'all') {
-    filtered = filtered.filter(function(p) { return p.status === currentTab; });
+  if (statusView !== 'all') {
+    filtered = filtered.filter(function(p) { return p.status === statusView; });
   }
 
   // Sort
@@ -88,6 +107,13 @@ function getVisibleItems(includeGroupMembers, includeAllStatuses) {
   });
 
   indexVisibleReviewCards(filtered);
+  reviewVisibleRowsCache?.set(statusView, {rows: filtered, index: reviewCardMemberIndex});
+  return filtered;
+}
+
+/** @param {boolean} [includeGroupMembers] @param {boolean} [includeAllStatuses] */
+function getVisibleItems(includeGroupMembers, includeAllStatuses) {
+  var filtered = reviewVisibleRows(includeAllStatuses);
   if (includeGroupMembers) return filtered;
 
   // Deduplicate groups — show only the first photo per group
@@ -110,10 +136,30 @@ function getVisibleItems(includeGroupMembers, includeAllStatuses) {
   return cards;
 }
 
+// The grid builds its cards in batches. A whole-workspace queue is about
+// 100,000 cards; building them all keeps the page blank for minutes and
+// repeats on every accept, because a decision re-renders the grid.
+var REVIEW_GRID_BATCH = 60;
+/** Every card of the current view, in display order. @type {ReviewPrediction[]} */ var reviewGridItems = [];
+/** How many of `reviewGridItems` are in the DOM. */ var reviewGridRendered = 0;
+var reviewGridViewKey = '';
+/** @type {IntersectionObserver|null} */ var reviewGridMoreObserver = null;
+
 function renderGrid() {
   var items = getVisibleItems();
   var grid = /** @type {HTMLElement} */ (document.getElementById('grid'));
   var empty = /** @type {HTMLElement} */ (document.getElementById('empty'));
+  // A decision re-renders the same view: keep the cards already built so the
+  // page does not jump back to the top. A different view starts over. The
+  // reload epoch is a component so the universal filter (whose rules are
+  // not in the scope key) resets the batching when it replaces the list.
+  // Accept and reject never bump the epoch, so a decision still preserves
+  // the built cards.
+  var viewKey = JSON.stringify([reviewCardScopeKey(), currentSort, currentCollection, currentPhotoIdFilter, _loadPredictionsEpoch]);
+  var keep = viewKey === reviewGridViewKey ? reviewGridRendered : 0;
+  reviewGridViewKey = viewKey;
+  reviewGridItems = items;
+  reviewGridRendered = Math.min(items.length, Math.max(REVIEW_GRID_BATCH, keep));
 
   if (items.length === 0) {
     grid.innerHTML = '';
@@ -123,12 +169,75 @@ function renderGrid() {
       empty.textContent = 'No predictions in this category.';
     }
     empty.style.display = 'block';
+    renderReviewGridMore();
     return;
   }
   empty.style.display = 'none';
   grid.style.setProperty('--card-width', thumbSize + 'px');
 
-  grid.innerHTML = items.map(function(p) { return renderPredictionCard(p); }).join('');
+  grid.innerHTML = items.slice(0, reviewGridRendered).map(function(p) { return renderPredictionCard(p); }).join('');
+  renderReviewGridMore();
+}
+
+/** Append the next batch of cards below the ones already built. */
+function showMoreReviewCards() {
+  var next = reviewGridItems.slice(reviewGridRendered, reviewGridRendered + REVIEW_GRID_BATCH);
+  if (!next.length) return;
+  /** @type {HTMLElement} */ (document.getElementById('grid')).insertAdjacentHTML(
+    'beforeend', next.map(function(p) { return renderPredictionCard(p); }).join(''));
+  reviewGridRendered += next.length;
+  renderReviewGridMore();
+}
+
+/** Say how many cards are built, and build more when the reader nears the end. */
+function renderReviewGridMore() {
+  var more = /** @type {HTMLElement} */ (document.getElementById('gridMore'));
+  if (!more) return;
+  var remaining = reviewGridItems.length - reviewGridRendered;
+  more.hidden = remaining <= 0;
+  if (remaining <= 0) return;
+  /** @type {HTMLElement} */ (document.getElementById('gridMoreStatus')).textContent =
+    'Showing ' + reviewGridRendered.toLocaleString() + ' of ' + reviewGridItems.length.toLocaleString() +
+    ' cards. More appear as you scroll.';
+  /** @type {HTMLElement} */ (document.getElementById('gridMoreBtn')).textContent =
+    'Show ' + Math.min(REVIEW_GRID_BATCH, remaining).toLocaleString() + ' more';
+  if (reviewGridMoreObserver) {
+    // An observer reports only a change. Observing again makes it report the
+    // current position, so a batch that still leaves the end in view builds
+    // the next one.
+    reviewGridMoreObserver.unobserve(more);
+    reviewGridMoreObserver.observe(more);
+  }
+}
+
+function bindReviewGridMore() {
+  var more = /** @type {HTMLElement} */ (document.getElementById('gridMore'));
+  /** @type {HTMLElement} */ (document.getElementById('gridMoreBtn')).addEventListener('click', showMoreReviewCards);
+  if (typeof IntersectionObserver !== 'function') return;
+  reviewGridMoreObserver = new IntersectionObserver(function(entries) {
+    if (entries.some(function(entry) { return entry.isIntersecting; })) showMoreReviewCards();
+  }, {rootMargin: '0px 0px 1500px 0px'});
+  reviewGridMoreObserver.observe(more);
+}
+
+/** The photos of the current view in display order, one entry per photo, for the lightbox's arrow keys.
+ * ``edit_recipe`` and ``render_key`` come along so navigation to a photo whose
+ * card is not yet built still seeds the lightbox's edit-recipe and render-key
+ * caches — without them the lightbox would load the unedited rendition first
+ * and then reload after the per-photo detail response. */
+function reviewGridPhotoList() {
+  /** @type {Set<number>} */ var seen = new Set();
+  /** @type {{id:number;filename:string;edit_recipe?:ReviewRecipe;render_key?:string}[]} */ var photoList = [];
+  reviewGridItems.forEach(function(p) {
+    if (seen.has(p.photo_id)) return;
+    seen.add(p.photo_id);
+    /** @type {{id:number;filename:string;edit_recipe?:ReviewRecipe;render_key?:string}} */
+    var entry = {id: p.photo_id, filename: p.filename || ''};
+    if (Object.prototype.hasOwnProperty.call(p, 'edit_recipe')) entry.edit_recipe = p.edit_recipe;
+    if (Object.prototype.hasOwnProperty.call(p, 'render_key')) entry.render_key = p.render_key;
+    photoList.push(entry);
+  });
+  return photoList;
 }
 
 /* Delegate grid clicks for lightbox and group review (XSS-safe) */
@@ -137,16 +246,7 @@ function bindReviewGridClicks() {
     if (!(e.target instanceof Element)) return;
     var img = e.target.closest(/** @type {'img'} */ ('img[data-photo-id]'));
     if (img) {
-      /** @type {Record<number,boolean>} */ var seen = {};
-      var photoList = [];
-      var thumbs = /** @type {HTMLElement} */ (document.getElementById('grid')).querySelectorAll(/** @type {'img'} */ ('img[data-photo-id]'));
-      for (var i = 0; i < thumbs.length; i++) {
-        var thumb = thumbs[i]; if (!thumb) continue; var pid = parseInt(thumb.dataset.photoId || '', 10);
-        if (seen[pid]) continue;
-        seen[pid] = true;
-        photoList.push({ id: pid, filename: thumb.dataset.filename || '' });
-      }
-      openLightbox(parseInt(img.dataset.photoId || '', 10), img.dataset.filename || '', photoList);
+      openLightbox(parseInt(img.dataset.photoId || '', 10), img.dataset.filename || '', reviewGridPhotoList());
       return;
     }
     var groupBtn = e.target.closest(/** @type {'button'} */ ('button[data-group-id]'));

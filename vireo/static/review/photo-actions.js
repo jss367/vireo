@@ -116,18 +116,9 @@ var enqueueReviewPhotoAction = (function() {
 }
 
 /** @param {number} photoId @param {string} filename */ function openReviewLightbox(photoId, filename) {
-  // Build the same photoList the grid click handler builds, so arrow-key
-  // navigation inside the lightbox walks the current review grid.
-  /** @type {Record<number,boolean>} */ var seen = {};
-  var photoList = [];
-  var thumbs = /** @type {HTMLElement} */ (document.getElementById('grid')).querySelectorAll(/** @type {'img'} */ ('img[data-photo-id]'));
-  for (var i = 0; i < thumbs.length; i++) {
-    var thumb = thumbs[i]; if (!thumb) continue; var pid = parseInt(thumb.dataset.photoId || '', 10);
-    if (seen[pid]) continue;
-    seen[pid] = true;
-    photoList.push({ id: pid, filename: thumb.dataset.filename || '' });
-  }
-  openLightbox(photoId, filename || '', photoList);
+  // The same list the grid click handler passes, so arrow-key navigation
+  // inside the lightbox walks the current review grid.
+  openLightbox(photoId, filename || '', reviewGridPhotoList());
 }
 
 // setLifeListPhoto (card context menu / shared lightbox action) only emits a

@@ -164,6 +164,26 @@
     padding: 24px;
   }
 
+  .grid-more {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    padding: 0 24px 32px;
+    font-size: 13px;
+    color: var(--text-secondary);
+  }
+  .grid-more[hidden] { display: none; }
+  .grid-more button {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    border: 1px solid var(--border-primary);
+    border-radius: 6px;
+    padding: 6px 14px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+
   /* ---------- Photo Card ---------- */
   .card {
     background: var(--bg-secondary, #0E2A3D);
@@ -917,6 +937,10 @@
 <!-- Photo Grid -->
 <p class="grouping-hint">You can save species before grouping. They will be attached to encounters when grouping finishes.</p>
 <div class="grid" id="grid"></div>
+<div class="grid-more" id="gridMore" hidden>
+  <span id="gridMoreStatus" role="status"></span>
+  <button type="button" id="gridMoreBtn"></button>
+</div>
 <div class="empty" id="empty" style="display:none;">
   Select a collection above to load photos.
 </div>

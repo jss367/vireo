@@ -14,9 +14,26 @@ function reviewEvidenceDeferred(pred) {
   return ['not_enough_evidence', 'invalid_subject'].includes(pred.evidence?.subject.decision || '');
 }
 
+/** @type {Map<number, ReviewPrediction>} */ var reviewPredictionIndex = new Map();
+/** @type {ReviewPrediction[]|null} */ var reviewPredictionIndexRows = null;
+
+/**
+ * The loaded prediction with this id. The grid asks once per card, so the
+ * lookup is an index built once per loaded list; scanning the list for every
+ * card takes minutes on a whole-workspace queue.
+ * @param {number} id
+ */
+function reviewPredictionById(id) {
+  if (reviewPredictionIndexRows !== predictions) {
+    reviewPredictionIndex = new Map(predictions.map(function(p) { return [p.id, p]; }));
+    reviewPredictionIndexRows = predictions;
+  }
+  return reviewPredictionIndex.get(id);
+}
+
 /** @param {number} id */
 function reviewEvidenceBlocksAccept(id) {
-  var pred = predictions.find(function(p) { return p.id === id; });
+  var pred = reviewPredictionById(id);
   if (!pred) return false;
   return reviewCardMembers(pred).some(function(sibling) {
     return reviewEvidenceDeferred(sibling) || reviewEvidenceSaving.has(sibling.detection_id || 0);
