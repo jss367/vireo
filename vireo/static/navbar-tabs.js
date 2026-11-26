@@ -167,11 +167,16 @@ function updateStripOverflow() {
 
 // A mouse wheel only scrolls vertically, so over an overflowing strip it
 // moves the tabs sideways instead. A sideways gesture keeps its own scroll.
+// At the boundary in the wheel direction the strip cannot move, so the
+// wheel falls through to the page instead of being swallowed in place.
 /** @param {WheelEvent} event */
 function scrollStripWithWheel(event) {
   const strip = STRIP();
   if (event.ctrlKey || Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
   if (strip.scrollWidth <= strip.clientWidth) return;
+  const hidden = strip.scrollWidth - strip.clientWidth;
+  if (event.deltaY > 0 && hidden - strip.scrollLeft <= 1) return;
+  if (event.deltaY < 0 && strip.scrollLeft <= 1) return;
   event.preventDefault();
   strip.scrollLeft += event.deltaY;
 }

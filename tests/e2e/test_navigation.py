@@ -540,6 +540,25 @@ def test_only_the_tab_strip_gives_way_in_a_narrow_window(live_server, page):
     strip.evaluate("el => { el.scrollLeft = el.scrollWidth; }")
     expect(strip).to_have_class("nav-tab-strip more-left")
 
+    # At the right boundary a downward wheel cannot move the strip, so it
+    # must fall through to the page instead of being swallowed in place.
+    # The opposite holds at the left boundary for an upward wheel.
+    def wheel_prevented(delta_y: int) -> bool:
+        return strip.evaluate(
+            """(el, dy) => {
+              const ev = new WheelEvent('wheel', {deltaY: dy, deltaX: 0, bubbles: true, cancelable: true});
+              el.dispatchEvent(ev);
+              return ev.defaultPrevented;
+            }""",
+            delta_y,
+        )
+
+    assert wheel_prevented(90) is False
+    assert wheel_prevented(-90) is True
+    strip.evaluate("el => { el.scrollLeft = 0; }")
+    assert wheel_prevented(-90) is False
+    assert wheel_prevented(90) is True
+
     # Wide enough for every tab, neither edge fades.
     page.set_viewport_size({"width": 2400, "height": 800})
     expect(strip).to_have_class("nav-tab-strip")
