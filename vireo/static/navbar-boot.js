@@ -44,6 +44,7 @@ import './navbar-pipeline-inspector.js';
 import './navbar-similar-photos.js';
 import './navbar-shared-helpers.js';
 import './navbar-folder-banners.js';
+import './navbar-update-notice.js';
 import './navbar-standing-notices.js';
 import './navbar-command-palette.js';
 import './navbar-lightbox-subjects.js';

@@ -129,6 +129,20 @@ fn set_job_progress(
         .map_err(|e| e.to_string())
 }
 
+/// The version of a downloaded update waiting for a restart, for the web UI's
+/// "Needs attention" notice.
+#[tauri::command]
+fn update_status() -> Option<String> {
+    updater::ready_version()
+}
+
+/// Install the downloaded update and restart, from the web UI's notice. Async
+/// so the install runs off the main thread; it returns only on failure.
+#[tauri::command]
+async fn restart_to_update(app: tauri::AppHandle) -> Result<(), String> {
+    updater::restart_to_update(&app)
+}
+
 #[tauri::command]
 fn open_external_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
     navigation::open_external_url(&app, &url)
@@ -409,6 +423,8 @@ pub fn run() {
             sync_navigation_shortcuts,
             set_job_progress,
             open_external_url,
+            update_status,
+            restart_to_update,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

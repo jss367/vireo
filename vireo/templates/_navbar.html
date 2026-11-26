@@ -46,6 +46,10 @@
        A page partial adds its own row by marking it data-standing-notice. -->
   <h3 class="notification-heading" id="standingNoticesHeading">Needs attention</h3>
   <div id="standingNotices" class="standing-notices" aria-labelledby="standingNoticesHeading">
+    <div class="standing-notice" id="updateReadyNotice" style="display:none;">
+      <span class="standing-notice-text" id="updateReadyMsg" data-notice-text></span>
+      <button type="button" class="banner-cta" id="updateReadyRestart" data-navbar-on="click:restartToUpdate">Restart to Update</button>
+    </div>
     <div class="standing-notice" id="runtimeWarningBanner" data-notice-level="warning" data-testid="runtime-warning-banner" style="display:none;">
       <div class="standing-notice-text" id="runtimeWarningText" data-notice-text></div>
       <button class="banner-dismiss" type="button" title="Dismiss" aria-label="Dismiss" data-navbar-on="click:dismissRuntimeWarning">&times;</button>
