@@ -181,11 +181,11 @@ def _file_size(path: str) -> int:
 
 def _folder_size(path: str) -> int:
     total = 0
-    with contextlib.suppress(OSError), os.scandir(path) as entries:
-        for entry in entries:
-            with contextlib.suppress(OSError):
-                if entry.is_file(follow_symlinks=False):
-                    total += entry.stat(follow_symlinks=False).st_size
+    with contextlib.suppress(OSError):
+        for dirpath, _dirnames, filenames in os.walk(path):
+            for name in filenames:
+                with contextlib.suppress(OSError):
+                    total += os.lstat(os.path.join(dirpath, name)).st_size
     return total
 
 
@@ -364,6 +364,29 @@ def _copy_snapshot_atomically(src: str, dest: str, name: str) -> bool:
     return True
 
 
+def _referenced_snapshot_bytes(media_dir: str, refs: set[str]) -> int:
+    """Total on-disk bytes of every referenced ``<photo>.<ref>.png`` snapshot.
+
+    Used by the backup preflight to reserve space for the snapshots it will
+    copy, so a live catalog's edit-masks cannot consume the ``FREE_SPACE_MARGIN``
+    the preflight keeps for its own writes.
+    """
+    if not refs or not media_dir:
+        return 0
+    source = os.path.join(media_dir, EDIT_MASKS_SUBDIR)
+    try:
+        entries = os.listdir(source)
+    except FileNotFoundError:
+        return 0
+    total = 0
+    for name in entries:
+        match = _SNAPSHOT_FILE_RE.match(name)
+        if match is None or match.group(2) not in refs:
+            continue
+        total += _file_size(os.path.join(source, name))
+    return total
+
+
 def _copy_referenced_snapshots(media_dir: str, dest_dir: str, refs: set[str]) -> int:
     """Copy every ``<photo>.<ref>.png`` snapshot whose ref is referenced.
 
@@ -520,7 +543,10 @@ def create_backup(
         catalog_dir = os.path.dirname(os.path.abspath(db_path))
         masks_root = media_dir or catalog_dir
         results_bytes = sum(_file_size(path) for path, _k, _w in result_files(catalog_dir))
-        _require_free_space(root, _file_size(db_path) + results_bytes, "a catalog backup")
+        mask_bytes = _referenced_snapshot_bytes(masks_root, _mask_refs_from_db_file(db_path))
+        _require_free_space(
+            root, _file_size(db_path) + results_bytes + mask_bytes, "a catalog backup",
+        )
         when = now or _now()
         name = _unique_name(root, "catalog", when)
         partial = os.path.join(root, PARTIAL_PREFIX + name)

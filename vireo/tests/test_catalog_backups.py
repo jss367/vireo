@@ -480,6 +480,42 @@ def test_restore_never_leaves_a_truncated_snapshot_at_the_final_name(tmp_path, m
     assert dest.read_bytes() == b"complete-bytes"
 
 
+def test_preflight_reserves_bytes_for_referenced_mask_snapshots(tmp_path, monkeypatch):
+    """The preflight must include referenced edit-mask bytes in ``needed``,
+    so the snapshot copy cannot consume ``FREE_SPACE_MARGIN``."""
+    db_path = _catalog(tmp_path)
+    ref = "0123456789ab"
+    # A 2 MiB snapshot stands in for several gigabytes on a real catalog.
+    payload = b"x" * (2 * 1024 * 1024)
+    _write_mask_snapshot(tmp_path, 1, ref, payload=payload)
+    _add_local_recipe(db_path, 1, ref)
+
+    db_bytes = os.path.getsize(db_path)
+    # Free space is just enough for the db plus the margin, but NOT for the mask.
+    free = db_bytes + cb.FREE_SPACE_MARGIN + 1
+    monkeypatch.setattr(cb.shutil, "disk_usage", lambda _p: type("U", (), {"free": free})())
+    with pytest.raises(cb.BackupError, match="Not enough free disk space"):
+        cb.create_backup(db_path, kind="daily", keep=3, hooks=_hooks()[0],
+                         media_dir=str(tmp_path))
+    assert cb.list_backups(db_path) == []
+
+
+def test_backup_size_counts_nested_mask_files(tmp_path):
+    """A backup's reported ``bytes`` must include files under ``edit-masks/``,
+    so Settings' total and the completion summary do not underreport."""
+    db_path = _catalog(tmp_path)
+    ref = "0123456789ab"
+    snapshot_bytes = b"x" * 4096
+    _write_mask_snapshot(tmp_path, 1, ref, payload=snapshot_bytes)
+    _add_local_recipe(db_path, 1, ref)
+
+    result = cb.create_backup(db_path, kind="manual", keep=3, hooks=_hooks()[0],
+                              media_dir=str(tmp_path))
+    [listed] = cb.list_backups(db_path)
+    assert result["bytes"] >= len(snapshot_bytes)
+    assert listed["bytes"] == result["bytes"]
+
+
 def test_api_backs_up_and_prepares_a_restore(app_and_db):
     app, _db = app_and_db
     client = app.test_client()
