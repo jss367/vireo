@@ -1722,6 +1722,14 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   min-height: 0; overflow-y: auto; overscroll-behavior-y: contain;
 }
 .ws-menu > .ws-menu-divider, .ws-menu > .ws-menu-action { flex-shrink: 0; }
+.ws-menu-search {
+  flex-shrink: 0; margin: 4px 8px 6px; padding: 6px 8px; font-size: 13px;
+  background: var(--bg-input); color: var(--text-primary);
+  border: 1px solid var(--border-primary); border-radius: 4px;
+}
+.ws-menu-search:focus { outline: none; border-color: var(--accent); }
+.ws-menu-search[hidden] { display: none; }
+.ws-menu-empty { padding: 8px 12px; font-size: 13px; color: var(--text-muted); }
 .ws-menu-header {
   font-size: 11px; color: var(--text-muted); padding: 8px 12px 4px;
   text-transform: uppercase; letter-spacing: 0.5px;
@@ -1731,7 +1739,7 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   padding: 8px 12px; cursor: pointer; font-size: 13px;
   color: var(--text-secondary); gap: 8px;
 }
-.ws-menu-item:hover { background: var(--bg-tertiary); }
+.ws-menu-item:hover, .ws-menu-item.highlighted { background: var(--bg-tertiary); }
 .ws-menu-item.active { color: var(--accent); }
 .ws-menu-item .ws-item-name {
   flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;

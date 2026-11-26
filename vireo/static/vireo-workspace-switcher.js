@@ -13,9 +13,42 @@
     return div.innerHTML;
   }
 
+  /* The search field stays hidden below this many workspaces: a shorter list
+   * is read faster than it is searched.
+   */
+  var SEARCH_MIN_WORKSPACES = 8;
+
+  function searchInput(/** @type {WorkspaceSwitcherContext} */ switcher) {
+    return /** @type {HTMLInputElement | null} */ (switcher.document.getElementById('wsMenuSearch'));
+  }
+
+  /** Every word of the query appears somewhere in the name, in any case. @param {string} name @param {string} query */
+  function nameMatches(name, query) {
+    var text = name.toLowerCase();
+    return query.toLowerCase().split(/\s+/).filter(Boolean).every(function(word) {
+      return text.indexOf(word) !== -1;
+    });
+  }
+
+  /** The workspaces the menu lists, in the order it lists them: pinned first. */
+  function listedWorkspaces(/** @type {WorkspaceSwitcherContext} */ switcher) {
+    var matching = switcher.workspaces.filter(function(w) { return nameMatches(w.name, switcher.query); });
+    return matching.filter(function(w) { return !!w.pinned_at; })
+      .concat(matching.filter(function(w) { return !w.pinned_at; }));
+  }
+
+  function focusSearch(/** @type {WorkspaceSwitcherContext} */ switcher) {
+    var search = searchInput(switcher);
+    if (switcher.open && search && !search.hidden) search.focus();
+  }
+
   function closeMenu(/** @type {WorkspaceSwitcherContext} */ switcher) {
     switcher.open = false;
     ++switcher.generation;
+    switcher.query = '';
+    switcher.highlightId = null;
+    var search = searchInput(switcher);
+    if (search) search.value = '';
     var menu = /** @type {HTMLElement} */ (switcher.document.getElementById('wsMenu'));
     if (menu) menu.classList.remove('open');
     if (switcher.outsideClickTimer !== null) switcher.window.clearTimeout(switcher.outsideClickTimer);
@@ -38,8 +71,10 @@
     }
     switcher.open = true;
     var menu = /** @type {HTMLElement} */ (switcher.document.getElementById('wsMenu'));
-    var loading = loadWorkspaceMenu(switcher);
+    var loading = loadWorkspaceMenu(switcher).then(function() { focusSearch(switcher); });
     menu.classList.add('open');
+    // On a reopen the field is already showing, so typing can start before the list returns.
+    focusSearch(switcher);
     switcher.outsideClickTimer = switcher.window.setTimeout(function() {
       switcher.outsideClickTimer = null;
       if (switcher.open) switcher.document.addEventListener('click', switcher.onOutsideClick);
@@ -55,12 +90,13 @@
     }
   }
 
-  /** @param {WorkspaceSummary} ws @param {number | null} activeId */
-  function renderWsItem(/** @type {WorkspaceSwitcherContext} */ switcher, ws, activeId) {
-    var isActive = ws.id === activeId;
+  /** @param {WorkspaceSummary} ws */
+  function renderWsItem(/** @type {WorkspaceSwitcherContext} */ switcher, ws) {
+    var isActive = ws.id === switcher.activeId;
     var isPinned = !!ws.pinned_at;
     var div = switcher.document.createElement('div');
-    div.className = 'ws-menu-item' + (isActive ? ' active' : '');
+    div.className = 'ws-menu-item' + (isActive ? ' active' : '') +
+      (ws.id === switcher.highlightId ? ' highlighted' : '');
     // Title is "Unpin" if pinned, "Pin" if not. Filled star for pinned, outline for unpinned.
     div.innerHTML =
       '<span class="ws-item-name">' + wsEscapeHtml(ws.name) + '</span>' +
@@ -88,12 +124,26 @@
     return div;
   }
 
-  /** @param {WorkspaceSummary[]} workspaces @param {number | null} activeId */
-  function renderWorkspaceMenu(/** @type {WorkspaceSwitcherContext} */ switcher, workspaces, activeId) {
+  function renderWorkspaceMenu(/** @type {WorkspaceSwitcherContext} */ switcher) {
     var list = /** @type {HTMLElement} */ (switcher.document.getElementById('wsMenuList'));
+    var search = searchInput(switcher);
+    if (search) search.hidden = switcher.workspaces.length < SEARCH_MIN_WORKSPACES;
     list.innerHTML = '';
-    var pinned = workspaces.filter(function(w) { return !!w.pinned_at; });
-    var unpinned = workspaces.filter(function(w) { return !w.pinned_at; });
+    var listed = listedWorkspaces(switcher);
+    var searching = !!switcher.query.trim();
+    if (searching && listed.length === 0) {
+      var empty = switcher.document.createElement('div');
+      empty.className = 'ws-menu-empty';
+      empty.textContent = 'No workspace matches \u201c' + switcher.query.trim() + '\u201d';
+      list.appendChild(empty);
+      return;
+    }
+    // Enter acts on the highlighted row, so a search always highlights one that is listed.
+    var highlighted = listed.some(function(w) { return w.id === switcher.highlightId; });
+    var first = listed[0];
+    if (!highlighted) switcher.highlightId = searching && first ? first.id : null;
+    var pinned = listed.filter(function(w) { return !!w.pinned_at; });
+    var unpinned = listed.filter(function(w) { return !w.pinned_at; });
     /** @param {string} text */
     function addHeader(text) {
       var h = switcher.document.createElement('div');
@@ -103,17 +153,60 @@
     }
     if (pinned.length > 0) {
       addHeader('Pinned');
-      pinned.forEach(function(ws) { list.appendChild(renderWsItem(switcher, ws, activeId)); });
+      pinned.forEach(function(ws) { list.appendChild(renderWsItem(switcher, ws)); });
       if (unpinned.length > 0) {
         var divider = switcher.document.createElement('div');
         divider.className = 'ws-menu-divider';
         list.appendChild(divider);
         addHeader('Workspaces');
       }
-    } else {
+    } else if (unpinned.length > 0 || !searching) {
       addHeader('Workspaces');
     }
-    unpinned.forEach(function(ws) { list.appendChild(renderWsItem(switcher, ws, activeId)); });
+    unpinned.forEach(function(ws) { list.appendChild(renderWsItem(switcher, ws)); });
+    var row = list.querySelector('.ws-menu-item.highlighted');
+    if (row) row.scrollIntoView({ block: 'nearest' });
+  }
+
+  /** @param {number} step 1 for the next listed workspace, -1 for the previous one */
+  function moveHighlight(/** @type {WorkspaceSwitcherContext} */ switcher, step) {
+    var listed = listedWorkspaces(switcher);
+    var at = listed.findIndex(function(w) { return w.id === switcher.highlightId; });
+    var next = at < 0 ? (step > 0 ? 0 : listed.length - 1) : (at + step + listed.length) % listed.length;
+    var target = listed[next];
+    if (!target) return;
+    switcher.highlightId = target.id;
+    renderWorkspaceMenu(switcher);
+  }
+
+  /** @param {KeyboardEvent} e */
+  function onSearchKeydown(/** @type {WorkspaceSwitcherContext} */ switcher, e) {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      moveHighlight(switcher, e.key === 'ArrowDown' ? 1 : -1);
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      var target = listedWorkspaces(switcher).find(function(w) { return w.id === switcher.highlightId; });
+      if (target) switchWorkspace(switcher, target.id, target.name);
+    } else if (e.key === 'Escape') {
+      // Escape closes only this menu, not a lightbox or modal listening on the document.
+      e.preventDefault();
+      e.stopPropagation();
+      closeMenu(switcher);
+      var button = switcher.document.getElementById('wsCurrentBtn');
+      if (button) button.focus();
+    }
+  }
+
+  function bindSearch(/** @type {WorkspaceSwitcherContext} */ switcher) {
+    var search = searchInput(switcher);
+    if (!search) return;
+    search.addEventListener('input', function() {
+      switcher.query = /** @type {HTMLInputElement} */ (search).value;
+      switcher.highlightId = null;
+      renderWorkspaceMenu(switcher);
+    });
+    search.addEventListener('keydown', function(e) { onSearchKeydown(switcher, e); });
   }
 
   async function loadWorkspaceMenu(/** @type {WorkspaceSwitcherContext} */ switcher) {
@@ -130,12 +223,13 @@
     try {
       var workspaces = await /** @type {Promise<WorkspaceSummary[]>} */ (switcher.options.fetch('/api/workspaces', {}, { toast: false }));
       if (generation !== switcher.generation) return;
-      renderWorkspaceMenu(switcher, workspaces, switcher.activeId);
+      switcher.workspaces = workspaces;
+      renderWorkspaceMenu(switcher);
 
       activePromise.then(function(active) {
         if (active && generation === switcher.generation) {
           switcher.activeId = active.id;
-          renderWorkspaceMenu(switcher, workspaces, active.id);
+          renderWorkspaceMenu(switcher);
         }
       });
     } catch(e) {
@@ -229,10 +323,14 @@
       options: options,
       open: false,
       activeId: null,
+      workspaces: [],
+      query: '',
+      highlightId: null,
       generation: 0,
       outsideClickTimer: null,
       onOutsideClick: function(e) { closeWsDropdownOutside(switcher, e); }
     };
+    bindSearch(switcher);
     return Object.freeze({
       loadCurrentName: loadCurrentName.bind(null, switcher),
       toggle: toggleWsDropdown.bind(null, switcher),

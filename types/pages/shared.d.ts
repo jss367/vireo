@@ -73,6 +73,12 @@ interface WorkspaceSwitcherContext {
   /** The menu is open. */
   open: boolean;
   activeId: number | null;
+  /** The list the menu last loaded; the search filters it without another request. */
+  workspaces: WorkspaceSummary[];
+  /** The text in the menu's search field; empty when the menu is closed. */
+  query: string;
+  /** The workspace Enter would switch to, moved by the arrow keys and reset by typing. */
+  highlightId: number | null;
   /** Bumped by every menu load and by close; a response from an earlier value is dropped. */
   generation: number;
   outsideClickTimer: number | null;
