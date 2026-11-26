@@ -173,15 +173,24 @@
     color: var(--text-dim); text-decoration: none;
   }
   #labelsSkip:hover { color: var(--text-secondary); }
+  .recovery-notice {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-secondary);
+    border-radius: 8px;
+    color: var(--text-primary);
+    font-size: 13px;
+    line-height: 1.5;
+    margin: 0 0 24px;
+    padding: 12px 16px;
+    text-align: left;
+  }
 </style>
 </head>
 <body>
 {% include '_page_find.html' %}
 
 <div class="setup-card">
-  {% if config_recovery %}
-  <p role="alert">{{ config_recovery.message }}</p>
-  {% endif %}
+  <p id="configRecoveryNotice" class="recovery-notice" role="alert" hidden></p>
 
   <!-- Step 1: download the classification model -->
   <div id="stepModel">
@@ -250,6 +259,7 @@
 
 </div>
 
+<script src="/config-defaults.js"></script>
 <script src="/static/vireo-api.js"></script>
 <script src="/static/vireo-utils.js"></script>
 <script type="module" src="/static/welcome/boot.js"></script>

@@ -1,6 +1,7 @@
 // The Welcome (first-run setup) page (vireo/static/welcome/): the model
-// status, place search and job payloads it reads. It has no navbar and reads
-// no shared globals.
+// status, place search and job payloads it reads. It has no navbar and
+// reads only the config-recovery global /config-defaults.js publishes.
+interface Window { VIREO_CONFIG_RECOVERY?: {id: string; message: string} | null; }
 interface WelcomeModelStatus {
   available_models?: {id: string; downloaded?: boolean}[];
   classification?: {labels_ready?: boolean} | null;

@@ -161,6 +161,8 @@ def create_pages_blueprint(get_db: GetDb) -> Blueprint:
             + json.dumps(labels["name"])
             + ";\nwindow.VIREO_EDITOR_PATH_PLACEHOLDER = "
             + json.dumps(labels["editor_placeholder"])
+            + ";\nwindow.VIREO_CONFIG_RECOVERY = "
+            + json.dumps(cfg.config_recovery_notice())
             + ";\n",
             mimetype="application/javascript",
             headers={"Cache-Control": "no-store"},
@@ -183,7 +185,7 @@ def create_pages_blueprint(get_db: GetDb) -> Blueprint:
             classification_readiness(get_db())["ready"] or cfg.load().get("setup_complete")
         ):
             return redirect("/browse")
-        return render_template("welcome.html", config_recovery=cfg.config_recovery_notice())
+        return render_template("welcome.html")
 
     @blueprint.route("/favicon.ico")
     def favicon() -> ResponseReturnValue:

@@ -11,8 +11,10 @@ def test_corrupt_config_warns_once_after_settings_are_saved(live_server, page):
 
     Path(cfg.CONFIG_PATH).write_text("{broken")
     cfg.set("classification_threshold", 0.31)
-    setup = page.request.get(live_server["url"] + "/welcome?force=1")
-    assert "Vireo could not read config.json" in setup.text()
+    page.goto(live_server["url"] + "/welcome?force=1")
+    expect(page.locator("#configRecoveryNotice")).to_contain_text(
+        "Vireo could not read config.json"
+    )
     page.goto(live_server["url"] + "/settings")
     warning = page.locator(".notification-toast").filter(has_text="default settings")
     expect(warning).to_contain_text(cfg.CONFIG_PATH + ".corrupt")
