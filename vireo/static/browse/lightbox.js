@@ -104,7 +104,7 @@ export function removeDeletedLightboxPhoto(
   // ``deleted > 1`` means the companion row was also dropped. Drop it from the
   // loaded window too, or the next photo reads a stale neighbour and the
   // counter's ``state.photos.length`` guard keeps the pre-delete total.
-  var companionId = null;
+  /** @type {number | null} */ var companionId = null;
   if (deletedCount > 1 && companionFolder != null && companionName) {
     var companionIdx = state.photos.findIndex(function(photo) {
       return photo.folder_id === companionFolder && photo.filename === companionName;
@@ -113,12 +113,23 @@ export function removeDeletedLightboxPhoto(
     if (companionIdx >= 0 && companion) {
       companionId = companion.id;
       state.photos.splice(companionIdx, 1);
+      // ``browseAvailableLightboxPhotos`` (offline-view lightbox list) is a
+      // separate array from ``state.photos``; ``delete.js`` splices only the
+      // clicked primary from ``lbState.photoList``, so without this the
+      // companion stays navigable and the counter reads one high.
+      var availIdx = browseAvailableLightboxPhotos.findIndex(function(photo) {
+        return photo.id === companionId;
+      });
+      if (availIdx >= 0) browseAvailableLightboxPhotos.splice(availIdx, 1);
     }
   }
-  // The rows this delete removed from the grid also leave the whole-result
-  // total, so the counter the next photo renders reads the shrunk count
-  // instead of carrying the pre-delete total until the next page request.
-  pagination.removePhotos(deletedCount);
+  // Decrement by the rows actually dropped from the current projection — the
+  // primary, plus the companion only when it was in ``state.photos`` (a
+  // RAW-only or primary-only filter leaves it out, and ``pagination.total``
+  // never counted it). Subtracting the server's raw count in that case would
+  // read the counter one low until the next page request.
+  var removedFromProjection = 1 + (companionId != null ? 1 : 0);
+  pagination.removePhotos(removedFromProjection);
   selection.removeFromBatch(photoId);
   if (companionId != null) selection.removeFromBatch(companionId);
   if (selection.focusedPhotoId === photoId) selection.focus(null);

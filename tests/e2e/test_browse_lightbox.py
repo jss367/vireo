@@ -560,6 +560,133 @@ def test_browse_lightbox_delete_with_catalog_companion_shrinks_total(
     )
 
 
+def test_browse_lightbox_delete_in_offline_view_prunes_companion_from_lightbox_list(
+    live_server, page,
+):
+    """In the offline-collection view the lightbox navigates
+    ``browseAvailableLightboxPhotos``, a separate array from ``state.photos``.
+    A RAW+JPEG pair delete must splice the companion from that list too, or
+    the lightbox reopens on a card for a row the catalog no longer has."""
+    db = live_server["db"]
+    folder_id = live_server["data"]["folders"][0]
+    primary_id = photo_ingest.add_photo(
+        db, folder_id=folder_id,
+        filename="pair.nef", extension=".nef",
+        file_size=2000, file_mtime=1.0,
+        timestamp="2099-01-01T00:00:01",
+    )
+    companion_id = photo_ingest.add_photo(
+        db, folder_id=folder_id,
+        filename="pair.jpg", extension=".jpg",
+        file_size=1000, file_mtime=1.0,
+        timestamp="2099-01-01T00:00:00",
+    )
+    db.conn.execute(
+        "UPDATE photos SET companion_path='pair.jpg' WHERE id=?", (primary_id,),
+    )
+    db.conn.commit()
+
+    page.route(
+        "**/photos/*/full*",
+        lambda route: route.fulfill(
+            body=base64.b64decode(_PNG_1X1), content_type="image/png"
+        ),
+    )
+    page.goto(f"{live_server['url']}/browse")
+    page.wait_for_function(
+        "ids => ids.every(id => browseState.photos.some(p => p.id === id))",
+        arg=[primary_id, companion_id],
+    )
+    # Open the lightbox against the offline-view's separate list: filtering
+    # ``browsePhotoIsAvailable`` with no folder_status set keeps every photo,
+    # so the lightbox sees the pair and ``lbState.photoList`` is
+    # ``browseAvailableLightboxPhotos``, not ``state.photos``.
+    page.evaluate("() => { browseState.showOfflineCollectionPhotos = true; }")
+    page.locator(f'.grid-card[data-id="{primary_id}"]').dblclick()
+    page.wait_for_function(
+        "photoId => vireoLightboxSession.displayedPhotoId() === photoId",
+        arg=primary_id,
+    )
+    assert page.evaluate(
+        "() => lbState.photoList === pageModules.lightbox.browseAvailableLightboxPhotos",
+    )
+
+    page.evaluate(
+        """() => {
+          window.lightboxDelete();
+          const callback = _deleteCallback;
+          hideDeleteModal();
+          callback({deleted: 2, failed_photo_ids: []});
+        }"""
+    )
+
+    page.wait_for_function(
+        "ids => ids.every(id => !browseState.photos.some(p => p.id === id))",
+        arg=[primary_id, companion_id],
+    )
+    assert page.evaluate(
+        "ids => ids.every(id => !pageModules.lightbox.browseAvailableLightboxPhotos.some(p => p.id === id))",
+        [primary_id, companion_id],
+    )
+
+
+def test_browse_lightbox_delete_decrements_total_by_rows_in_projection(
+    live_server, page,
+):
+    """The server's ``deleted`` count is catalog-wide; ``pagination.total``
+    is filter-scoped. A pair whose companion was filtered out of the result
+    (so it is not in ``state.photos``) must decrement the total by one, not
+    two, or the counter reads one low until the next page request."""
+    db = live_server["db"]
+    folder_id = live_server["data"]["folders"][0]
+    primary_id = photo_ingest.add_photo(
+        db, folder_id=folder_id,
+        filename="solo.nef", extension=".nef",
+        file_size=2000, file_mtime=1.0,
+        timestamp="2099-01-01T00:00:01",
+    )
+    db.conn.execute(
+        "UPDATE photos SET companion_path='solo.jpg' WHERE id=?", (primary_id,),
+    )
+    db.conn.commit()
+
+    page.route(
+        "**/photos/*/full*",
+        lambda route: route.fulfill(
+            body=base64.b64decode(_PNG_1X1), content_type="image/png"
+        ),
+    )
+    page.goto(f"{live_server['url']}/browse")
+    page.wait_for_function(
+        "id => browseState.photos.some(p => p.id === id)", arg=primary_id,
+    )
+    initial_total = page.evaluate("pageModules.pagination.pagination.total")
+
+    page.locator(f'.grid-card[data-id="{primary_id}"]').dblclick()
+    page.wait_for_function(
+        "photoId => vireoLightboxSession.displayedPhotoId() === photoId",
+        arg=primary_id,
+    )
+    # Server reports two catalog rows deleted (the JPEG companion was never
+    # imported into the grid, so it was filtered out of this projection).
+    page.evaluate(
+        """() => {
+          window.lightboxDelete();
+          const callback = _deleteCallback;
+          hideDeleteModal();
+          callback({deleted: 2, failed_photo_ids: []});
+        }"""
+    )
+
+    page.wait_for_function(
+        "id => !browseState.photos.some(p => p.id === id)", arg=primary_id,
+    )
+    assert (
+        page.evaluate("pageModules.pagination.pagination.total")
+        == initial_total - 1
+    )
+
+
 def test_browse_lightbox_stale_boundary_retry_does_not_advance_reopened_session(
     live_server, page,
 ):
