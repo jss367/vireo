@@ -839,6 +839,24 @@ class PredictionRepository:
         )
         base_params.extend(r_params)
 
+    @staticmethod
+    def _rows_visibility(workspace_id, *, by_photo_id):
+        """How ``get_rows`` limits its rows to the workspace's photos.
+
+        Returns ``(join, conditions, params)``. A photo-id list is looked up
+        by id and each photo's visibility tested per row: joining
+        ``photo_workspace_visibility`` there rebuilds the workspace's whole
+        photo set once per chunk, and Review passes every photo in its queue.
+        With no id list the view scopes the query.
+        """
+        if by_photo_id:
+            return "", [photo_visible_in_workspace_sql("p.id")], [workspace_id, workspace_id]
+        return (
+            "JOIN photo_workspace_visibility wf ON wf.photo_id = p.id",
+            ["wf.workspace_id = ?"],
+            [workspace_id],
+        )
+
     def get_rows(self, photo_ids=None, model=None, status=None,
                         rules=None):
         """Get predictions with photo, detection and review info.
@@ -865,11 +883,13 @@ class PredictionRepository:
         """
         ws = self.workspace_id
         detector_floor = config_value(self.effective_config(), "detector_confidence")
-        base_conditions = [
-            "wf.workspace_id = ?",
-            "(d.detector_model = 'full-image' OR d.detector_confidence >= ? AND d.subject_verdict IS NULL)",
-        ]
-        base_params = [ws, detector_floor]
+        visibility_join, base_conditions, base_params = self._rows_visibility(
+            ws, by_photo_id=photo_ids is not None,
+        )
+        base_conditions.append(
+            "(d.detector_model = 'full-image' OR d.detector_confidence >= ? AND d.subject_verdict IS NULL)"
+        )
+        base_params.append(detector_floor)
         if rules is not None:
             self._append_rules_scope(rules, base_conditions, base_params)
         if model:
@@ -919,7 +939,7 @@ class PredictionRepository:
                     FROM predictions pr
                     JOIN detections d ON d.id = pr.detection_id
                     JOIN photos p ON p.id = d.photo_id
-                    JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
+                    {visibility_join}
                     {prediction_review_join('pr')}
                     {where} ORDER BY pr.confidence DESC""",
                 params,

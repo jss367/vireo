@@ -101,6 +101,11 @@ class SpeciesResolver:
         self.taxonomy = taxonomy
         self.db = db
         self._cache = {}
+        # ``prediction`` and ``consensus`` by the row fields they read. Review
+        # resolves every row of its queue, several times each, and a queue
+        # of 150,000 rows carries a few thousand distinct labels.
+        self._prediction_cache = {}
+        self._consensus_cache = {}
         self._common_names_verified = False
         self._ambiguous_common = set()
         if db is not None:
@@ -215,20 +220,39 @@ class SpeciesResolver:
         self._cache[cache_key] = result
         return result
 
+    @staticmethod
+    def _prediction_fields(row):
+        """The fields that decide a row's own identity: its label, stored
+        binomial, source taxon, and whether a fixed model head produced it."""
+        get = row.get if isinstance(row, dict) else dict(row).get
+        model = get("classifier_model", get("model", "")) or ""
+        native = get("labels_fingerprint") == "tol" or model.startswith("iNat")
+        return get("species"), get("scientific_name"), get("source_taxon_id"), native
+
     def prediction(self, row):
         """Fixed-head scientific names are primary evidence. Old custom-label
         metadata was inferred from text and can contain group-level mistakes.
         New source-backed custom predictions carry the exact source binomial.
         """
-        row = dict(row)
-        model = row.get("classifier_model", row.get("model", "")) or ""
-        native = row.get("labels_fingerprint") == "tol" or model.startswith("iNat")
+        return self._prediction_identity(self._prediction_fields(row))
+
+    def _prediction_identity(self, fields):
+        try:
+            cached = self._prediction_cache.get(fields)
+        except TypeError:  # an unhashable field: resolve without the cache
+            return self._resolve_prediction(fields)
+        if cached is None:
+            cached = self._prediction_cache[fields] = self._resolve_prediction(fields)
+        return cached
+
+    def _resolve_prediction(self, fields):
+        species, scientific_name, source_taxon_id, native = fields
         source = None
-        if row.get("source_taxon_id"):
-            source = {"taxon_id": row["source_taxon_id"], "scientific_name": row.get("scientific_name")}
-        if not source and not (native and row.get("scientific_name")):
-            return self.display(row.get("species"))
-        return self.resolve(row.get("species"), row.get("scientific_name") if native else None, source)
+        if source_taxon_id:
+            source = {"taxon_id": source_taxon_id, "scientific_name": scientific_name}
+        if not source and not (native and scientific_name):
+            return self.display(species)
+        return self.resolve(species, scientific_name if native else None, source)
 
     def explicit_source(self, name):
         """Return the ``resolve`` source ``display(name)`` would use, or ``None``.
@@ -265,21 +289,35 @@ class SpeciesResolver:
         A display spelling of the row's own identity retains its source
         evidence. A vote for another species must not inherit that evidence.
         """
-        row = dict(row)
-        own = self.prediction(row)
-        species = row.get("species") or ""
-        if row.get("group_id") and row.get("individual"):
+        if not isinstance(row, dict):
+            row = dict(row)
+        fields = self._prediction_fields(row)
+        # Burst votes count only on a grouped row.
+        votes = (row.get("individual") or None) if row.get("group_id") else None
+        try:
+            cached = self._consensus_cache.get((fields, votes))
+        except TypeError:  # an unhashable field: resolve without the cache
+            return self._resolve_consensus(fields, votes)
+        if cached is None:
+            cached = self._consensus_cache[(fields, votes)] = self._resolve_consensus(fields, votes)
+        return cached
+
+    def _resolve_consensus(self, fields, votes):
+        own = self._prediction_identity(fields)
+        row_species = fields[0]
+        species = row_species or ""
+        if votes:
             try:
-                votes = json.loads(row["individual"])
-                if isinstance(votes, dict) and votes:
-                    species = max(votes, key=lambda sp: votes[sp])
+                counts = json.loads(votes)
+                if isinstance(counts, dict) and counts:
+                    species = max(counts, key=lambda sp: counts[sp])
             except (TypeError, ValueError):
                 pass
-        spellings = [row.get("species"), own.display_name]
+        spellings = [row_species, own.display_name]
         if own.scientific_name:
             spellings.extend([
                 own.scientific_name,
-                f"{row.get('species')} ({own.scientific_name})",
+                f"{row_species} ({own.scientific_name})",
             ])
         if keyword_match_key(species) in {keyword_match_key(s) for s in spellings if s}:
             return own

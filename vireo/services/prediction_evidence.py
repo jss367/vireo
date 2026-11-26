@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import functools
 import math
 from typing import TYPE_CHECKING
-from urllib.parse import urlencode
+from urllib.parse import quote_plus
 
 import match_confidence
 from services.service_types import JsonDict
@@ -26,20 +27,33 @@ def geographic_context(row: JsonDict, prediction: JsonDict) -> JsonDict:
     )
     if not valid:
         return {'state': 'unknown', 'explanation': 'Geographic plausibility unknown: no usable catalog GPS.'}
-    params = {'lat': lat, 'lng': lon, 'radius': 50}
     name = prediction.get('scientific_name') or prediction.get('species')
-    if name:
-        params['taxon_name'] = name
     return {
         'state': 'unknown', 'latitude': lat, 'longitude': lon,
         'source': 'Catalog GPS (camera metadata or manual assignment)',
-        'observations_url': 'https://www.inaturalist.org/observations?' + urlencode(params),
+        'observations_url': _observations_url(lat, lon, name),
         'explanation': (
             'Geographic plausibility unknown: no validated species-range assessment. '
             'Nearby iNaturalist observations are context, not a complete range; '
             'missing sightings do not exclude a species. Check location accuracy, season and vagrants.'
         ),
     }
+
+
+def _observations_url(lat: object, lon: object, name: object) -> str:
+    """Nearby iNaturalist observations of ``name``, within 50 km.
+
+    Review builds one link per prediction row with catalog GPS. A number
+    needs no quoting and a queue repeats a few thousand names, so only each
+    distinct name is encoded.
+    """
+    url = f'https://www.inaturalist.org/observations?lat={lat}&lng={lon}&radius=50'
+    return url + '&taxon_name=' + _quoted_name(str(name)) if name else url
+
+
+@functools.lru_cache(maxsize=8192)
+def _quoted_name(name: str) -> str:
+    return quote_plus(name)
 
 
 def _subject_context(prediction: JsonDict, context: JsonDict) -> JsonDict:
