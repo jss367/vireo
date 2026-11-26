@@ -494,6 +494,72 @@ def test_browse_lightbox_delete_preserves_live_pagination_list(live_server, page
     assert page.evaluate("window._lightboxPhotoList === browseState.photos") is True
 
 
+def test_browse_lightbox_delete_with_catalog_companion_shrinks_total(
+    live_server, page,
+):
+    """A catalogued RAW+JPEG pair deletes two rows, so the loaded window and
+    the whole-result total both drop by two. Without this, the reopened
+    lightbox keeps the companion card (a 404 on open) and the counter stays
+    one high (CORE_PHILOSOPHY: no black boxes — the counter has to match the
+    catalog). Covers the Codex P2 finding on PR #2589."""
+    db = live_server["db"]
+    folder_id = live_server["data"]["folders"][0]
+    primary_id = photo_ingest.add_photo(
+        db, folder_id=folder_id,
+        filename="pair.nef", extension=".nef",
+        file_size=2000, file_mtime=1.0,
+        timestamp="2099-01-01T00:00:01",
+    )
+    companion_id = photo_ingest.add_photo(
+        db, folder_id=folder_id,
+        filename="pair.jpg", extension=".jpg",
+        file_size=1000, file_mtime=1.0,
+        timestamp="2099-01-01T00:00:00",
+    )
+    db.conn.execute(
+        "UPDATE photos SET companion_path='pair.jpg' WHERE id=?", (primary_id,),
+    )
+    db.conn.commit()
+
+    page.route(
+        "**/photos/*/full*",
+        lambda route: route.fulfill(
+            body=base64.b64decode(_PNG_1X1), content_type="image/png"
+        ),
+    )
+    page.goto(f"{live_server['url']}/browse")
+    page.wait_for_function(
+        "ids => ids.every(id => browseState.photos.some(p => p.id === id))",
+        arg=[primary_id, companion_id],
+    )
+    initial_total = page.evaluate("pageModules.pagination.pagination.total")
+    initial_photos = page.evaluate("browseState.photos.length")
+
+    page.locator(f'.grid-card[data-id="{primary_id}"]').dblclick()
+    page.wait_for_function(
+        "photoId => vireoLightboxSession.displayedPhotoId() === photoId",
+        arg=primary_id,
+    )
+    page.evaluate(
+        """() => {
+          window.lightboxDelete();
+          const callback = _deleteCallback;
+          hideDeleteModal();
+          callback({deleted: 2, failed_photo_ids: []});
+        }"""
+    )
+
+    page.wait_for_function(
+        "ids => ids.every(id => !browseState.photos.some(p => p.id === id))",
+        arg=[primary_id, companion_id],
+    )
+    assert page.evaluate("browseState.photos.length") == initial_photos - 2
+    assert (
+        page.evaluate("pageModules.pagination.pagination.total")
+        == initial_total - 2
+    )
+
+
 def test_browse_lightbox_stale_boundary_retry_does_not_advance_reopened_session(
     live_server, page,
 ):

@@ -426,7 +426,14 @@ export function lightboxDelete() {
     // block would then null out — leaving the sidebar blank).
     var removeDeletedLightboxPhoto = Vireo.pageHook('removeDeletedLightboxPhoto');
     if (removeDeletedLightboxPhoto) {
-      removedFromSharedLightboxList = removeDeletedLightboxPhoto(currentId, lbState.photoList);
+      // ``data.deleted`` is the server's authoritative count: when the primary
+      // had a cataloged companion row and the user left the companion checkbox
+      // on, the backend dropped both rows and reports deleted === 2. The hook
+      // reads it so the companion leaves the grid and the pagination total
+      // matches the catalog.
+      removedFromSharedLightboxList = removeDeletedLightboxPhoto(
+        currentId, lbState.photoList, data,
+      );
     }
 
     // Remove from a page-specific lightbox list. When Browse shared its live
