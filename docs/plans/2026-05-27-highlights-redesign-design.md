@@ -163,4 +163,4 @@ Update in `vireo/tests/test_app.py` and `vireo/tests/test_db.py`:
 
 ## Migration
 
-None. Solo user app; API response shape changes are fine, the only consumer is the page template.
+None. The page template is the only consumer of the API response, so changing its shape is fine.
