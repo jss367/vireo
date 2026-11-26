@@ -307,13 +307,15 @@ body { padding-bottom: 36px; }
 {% include '_navbar.html' %}
 
 <div class="content">
-  <h2 style="margin-bottom:8px;font-size:20px;">Cull Photos</h2>
-  <p style="font-size:13px;color:var(--text-dim);margin-bottom:20px;">
-    Choose a species or several, and narrow by date if you like. Compare the remaining photos
-    with your picks and suggested favorites, then decide what to keep or reject.
-  </p>
+  <div class="cull-title">
+    <h2>Cull Photos</h2>
+    <p id="cullScope" class="cull-hint" aria-live="polite"></p>
+  </div>
 
   <div class="cull-filters" aria-label="Photos to cull">
+    <select id="cullCollection" class="btn btn-secondary" aria-label="Collection">
+      <option value="">All photos</option>
+    </select>
     <details id="cullSpeciesPicker">
       <summary id="cullSpeciesSummary">All species</summary>
       <div class="cull-species-menu">
@@ -326,11 +328,7 @@ body { padding-bottom: 36px; }
     <label>Through <input type="date" id="cullDateTo" data-cull-on="change:onCullScopeChange"></label>
     <button class="summary-link" data-cull-on="click:clearCullFilters">Clear filters</button>
   </div>
-  <p id="cullScope" class="cull-hint" aria-live="polite"></p>
   <div class="action-bar">
-    <select id="cullCollection" class="btn btn-secondary" style="font-size:13px;">
-      <option value="">All photos</option>
-    </select>
     <button class="btn btn-primary" data-cull-on="click:runCulling">Analyze for Culling</button>
     <button class="btn btn-secondary" id="cullSettingsBtn" style="font-size:12px;" data-cull-on="click:toggleCullSettings">Settings &#9662;</button>
     <span id="cullStatus" style="font-size:12px;color:var(--text-dim);"></span>
@@ -497,7 +495,9 @@ body { padding-bottom: 36px; }
   <div id="cullSummary" style="display:none;"></div>
   <div id="cullContent">
     <div style="text-align:center;padding:60px 20px;color:var(--text-dim);">
-      Choose your species and dates, then analyze to find suggested favorites. Existing flagged picks are always included.
+      Choose a species or several, and narrow by date if you like, then analyze to find suggested favorites.
+      Compare the remaining photos with your picks and the suggestions, and decide what to keep or reject.
+      Existing flagged picks are always included.
     </div>
   </div>
 </div>

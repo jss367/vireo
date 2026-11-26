@@ -260,8 +260,13 @@ function cullFavoritesHtml(sg, si) {
     var pick = favorites.find(function(p) { return p.decision_source !== 'auto'; }) || favorites[0];
     cullFavoriteReferences[sg.species] = pick ? pick.photo_id : null;
   }
-  var html = '<div class="cull-favorites"><div class="cull-favorites-heading">Favorites <span>' +
-    favorites.length + '</span></div><p class="cull-hint">All your flagged picks, plus up to three suggestions per day. Select a favorite to use as your comparison reference.</p>';
+  // With no favorites the block is one line, so the photos below start higher.
+  if (!favorites.length) {
+    return '<div class="cull-favorites cull-favorites-empty"><div class="cull-favorites-heading">Favorites <span>0</span></div>' +
+      '<p class="cull-hint">No favorites yet. Add your own picks from the photos below.</p></div>';
+  }
+  var html = '<div class="cull-favorites"><div class="cull-favorites-top"><div class="cull-favorites-heading">Favorites <span>' +
+    favorites.length + '</span></div><p class="cull-hint">All your flagged picks, plus up to three suggestions per day. Select a favorite to use as your comparison reference.</p></div>';
   /** @type {Record<string, CullDisplayPhoto[]>} */
   var days = Object.create(null);
   favorites.forEach(function(p) { (days[p.day] || (days[p.day] = [])).push(p); });
@@ -274,7 +279,6 @@ function cullFavoritesHtml(sg, si) {
     });
     html += '</div></div>';
   });
-  if (!favorites.length) html += '<p class="cull-hint">No favorites yet. Add your own picks from the photos below.</p>';
   return html + '</div>';
 }
 
