@@ -86,6 +86,8 @@ The Windows legs of both workflows run with `--reruns 1`: a test that fails once
 
 `vireo/tests/test_photo_safety_invariants.py` is a Hypothesis state machine that runs random sequences of imports (including cancelled and crashed ones), scans, moves, deletes and workspace sharing against a scratch library, and checks after every step that no photo is lost or overwritten, the catalog matches disk, a finished import catalogs the whole card, and no photo drops out of a workspace. PRs run a small derandomized budget; `photo-safety-nightly.yml` runs a large random one (`VIREO_INVARIANTS_PROFILE=nightly` locally). When you add an operation that copies, moves or deletes originals, add it as a rule there. A failure prints the shrunk sequence of steps; keep it as a regression test.
 
+`vireo/tests/test_release_catalog_upgrades.py` starts the current app on a small catalog written by each release since v0.56.0 with that release's own code (`vireo/tests/fixtures/release_catalogs/`, made by `scripts/release_catalogs.py`), and requires its photos, flags, ratings, keywords, masks and workspace membership to come through unchanged. `release.sh` saves each new release's catalog in the release commit, and the test fails when the version in `pyproject.toml` has none. A migration that deliberately removes data names it in the test's retirement table (`RETIRED_MASK_DETECTORS`, today only migration 54's MegaDetector masks); any other difference is a lost-data bug.
+
 Do not monkeypatch `sqlite3.connect` globally in tests: coverage flushes per-test contexts to its own SQLite file at every test boundary, so a global fake crashes the xdist worker. Fake only the connection for the database path under test (see `test_pipeline_queue.py`).
 
 ### Broad exception handlers

@@ -6,3 +6,7 @@
 *.cjs  text eol=lf
 *.html text eol=lf
 *.css  text eol=lf
+
+# Release catalogs for the upgrade test: gzipped SQLite, never diffed or
+# line-ending converted.
+vireo/tests/fixtures/release_catalogs/*.db.gz binary
