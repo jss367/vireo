@@ -5,7 +5,7 @@ import { selection } from './selection-state.js';
 import { state } from './state.js';
 import {
   lightboxNav, lightboxPhotoList, lightboxSession, matchesShortcut, openLightbox,
-  requestLightboxFullscreen,
+  refreshLightboxCounter, requestLightboxFullscreen,
 } from './shared.js';
 import { updateBatchBar } from './batch-bar.js';
 import { _shortcuts } from './config.js';
@@ -232,20 +232,24 @@ export function browseLightboxOwnsLoadedWindow() {
 
 export function refreshBrowseLightboxCounter() {
   if (!browseLightboxOwnsLoadedWindow()) return;
-  var visibleId = lightboxSession().displayedPhotoId() != null
-    ? lightboxSession().displayedPhotoId()
-    : lightboxSession().requestedPhotoId();
-  var lightboxPhotos = lightboxPhotoList();
-  var index = lightboxPhotos.findIndex(function(photo) {
-    return photo.id === visibleId;
-  });
-  var counter = /** @type {HTMLElement} */ (document.getElementById('lightboxCounter'));
-  if (index < 0 || !counter || lightboxPhotos.length < 2) return;
-  var filename = lightboxPhotos[index]?.filename || '';
-  counter.textContent = (index + 1) + ' / ' + lightboxPhotos.length
-    + (filename ? ' \u00b7 ' + filename : '');
-  counter.title = filename;
-  counter.style.display = '';
+  refreshLightboxCounter();
+}
+
+/* Page hook for the lightbox's counter: the photo's place in the whole result
+   and the result's size, in grid rows (a stack is one row). The grid holds
+   only the pages loaded so far, so the lightbox cannot count them itself.
+   Answers null for any other list (a stack's members, or the available-only
+   list shown with offline photos), which the lightbox counts as it stands. */
+export function getLightboxListPosition(/** @type {number} */ photoId, /** @type {readonly unknown[]} */ lightboxPhotos) {
+  if (lightboxPhotos !== state.photos || !pagination.ready) return null;
+  var index = state.photos.findIndex(function(photo) { return photo.id === photoId; });
+  if (index < 0) return null;
+  // A total that has not caught up with the loaded rows must not read lower
+  // than the rows on screen.
+  return {
+    position: pagination.offset + index + 1,
+    total: Math.max(pagination.total, pagination.offset + state.photos.length),
+  };
 }
 
 function continueBrowseLightboxAcrossBoundary(/** @type {number} */ delta, /** @type {number} */ currentId, /** @type {number} */ session) {

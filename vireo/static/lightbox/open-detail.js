@@ -23,7 +23,7 @@ import {
   _lbApplyMaskVisibility, _lbApplyTrackEyeState, _lbLoadDetections, _lbMetadataOrientation,
   _lbRenderEyeCrosshair, _lbResetMaskOverlay, _lbSourceOverlaysAvailable,
 } from './overlays.js';
-import { _lbRenderKeywords } from './open-image.js';
+import { _lbRenderExposure, _lbRenderKeywords } from './open-image.js';
 
 // Learn whether the photo has a developed companion. A pair first learned here
 // changes which source the displayed image came from, so its renders refresh.
@@ -148,7 +148,10 @@ function applyPhotoDetail(/** @type {LightboxOpenContext} */ open, /** @type {Li
   if (!editRecipeFresh) data.edit_recipe = _lbHeldEditRecipe(photoId);
   _lbPhotoDataByPhoto[String(photoId)] = data;
   open.detail = data;
-  if (open.identityCommitted) _lbRenderKeywords(data.keywords);
+  if (open.identityCommitted) {
+    _lbRenderKeywords(data.keywords);
+    _lbRenderExposure(data);
+  }
   _lbRenderLifeListPanel(photoId);
   if (editRecipeFresh) rememberDetailRecipe(photoId, data, recipeKeyBefore);
   _lbApplyMaskVisibility();

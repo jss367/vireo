@@ -88,6 +88,12 @@ interface VireoPageHooks {
    * from it.
    */
   removeDeletedLightboxPhoto?(photoId: number, lightboxPhotos: readonly unknown[]): boolean;
+  /**
+   * The photo's place (from 1) in the whole result the lightbox's list is a
+   * loaded window of, and that result's size. Null when the lightbox's list
+   * is everything there is to count.
+   */
+  getLightboxListPosition?(photoId: number, lightboxPhotos: readonly unknown[]): {position: number; total: number} | null;
   /** Handle the lightbox's flag keys for a miss; true when it did. */
   /** Reload the Highlights page after a lightbox curation change. */
   loadHighlights?(): Promise<void>;

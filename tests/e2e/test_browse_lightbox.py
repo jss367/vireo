@@ -7,7 +7,7 @@ import time
 import pytest
 from PIL import Image
 from playwright.sync_api import expect
-from services import photo_ingest, workspace_folders
+from services import keyword_tagging, photo_ingest, workspace_folders
 
 from e2e.viewport_test_support import install_viewport_test_helpers
 
@@ -89,6 +89,128 @@ def test_browse_lightbox_arrows_navigate(live_server, page):
     expect(keywords.locator(".lightbox-keyword")).to_have_text("Red-tailed Hawk")
 
 
+def test_browse_lightbox_counter_counts_the_whole_result(live_server, page):
+    """With one page of a longer result loaded, the counter reads the result's
+    size and the photo's place in it, not the page size."""
+    page.add_init_script(
+        """
+        class NoopIntersectionObserver {
+          observe() {}
+          unobserve() {}
+          disconnect() {}
+        }
+        window.IntersectionObserver = NoopIntersectionObserver;
+        """
+    )
+    page.route(
+        "**/api/config",
+        lambda route: route.fulfill(
+            json={"photos_per_page": 2, "keyboard_shortcuts": {}}
+        ),
+    )
+    page.route(
+        "**/photos/*/full*",
+        lambda route: route.fulfill(
+            body=base64.b64decode(_PNG_1X1), content_type="image/png"
+        ),
+    )
+    page.goto(f"{live_server['url']}/browse")
+    cards = page.locator(".grid-card")
+    cards.first.wait_for(state="visible")
+    page.wait_for_function(
+        "browseState.photos.length === 2"
+        " && pageModules.pagination.pagination.total === 5"
+    )
+
+    position = page.evaluate(
+        """() => {
+            const list = browseState.photos;
+            const hook = Vireo.pageHook('getLightboxListPosition');
+            return {
+                first: hook(list[0].id, list),
+                second: hook(list[1].id, list),
+                otherList: hook(list[0].id, list.slice()),
+                unknown: hook(-1, list),
+            };
+        }"""
+    )
+    assert position == {
+        "first": {"position": 1, "total": 5},
+        "second": {"position": 2, "total": 5},
+        "otherList": None,
+        "unknown": None,
+    }
+
+    cards.first.dblclick()
+    expect(page.locator("#lightboxCounter")).to_contain_text("1 / 5 ")
+
+
+def test_browse_lightbox_shows_exposure_and_keeps_labels_apart(live_server, page):
+    """The photo's exposure sits beside its filename, a keyword name shows
+    once, the backdrop hides the page, and the flag label is clear of the
+    action bar."""
+    db = live_server["db"]
+    hawk = live_server["data"]["photos"][0]
+    with db.conn:
+        db.conn.execute("UPDATE photos SET exif_data=? WHERE id=?", (
+            json.dumps({"EXIF": {
+                "FocalLength": 600, "FNumber": 6.3,
+                "ExposureTime": 0.003125, "ISO": 64,
+            }}),
+            hawk,
+        ))
+    region = db.keywords.add("Lake County", kw_type="location")
+    flat = db.keywords.add("Lake Park", kw_type="location")
+    placed = db.keywords.add("Lake Park", parent_id=region, kw_type="location")
+    assert flat != placed
+    keyword_tagging.tag_photo(db, hawk, flat)
+    keyword_tagging.tag_photo(db, hawk, placed)
+    db.commit()
+
+    page.route(
+        "**/photos/*/full*",
+        lambda route: route.fulfill(
+            body=base64.b64decode(_PNG_1X1), content_type="image/png"
+        ),
+    )
+    page.goto(f"{live_server['url']}/browse")
+    card = page.locator(".grid-card[data-filename='hawk1.jpg']")
+    card.wait_for(state="visible")
+    card.dblclick()
+
+    exposure = page.locator("#lightboxExposure")
+    expect(exposure).to_have_text("600mm · f/6.3 · 1/320s · ISO 64")
+    expect(page.locator("#lightboxKeywords .lightbox-keyword")).to_have_text(
+        ["Lake Park", "Red-tailed Hawk"]
+    )
+
+    flag = page.locator("#lightboxFlagStatus")
+    expect(flag).to_have_text("No flag")
+    layout = page.evaluate(
+        """() => {
+            const box = id => document.querySelector(id).getBoundingClientRect();
+            const flag = box('#lightboxFlagStatus');
+            const bar = box('.lightbox-bottom-bar');
+            const counter = box('#lightboxCounter');
+            return {
+                flagAboveBar: flag.bottom <= bar.top,
+                flagBesideCounter: flag.left >= counter.right && flag.top < counter.bottom,
+                backdrop: getComputedStyle(document.getElementById('lightboxOverlay')).backgroundColor,
+            };
+        }"""
+    )
+    assert layout["flagAboveBar"] is True
+    assert layout["flagBesideCounter"] is True
+    # No alpha channel: the page behind does not show through.
+    assert re.fullmatch(r"rgb\(\d+, \d+, \d+\)", layout["backdrop"])
+
+    # A photo with no exposure data shows no exposure line.
+    page.locator("[title='Next (→)']").click()
+    expect(page.locator("#lightboxFilename")).not_to_have_text("hawk1.jpg")
+    expect(exposure).to_be_hidden()
+    expect(exposure).to_have_text("")
+
+
 def test_browse_lightbox_full_request_carries_render_fingerprint(live_server, page):
     """The lightbox's /full request must carry an ``er`` fingerprint.
 
@@ -167,10 +289,9 @@ def test_browse_lightbox_autoloads_next_page_at_navigation_boundary(
         "photoId => vireoLightboxSession.displayedPhotoId() === photoId", arg=boundary_id
     )
     page.wait_for_function("browseState.photos.length > 2", timeout=5000)
-    loaded_count = page.evaluate("browseState.photos.length")
-    expect(page.locator("#lightboxCounter")).to_contain_text(
-        f"2 / {loaded_count}"
-    )
+    # The counter counts the whole result, not the pages loaded so far.
+    total = page.evaluate("pageModules.pagination.pagination.total")
+    expect(page.locator("#lightboxCounter")).to_contain_text(f"2 / {total} ")
     page.evaluate("lightboxNav(1)")
 
     page.wait_for_function(

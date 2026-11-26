@@ -47,6 +47,7 @@ interface Window {GOOGLE_MAPS_API_KEY: string; GOOGLE_MAPS_PREFER_ENGLISH: boole
 declare function showToast(message: string, type?: string): void;
 declare function escapeHtml(value: string | number): string;
 declare function escapeAttr(value: string | number): string;
+declare function exposureSummaryParts(metadata: unknown): string[];
 declare var VireoViewPreferences: {read(key: string): string | null; write(key: string, value: string): void; restoreAll(root?: Element | null): void};
 type BrowseRuleValue = string | number | boolean | (string | number)[] | null;
 interface BrowseRule {mode?: string; rules?: BrowseRule[]; field?: string; op?: string; value?: BrowseRuleValue; value_label?: string}
@@ -102,6 +103,7 @@ declare function closeLightbox(event?: Event | null): void;
 declare function exitLightboxFullscreen(): void;
 declare function requestLightboxFullscreen(): void;
 declare function lightboxNav(delta: number): void;
+declare function refreshLightboxCounter(): void;
 declare function findSimilar(id: number): void;
 declare function checkPendingSync(): Promise<void>;
 declare function showRevealFeedback(data: unknown): void;

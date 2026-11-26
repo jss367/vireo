@@ -432,6 +432,24 @@ test('formatBytes (vireo-utils.js) picks the unit at each 1024 boundary', () => 
   assert.equal(ctx.formatBytes(3 * 1024 ** 4), '3.00 TB');
 });
 
+test('exposureSummaryParts (vireo-utils.js) lists focal length, aperture, shutter and ISO', () => {
+  const ctx = load([fn('vireo-utils.js', 'exposureSummaryParts')]);
+  const parts = exif => Array.from(ctx.exposureSummaryParts({EXIF: exif}));
+  assert.deepEqual(
+    parts({FocalLength: 600, FNumber: 6.3, ExposureTime: 0.003125, ISO: 64}),
+    ['600mm', 'f/6.3', '1/320s', 'ISO 64']);
+  // A slow shutter reads in seconds; 0.6s is not "1/2s".
+  assert.deepEqual(parts({ExposureTime: 0.6}), ['0.6s']);
+  assert.deepEqual(parts({ExposureTime: 2}), ['2s']);
+  assert.deepEqual(parts({ExposureTime: 0.25}), ['1/4s']);
+  assert.deepEqual(parts({FocalLength: 104.6, ISO: '400'}), ['105mm', 'ISO 400']);
+  // Missing, zero and unreadable values are left out.
+  assert.deepEqual(parts({FocalLength: 0, FNumber: 'n/a', ISO: null}), []);
+  assert.deepEqual(Array.from(ctx.exposureSummaryParts(null)), []);
+  assert.deepEqual(Array.from(ctx.exposureSummaryParts({EXIF: 'x'})), []);
+  assert.deepEqual(Array.from(ctx.exposureSummaryParts({Composite: {Aperture: 4}})), []);
+});
+
 test('escapeHtml and escapeAttr (vireo-utils.js) encode the same five characters', () => {
   const ctx = load([fn('vireo-utils.js', 'escapeHtml'), fn('vireo-utils.js', 'escapeAttr')]);
   assert.equal(ctx.escapeHtml(null), '');

@@ -25,7 +25,8 @@ EXPECTED_HOOKS = {
         "setWildlifeExcludedFor", "openExportModal", "openPhotoExportModal",
         "revealPhoto", "copyPhotoPaths", "openBrowseCompare", "batchAddKeyword",
         "addToCollection", "openCaptureTimeModal", "batchDelete",
-        "removeDeletedLightboxPhoto", "afterHistoryChange", "runSync",
+        "removeDeletedLightboxPhoto", "getLightboxListPosition",
+        "afterHistoryChange", "runSync",
     } | _EXPORT_MODAL,
     "/misses": {
         "getActiveSelection", "openBrowseShortcutPhoto", "afterHistoryChange",

@@ -159,6 +159,35 @@ function formatBytes(n) {
 }
 
 /*
+ * A photo's exposure as short labels, in the order Browse's detail panel and
+ * the lightbox show them: focal length, aperture, shutter speed, ISO. Takes
+ * the photo's `metadata` (ExifTool groups); a value the file does not carry
+ * is left out, so a photo without EXIF gives []. Shutter speeds from 0.3s up
+ * read in seconds ("0.6s"), faster ones as a fraction ("1/320s").
+ */
+/** @param {unknown} metadata @returns {string[]} */
+function exposureSummaryParts(metadata) {
+  var groups = /** @type {Record<string, unknown>} */ (
+    metadata && typeof metadata === 'object' ? metadata : {});
+  var exif = /** @type {Record<string, unknown>} */ (
+    groups.EXIF && typeof groups.EXIF === 'object' ? groups.EXIF : {});
+  var parts = [];
+  var focal = Number(exif.FocalLength);
+  if (focal > 0) parts.push(Math.round(focal) + 'mm');
+  var aperture = Number(exif.FNumber);
+  if (aperture > 0) parts.push('f/' + aperture);
+  var shutter = Number(exif.ExposureTime);
+  if (shutter > 0) {
+    parts.push(shutter < 0.3
+      ? '1/' + Math.round(1 / shutter) + 's'
+      : Math.round(shutter * 10) / 10 + 's');
+  }
+  var iso = Number(exif.ISO);
+  if (iso > 0) parts.push('ISO ' + iso);
+  return parts;
+}
+
+/*
  * The one thumbnail URL for a photo row. The navbar's builder adds the query
  * that follows an edit, so an edited photo's thumbnail is refetched; before
  * the navbar's modules run, or on a page without them, the plain path is
