@@ -667,14 +667,14 @@ def test_move_folder_job_surfaces_post_commit_cleanup_warning(
     dst = tmp_path / "cleanup_dst"
     dst.mkdir()
 
-    real_rmtree = move_mod.folder.shutil.rmtree
+    real_unlink = os.unlink
 
     def cleanup_fails(path, *args, **kwargs):
-        if os.fspath(path) == str(src):
-            raise OSError("permission denied")
-        return real_rmtree(path, *args, **kwargs)
+        if os.path.dirname(os.fspath(path)) == str(src):
+            raise PermissionError(13, "permission denied")
+        return real_unlink(path, *args, **kwargs)
 
-    monkeypatch.setattr(move_mod.folder.shutil, "rmtree", cleanup_fails)
+    monkeypatch.setattr(move_mod.source_cleanup.os, "unlink", cleanup_fails)
 
     client = app.test_client()
     resp = client.post("/api/jobs/move-folder", json={
@@ -692,8 +692,10 @@ def test_move_folder_job_surfaces_post_commit_cleanup_warning(
     assert result["ok"] is True
     assert result["errors"] == []
     assert "cleanup_error" in result
-    assert "cleanup failed" in result["summary"]
+    assert "the source folder was not fully removed" in result["summary"]
     assert "permission denied" in result["summary"]
+    assert result["source_leftovers"]["failed"] == ["bird.jpg ([Errno 13] permission denied)"]
+    assert (src / "bird.jpg").exists()
     # Each phase is its own step; the leftover originals are a warning on
     # the step that tried to remove them.
     steps = {step["id"]: step for step in job["steps"]}
@@ -701,7 +703,7 @@ def test_move_folder_job_surfaces_post_commit_cleanup_warning(
     assert all(step["status"] == "completed" for step in steps.values()), steps
     assert str(src) in steps["cleanup"]["error"]
     assert "permission denied" in steps["cleanup"]["error"]
-    assert steps["verify"]["label"] == "Verify copy"
+    assert steps["verify"]["label"] == "Verify copy (compare every byte)"
 
 
 def test_move_folder_merge_param_accepted(app_and_db, tmp_path):

@@ -365,7 +365,7 @@ def _case_folded_descends(real_c, real_a, root):
 def _destination_overlaps_source(src_path, dest_path):
     """True if dest_path equals src_path or one is a descendant of the other.
 
-    The post-copy rmtree(src_path) would delete the only copy of the files if
+    The post-copy source cleanup would delete the only copy of the files if
     dest and src refer to the same on-disk directory, so this is checked
     before any copy. See `_path_equal_or_descends` for the alias surface.
     """

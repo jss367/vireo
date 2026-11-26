@@ -416,10 +416,7 @@ class FolderMoves:
                     control=control,
                 )
             else:
-                steps = MoveSteps(runner, job, folder_move_steps(
-                    remote=bool(remote),
-                    verify_contents=bool(managed_staging_root),
-                ))
+                steps = MoveSteps(runner, job, folder_move_steps(remote=bool(remote)))
                 result = _run_stepped_move(
                     steps, request.source_path, move_folder,
                     db=thread_db,
@@ -433,7 +430,7 @@ class FolderMoves:
                     allow_tracked_merge=request.allow_tracked_merge,
                     thumb_cache_dir=self._config["THUMB_CACHE_DIR"],
                     control=control,
-                    **({"verify_contents": True, "verification_cb": steps.verification_notice} if managed_staging_root and not remote else {}),
+                    **({"verification_cb": steps.verification_notice} if managed_staging_root and not remote else {}),
                     **({"pre_commit_check": check_mount} if check_mount else {}),
                 )
 
@@ -642,7 +639,7 @@ def _record_move_outcome(result: JsonDict) -> None:
                 )
                 + (f", {len(errors)} error(s)" if errors else "")
                 + (
-                    f"; cleanup failed: {cleanup_error}"
+                    f"; the source folder was not fully removed: {cleanup_error}"
                     if cleanup_error else ""
                 )
             )

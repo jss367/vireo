@@ -41,3 +41,32 @@ after the job finishes.
 A checksum mismatch stops the move and preserves the originals. Pausing
 invalidates earlier verification, so resuming must complete a fresh check
 before originals can be removed. Canceling also preserves the originals.
+
+## Moves between folders
+
+The same rule covers every move, not only transfers of staged originals:
+Vireo removes an original only after it has compared the copy's contents
+with it. A matching file size is never enough.
+
+- **Moving a folder** to a local disk or a mounted share reads both sides
+  and compares every byte. Jobs shows **Verify copy (compare every byte)**
+  with a count of files checked. When one saved SSH target covers the
+  destination, the NAS checksums the copy instead, as described above.
+- **Moving a folder over SSH** compares rsync checksums of both sides. Jobs
+  shows **Verify copy (compare checksums with the NAS)**.
+- **Moving individual photos** compares each copy with its original right
+  after it is written. A copy that differs is removed, the original stays
+  where it was, and the job reports the photo by name.
+
+Comparing every byte means reading the destination back. On a network share
+without an SSH target this takes about as long as the copy did, and the
+operating system may answer part of that read from its own cache instead of
+from the server. Add an SSH target under **Settings → Remote targets** to
+have the server check its own disk.
+
+After a folder move, Vireo deletes only the files it verified. A file that
+was added to the source folder, or changed in it, after verification began
+has no proven copy at the destination, so Vireo leaves it in place. The
+**Remove originals** step and the job summary name those files, which is why
+the source folder can still exist after a successful move. Finder's
+`.DS_Store` files are the one exception: they are discarded with the folder.

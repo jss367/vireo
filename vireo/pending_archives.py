@@ -136,7 +136,6 @@ def send_pending_archive(db, archive, *, vireo_dir, guard_folder, progress_cb, c
         db, folder_id, destination, progress_cb=progress_cb,
         developed_dir=db.get_effective_config(config.load()).get("darktable_output_dir", "") or "",
         merge=True, remote=remote, allow_tracked_merge=True,
-        verify_contents=remote is None,
         **({"verification_cb": verification_cb} if verification_cb else {}),
         thumb_cache_dir=os.path.join(vireo_dir, "thumbnails"),
         **({"control": control} if control else {}),

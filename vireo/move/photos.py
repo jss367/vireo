@@ -696,7 +696,8 @@ class _PhotoFileTransfer:
         self.copied_xmp_companions = set()
 
     def copy_files(self, item):
-        """Copy and verify the photo and its companions; False skips the photo."""
+        """Copy the photo and its companions, comparing each copy's bytes with
+        its source; False skips the photo."""
         photo = item.photo
         src_dir = item.src_dir
         destination = self.destination
@@ -710,8 +711,11 @@ class _PhotoFileTransfer:
             self.errors.append(f"{photo['filename']}: copy failed: {e}")
             return False
         if not copied_ok:
-            log.warning("Move skipped for %s: verification failed after copy", photo["filename"])
-            self.errors.append(f"{photo['filename']}: verification failed after copy")
+            log.warning("Move skipped for %s: the copy did not match the original", photo["filename"])
+            self.errors.append(
+                f"{photo['filename']}: the copy at the destination did not match "
+                "the original byte for byte, so the copy was removed and the "
+                "original was kept")
             return False
 
         # Copy companions
@@ -724,7 +728,8 @@ class _PhotoFileTransfer:
                 continue
             try:
                 comp_copied = _copy_and_verify(comp_src, comp_dst)
-                comp_error = "companion verification failed"
+                comp_error = ("the copy did not match the original byte for "
+                              "byte, so it was removed")
             except OSError as e:
                 comp_copied = False
                 comp_error = f"companion copy failed: {e}"

@@ -117,7 +117,7 @@ class _FolderMoveTarget:
         """Refuse a destination that overlaps the source.
 
         Moving a folder into itself (or into one of its own descendants) would
-        make the post-copy rmtree(src) delete the only copy of the files. This
+        make the post-copy source cleanup delete the only copy of the files. This
         is especially dangerous for a merge, where a destination equal to the
         source passes verification trivially (every source file is already
         "there") before the delete wipes everything. See
@@ -130,7 +130,7 @@ class _FolderMoveTarget:
         mount. e.g. src=/Volumes/Photography/trip with remote mount_path=
         /Volumes/Photography would copy a tree onto itself over SSH; the
         checksum verify passes (everything is "already there") and then the
-        rmtree(src) deletes the only copy. So check the local-facing path:
+        the source cleanup deletes the only copy. So check the local-facing path:
         transfer_dest for local moves, catalog_path for remote.
         """
         overlap_src_check = (self.catalog_path if self.remote

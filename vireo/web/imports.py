@@ -1117,7 +1117,7 @@ def _send_archive_steps(runner: JobRunner, job: JobDict, archive: JsonDict, sync
     return MoveSteps(
         runner, job,
         ([{"id": "sync", "label": "Write metadata to sidecars"}] if sync_first else [])
-        + folder_move_steps(remote=remote, verify_contents=not remote),
+        + folder_move_steps(remote=remote),
         phases={**FOLDER_MOVE_PHASES,
                 "Waiting for current XMP sync": "sync",
                 "Writing metadata to sidecars": "sync"},

@@ -12,6 +12,7 @@ from job_runner.work_control import JobCancelled
 from .folder_catalog import _plan_moved_file_mtimes
 from .mounted_verify import mounted_verification_target, verification_notice, verify_mounted_copy
 from .remote import _remote_mkdir_p, _ssh_rsh_string, resolve_rsync_bin
+from .source_cleanup import record_source_tree
 from .transfer import (
     RSYNC_STALL_TIMEOUT,
     _copy_tree_with_progress,
@@ -109,22 +110,22 @@ def _rsync_copy_error(returncode, stderr, timed_out):
 class _FolderTransfer:
     """Copy the source tree to ``target`` and verify the copy.
 
-    Owns the source-file count, the rsync binary and the planned
-    ``file_mtime`` corrections. Reads the destination views and
+    Owns the source-file count, the rsync binary, the planned
+    ``file_mtime`` corrections and the record of the source entries the
+    verification covered. Reads the destination views and
     ``dest_exists`` from ``target``. Each phase returns the result dict to
     abort with, or None to continue. A failed phase removes only a
     destination this move created, never a pre-existing merge target, and
     never touches the source.
     """
 
-    def __init__(self, db, src_path, target, *, remote, verify_contents,
+    def __init__(self, db, src_path, target, *, remote,
                  progress_cb, progress, control=None, verification_cb=None):
         self.db = db
         self.src_path = src_path
         self.target = target
         self.remote = remote
         self.verification_cb = verification_cb
-        self.verify_contents = verify_contents
         # ``progress_cb`` is the caller's raw callback (may be None), handed
         # to the copy and timestamp helpers; ``progress`` is the coordinator's
         # None-safe wrapper around it.
@@ -134,9 +135,12 @@ class _FolderTransfer:
         self.total_files = 0
         self.rsync_bin = None
         self.mtime_updates = []
+        # Source entries the last passing verification covered, keyed by
+        # relative path; None until a verification passes.
+        self.source_record = None
 
     def report_verification_eligibility(self):
-        if self.verify_contents and not self.remote and self.verification_cb:
+        if not self.remote and self.verification_cb:
             _, reason = mounted_verification_target(
                 self.target.transfer_dest, self.db.effective_config())
             self.verification_cb("check", verification_notice(reason, preflight=True))
@@ -296,7 +300,7 @@ class _FolderTransfer:
 
         This pass stats every catalogued photo on both sides, which on a
         network mount is minutes of wall clock. Running it between
-        verification and the ``rmtree`` below would push those minutes into
+        verification and the source cleanup would push those minutes into
         the one window where a destination file going missing, or being
         replaced, is never noticed before the originals are deleted. Ordering
         it ahead of verification means the byte-level check remains the last
@@ -338,92 +342,119 @@ class _FolderTransfer:
         return None
 
     def verify_copy(self):
-        """Verify before deleting originals."""
+        """Compare the copy with the source before originals are deleted.
+
+        Every route compares contents, never sizes alone: a remote move asks
+        rsync for checksums on the NAS, and a local or mounted move compares
+        bytes (or NAS checksums over a proven SSH route). On success
+        ``source_record`` holds the source entries this pass covered, which
+        is the only thing ``_FolderMove.remove_originals`` may delete.
+        """
+        self.source_record = None
+        try:
+            # Listed before the verifier walks the tree: anything listed that
+            # is missing or different at the destination fails the pass, and
+            # anything that arrives later is not in the list.
+            record = record_source_tree(self.src_path)
+        except OSError as exc:
+            return self._refuse(
+                f"Verification failed: the source folder could not be read "
+                f"({exc}). Originals preserved.")
+        error = (self._verify_remote_copy() if self.remote
+                 else self._verify_local_copy())
+        if error is not None:
+            return self._refuse(error)
+        self.source_record = record
+        return None
+
+    def _refuse(self, message):
+        """Fail verification, removing only a local destination this move made.
+
+        A destination that was already there may hold the user's own files and
+        is never removed. A remote destination is not reachable from this
+        filesystem, so it is left for the next run to resume into.
+        """
+        if not self.remote and self._owns_destination():
+            shutil.rmtree(self.target.transfer_dest, ignore_errors=True)
+        return {"moved": 0, "errors": [message]}
+
+    def _verify_remote_copy(self):
+        """Ask rsync on the NAS for checksums; the error message, or None."""
+        # One rsync dry-run with no per-file output: no count to show.
+        self.progress(0, 0, "", "Verifying copy")
+        # The local filesystem can't be walked to confirm a remote copy, so
+        # run a --checksum dry-run over SSH: any file it would still transfer
+        # is missing or differs at the destination. Covers both fresh and
+        # merge moves, and is the safety backstop replacing the local
+        # content-conflict and file-count checks.
+        verify = _remote_verify_complete(self.rsync_bin, self.src_path,
+                                         self.target.rsync_target, self.remote,
+                                         is_merge=self.target.dest_exists,
+                                         **({"control": self.control} if self.control else {}))
+        if verify is None:
+            return None
+        name, detail = verify
+        if name == "__ERROR__":
+            return (f"Verification could not be completed ({detail}). "
+                    f"Originals preserved.")
+        return (f"Verification failed: '{name}' is missing or differs at the "
+                f"destination. Originals preserved.")
+
+    def _verify_local_copy(self):
+        """Compare a local or mounted copy's contents; the error message, or None.
+
+        A proven SSH route lets the NAS checksum its own disk, which avoids
+        rereading the destination over the mount. Without one, both sides
+        are read here and compared byte for byte.
+        """
         src_path = self.src_path
         transfer_dest = self.target.transfer_dest
-        dest_exists = self.target.dest_exists
-        if self.remote:
-            # One rsync dry-run with no per-file output: no count to show.
-            self.progress(0, 0, "", "Verifying copy")
-        else:
-            # Recounted rather than reusing the pre-copy ``total_files`` so the
-            # bar's denominator is the tree the verifier actually walks.
-            verify_total = sum(1 for _, _, files in os.walk(src_path)
-                               for _ in files)
+        # Recounted rather than reusing the pre-copy ``total_files`` so the
+        # bar's denominator is the tree the verifier actually walks.
+        verify_total = sum(1 for _, _, files in os.walk(src_path)
+                           for _ in files)
+        phase = "Verifying copy"
 
-            def report(checked, name, phase="Verifying copy"):
-                self.progress(checked, max(verify_total, checked), name, phase)
+        def report(checked, name):
+            self.progress(checked, max(verify_total, checked), name, phase)
+
+        report(0, "")
+        remote, reason = mounted_verification_target(
+            transfer_dest, self.db.effective_config())
+        if self.verification_cb:
+            self.verification_cb("verify", None)  # Clear any pre-pause verdict.
+        if remote:
+            reason, mismatch = verify_mounted_copy(
+                src_path, transfer_dest, remote,
+                is_merge=self.target.dest_exists, progress=self.progress,
+                control=self.control,
+            )
+            if reason is None:
+                return None if mismatch is None else _unconfirmed(mismatch)
+            log.warning("NAS verification unavailable (%s), comparing bytes locally", reason)
+        if self.verification_cb:
+            self.verification_cb("verify", verification_notice(reason))
+        if remote or self.verification_cb:
+            # A NAS check was expected here (a saved route, or a caller that
+            # reports on one), so say that this pass replaces it.
+            phase = "Verifying copy locally (NAS verification unavailable)"
             report(0, "")
-        if self.remote:
-            # The local filesystem can't be walked to confirm a remote copy, so
-            # run a --checksum dry-run over SSH: any file it would still transfer
-            # is missing or differs at the destination. Covers both fresh and
-            # merge moves, and is the safety backstop replacing the local
-            # content-conflict and file-count checks.
-            verify = _remote_verify_complete(self.rsync_bin, src_path,
-                                             self.target.rsync_target, self.remote,
-                                             is_merge=dest_exists,
-                                             **({"control": self.control} if self.control else {}))
-            if verify is not None:
-                name, detail = verify
-                if name == "__ERROR__":
-                    return {"moved": 0, "errors": [
-                        f"Verification could not be completed ({detail}). "
-                        f"Originals preserved."
-                    ]}
-                return {"moved": 0, "errors": [
-                    f"Verification failed: '{name}' is missing or differs at the "
-                    f"destination. Originals preserved."
-                ]}
-        elif dest_exists or self.verify_contents:
+
+        if self.target.dest_exists:
             # Merge: the destination may legitimately hold extra unrelated
             # files (and leftover temp files from an interrupted run), so a
             # count comparison is meaningless. Instead require that every
-            # source file is present at the destination with a matching size.
-            missing = self._verify_local_copy(report)
-            if missing is not None:
-                return {"moved": 0, "errors": [
-                    f"Verification failed ({missing}). The source and destination "
-                    f"could not be confirmed to match. Originals preserved."
-                ]}
-        else:
-            verify_error = _fresh_copy_mismatch(src_path, transfer_dest,
-                                                progress=report)
-            if verify_error is not None:
-                if self._owns_destination():
-                    shutil.rmtree(transfer_dest, ignore_errors=True)
-                return {"moved": 0, "errors": [
-                    f"Verification failed: {verify_error}. Originals preserved."
-                ]}
-        return None
+            # source file is present at the destination with the same bytes.
+            missing = _first_missing_source_file(
+                src_path, transfer_dest, verify_contents=True, is_merge=True,
+                progress=report)
+            return None if missing is None else _unconfirmed(missing)
+        mismatch = _fresh_copy_mismatch(src_path, transfer_dest, progress=report)
+        if mismatch is None:
+            return None
+        return f"Verification failed: {mismatch}. Originals preserved."
 
-    def _verify_local_copy(self, report):
-        """Use a proven SSH route for mounted byte checks when available."""
-        if self.verify_contents:
-            remote, reason = mounted_verification_target(
-                self.target.transfer_dest, self.db.effective_config())
-            if self.verification_cb:
-                self.verification_cb("verify", None)  # Clear any pre-pause verdict.
-            if remote:
-                reason, mismatch = verify_mounted_copy(
-                    self.src_path, self.target.transfer_dest, remote,
-                    is_merge=self.target.dest_exists, progress=self.progress,
-                    control=self.control,
-                )
-                if reason is None:
-                    return mismatch
-                log.warning("NAS verification unavailable (%s), comparing bytes locally", reason)
-            if self.verification_cb:
-                self.verification_cb("verify", verification_notice(reason))
 
-            def report_local(checked, name):
-                report(checked, name, "Verifying copy locally (NAS verification unavailable)")
-
-            report_local(0, "")
-        else:
-            report_local = report
-
-        return _first_missing_source_file(
-            self.src_path, self.target.transfer_dest,
-            verify_contents=self.verify_contents, is_merge=self.target.dest_exists,
-            progress=report_local)
+def _unconfirmed(problem):
+    return (f"Verification failed ({problem}). The source and destination "
+            f"could not be confirmed to match. Originals preserved.")

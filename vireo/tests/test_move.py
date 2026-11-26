@@ -3553,9 +3553,9 @@ def test_normalize_destination_name_rejects_colon():
 
 
 def test_move_folder_reports_cleanup_error_after_commit(move_env, monkeypatch):
-    """Catalog repoints first, so a post-commit rmtree failure is committed.
+    """Catalog repoints first, so a post-commit cleanup failure is committed.
 
-    If rmtree(src_path) raises after moves_merge.move_folder_path has already pointed
+    If an original cannot be deleted after moves_merge.move_folder_path has already pointed
     the catalog at the destination, the archive IS published — the files
     exist at the destination and the catalog resolves there. Surfacing
     that as a normal ``errors`` entry would tell the caller the move
@@ -3569,19 +3569,27 @@ def test_move_folder_reports_cleanup_error_after_commit(move_env, monkeypatch):
 
     env = move_env
 
-    def raise_on_rmtree(path):
-        raise OSError("permission denied")
+    real_unlink = os.unlink
 
-    monkeypatch.setattr(move_mod.folder.shutil, "rmtree", raise_on_rmtree)
+    def locked_original(path, *args, **kwargs):
+        if os.path.dirname(os.fspath(path)) == str(env["src"]):
+            raise PermissionError(13, "permission denied")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(move_mod.source_cleanup.os, "unlink", locked_original)
 
     result = move_mod.move_folder(
         db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"])
     )
     assert result["errors"] == []
     assert result["moved"] >= 1
-    assert result.get("cleanup_error") == "permission denied"
+    assert "3 copied originals could not be deleted" in result["cleanup_error"]
+    assert "permission denied" in result["cleanup_error"]
+    assert result["source_leftovers"]["failed_total"] == 3
+    assert result["source_leftovers"]["kept_total"] == 0
+    assert sorted(os.listdir(env["src"])) == ["bird1.jpg", "bird1.xmp", "bird2.jpg"]
     # Catalog now points at the new destination (commit step ran before
-    # rmtree) — verifying we don't roll that back on the cleanup failure.
+    # the cleanup) — verifying we don't roll that back on the cleanup failure.
     folder = env["db"].conn.execute(
         "SELECT path FROM folders WHERE id = ?", (env["fid_src"],)
     ).fetchone()
@@ -3589,7 +3597,7 @@ def test_move_folder_reports_cleanup_error_after_commit(move_env, monkeypatch):
 
 
 def test_move_folder_no_cleanup_error_on_clean_run(move_env):
-    """When rmtree succeeds, ``cleanup_error`` is not present.
+    """When the originals are all removed, ``cleanup_error`` is not present.
 
     Locks in that the new key is opt-in and the existing happy-path
     return shape is unchanged for the typical case.
@@ -6232,7 +6240,6 @@ def test_move_folder_counts_files_through_verification(move_env, merge):
         folder_id=env["fid_src"],
         destination=str(env["dst"]),
         merge=merge,
-        verify_contents=True,
         progress_cb=lambda cur, tot, fn, phase: calls.append(
             (cur, tot, fn, phase)
         ),
@@ -6242,7 +6249,7 @@ def test_move_folder_counts_files_through_verification(move_env, merge):
     def counts(phase):
         return [(c[0], c[1]) for c in calls if c[3] == phase]
 
-    local_phase = "Verifying copy locally (NAS verification unavailable)"
+    local_phase = "Verifying copy"
     verify = counts(local_phase)
     assert verify[0] == (0, 3)
     assert verify[-1] == (3, 3)
@@ -6254,10 +6261,14 @@ def test_move_folder_counts_files_through_verification(move_env, merge):
     assert timestamps[0] == (0, 2)
     assert timestamps[-1] == (2, 2)
 
-    # Single operations with nothing to count report no total rather than
+    # A single operation with nothing to count reports no total rather than
     # a full bar.
     assert set(counts("Updating catalog")) == {(0, 0)}
-    assert set(counts("Removing originals")) == {(0, 0)}
+
+    # Originals are deleted one verified file at a time.
+    removal = counts("Removing originals")
+    assert removal[0] == (0, 3)
+    assert removal[-1] == (3, 3)
 
 
 @pytest.mark.parametrize("existing", [1, 3])
@@ -7216,8 +7227,8 @@ def test_timestamp_plan_runs_before_the_copy_is_verified(tmp_path, monkeypatch):
 
     The plan stats every photo on both sides — minutes on a network mount.
     Run after verification, those minutes would land in the one window where
-    a destination file going missing is never noticed before ``rmtree``
-    deletes the originals. Run before it, the byte-level check still has the
+    a destination file going missing is never noticed before the originals
+    are deleted. Run before it, the byte-level check still has the
     final word and nothing is owed a second pass.
     """
     import move as move_mod
@@ -7225,7 +7236,7 @@ def test_timestamp_plan_runs_before_the_copy_is_verified(tmp_path, monkeypatch):
     db, _src, dst, fid, _ids = _catalog_folder_with_current_stats(tmp_path)
     order = []
     real_plan = move_mod._plan_moved_file_mtimes
-    real_verify = move_mod._first_missing_source_file
+    real_verify = move_mod.folder_transfer._fresh_copy_mismatch
 
     def traced_plan(*a, **kw):
         order.append("plan")
@@ -7236,11 +7247,11 @@ def test_timestamp_plan_runs_before_the_copy_is_verified(tmp_path, monkeypatch):
         return real_verify(*a, **kw)
 
     monkeypatch.setattr(move_mod.folder_transfer, "_plan_moved_file_mtimes", traced_plan)
-    monkeypatch.setattr(move_mod.folder_transfer, "_first_missing_source_file", traced_verify)
+    monkeypatch.setattr(move_mod.folder_transfer, "_fresh_copy_mismatch", traced_verify)
     _lose_timestamps_in_transfer(monkeypatch)
 
     result = move_mod.move_folder(db=db, folder_id=fid, destination=str(dst),
-                                 merge=True, verify_contents=True)
+                                 merge=True)
 
     assert result["errors"] == []
     assert order == ["plan", "verify"]
@@ -7271,7 +7282,7 @@ def test_a_copy_lost_during_planning_still_aborts_the_move(
     _lose_timestamps_in_transfer(monkeypatch)
 
     result = move_mod.move_folder(db=db, folder_id=fid, destination=str(dst),
-                                 merge=True, verify_contents=True)
+                                 merge=True)
 
     assert result["moved"] == 0
     assert any("Originals preserved" in e for e in result["errors"])
@@ -7766,7 +7777,7 @@ def test_mounted_checksum_move_deletes_originals_only_after_verification(move_en
         return result
 
     monkeypatch.setattr(ft._FolderTransfer, 'copy_tree', copy_then_corrupt)
-    result = move_folder(env['db'], env['fid_src'], str(env['dst']), verify_contents=True)
+    result = move_folder(env['db'], env['fid_src'], str(env['dst']))
     if 'corrupt' in mode:
         assert result['errors'] and result['moved'] == 0
         assert (env['src'] / 'bird1.jpg').exists()
@@ -7806,8 +7817,11 @@ def test_creation_time_platform_preserves_originals_and_catalog_on_corruption(mo
         return result
 
     monkeypatch.setattr(ft._FolderTransfer, 'copy_tree', copy_then_corrupt)
-    result = move_folder(env['db'], env['fid_src'], str(env['dst']), verify_contents=True)
+    result = move_folder(env['db'], env['fid_src'], str(env['dst']))
     assert result['moved'] == 0 and result['errors']
-    assert (env['src'] / 'bird1.jpg').read_bytes() != (env['dst'] / 'src' / 'bird1.jpg').read_bytes()
+    assert any("'bird1.jpg' contents differ at destination" in e for e in result['errors'])
+    assert (env['src'] / 'bird1.jpg').read_bytes() == b"\xff\xd8" + b"\x00" * 100
+    # The destination was created by this move, so the bad copy is removed.
+    assert not (env['dst'] / 'src').exists()
     assert env['db'].folders.get(env['fid_src'])['path'] == str(env['src'])
     assert env['db'].photos.get(env['p1'])['folder_id'] == env['fid_src']

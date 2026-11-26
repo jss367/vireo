@@ -1,9 +1,10 @@
 """Copying files for a move.
 
-``_copy_and_verify`` copies one photo file; ``_run_rsync_streamed`` runs
-rsync with per-file progress and a stall watchdog; ``_copy_tree_with_progress``
-is the shutil fallback when no rsync exists. The Finder-metadata helpers
-build the ``.DS_Store`` excludes a merge passes to every rsync it runs.
+``_copy_and_verify`` copies one photo file and compares the copy with its
+source; ``_run_rsync_streamed`` runs rsync with per-file progress and a
+stall watchdog; ``_copy_tree_with_progress`` is the shutil fallback when no
+rsync exists. The Finder-metadata helpers build the ``.DS_Store`` excludes a
+merge passes to every rsync it runs.
 """
 
 import contextlib
@@ -16,6 +17,7 @@ import time
 
 from job_runner.subprocess_control import process_group_kwargs, stop_process_tree
 
+from .contents import files_match
 from .paths import _unsafe_destination_directory
 
 try:
@@ -47,19 +49,31 @@ RSYNC_STALL_TIMEOUT = 1800  # 30 minutes
 
 
 def _copy_and_verify(src, dst):
-    """Copy a single file and verify size matches. Returns True on success.
+    """Copy one file and compare the copy with its source, byte for byte.
+
+    Returns True when the copy holds the source's bytes. The caller deletes
+    the source on the strength of this answer, so a matching size is not
+    enough: both files are read back and compared.
 
     The copy goes through a hidden sibling temp file (``copy_via_temp``),
     so a failed copy never leaves a truncated file at ``dst`` that would
     block every retry as "already exists" and be cataloged by a rescan.
-    ``OSError`` from the copy propagates for the caller to record against
-    this one photo.
+    ``copy_via_temp`` never overwrites, so a file at ``dst`` after it
+    returns is one this call created; a copy that does not match, or that
+    cannot be read back, is removed again for the same reason. ``OSError``
+    from the copy or the comparison propagates for the caller to record
+    against this one photo.
     """
     copy_via_temp(src, dst)
-    if os.path.getsize(src) != os.path.getsize(dst):
-        os.remove(dst)
-        return False
-    return True
+    try:
+        if os.path.getsize(src) == os.path.getsize(dst) and files_match(src, dst):
+            return True
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.remove(dst)
+        raise
+    os.remove(dst)
+    return False
 
 
 def _copy_tree_with_progress(src_path, dest_path, skip_existing, total_files,
@@ -74,7 +88,7 @@ def _copy_tree_with_progress(src_path, dest_path, skip_existing, total_files,
     # os.walk swallows scandir errors by default, so an unreadable source
     # subdirectory would be silently skipped here — and the fresh-move count
     # verification (also a default os.walk) would skip it too, so the counts
-    # match and the catalog update + rmtree(src) proceed on an incomplete
+    # match and the catalog update + source cleanup proceed on an incomplete
     # copy. shutil.copytree (the old fallback) raised instead; re-raise so the
     # caller aborts the move before anything is deleted.
     def _raise(err):
@@ -94,7 +108,7 @@ def _copy_tree_with_progress(src_path, dest_path, skip_existing, total_files,
         # default followlinks=False, never recurses into it — so its contents
         # would be silently dropped here while the post-copy file-count
         # verification (also a default os.walk) skips it on both sides and
-        # still matches, letting rmtree(src) delete the originals. Recreate
+        # still matches, letting the source cleanup delete the originals. Recreate
         # each directory symlink as a symlink at the destination, matching the
         # primary rsync -a path (which preserves symlinks rather than
         # following them) and keeping the verification counts consistent.
@@ -441,7 +455,7 @@ def _rsync_finder_metadata_exclude_patterns(src_path):
     The exclude has to skip regular files while leaving directories and
     symlinks with the same name alone: a pattern that matches every entry
     type would silently drop those from the transfer, the conflict probe
-    and the checksum verify, and ``shutil.rmtree(src_path)`` after a
+    and the checksum verify, and the source cleanup after a
     "successful" merge would then delete them from the source without ever
     copying them. rsync's filter language can't distinguish entry type on
     its own, so we walk ``src_path`` ourselves, collect the regular-file
@@ -450,7 +464,7 @@ def _rsync_finder_metadata_exclude_patterns(src_path):
     slip past an ``--include=<name>/`` guard; a FIFO/socket/device lands in
     ``os.walk``'s ``files`` list too, and ``rsync -a`` would recreate it
     from ``-D``, so an exclude would drop it from every side of the merge
-    while the post-merge ``shutil.rmtree`` still deletes it from the
+    while the post-merge source cleanup still deletes it from the
     source), and emit an anchored ``/<relpath>`` for each. Every parent
     component in the relative path is passed through
     ``_escape_rsync_pattern`` so a real directory whose name contains rsync
@@ -518,7 +532,7 @@ def _rsync_finder_metadata_exclude_file(src_path):
     pattern like ``/foo\\nbar/.DS_Store`` into two filter records
     (``/foo`` and ``bar/.DS_Store``) — rsync would then exclude an
     unrelated ``/foo`` subtree on both the transfer and the ``--checksum``
-    verify, letting the post-merge ``shutil.rmtree`` destroy source files
+    verify, letting the post-merge source cleanup destroy source files
     that never landed at the destination. NUL is the one byte the
     filesystem cannot put in a filename, so it is the only safe record
     separator.

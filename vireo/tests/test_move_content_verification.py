@@ -1,0 +1,399 @@
+"""A move proves its copy by content before it removes the source.
+
+A copy can have the right size and the wrong bytes, so a size check alone
+must never authorize deleting an original. These tests corrupt copies
+without changing their length, and add or change source files after the
+copy was verified, and require the originals to survive.
+"""
+import os
+import shutil
+
+import pytest
+from db import Database
+from services import photo_ingest, workspace_folders
+
+JPEG = b"\xff\xd8"
+
+
+def _same_size_corruption(path):
+    """Flip the file's last byte in place; its length does not change."""
+    with open(path, "r+b") as handle:
+        handle.seek(-1, os.SEEK_END)
+        last = handle.read(1)
+        handle.seek(-1, os.SEEK_END)
+        handle.write(bytes([last[0] ^ 0xFF]))
+
+
+def _folder(tmp_path, names=("a.jpg", "b.jpg"), extras=(), root_name="shoot"):
+    """A cataloged source folder and an empty destination parent.
+
+    ``extras`` are relative paths of files the catalog does not know (a
+    sidecar, a file in a subfolder); a folder move carries them along.
+    """
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.ensure_default_workspace())
+    src = tmp_path / root_name
+    src.mkdir()
+    dst = tmp_path / "archive"
+    dst.mkdir()
+    fid = workspace_folders.add_folder(db, str(src), name=root_name)
+    ids = {}
+    for index, name in enumerate(names):
+        path = src / name
+        path.write_bytes(JPEG + bytes([index + 1]) * (64 + index))
+        st = path.stat()
+        ids[name] = photo_ingest.add_photo(
+            db, folder_id=fid, filename=name, extension=".jpg",
+            file_size=st.st_size, file_mtime=st.st_mtime,
+        )
+    for extra in extras:
+        path = src / extra
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"extra " + extra.encode())
+    return db, src, dst, fid, ids
+
+
+def _copy_tree(src_path, dest_spec):
+    for root, _dirs, files in os.walk(src_path):
+        rel = os.path.relpath(root, src_path)
+        target = dest_spec if rel == "." else os.path.join(dest_spec, rel)
+        os.makedirs(target, exist_ok=True)
+        for name in files:
+            if not os.path.exists(os.path.join(target, name)):
+                shutil.copy2(os.path.join(root, name), os.path.join(target, name))
+
+
+def _transfer_that_corrupts(monkeypatch, victim):
+    """Stand in for rsync: copy the tree, then damage ``victim`` at the
+    destination without changing its size, and report success."""
+    import move as move_mod
+
+    def transfer(src_path, dest_spec, rsync_flags, total_files, progress_cb, **kwargs):
+        already_there = os.path.exists(os.path.join(dest_spec, victim))
+        _copy_tree(src_path, dest_spec)
+        if not already_there:
+            _same_size_corruption(os.path.join(dest_spec, victim))
+        return 0, "", False
+
+    monkeypatch.setattr(move_mod.folder_transfer, "_run_rsync_streamed", transfer)
+
+
+def _after_verification(monkeypatch, change):
+    """Run ``change()`` once the fresh-move verifier has passed."""
+    import move as move_mod
+
+    real_verify = move_mod.folder_transfer._fresh_copy_mismatch
+
+    def verify_then_change(*args, **kwargs):
+        mismatch = real_verify(*args, **kwargs)
+        assert mismatch is None
+        change()
+        return mismatch
+
+    monkeypatch.setattr(move_mod.folder_transfer, "_fresh_copy_mismatch", verify_then_change)
+
+
+# -- one photo at a time ----------------------------------------------------
+
+
+def test_copy_and_verify_accepts_an_exact_copy(tmp_path):
+    from move import _copy_and_verify
+
+    src, dst = tmp_path / "a.jpg", tmp_path / "out" / "a.jpg"
+    src.write_bytes(JPEG + b"\x01" * 4096)
+    dst.parent.mkdir()
+
+    assert _copy_and_verify(str(src), str(dst)) is True
+    assert dst.read_bytes() == src.read_bytes()
+
+
+def test_copy_and_verify_rejects_a_same_size_copy_with_different_bytes(tmp_path, monkeypatch):
+    import move.transfer as transfer
+
+    src, dst = tmp_path / "a.jpg", tmp_path / "out" / "a.jpg"
+    src.write_bytes(JPEG + b"\x01" * 4096)
+    dst.parent.mkdir()
+
+    def corrupting_copy(source, destination):
+        shutil.copy2(source, destination)
+        _same_size_corruption(destination)
+
+    monkeypatch.setattr(transfer, "copy_via_temp", corrupting_copy)
+
+    assert transfer._copy_and_verify(str(src), str(dst)) is False
+    # The bad copy is gone, so a retry is not blocked by "already exists"
+    # and a rescan cannot catalog it.
+    assert not dst.exists()
+    assert src.read_bytes() == JPEG + b"\x01" * 4096
+
+
+def test_copy_and_verify_removes_a_copy_it_cannot_read_back(tmp_path, monkeypatch):
+    import move.transfer as transfer
+
+    src, dst = tmp_path / "a.jpg", tmp_path / "out" / "a.jpg"
+    src.write_bytes(JPEG + b"\x01" * 64)
+    dst.parent.mkdir()
+
+    def unreadable(source, destination):
+        raise OSError("share dropped")
+
+    monkeypatch.setattr(transfer, "files_match", unreadable)
+
+    with pytest.raises(OSError, match="share dropped"):
+        transfer._copy_and_verify(str(src), str(dst))
+    assert not dst.exists()
+    assert src.exists()
+
+
+def test_move_photos_keeps_the_original_when_the_copy_is_corrupted(tmp_path, monkeypatch):
+    import move as move_mod
+    import move.transfer as transfer
+
+    db, src, dst, _fid, ids = _folder(tmp_path)
+    real_copy = transfer.copy_via_temp
+
+    def corrupt_a(source, destination):
+        real_copy(source, destination)
+        if os.path.basename(source) == "a.jpg":
+            _same_size_corruption(destination)
+
+    monkeypatch.setattr(transfer, "copy_via_temp", corrupt_a)
+    original = (src / "a.jpg").read_bytes()
+
+    result = move_mod.move_photos(
+        db=db, photo_ids=[ids["a.jpg"], ids["b.jpg"]], destination=str(dst))
+
+    assert result["moved"] == 1
+    assert len(result["errors"]) == 1
+    assert "a.jpg" in result["errors"][0]
+    assert "did not match the original byte for byte" in result["errors"][0]
+    assert (src / "a.jpg").read_bytes() == original
+    assert not (dst / "a.jpg").exists()
+    # The photo that copied correctly still moved.
+    assert not (src / "b.jpg").exists()
+    assert (dst / "b.jpg").exists()
+    row = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id = p.folder_id "
+        "WHERE p.id = ?", (ids["a.jpg"],)).fetchone()
+    assert row["path"] == str(src)
+
+
+# -- a whole folder ---------------------------------------------------------
+
+
+def test_fresh_folder_move_keeps_originals_when_a_copy_has_wrong_bytes(tmp_path, monkeypatch):
+    import move as move_mod
+
+    db, src, dst, fid, _ids = _folder(tmp_path)
+    originals = {name: (src / name).read_bytes() for name in ("a.jpg", "b.jpg")}
+    _transfer_that_corrupts(monkeypatch, "a.jpg")
+
+    result = move_mod.move_folder(db=db, folder_id=fid, destination=str(dst))
+
+    assert result["moved"] == 0
+    assert any("'a.jpg' contents differ at destination" in error
+               and "Originals preserved" in error for error in result["errors"])
+    assert {name: (src / name).read_bytes() for name in originals} == originals
+    # The destination was created by this move, so the bad copy is removed.
+    assert not (dst / "shoot").exists()
+    assert db.conn.execute(
+        "SELECT path FROM folders WHERE id = ?", (fid,)).fetchone()["path"] == str(src)
+
+
+def test_merge_keeps_originals_and_the_destination_when_a_copy_has_wrong_bytes(tmp_path, monkeypatch):
+    import move as move_mod
+
+    db, src, dst, fid, _ids = _folder(tmp_path)
+    (dst / "shoot").mkdir()
+    (dst / "shoot" / "mine.jpg").write_bytes(b"already in the archive")
+    _transfer_that_corrupts(monkeypatch, "b.jpg")
+
+    result = move_mod.move_folder(db=db, folder_id=fid, destination=str(dst), merge=True)
+
+    assert result["moved"] == 0
+    assert any("b.jpg" in error and "Originals preserved" in error
+               for error in result["errors"])
+    assert (src / "a.jpg").exists()
+    assert (src / "b.jpg").exists()
+    # A destination that was already there is never removed.
+    assert (dst / "shoot" / "mine.jpg").read_bytes() == b"already in the archive"
+
+
+def test_a_file_added_after_verification_is_kept_and_reported(tmp_path, monkeypatch):
+    import move as move_mod
+
+    db, src, dst, fid, _ids = _folder(tmp_path, extras=("sub/notes.txt",))
+
+    def add_files():
+        (src / "late.jpg").write_bytes(b"written after the copy was verified")
+        (src / "sub" / "late.xmp").write_text("<xmp>new edit</xmp>")
+
+    _after_verification(monkeypatch, add_files)
+
+    result = move_mod.move_folder(db=db, folder_id=fid, destination=str(dst))
+
+    assert result["errors"] == []
+    assert result["moved"] == 2
+    # The late files were never copied, so they are still in the source.
+    assert (src / "late.jpg").read_bytes() == b"written after the copy was verified"
+    assert (src / "sub" / "late.xmp").read_text() == "<xmp>new edit</xmp>"
+    assert not (dst / "shoot" / "late.jpg").exists()
+    # The verified originals are gone and their copies are in place.
+    assert not (src / "a.jpg").exists()
+    assert not (src / "b.jpg").exists()
+    assert not (src / "sub" / "notes.txt").exists()
+    assert (dst / "shoot" / "a.jpg").exists()
+    assert (dst / "shoot" / "sub" / "notes.txt").exists()
+    late_xmp = os.path.join("sub", "late.xmp")
+    assert result["source_leftovers"] == {
+        "kept_total": 2, "kept": ["late.jpg", late_xmp],
+        "failed_total": 0, "failed": [],
+    }
+    assert "2 files in the source folder were added or changed" in result["cleanup_error"]
+    assert "late.jpg" in result["cleanup_error"]
+    assert late_xmp in result["cleanup_error"]
+
+
+def test_a_file_changed_after_verification_is_kept_and_reported(tmp_path, monkeypatch):
+    import move as move_mod
+
+    db, src, dst, fid, _ids = _folder(tmp_path)
+    verified_bytes = (src / "a.jpg").read_bytes()
+
+    def edit_a():
+        (src / "a.jpg").write_bytes(b"edited after the copy was verified")
+
+    _after_verification(monkeypatch, edit_a)
+
+    result = move_mod.move_folder(db=db, folder_id=fid, destination=str(dst))
+
+    assert result["errors"] == []
+    assert (src / "a.jpg").read_bytes() == b"edited after the copy was verified"
+    assert (dst / "shoot" / "a.jpg").read_bytes() == verified_bytes
+    assert not (src / "b.jpg").exists()
+    assert result["source_leftovers"]["kept"] == ["a.jpg"]
+    assert "1 file in the source folder was added or changed" in result["cleanup_error"]
+
+
+def test_a_clean_folder_move_removes_the_whole_source(tmp_path, monkeypatch):
+    import move as move_mod
+
+    db, src, dst, fid, _ids = _folder(
+        tmp_path, extras=("a.xmp", "sub/deep/notes.txt"))
+    (src / "empty").mkdir()
+
+    def finder_writes_its_layout():
+        (src / ".DS_Store").write_bytes(b"window layout")
+
+    # Finder rewrites .DS_Store whenever the folder is open. It is not the
+    # user's data, so it must not keep the source folder alive.
+    _after_verification(monkeypatch, finder_writes_its_layout)
+
+    result = move_mod.move_folder(db=db, folder_id=fid, destination=str(dst))
+
+    assert result["errors"] == []
+    assert result["moved"] == 2
+    assert "cleanup_error" not in result
+    assert "source_leftovers" not in result
+    assert not src.exists()
+    assert (dst / "shoot" / "a.xmp").read_bytes() == b"extra a.xmp"
+    assert (dst / "shoot" / "sub" / "deep" / "notes.txt").exists()
+
+
+# -- the cleanup itself -----------------------------------------------------
+
+
+def test_cleanup_report_names_at_most_twenty_files_and_counts_all(tmp_path):
+    from move.source_cleanup import record_source_tree, remove_verified_originals
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "verified.jpg").write_bytes(b"verified")
+    record = record_source_tree(str(src))
+    for index in range(25):
+        (src / f"late-{index:02d}.jpg").write_bytes(b"late")
+
+    cleanup = remove_verified_originals(str(src), record)
+
+    assert cleanup.removed == 1
+    assert not (src / "verified.jpg").exists()
+    report = cleanup.report()
+    assert report["kept_total"] == 25
+    assert report["kept"] == [f"late-{index:02d}.jpg" for index in range(20)]
+    assert cleanup.describe().endswith("late-19.jpg, and 5 more")
+    assert len(list(src.iterdir())) == 25
+
+
+def test_cleanup_reports_an_original_it_could_not_delete(tmp_path, monkeypatch):
+    from move import source_cleanup
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "locked.jpg").write_bytes(b"locked")
+    (src / "free.jpg").write_bytes(b"free")
+    record = source_cleanup.record_source_tree(str(src))
+    real_unlink = os.unlink
+
+    def unlink(path, *args, **kwargs):
+        if os.path.basename(path) == "locked.jpg":
+            raise PermissionError(13, "Permission denied")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(source_cleanup.os, "unlink", unlink)
+
+    cleanup = source_cleanup.remove_verified_originals(str(src), record)
+
+    assert cleanup.removed == 1
+    assert cleanup.kept == []
+    assert [name for name, _reason in cleanup.failed] == ["locked.jpg"]
+    assert "1 copied original could not be deleted: locked.jpg" in cleanup.describe()
+    assert (src / "locked.jpg").exists()
+    assert not (src / "free.jpg").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="creating symlinks needs a privilege on Windows")
+def test_cleanup_removes_a_recorded_directory_link_without_following_it(tmp_path):
+    from move.source_cleanup import record_source_tree, remove_verified_originals
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.jpg").write_bytes(b"not part of the move")
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.jpg").write_bytes(b"a")
+    os.symlink(str(outside), str(src / "link"))
+    record = record_source_tree(str(src))
+
+    cleanup = remove_verified_originals(str(src), record)
+
+    assert cleanup.complete
+    assert not src.exists()
+    assert (outside / "keep.jpg").read_bytes() == b"not part of the move"
+
+
+def test_cleanup_deletes_nothing_without_a_record(tmp_path):
+    from move.source_cleanup import remove_verified_originals
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.jpg").write_bytes(b"a")
+
+    cleanup = remove_verified_originals(str(src), {})
+
+    assert cleanup.removed == 0
+    assert cleanup.kept == ["a.jpg"]
+    assert (src / "a.jpg").exists()
+
+
+# -- what the job says ------------------------------------------------------
+
+
+def test_verify_step_label_says_what_is_compared():
+    from services.move_steps import folder_move_steps
+
+    def verify_label(**kwargs):
+        return next(step["label"] for step in folder_move_steps(**kwargs)
+                    if step["id"] == "verify")
+
+    assert verify_label(remote=False) == "Verify copy (compare every byte)"
+    assert verify_label(remote=True) == "Verify copy (compare checksums with the NAS)"

@@ -12,10 +12,12 @@ and verifier will treat it.
 import contextlib
 import filecmp
 import os
+import stat
 import subprocess
 
 from job_runner.subprocess_control import run_controlled_process
 
+from .contents import files_match
 from .paths import _unsafe_destination_directory
 from .remote import _ssh_rsh_string
 from .transfer import FINDER_METADATA_FILES, _rsync_finder_metadata_exclude_file
@@ -314,8 +316,10 @@ def _first_missing_source_file(src_path, dest_path, *, verify_contents=False,
     file is present and matches. Verifies a merge before deleting
     originals.
 
-    With ``verify_contents``, compare fresh bytes as well before allowing
-    managed temporary originals to be removed.
+    With ``verify_contents``, every regular file's bytes are compared as
+    well (``files_match``). A local move passes it; ``verify_mounted_copy``
+    does not, because there the NAS checksums the contents itself and this
+    walk only checks the structure.
 
     Expected source symlinks must remain independent links with identical
     target strings. For regular source files, a symlinked destination is
@@ -323,7 +327,7 @@ def _first_missing_source_file(src_path, dest_path, *, verify_contents=False,
     `os.path.getsize` follow the link, so a symlink pointing back into the
     source tree (directly, or via a symlinked parent directory) would pass
     a size compare even though no independent copy exists at the
-    destination — and the post-copy `shutil.rmtree(src_path)` would then
+    destination — and the post-copy source cleanup would then
     destroy the only copy. `lexists` lets a broken symlink count as
     missing instead of crashing later checks; `islink` catches the direct
     case; `samefile` catches the symlinked-parent case where `src_file`
@@ -337,7 +341,7 @@ def _first_missing_source_file(src_path, dest_path, *, verify_contents=False,
     must not refuse the delete. A fresh (non-merge) move with
     ``verify_contents`` also reaches this verifier, but there ``.DS_Store``
     IS transferred by the primary rsync path and the shutil fallback, so
-    the destination must hold a matching copy before ``rmtree`` removes
+    the destination must hold a matching copy before the source cleanup removes
     the source — a destination ``.DS_Store`` that disappears between copy
     and verify would otherwise be silently forgiven and take the source's
     copy with it. A ``.DS_Store`` symlink is NOT excluded by the rsync
@@ -385,15 +389,8 @@ def _first_missing_source_file(src_path, dest_path, *, verify_contents=False,
             if not os.path.isfile(dst_file) or \
                     os.path.getsize(src_file) != os.path.getsize(dst_file):
                 return rel_name
-            if verify_contents:
-                # Read fresh bytes: filecmp caches by stat signatures and a
-                # pre-copy conflict check may already have populated it.
-                with open(src_file, "rb") as source, open(dst_file, "rb") as dest:
-                    while chunk := source.read(1024 * 1024):
-                        if chunk != dest.read(len(chunk)):
-                            return rel_name
-                    if dest.read(1):
-                        return rel_name
+            if verify_contents and not files_match(src_file, dst_file):
+                return rel_name
     if progress:
         progress(checked, "")
     return None
@@ -527,21 +524,27 @@ def _fresh_copy_mismatch(src_path, transfer_dest, progress=None):
     """Describe how a fresh move's destination differs from its source.
 
     Fresh move into a destination we created: walk the source and check
-    each file has a same-sized counterpart at the destination. Recount
+    each file has a counterpart at the destination with the same size and
+    the same bytes. Recount
     the source here rather than reusing the pre-copy `total_files` — if
     a file appeared in the source after that upfront count (and rsync
     didn't pick it up), a stale count could spuriously match a naive
-    dst_count and the rmtree below would delete the never-copied file.
+    dst_count and the source cleanup would delete the never-copied file.
 
     A whole-tree file count alone is not sufficient: ``_plan_moved_file_mtimes``
     above stats every catalog photo sequentially and can run for minutes
     on a network mount, so a destination photo stat'd early in that pass
     could be truncated or replaced afterwards while the pass keeps working
     through the rest of the tree. Neither the pass's remaining iterations
-    nor a count-only check would notice, and rmtree(src) would then delete
-    the intact original. Per-file size verification is the last thing
+    nor a count-only check would notice, and the source cleanup would then delete
+    the intact original. This per-file verification is the last thing
     that touches the destination before the catalog update, closing the
     window opened by the planning pass.
+
+    Size is checked first because it is one ``stat`` and names the usual
+    failure (a truncated copy) exactly. It cannot stand alone: a copy can
+    have the right length and the wrong bytes, so every regular file is
+    then read back on both sides and compared.
 
     Symlinks are matched structurally: rsync -a (and the shutil fallback)
     preserves source symlinks as destination symlinks with the same
@@ -578,14 +581,25 @@ def _fresh_copy_mismatch(src_path, transfer_dest, progress=None):
                         f"'{rel_name}' symlink target mismatch or source alias at destination")
                 continue
             try:
-                src_size = os.stat(src_file, follow_symlinks=False).st_size
-                dst_size = os.stat(dst_file, follow_symlinks=False).st_size
+                src_stat = os.stat(src_file, follow_symlinks=False)
+                dst_stat = os.stat(dst_file, follow_symlinks=False)
             except OSError:
                 return f"'{rel_name}' unreadable at destination"
-            if src_size != dst_size:
+            if src_stat.st_size != dst_stat.st_size:
                 return (
                     f"'{rel_name}' size mismatch at destination "
-                    f"(source={src_size}, dest={dst_size})")
+                    f"(source={src_stat.st_size}, dest={dst_stat.st_size})")
+            if stat.S_IFMT(src_stat.st_mode) != stat.S_IFMT(dst_stat.st_mode):
+                return f"'{rel_name}' is a different kind of file at destination"
+            # Only a regular file has bytes to compare; opening a FIFO or a
+            # device would block or read something that is not a copy.
+            if not stat.S_ISREG(src_stat.st_mode):
+                continue
+            try:
+                if not files_match(src_file, dst_file):
+                    return f"'{rel_name}' contents differ at destination"
+            except OSError as exc:
+                return f"'{rel_name}' could not be read back to compare ({exc})"
     # Extras at destination — a leftover rsync temp file, or anything
     # else the source-driven walk above never looked for — would leave
     # the fresh destination in a state we do not fully understand.
