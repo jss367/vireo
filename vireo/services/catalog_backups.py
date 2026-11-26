@@ -78,9 +78,9 @@ DAILY_INTERVAL = timedelta(hours=23)
 CHECK_INTERVAL_SECONDS = 60 * 60
 FIRST_CHECK_DELAY_SECONDS = 120.0
 
-# Room kept free beyond the copy itself, so a backup never fills the disk the
-# live catalog has to keep writing to.
-FREE_SPACE_MARGIN = 1024 ** 3
+# Room kept free beyond the copy itself, so a backup never takes the space the
+# live catalog, its write-ahead log and the generated caches keep writing to.
+FREE_SPACE_MARGIN = 5 * 1024 ** 3
 COPY_CHUNK = 16 * 1024 ** 2
 PROGRESS_SECONDS = 0.5
 
@@ -186,13 +186,20 @@ def _require_free_space(root: str, needed: int, what: str) -> None:
     if free < needed + FREE_SPACE_MARGIN:
         raise BackupError(
             f"Not enough free disk space for {what}: it needs about "
-            f"{_gb(needed + FREE_SPACE_MARGIN)} (including 1 GB kept free for the "
-            f"catalog), and {_gb(free)} is free in {root}."
+            f"{_gb(needed + FREE_SPACE_MARGIN)} (including {_gb(FREE_SPACE_MARGIN)} kept "
+            f"free for Vireo's own files), and {_gb(free)} is free in {root}."
         )
 
 
 def _gb(size: int) -> str:
     return f"{size / 1024 ** 3:.1f} GB"
+
+
+def _size(size: int) -> str:
+    for unit, scale in (("GB", 1024 ** 3), ("MB", 1024 ** 2), ("KB", 1024)):
+        if size >= scale:
+            return f"{size / scale:.1f} {unit}"
+    return f"{size} bytes"
 
 
 def _stop_if_cancelled(hooks: BackupHooks, what: str = "Catalog backup") -> None:
@@ -410,7 +417,7 @@ def create_backup(
     finally:
         _LOCK.release()
     size = _folder_size(os.path.join(root, name))
-    summary = f"Backed up the catalog ({_gb(size)})"
+    summary = f"Backed up the catalog ({_size(size)})"
     if removed:
         summary += f"; removed {len(removed)} older backup{'s' if len(removed) != 1 else ''}"
     return {
