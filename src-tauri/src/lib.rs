@@ -133,8 +133,8 @@ fn set_job_progress(
 /// attention" notice: its version, the jobs a restart is waiting for, and the
 /// countdown before an automatic restart.
 #[tauri::command]
-fn update_status() -> Option<updater::UpdateStatus> {
-    updater::status()
+fn update_status(app: tauri::AppHandle) -> Option<updater::UpdateStatus> {
+    updater::status(&app)
 }
 
 /// Restart for the downloaded update, from the web UI's notice. It may ask
@@ -442,10 +442,18 @@ pub fn run() {
                         progress: None,
                     });
                 }
-                if let Some(state) = app_handle.try_state::<SidecarState>() {
-                    sidecar::stop_sidecar(&state);
+                // Only install the pending update once this process is the
+                // last GUI client holding the backend. Replacing the packaged
+                // application while another GUI and its sidecar are still
+                // attached would leave that instance running against files
+                // from a different version.
+                let backend_free = app_handle
+                    .try_state::<SidecarState>()
+                    .map(|state| sidecar::stop_sidecar(&state))
+                    .unwrap_or(true);
+                if backend_free {
+                    updater::install_pending_on_exit(app_handle);
                 }
-                updater::install_pending_on_exit(app_handle);
             }
         });
 }

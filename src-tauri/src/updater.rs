@@ -170,12 +170,16 @@ pub struct UpdateStatus {
 
 /// The downloaded update and what Vireo is doing about it. Reading a running
 /// countdown marks it shown, which is what lets the restart happen on its own.
-pub fn status() -> Option<UpdateStatus> {
+/// A hidden webview (the main window closed to the tray) still runs JS, so a
+/// read from one leaves it unmarked and the native dialog asks instead:
+/// nothing restarts until a window the user can see showed the warning.
+pub fn status(app: &AppHandle) -> Option<UpdateStatus> {
+    let visible = main_window_visible(app);
     let mut state = state();
     let version = state.pending.as_ref()?.update.version.clone();
     let waiting_for = state.waiting_for.clone();
     let restart_in = state.countdown.as_mut().map(|countdown| {
-        countdown.shown = true;
+        countdown.shown |= visible;
         countdown
             .deadline
             .saturating_duration_since(Instant::now())
@@ -742,7 +746,9 @@ fn run_countdown(app: &AppHandle, generation: u64) -> CountdownOutcome {
             .unwrap_or_default()
     };
     let started = Instant::now();
-    let page_can_show = !crate::tray::is_browser_mode(app);
+    // The banner is a visible warning only in a visible window; a window
+    // closed to the tray, or browser mode, gets the native dialog.
+    let page_can_show = !crate::tray::is_browser_mode(app) && main_window_visible(app);
     if page_can_show {
         notify_page(app);
     }
@@ -855,6 +861,14 @@ fn stop_waiting_keep_download(app: &AppHandle) {
     set_update_menu_text(app, text);
     crate::tray::refresh_tray_menu(app);
     notify_page(app);
+}
+
+/// Whether the main window is on screen. A window closed to the tray keeps
+/// its webview running, hidden, where a banner warns nobody.
+fn main_window_visible(app: &AppHandle) -> bool {
+    app.get_webview_window("main")
+        .and_then(|window| window.is_visible().ok())
+        .unwrap_or(false)
 }
 
 /// Tell the page the update status changed, so it reads `update_status` again
