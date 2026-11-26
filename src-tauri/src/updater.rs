@@ -874,7 +874,7 @@ fn run_countdown(app: &AppHandle, generation: u64) -> CountdownOutcome {
     }
 
     let mut last_seconds = None;
-    let end = loop {
+    let mut end = loop {
         if !page_can_show {
             break CountdownEnd::AskNatively;
         }
@@ -930,15 +930,19 @@ fn run_countdown(app: &AppHandle, generation: u64) -> CountdownOutcome {
             notify_page(app);
             return CountdownOutcome::Busy(generation);
         }
-        let cancelled =
-            state.countdown.as_ref().and_then(|c| c.response) == Some(CountdownResponse::Cancel);
+        let response = state.countdown.as_ref().and_then(|c| c.response);
         state.stop_waiting();
-        if cancelled {
+        if response == Some(CountdownResponse::Cancel) {
             drop(state);
             publish_stopped_waiting(app);
             return CountdownOutcome::Stopped;
         }
         state.begin(true);
+        // A Restart Now that arrived after the loop let go is the user's
+        // answer, not an expiry nobody answered.
+        if response == Some(CountdownResponse::Now) {
+            end = CountdownEnd::UserChoseNow;
+        }
         state.pending.take()
     };
     notify_page(app);

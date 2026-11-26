@@ -381,22 +381,25 @@ fn live_gui_client_pids() -> std::io::Result<Vec<u32>> {
         Err(error) => return Err(error),
     };
 
-    Ok(entries
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            let pid = path
-                .file_stem()
-                .and_then(|name| name.to_str())
-                .and_then(|name| name.parse::<u32>().ok())?;
-            if process_is_alive(pid) {
-                Some(pid)
-            } else {
-                let _ = std::fs::remove_file(path);
-                None
-            }
-        })
-        .collect())
+    let mut pids = Vec::new();
+    for entry in entries {
+        // An entry that fails to read leaves the scan incomplete; report it
+        // rather than count only the clients read before it.
+        let path = entry?.path();
+        let Some(pid) = path
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if process_is_alive(pid) {
+            pids.push(pid);
+        } else {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+    Ok(pids)
 }
 
 /// Whether a Vireo window in another process shares this backend. Installing
