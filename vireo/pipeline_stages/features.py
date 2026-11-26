@@ -1035,6 +1035,8 @@ class _MaskPass:
             self.outcomes.record(item.photo_id, tag)
             if not invalidated:
                 self.masked += 1
+                if item.existing is not None and item.existing.get("set_aside_by") is not None:
+                    self.set_aside_reused += 1
             self.processed = i + 1
             return _NEXT_PHOTO
 
@@ -1208,7 +1210,6 @@ class _MaskPass:
         )
         if reactivated:
             thread_db.commit_with_retry()
-            self.set_aside_reused += 1
         return reactivated
 
     def _count_unreadable_source(self, item: _MaskPhoto) -> None:

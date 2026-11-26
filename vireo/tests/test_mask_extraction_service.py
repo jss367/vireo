@@ -130,6 +130,21 @@ def test_mask_an_upgrade_set_aside_is_proven_and_reused_without_sam(db, tmp_path
     assert db.masks_features.get_mask(pid, "sam2-base")["set_aside_by"] is None
 
 
+def test_regenerated_set_aside_mask_is_not_counted_as_reused(db, tmp_path, extraction):
+    import schema
+
+    pid = seed_photo(db, tmp_path, "set-aside-different-embedding")
+    assert run(extraction)["masked"] == 1
+    schema.set_aside_masks(db.conn, "m.photo_id=?", (pid,), version=99, reason="Test reason")
+    db.commit()
+    extraction.options = replace(extraction.options, dinov2_variant="dinov2-large")
+
+    result = run(extraction)
+
+    assert (result["masked"], result["set_aside_reused"], result["ok"]) == (1, 0, True)
+    assert len(extraction.generated) == 2
+
+
 def test_set_aside_mask_whose_file_is_gone_is_made_again(db, tmp_path, extraction):
     import schema
 

@@ -472,7 +472,8 @@ class _MaskExtractionRun:
                 and os.path.isfile(existing["path"])
                 and cached_mask_frame_matches(existing["path"], frame)):
             return False
-        if existing.get("set_aside_by") is not None:
+        was_set_aside = existing.get("set_aside_by") is not None
+        if was_set_aside:
             # An upgrade set this mask aside; the checks above are the proof
             # it needs. One that was not the photo's active mask stays set
             # aside, and SAM replaces it below.
@@ -481,7 +482,6 @@ class _MaskExtractionRun:
             ):
                 return False
             thread_db.commit_with_retry()
-            self.set_aside_reused += 1
         state = thread_db.masks_features.photo_mask_state(item.photo_id)
         if (state is not None
                 and state["active_mask_variant"]
@@ -499,6 +499,8 @@ class _MaskExtractionRun:
             # surfaces the drop and flips ``ok`` to False.
             if not invalidated:
                 self.masked += 1
+                if was_set_aside:
+                    self.set_aside_reused += 1
             self._push_progress(item.index, photo["filename"])
             return True
         # Denormalised subject state is stale: fall
