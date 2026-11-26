@@ -504,6 +504,47 @@ def test_pinned_navigation_stays_in_order_across_pages(live_server, page):
     expect(page.locator(".nav-tab.active")).to_have_attribute("data-nav-id", expected[-1])
 
 
+def test_only_the_tab_strip_gives_way_in_a_narrow_window(live_server, page):
+    """The wordmark stays on one line beside its icon, and a side of the strip
+    with tabs scrolled out of view is marked so its edge fades; a mouse wheel
+    over the strip scrolls the tabs, not the page."""
+    page.set_viewport_size({"width": 900, "height": 800})
+    page.goto(f"{live_server['url']}/browse")
+    strip = page.locator("#navTabStrip")
+    strip.locator(".nav-tab").first.wait_for(state="visible", timeout=3000)
+
+    brand = page.locator(".navbar .brand")
+    icon = brand.locator("img").bounding_box()
+    word = brand.evaluate(
+        """el => {
+          const range = document.createRange();
+          range.selectNodeContents(el.lastChild);
+          const box = range.getBoundingClientRect();
+          return {top: box.top, bottom: box.bottom, lines: range.getClientRects().length};
+        }"""
+    )
+    assert word["lines"] == 1, word
+    assert word["top"] < icon["y"] + icon["height"], (word, icon)
+    assert page.locator(".navbar").evaluate("el => el.scrollWidth <= el.clientWidth")
+    pages = page.get_by_role("button", name="Pages").bounding_box()
+    box = strip.bounding_box()
+    assert box["x"] + box["width"] <= pages["x"], (box, pages)
+
+    assert strip.evaluate("el => el.scrollWidth > el.clientWidth")
+    expect(strip).to_have_class("nav-tab-strip more-right")
+    page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+    page.mouse.wheel(0, 90)
+    page.wait_for_function("document.getElementById('navTabStrip').scrollLeft >= 90")
+    assert page.evaluate("window.scrollY") == 0
+    expect(strip).to_have_class("nav-tab-strip more-right more-left")
+    strip.evaluate("el => { el.scrollLeft = el.scrollWidth; }")
+    expect(strip).to_have_class("nav-tab-strip more-left")
+
+    # Wide enough for every tab, neither edge fades.
+    page.set_viewport_size({"width": 2400, "height": 800})
+    expect(strip).to_have_class("nav-tab-strip")
+
+
 def test_tab_scroll_position_is_scoped_to_workspace(live_server, page):
     page.set_viewport_size({"width": 900, "height": 800})
     page.goto(f"{live_server['url']}/browse")

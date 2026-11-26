@@ -384,3 +384,31 @@ def test_date_can_be_chosen_before_the_first_analysis(live_server, page):
     assert len(requests) == 2
     assert 'photo_ids' not in requests[0]
     assert requests[1]['photo_ids'] == [10, 11, 12]
+
+
+@pytest.mark.parametrize('picks', [True, False])
+def test_cull_header_leaves_the_first_screen_to_the_photos(live_server, page, picks):
+    """The first photo starts in the top 45% of a laptop window, with or
+    without favorites, and the totals read as one line."""
+    results = _results()
+    if not picks:
+        # No pick and nothing eligible to suggest: the Favorites block is empty.
+        for photo in results['photos']:
+            photo.update(flag='none', flag_confirmation_status='unverified',
+                         label='REVIEW', automatic_keep_eligible=False)
+    page.set_viewport_size({'width': 1440, 'height': 900})
+    _open(page, live_server, results)
+
+    first = page.locator('.cull-card img').first.bounding_box()
+    assert first['y'] <= 405, first
+    assert page.locator('.summary-bar').bounding_box()['height'] <= 44
+    expect(page.locator('#cullScope')).to_contain_text('15 photos with pipeline results')
+
+    heron = _section(page, 'Great blue heron')
+    favorites = heron.locator('.cull-favorites')
+    if picks:
+        expect(favorites.locator('.cull-favorite-card')).to_have_count(10)
+    else:
+        expect(favorites).to_contain_text('No favorites yet')
+        expect(favorites.locator('.cull-card')).to_have_count(0)
+        assert favorites.bounding_box()['height'] <= 52

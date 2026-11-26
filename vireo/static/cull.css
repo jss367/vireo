@@ -38,3 +38,30 @@
 #cullCompareReference { background: #181b20; color: #f4f4f4; border-color: #ffffff40; max-width: 320px; }
 
 .pose-group { scroll-margin-top: min(440px, calc(50vh - 20px)); scroll-margin-bottom: 48px; }
+
+/* The header is compact so the first photos start in the top half of a laptop
+ * window: title and scope on one line, then the scope controls, then the
+ * actions, then the totals as one line of figures. */
+.content { padding-top: 16px; }
+.cull-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; margin-bottom: 10px; }
+.cull-title h2 { font-size: 20px; margin: 0; }
+.cull-title .cull-hint { margin: 0; }
+.cull-filters { margin: 0 0 8px; gap: 8px 10px; }
+.cull-filters input { padding: 6px 8px; }
+#cullCollection { font-size: 13px; padding: 7px 10px; max-width: 220px; }
+#cullSpeciesPicker { min-width: 220px; }
+#cullSpeciesPicker summary { padding: 7px 12px; font-size: 13px; }
+.action-bar { margin-bottom: 10px; flex-wrap: wrap; }
+.action-bar .btn { padding: 7px 16px; }
+.summary-bar { gap: 6px 22px; margin-bottom: 10px; padding: 8px 14px; }
+.summary-stat { display: flex; align-items: baseline; gap: 6px; text-align: left; }
+.summary-stat .num { font-size: 17px; }
+.summary-stat .label { font-size: 12px; margin-top: 0; }
+.summary-actions { flex-direction: row; align-items: center; }
+.species-header { padding: 9px 16px; }
+.cull-favorites { padding: 12px 16px; }
+.cull-favorites-top, .cull-favorites-empty { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 14px; }
+.cull-favorites-top .cull-hint, .cull-favorites-empty .cull-hint { margin: 0; }
+.cull-remaining-heading { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 14px; padding: 12px 16px 2px; }
+.cull-remaining-heading .cull-hint { display: inline; margin: 0; }
+.pose-group { padding-top: 10px; }
