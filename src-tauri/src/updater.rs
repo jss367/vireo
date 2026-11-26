@@ -408,9 +408,10 @@ async fn download_update(
 ///
 /// When jobs the user started are queued or running, ask first: the default
 /// waits for them to finish, Restart Now names what it would stop, and Later
-/// keeps the download. Otherwise a request to restart (the menu item, tray
-/// item or notice) installs at once, and a manual check that just found the
-/// update (`ask_when_idle`) asks Restart or Later. Returns an install failure
+/// keeps the download. When the check fails, Restart or Later asks and says
+/// the jobs could not be checked. Otherwise a request to restart (the menu
+/// item, tray item or notice) installs at once, and a manual check that just
+/// found the update (`ask_when_idle`) asks Restart or Later. Returns an install failure
 /// for the caller to show; the update is then ready again.
 fn decide_restart(
     app: &AppHandle,
@@ -427,7 +428,9 @@ fn decide_restart(
     let readiness = match readiness {
         Ok(readiness) if !readiness.idle => readiness,
         readiness => {
-            if !ask_when_idle {
+            // A failed check says nothing about running jobs, so it asks
+            // even where an idle backend would let a click restart at once.
+            if !ask_when_idle && readiness.is_ok() {
                 return install(app, pending);
             }
             set_update_menu_text(app, RESTART_TEXT);
