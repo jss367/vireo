@@ -853,8 +853,8 @@ fn run_countdown(app: &AppHandle, generation: u64) -> CountdownOutcome {
 
     // A follow-up job (the Process run an import queues) can start in the
     // moments after the last one ends. Check once more before stopping it.
-    if let Ok(readiness) = fetch_readiness(app) {
-        if !readiness.idle {
+    match fetch_readiness(app) {
+        Ok(readiness) if !readiness.idle => {
             let next = {
                 let mut state = state();
                 state.finish();
@@ -864,6 +864,31 @@ fn run_countdown(app: &AppHandle, generation: u64) -> CountdownOutcome {
             notify_page(app);
             return CountdownOutcome::Busy(next);
         }
+        Ok(_) => {}
+        // A failed check says nothing about a job that just started. Nobody
+        // has answered yet when the countdown ran out on its own, so ask;
+        // waiting instead could last forever when the backend has stopped.
+        Err(error) if !ask_natively && matches!(end, CountdownEnd::Expired) => {
+            log::warn!("Final job check before updating failed: {error}");
+            set_update_menu_text(app, RESTART_TEXT);
+            let restart = app
+                .dialog()
+                .message(ready_message(&version, None, check.shared))
+                .title("Update Ready")
+                .kind(MessageDialogKind::Info)
+                .buttons(MessageDialogButtons::OkCancelCustom(
+                    RESTART_BUTTON.into(),
+                    LATER_BUTTON.into(),
+                ))
+                .blocking_show();
+            if !restart {
+                keep_ready(app, pending);
+                state().finish();
+                return CountdownOutcome::Stopped;
+            }
+        }
+        // The user just said Restart, in the banner or the dialog.
+        Err(error) => log::warn!("Final job check before updating failed: {error}"),
     }
     CountdownOutcome::Restart(Box::new(pending))
 }
