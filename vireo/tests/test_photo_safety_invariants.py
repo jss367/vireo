@@ -1051,7 +1051,10 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
                     path = os.path.join(row["folder_path"], row["filename"])
                     if os.path.isfile(path):
                         permanent_hashes[row["id"]] = (path, _sha256(path))
-        result = self._deleter().run_batch_delete(self.db, chosen, mode=mode)
+        result = self._deleter().run_batch_delete(
+            self.db, chosen, mode=mode,
+            confirm_permanent=mode == "disk_permanent",
+        )
         self._record_successful_deletions(chosen, result, permanent_hashes)
         event(f"delete {mode}: ok={result.get('ok')}")
 

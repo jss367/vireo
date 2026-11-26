@@ -13,7 +13,7 @@ interface WorkLocalStep {status?:string;id?:string;label?:string;current_file?:s
 interface WorkLocalProgress {steps?:WorkLocalStep[];root_folder_id?:number;current_file?:string;phase?:string;current?:number;total?:number;bytes_current?:number;bytes_total?:number}
 interface WorkLocalWatch {id:string;progress:WorkLocalProgress|null;progressByRoot:Record<string,WorkLocalProgress>;completedRoots:Record<string,boolean>;source:EventSource|null;eventCount:number}
 interface WorkLocalStarted {job_id:string;folder_ids?:number[]}
-declare var Vireo:{api:{fetch(url:string,options?:RequestInit):Promise<Response>;json<T>(url:string,options?:RequestInit,settings?:{toast?:boolean}):Promise<T>}}&VireoPageHookRegistry;
+declare var Vireo:{api:{fetch(url:string,options?:RequestInit):Promise<Response>;json<T>(url:string,options?:RequestInit,settings?:{toast?:boolean}):Promise<T>};confirm:VireoConfirm}&VireoPageHookRegistry;
 declare function formatBytes(value:number):string;
 declare function escapeHtml(value:string):string;
 declare function escapeAttr(value:string):string;
