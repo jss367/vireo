@@ -8,15 +8,22 @@
 
 /* ---------- Render ---------- */
 function renderAll() {
-  renderModelFilter();
-  renderFingerprintFilterPill();
-  renderPhotoFilterPill();
-  renderStats();
-  renderTabs();
-  renderButtons();
-  renderGrid();
-  checkPendingSync();
-  renderReviewQueue();
+  // Nothing below changes a row or a filter, so the steps share one
+  // filtered, sorted and indexed copy of the rows (see reviewVisibleRows).
+  reviewVisibleRowsCache = new Map();
+  try {
+    renderModelFilter();
+    renderFingerprintFilterPill();
+    renderPhotoFilterPill();
+    renderStats();
+    renderTabs();
+    renderButtons();
+    renderGrid();
+    checkPendingSync();
+    renderReviewQueue();
+  } finally {
+    reviewVisibleRowsCache = null;
+  }
 }
 
 function renderModelFilter() {

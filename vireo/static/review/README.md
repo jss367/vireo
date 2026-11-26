@@ -18,7 +18,7 @@ separate implementations: a fix in one does not reach the other.
 | `loading.js` | `loadPredictions()`, its sequence guard, and the reload flag that gates decisions |
 | `deep-links.js` | `?model=`, `?labels_fingerprint=` and `?photo_id=` deep links and their filter pills |
 | `controls.js` | `renderAll()`, the toolbar (confidence, model, sort, photo size), the heading's pending count, the status tabs in the sticky header, and Accept All |
-| `grid.js` | Filtering and sorting the grid, prediction cards, burst-group buttons, and grid clicks |
+| `grid.js` | Filtering and sorting the grid, building its cards in batches, prediction cards, burst-group buttons, and grid clicks |
 | `evidence.js` | Relative score explanations, subject-specific disagreement, geographic context, questionable-detection filters and durable subject assessments |
 | `decisions.js` | Accept, reject, accept an alternative, and Accept All |
 | `keyboard.js` | The accept, reject, and skip shortcuts for the first visible pending card |
@@ -90,6 +90,30 @@ changing this code:
   included. The Group Review handler (`group-changes.js`) acts only while
   `#grmOverlay` is open and the lightbox is not. Boot registers the A/S handler
   first; keep both guard lists and that order.
+
+## Grid batches
+
+`renderGrid()` builds 60 cards (`REVIEW_GRID_BATCH`) and `showMoreReviewCards()`
+appends the next 60 when the line under the grid (`#gridMore`) comes within
+1,500 pixels of the viewport, or when its button is pressed. The line says how
+many cards are built and how many the view holds. A whole-workspace queue is
+about 100,000 cards, and every decision re-renders the grid, so building them
+all blocks the page for minutes on each accept.
+
+`reviewGridItems` holds every card of the view in display order. Read it, not
+the DOM, for anything that must cover the whole view: the lightbox's photo list
+comes from `reviewGridPhotoList()`. A re-render of the same view (status tab,
+model, label set, confidence, evidence filter, sort, collection and
+deep-linked photo) keeps the number of cards already built, so a decision
+leaves the reader where they were; a different view starts at one batch.
+
+`renderAll()` opens `reviewVisibleRowsCache` for its own duration. The heading,
+tabs, Accept All and the grid each ask `getVisibleItems()` for the rows, and one
+render filters, sorts and indexes them once per status view. Outside a render
+the cache is null and every call reads the rows again, so a status written
+between renders is never served from an older copy. `reviewPredictionById()` is
+an id index rebuilt when `predictions` is replaced; replace the array, do not
+push to it.
 
 ## Cards shared by classifier models
 
