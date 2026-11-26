@@ -38,18 +38,23 @@
     return next;
   }
 
-  var lastRecovery = '';
+  var lastRecoveryId = '';
   /** @param {Response} response */
   function showConfigRecovery(response) {
     var notice = response.headers?.get('X-Vireo-Config-Recovery');
-    if (!notice || notice === lastRecovery || typeof global.showToast !== 'function') return response;
+    if (!notice || typeof global.showToast !== 'function') return response;
     try {
       var recovery = JSON.parse(notice);
-      lastRecovery = notice;
-      var key = 'vireo.configRecovery';
-      try { if (global.localStorage.getItem(key) === notice) return response; } catch (_) {}
+      // Dedupe by recovery identity: a backup-failed read followed by a
+      // backup-succeeded one carries the same id but a different message,
+      // and two toasts for one recovery would read as a repeat event.
+      var recoveryId = recovery && recovery.id;
+      if (!recoveryId || recoveryId === lastRecoveryId) return response;
+      lastRecoveryId = recoveryId;
+      var key = 'vireo.configRecoveryId';
+      try { if (global.localStorage.getItem(key) === recoveryId) return response; } catch (_) {}
       global.showToast(recovery.message, 'warning');
-      try { global.localStorage.setItem(key, notice); } catch (_) {}
+      try { global.localStorage.setItem(key, recoveryId); } catch (_) {}
     } catch (_) { /* A notice must never interrupt the request. */ }
     return response;
   }

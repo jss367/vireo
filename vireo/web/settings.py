@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import filter_shortcuts
 from app_paths import media_root
-from config import config_recovery_notice, config_value, read_raw_config_file, settings_write_lock
+from config import config_value, read_raw_config_file, settings_write_lock
 from flask import Blueprint, g, jsonify, make_response, request
 from preview_cache import (
     evict_if_over_quota as evict_preview_cache_if_over_quota,
@@ -724,14 +724,6 @@ def create_settings_blueprint(
     and is only called while holding ``settings_write_lock``.
     """
     blueprint = Blueprint("settings", __name__)
-
-    @blueprint.after_request
-    def include_config_recovery_notice(response: Response) -> Response:
-        if 200 <= response.status_code < 300:
-            notice = config_recovery_notice()
-            if notice:
-                response.headers["X-Vireo-Config-Recovery"] = json.dumps(notice)
-        return response
 
     def _working_copy_quota_confirmation_required(
         # A raw or validated setting value (int() rejects a bad one), and the
