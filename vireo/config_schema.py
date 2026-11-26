@@ -68,6 +68,12 @@ SCHEMA = {
         "desc": "Daily maintenance removes generated files older than this age using their latest filesystem access, write or change timestamp. "
                 "0 disables age expiry; the byte limit still applies.",
     },
+    "catalog_backup_keep": {
+        "type": "int", "min": 0, "max": 30, "category": "Behavior", "scope": "global",
+        "label": "Daily catalog backups kept",
+        "desc": "Vireo copies the catalog once a day into the backups folder beside it and keeps this many copies, deleting the oldest. "
+                "Each copy is about the size of the catalog. 0 turns off the daily backup; Back up now in Settings still keeps the newest copy.",
+    },
     "grouping_history_max_mb": {
         "type": "int", "min": 0, "max": 1048576, "category": "Behavior", "scope": "global",
         "label": "Grouping undo snapshots per workspace (MB)",

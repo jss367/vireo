@@ -6,6 +6,7 @@
     "../vireo/static/settings/all-settings.js",
     "../vireo/static/settings/autosave.js",
     "../vireo/static/settings/boot.js",
+    "../vireo/static/settings/catalog-backups.js",
     "../vireo/static/settings/config.js",
     "../vireo/static/settings/desktop.js",
     "../vireo/static/settings/external-editors.js",

@@ -48,6 +48,7 @@ from web.browse import create_browse_blueprint
 from web.caches import create_caches_blueprint
 from web.capture_time import create_capture_time_blueprint
 from web.card_cleanup import create_card_cleanup_blueprint
+from web.catalog_backups import create_catalog_backups_blueprint
 from web.collections import create_collections_blueprint
 from web.dashboard import create_dashboard_blueprint
 from web.duplicates import create_duplicates_blueprint
@@ -822,7 +823,7 @@ def _start_app_runtime(app, db_path):
     app._log_broadcaster = LogBroadcaster(buffer_size=500)
     app._log_broadcaster.install()
 
-    app._cleanup_app_resources = startup.cleanup_app_resources
+    app._cleanup_app_resources = _start_catalog_backups(app, db_path, startup)
     app._start_thumbnail_recheck = startup.start_thumbnail_recheck
     app._kickoff_preview_cache_maintenance = startup.kickoff_preview_cache_maintenance
     if not os.environ.get("VIREO_DISABLE_STARTUP_BACKFILL_TIMERS"):
@@ -844,6 +845,39 @@ def _start_app_runtime(app, db_path):
     _schedule_startup_backfills(app, startup)
 
     return init_db, missing_originals
+
+
+def _start_catalog_backups(app, db_path, startup):
+    """Build the daily catalog backup schedule; return the app cleanup.
+
+    The returned cleanup stops the schedule before the job runner shuts
+    down, so no backup starts against a runner that is closing.
+    """
+    from services.catalog_backups import CatalogBackups
+
+    app._catalog_backups = CatalogBackups(db_path, lambda: app._job_runner)
+    if not os.environ.get("VIREO_DISABLE_STARTUP_BACKFILL_TIMERS"):
+        app._catalog_backups.schedule()
+
+    def cleanup_app_resources(job_timeout=10.0):
+        app._catalog_backups.stop()
+        return startup.cleanup_app_resources(job_timeout=job_timeout)
+
+    return cleanup_app_resources
+
+
+def _apply_pending_catalog_restore(db_path):
+    """Finish a restore Settings prepared, before anything opens the catalog.
+
+    Runs after the single-instance lock, so no other Vireo has the catalog
+    open. A restore that could not put the previous catalog back raises:
+    starting would create an empty catalog in its place.
+    """
+    from services.catalog_backups import apply_pending_restore
+
+    outcome = apply_pending_restore(db_path)
+    if outcome is not None and not outcome["ok"]:
+        log.error("Catalog restore did not happen: %s", outcome["error"])
 
 
 def _start_missing_originals(app, db_path):
@@ -1074,6 +1108,9 @@ def _register_library_blueprints(app, w):
         create_storage_blueprint(_get_db, json_error, db_path, app.config,
                                  get_runner=lambda: app._job_runner)
     )
+    app.register_blueprint(create_catalog_backups_blueprint(
+        _get_db, json_error, catalog_backups=app._catalog_backups,
+    ))
     app.register_blueprint(
         create_workspace_blueprint(
             _get_db,
@@ -1655,6 +1692,7 @@ def main():
     )
 
     _reserve_single_instance_or_exit()
+    _apply_pending_catalog_restore(args.db)
 
     api_token = generate_token()
     mode = "headless" if args.headless else "gui"

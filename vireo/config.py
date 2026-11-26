@@ -59,6 +59,7 @@ DEFAULTS = {
     "grouping_history_max_mb": 512,
     "retained_cache_max_mb": 10240,
     "retained_cache_max_age_days": 30,
+    "catalog_backup_keep": 3,
     "inat_token": "",
     "hf_token": "",
     "google_maps_api_key": "",
