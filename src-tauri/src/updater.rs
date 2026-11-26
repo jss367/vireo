@@ -1027,8 +1027,9 @@ enum FinalStep {
 /// restart nobody answered needs all of it: a page showed the warning, the
 /// job check answered with nothing running or paused, the window is still on
 /// screen and no other Vireo window shares the backend. The user's own
-/// Restart Now is honored unless new jobs appeared, or a paused job or
-/// another window would be affected that the banner did not name.
+/// Restart Now is honored unless new jobs appeared, a paused job or another
+/// window would be affected that the banner did not name, or the check
+/// failed and can no longer confirm the jobs finished.
 fn final_step(
     end: &CountdownEnd,
     readiness: &Result<Readiness, String>,
@@ -1040,7 +1041,11 @@ fn final_step(
     let paused = matches!(readiness, Ok(r) if !r.paused.is_empty());
     match end {
         CountdownEnd::UserChoseNow if busy => FinalStep::AskAboutNewJobs,
-        CountdownEnd::UserChoseNow if paused || check.shared => FinalStep::Ask,
+        // The banner said the jobs had finished; a check that now fails can
+        // no longer confirm it, so ask, as every Restart answer does.
+        CountdownEnd::UserChoseNow if paused || check.shared || readiness.is_err() => {
+            FinalStep::Ask
+        }
         CountdownEnd::UserChoseNow => FinalStep::Restart,
         _ if busy => FinalStep::KeepWaiting,
         CountdownEnd::Expired if readiness.is_ok() && !paused && check.allowed() => {
@@ -1631,6 +1636,10 @@ mod tests {
         // The user's Restart Now stands, unless new work appeared.
         assert_eq!(
             final_step(&CountdownEnd::UserChoseNow, &failed(), &hidden),
+            FinalStep::Ask
+        );
+        assert_eq!(
+            final_step(&CountdownEnd::UserChoseNow, &idle(), &hidden),
             FinalStep::Restart
         );
         assert_eq!(
