@@ -1460,6 +1460,10 @@ def _progress_event(stages, stage_id, phase, **extra):
         phase_current=None,
         phase_total=None,
         phase_label=None,
+        # Every pipeline stage reports `rate` in files per minute, while
+        # standalone jobs report items per second; the navbar status line
+        # reads this to label the number.
+        rate_unit="per_minute",
     )
     data.update(extra)
     return data

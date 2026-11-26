@@ -8916,6 +8916,22 @@ def test_progress_event_defaults_phase_triple_to_none():
     assert data["phase_label"] == "Extracting metadata"
 
 
+def test_progress_event_says_its_rate_is_per_minute():
+    """Pipeline stages report files per minute while standalone jobs report
+    items per second; the navbar status line labels the number from
+    rate_unit, so every pipeline payload carries it."""
+    from pipeline_job import _progress_event
+
+    stages = _empty_stages()
+    stages["thumbnails"]["status"] = "running"
+
+    data = _progress_event(
+        stages, "thumbnails", "Generating thumbnails", rate=120.0,
+    )
+    assert data["rate"] == 120.0
+    assert data["rate_unit"] == "per_minute"
+
+
 def test_emit_progress_clears_stale_phase_in_merged_job_progress():
     """End-to-end: JobRunner.push_event merges into job['progress']; after a
     scan sub-phase emission followed by a plain status emission, the merged
