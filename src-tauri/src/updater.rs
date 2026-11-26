@@ -446,7 +446,8 @@ fn decide_restart(
                 ))
                 .blocking_show();
             if restart {
-                return install(app, pending);
+                let asked = Asked::new(readiness.as_ref().ok(), shared);
+                return install_confirmed(app, pending, &asked);
             }
             keep_ready(app, pending);
             return Ok(());
@@ -470,12 +471,63 @@ fn decide_restart(
             start_waiting(app, pending, &readiness);
             Ok(())
         }
-        BusyChoice::Now => install(app, pending),
+        BusyChoice::Now => install_confirmed(app, pending, &Asked::new(Some(&readiness), shared)),
         BusyChoice::Later => {
             keep_ready(app, pending);
             Ok(())
         }
     }
+}
+
+/// What a Restart dialog told the user a restart would stop or replace.
+#[derive(Debug, Default)]
+struct Asked {
+    jobs: Vec<String>,
+    shared: bool,
+}
+
+impl Asked {
+    fn new(readiness: Option<&Readiness>, shared: bool) -> Self {
+        let jobs = readiness
+            .map(|r| {
+                r.blocking
+                    .iter()
+                    .chain(&r.paused)
+                    .map(|j| j.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self { jobs, shared }
+    }
+
+    /// Whether `readiness` and `shared`, read after the answer, include
+    /// something the dialog did not name: a job, or another Vireo window. A
+    /// check that fails after the answer adds nothing the user can be told.
+    fn missed(&self, readiness: &Result<Readiness, String>, shared: bool) -> bool {
+        if shared && !self.shared {
+            return true;
+        }
+        matches!(readiness, Ok(r) if r
+            .blocking
+            .iter()
+            .chain(&r.paused)
+            .any(|job| !self.jobs.contains(&job.name)))
+    }
+}
+
+/// Install after the user answered Restart in a dialog. A dialog stays open
+/// while Vireo keeps working (fully so in browser mode), so read the jobs and
+/// GUI clients again first: if something appeared that the dialog did not
+/// name, ask again naming it, rather than install for a state the user never
+/// saw. Each further check waits on another answer, so this ends.
+fn install_confirmed(app: &AppHandle, pending: PendingUpdate, asked: &Asked) -> Result<(), String> {
+    let readiness = fetch_readiness(app);
+    let shared = crate::sidecar::other_gui_clients_attached();
+    if asked.missed(&readiness, shared) {
+        log::info!("Work changed while the restart dialog was open; asking again");
+        return decide_restart(app, pending, false, false);
+    }
+    install(app, pending)
 }
 
 /// Whether a click on Restart to Update may restart without a dialog: the job
@@ -892,9 +944,13 @@ fn run_countdown(app: &AppHandle, generation: u64) -> CountdownOutcome {
                 ))
                 .blocking_show();
             if restart {
-                return CountdownOutcome::Restart(Box::new(pending));
+                let asked = Asked::new(readiness.as_ref().ok(), check.shared);
+                if let Err(error) = install_confirmed(app, pending, &asked) {
+                    show_install_error(app, &error);
+                }
+            } else {
+                keep_ready(app, pending);
             }
-            keep_ready(app, pending);
             state().finish();
             CountdownOutcome::Stopped
         }
@@ -1518,6 +1574,39 @@ mod tests {
             final_step(&CountdownEnd::UserChoseNow, &busy(), &ok),
             FinalStep::AskAboutNewJobs
         );
+    }
+
+    #[test]
+    fn a_confirmed_restart_asks_again_only_for_what_the_dialog_did_not_name() {
+        let readiness = |blocking: Vec<ReadinessJob>, paused: Vec<ReadinessJob>| {
+            Ok::<Readiness, String>(Readiness {
+                idle: blocking.is_empty(),
+                blocking,
+                paused,
+            })
+        };
+        let asked = Asked::new(
+            Some(&Readiness {
+                idle: false,
+                blocking: vec![job("Import", "running")],
+                paused: vec![job("Move folder", "paused")],
+            }),
+            false,
+        );
+        // Nothing new, or less than before: install.
+        assert!(!asked.missed(&readiness(vec![job("Import", "running")], vec![]), false));
+        assert!(!asked.missed(
+            &readiness(vec![], vec![job("Move folder", "paused")]),
+            false
+        ));
+        assert!(!asked.missed(&Err("timed out".into()), false));
+        // A job or another window the dialog never named: ask again.
+        assert!(asked.missed(
+            &readiness(vec![job("Process run", "queued")], vec![]),
+            false
+        ));
+        assert!(asked.missed(&readiness(vec![], vec![]), true));
+        assert!(!Asked::new(None, true).missed(&readiness(vec![], vec![]), true));
     }
 
     #[test]
