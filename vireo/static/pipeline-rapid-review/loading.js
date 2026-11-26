@@ -59,6 +59,19 @@ async function rapidAfterHistoryChange() {
 
 function registerRapidHistoryHooks() {
   Vireo.registerPageHooks({
+    localHistoryStatus(operation) {
+      if (!rapid.history.length) return null;
+      return {
+        available: operation === 'undo' && rapid.seeded && !rapid.applying && !isQueuePromptOpen(),
+        description: 'Staged photo decision',
+      };
+    },
+    changeLocalHistory(operation) {
+      if (operation !== 'undo' || !rapid.history.length) return null;
+      if (rapid.applying || !rapid.seeded || isQueuePromptOpen()) return false;
+      undoLast();
+      return true;
+    },
     beforeHistoryChange: rapidBeforeHistoryChange,
     afterHistoryChange: rapidAfterHistoryChange,
   });

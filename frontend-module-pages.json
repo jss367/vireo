@@ -134,7 +134,6 @@
     "pageHooks": [
       "afterHistoryChange",
       "getActiveSelection",
-      "handleMissesLightboxFlagShortcut",
       "loadMisses",
       "openBrowseShortcutPhoto"
     ],

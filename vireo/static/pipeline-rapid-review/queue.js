@@ -92,7 +92,13 @@ function promptStagedQueueChange() {
   }
   prompt.hidden = false;
   return new Promise(function(resolve) {
-    rapid.queuePromptResolve = resolve;
+    const token = window.Keymap.pushEsc(() => rapid.queuePromptResolve?.('stay'));
+    rapid.queuePromptResolve = function(choice) {
+      window.Keymap.popEsc(token);
+      rapid.queuePromptResolve = null;
+      prompt.hidden = true;
+      resolve(choice);
+    };
   });
 }
 
@@ -105,16 +111,13 @@ function bindQueuePromptChoices() {
   /** @type {HTMLElement} */ (document.getElementById('queuePrompt')).addEventListener('click', function(e) {
     var btn = /** @type {HTMLElement} */ (e.target).closest('[data-queue-choice]');
     if (!btn || !rapid.queuePromptResolve) return;
-    var resolve = rapid.queuePromptResolve;
-    rapid.queuePromptResolve = null;
-    /** @type {HTMLElement} */ (document.getElementById('queuePrompt')).hidden = true;
-    resolve(btn.getAttribute('data-queue-choice'));
+    rapid.queuePromptResolve(btn.getAttribute('data-queue-choice'));
   });
 }
 
 /** @param {Partial<RapidQueue>} patch */
 async function changeQueue(patch) {
-  if (rapid.applying) {
+  if (rapid.applying || isQueuePromptOpen()) {
     renderQueueControls();
     return;
   }

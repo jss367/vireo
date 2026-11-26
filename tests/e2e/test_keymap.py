@@ -414,13 +414,13 @@ def test_shortcuts_sheet_lists_misses_and_shared_hotkeys(live_server, page):
     """)
 
     assert {"Global", "Misses", "Lightbox"}.issubset(groups.keys())
-    assert {"key": "J", "label": "Next miss"} in groups["Misses"]
-    assert {"key": "K", "label": "Previous miss"} in groups["Misses"]
+    assert {"key": "→", "label": "Next miss"} in groups["Misses"]
+    assert {"key": "←", "label": "Previous miss"} in groups["Misses"]
     assert {"key": "Shift+J", "label": "Extend selection to next miss"} in groups["Misses"]
     assert {"key": "Shift+K", "label": "Extend selection to previous miss"} in groups["Misses"]
     assert {"key": "Alt+P", "label": "Flag focused or selected photo"} in groups["Misses"]
     assert {"key": "Alt+X", "label": "Reject focused or selected photo"} in groups["Misses"]
-    assert {"key": "Alt+U", "label": "Unmark as missed"} in groups["Misses"]
+    assert {"key": "Alt+U", "label": "Clear photo flag"} in groups["Misses"]
     assert {"key": "Enter", "label": "Open focused photo"} in groups["Misses"]
     assert {"key": "Escape", "label": "Clear selection"} in groups["Misses"]
     assert {"key": "?", "label": "Open keyboard shortcuts"} in groups["Global"]
@@ -836,3 +836,17 @@ def test_help_modal_unlocks_scroll_when_keymap_unavailable(live_server, page):
     assert page.evaluate("document.body.style.overflow") == "", (
         "Body scroll must unlock when help modal closes, even with Keymap unavailable"
     )
+
+
+def test_pick_binding_is_edited_once_and_used_in_rapid_review(live_server, page):
+    url = live_server["url"]
+    page.goto(f"{url}/shortcuts")
+    pick = page.locator('button[data-ctx="browse"][data-action="flag"].shortcut-key-btn')
+    pick.wait_for()
+    assert page.locator('button[data-ctx="pipeline_rapid_review"][data-action="pick"]').count() == 0
+    pick.click()
+    with page.expect_response(lambda r: r.url.endswith('/api/config') and r.request.method == 'POST'):
+        page.keyboard.press('Alt+p')
+    page.goto(f"{url}/pipeline/rapid-review")
+    page.wait_for_function("""() => Keymap.shortcutsForScope('pipeline_rapid_review')
+        .some(binding => binding.name === 'pick' && binding.key === 'alt+p')""")

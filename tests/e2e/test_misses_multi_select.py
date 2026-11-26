@@ -5,6 +5,7 @@ keyboard extension, Esc-to-clear, toolbar actions, and bulk P/X/U acting on the
 selection. Double-click opens the shared lightbox.
 """
 import json
+import re
 import time
 from urllib.parse import quote
 
@@ -935,72 +936,6 @@ def test_double_click_opens_lightbox(live_server, page):
     )
 
 
-def test_u_unmarks_miss_from_lightbox(live_server, page):
-    """When inspecting a miss in the lightbox, `u` clears the miss flag."""
-    url = live_server["url"]
-    db = live_server["db"]
-    pid = live_server["data"]["photos"][0]
-    _seed_misses(db, [pid], "oof")
-
-    page.goto(f"{url}/misses")
-    card = page.locator(f"[data-testid='miss-card-oof-{pid}']")
-    card.wait_for(state="visible", timeout=3000)
-
-    card.dblclick()
-    page.wait_for_function(
-        "document.getElementById('lightboxOverlay').classList.contains('active')",
-        timeout=3000,
-    )
-
-    page.keyboard.press("u")
-
-    page.wait_for_function(
-        f"!document.querySelector('[data-testid=\"miss-card-oof-{pid}\"]')",
-        timeout=3000,
-    )
-    row = db.conn.execute(
-        "SELECT miss_oof, flag FROM photos WHERE id=?",
-        (pid,),
-    ).fetchone()
-    assert row["miss_oof"] == 0
-    assert row["flag"] in (None, "none")
-
-
-def test_u_unmarks_only_active_miss_category_from_lightbox(live_server, page):
-    """A lightbox `u` clears the miss category that opened the lightbox."""
-    url = live_server["url"]
-    db = live_server["db"]
-    pid = live_server["data"]["photos"][0]
-    _seed_misses(db, [pid], "clipped")
-    _seed_misses(db, [pid], "oof")
-
-    page.goto(f"{url}/misses")
-    clipped_card = page.locator(f"[data-testid='miss-card-clipped-{pid}']")
-    oof_card = page.locator(f"[data-testid='miss-card-oof-{pid}']")
-    clipped_card.wait_for(state="visible", timeout=3000)
-    oof_card.wait_for(state="visible", timeout=3000)
-
-    clipped_card.dblclick()
-    page.wait_for_function(
-        "document.getElementById('lightboxOverlay').classList.contains('active')",
-        timeout=3000,
-    )
-
-    page.keyboard.press("u")
-
-    page.wait_for_function(
-        f"!document.querySelector('[data-testid=\"miss-card-clipped-{pid}\"]')"
-        f" && document.querySelector('[data-testid=\"miss-card-oof-{pid}\"]')",
-        timeout=3000,
-    )
-    row = db.conn.execute(
-        "SELECT miss_clipped, miss_oof FROM photos WHERE id=?",
-        (pid,),
-    ).fetchone()
-    assert row["miss_clipped"] == 0
-    assert row["miss_oof"] == 1
-
-
 def test_selection_bar_unmarks_selected_misses(live_server, page):
     """The visible toolbar can clear the selected photos' miss flags."""
     url = live_server["url"]
@@ -1033,32 +968,25 @@ def test_selection_bar_unmarks_selected_misses(live_server, page):
     assert {r["id"]: r["miss_no_subject"] for r in rows} == {a: 0, b: 0}
 
 
-def test_u_unmarks_clicked_miss(live_server, page):
-    """Plain-click selection followed by `u` clears the selected miss."""
-    url = live_server["url"]
+@pytest.mark.parametrize("lightbox", [False, True])
+def test_u_clears_photo_flag_and_keeps_miss_category(live_server, page, lightbox):
     db = live_server["db"]
     pid = live_server["data"]["photos"][0]
     _seed_misses(db, [pid], "no_subject")
-
-    page.goto(f"{url}/misses")
-    _expose_miss_modules(page)
-    card = page.locator(f"[data-testid='miss-card-no_subject-{pid}']")
-    card.wait_for(state="visible", timeout=3000)
-
-    card.click()
-    assert page.evaluate("missState.selection.size") == 1
-
+    db.conn.execute("UPDATE photos SET flag='flagged' WHERE id=?", (pid,))
+    db.conn.commit()
+    page.goto(f"{live_server['url']}/misses")
+    card = page.get_by_test_id(f"miss-card-no_subject-{pid}")
+    card.wait_for(state="visible")
+    page.keyboard.press("ArrowRight")
+    if lightbox:
+        page.keyboard.press("Enter")
+        expect(page.locator("#lightboxOverlay")).to_have_class(re.compile("active"))
+    else:
+        card.click()
     page.keyboard.press("u")
-
-    page.wait_for_function(
-        f"!document.querySelector('[data-testid=\"miss-card-no_subject-{pid}\"]')",
-        timeout=3000,
-    )
-    row = db.conn.execute(
-        "SELECT miss_no_subject FROM photos WHERE id=?",
-        (pid,),
-    ).fetchone()
-    assert row["miss_no_subject"] == 0
+    assert _wait_for_flag(db, pid, "none") == "none"
+    assert db.photos.get(pid)["miss_no_subject"] == 1
 
 
 def test_selection_bar_deletes_selected_misses_from_vireo(live_server, page):

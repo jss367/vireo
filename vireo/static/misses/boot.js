@@ -13,9 +13,9 @@ import {
 } from './tuning.js';
 import { afterHistoryChange, loadMisses } from './loading.js';
 import {
-  bindMissLightboxTracking, getActiveSelection, openBrowseShortcutPhoto, openSelectionInBrowse,
+  getActiveSelection, openBrowseShortcutPhoto, openSelectionInBrowse,
 } from './photo-open.js';
-import { bulkUnflagSelection, handleMissesLightboxFlagShortcut } from './flagging.js';
+import { bulkUnflagSelection } from './flagging.js';
 import { clearSelection } from './selection.js';
 import { bindMissCardEvents } from './card-events.js';
 import { bindMissContextMenu } from './context-menu.js';
@@ -31,7 +31,6 @@ registerPageHooks({
   loadMisses: loadMisses,
   getActiveSelection: getActiveSelection,
   openBrowseShortcutPhoto: openBrowseShortcutPhoto,
-  handleMissesLightboxFlagShortcut: handleMissesLightboxFlagShortcut,
 });
 
 /** @param {string} id @param {() => unknown} action */
@@ -55,7 +54,6 @@ bindMissCardEvents();
 
 // Preserve the inline script's order: the listeners it attached at load, then
 // the slider handlers, the filter bar, the config and the first load.
-bindMissLightboxTracking();
 bindMissContextMenu();
 bindMissKeyboard();
 bindMissLifeListEvents();

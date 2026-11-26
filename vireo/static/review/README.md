@@ -21,7 +21,7 @@ separate implementations: a fix in one does not reach the other.
 | `grid.js` | Filtering and sorting the grid, prediction cards, burst-group buttons, and grid clicks |
 | `evidence.js` | Relative score explanations, subject-specific disagreement, geographic context, questionable-detection filters and durable subject assessments |
 | `decisions.js` | Accept, reject, accept an alternative, and Accept All |
-| `keyboard.js` | The accept/skip shortcuts for the first visible pending card |
+| `keyboard.js` | The accept, reject, and skip shortcuts for the first visible pending card |
 | `photo-actions.js` | Rating, flag, reveal, copy path, lightbox, and keeping Representative badges current |
 | `context-menu.js` | Right-click menus for review cards and Group Review cards |
 | `group-session.js` | `grmState`, opening and closing Group Review, and loading a burst |

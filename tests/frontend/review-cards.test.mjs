@@ -228,3 +228,23 @@ test('Accept All stops when a local model filter changes during a request', asyn
   assert.equal(calls, 1);
   assert.equal(ctx.predictions[5].status, 'pending');
 });
+
+test('skipping a prediction moves it behind the other pending cards without recording a decision', () => {
+  const ctx = harness();
+  ctx.predictions.forEach(p => { p.card_id = String(p.id); });
+  let keydown;
+  ctx.Element = class {};
+  ctx.HTMLElement = ctx.Element;
+  ctx.document = {querySelector: () => null, addEventListener: (_, handler) => { keydown = handler; }};
+  ctx.mode = 'review';
+  ctx.renderGrid = () => {};
+  ctx.matchesShortcut = (event, key) => event.key === key;
+  vm.runInContext(readFileSync('vireo/static/review/keyboard.js', 'utf8'), ctx);
+  ctx._shortcuts = {accept: 'a', reject: 'x', skip_pending: 's'};
+  ctx.bindReviewKeyboard();
+  const before = Array.from(ctx.visiblePendingCards(), p => p.id);
+  assert.ok(before.length > 1);
+  keydown({key: 's', preventDefault() {}});
+  assert.deepEqual(Array.from(ctx.visiblePendingCards(), p => p.id), [...before.slice(1), before[0]]);
+  assert.ok(ctx.predictions.every(p => p.status === 'pending'));
+});

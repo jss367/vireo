@@ -89,7 +89,6 @@ interface VireoPageHooks {
    */
   removeDeletedLightboxPhoto?(photoId: number, lightboxPhotos: readonly unknown[]): boolean;
   /** Handle the lightbox's flag keys for a miss; true when it did. */
-  handleMissesLightboxFlagShortcut?(photoId: number, flag: VireoHookFlag): boolean;
   /** Reload the Highlights page after a lightbox curation change. */
   loadHighlights?(): Promise<void>;
   updateHighlightsLightboxControls?(photoId: number): void;

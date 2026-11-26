@@ -3,7 +3,7 @@
 // ES module.
 
 import { state } from './state.js';
-import { SHORTCUT_DEFAULTS, SHORTCUT_LABELS, defaultsFor } from './labels.js';
+import { RAPID_SHARED, SHORTCUT_DEFAULTS, SHORTCUT_LABELS, defaultsFor, effectiveRapidBindings } from './labels.js';
 import { formatShortcut, parseShortcut, safeFetch } from './shared.js';
 
 const RESET_ALL_STYLE = 'background:none;border:1px solid var(--text-ghost);color:var(--text-dim);'
@@ -18,6 +18,8 @@ function contextHtml(shortcuts, ctx) {
     '<button type="button" data-shortcut-reset-context="' + ctx + '" style="' + RESET_ALL_STYLE + '">Reset All</button></div>';
   for (var action in labels) {
     if (action === '_title') continue;
+    const override = ctx === 'pipeline_rapid_review' && action in RAPID_SHARED;
+    if (override && !(action in values)) continue;
     // Presence-checked so an explicit '' (e.g. server-side migration
     // resolved a conflicting default) renders as "Unassigned" instead of
     // silently falling through to the default key. Otherwise the button
@@ -29,12 +31,12 @@ function contextHtml(shortcuts, ctx) {
     html += '<span class="shortcut-action">' + labels[action] + '</span>';
     html += '<button type="button" class="shortcut-key-btn" data-ctx="' + ctx + '" data-action="' + action + '">' +
       formatShortcut(current) + '</button>';
-    html += '<span class="shortcut-default-hint">' + (isDefault ? '' : 'default: ' + formatShortcut(defaults[action])) + '</span>';
+    html += '<span class="shortcut-default-hint">' + (isDefault ? '' : 'default: ' + (override ? 'shared photo shortcut' : formatShortcut(defaults[action]))) + '</span>';
     if (!isDefault) {
       html += '<button type="button" class="shortcut-reset-btn" data-ctx="' + ctx + '" data-action="' + action + '" title="Reset to default">&times;</button>';
     }
     if (conflict) {
-      html += '<span class="shortcut-conflict">Conflict: ' + labels[conflict] + '</span>';
+      html += '<span class="shortcut-conflict">Conflict: ' + conflict + '</span>';
     }
     html += '</div>';
   }
@@ -49,14 +51,21 @@ export function renderShortcutsEditor() {
   /** @type {HTMLElement} */ (document.getElementById('shortcutsEditor')).innerHTML = html;
 }
 
-/** The other action in `ctx` already bound to `keyStr`, if any. @param {string} ctx @param {string} action @param {string | undefined} keyStr */
-export function findConflict(ctx, action, keyStr) {
+/** The other action in `ctx` already bound to `keyStr`, if any. @param {string} ctx @param {string} action @param {string | undefined} keyStr @param {ShortcutConfig | null} [config] */
+export function findConflict(ctx, action, keyStr, config = state.currentShortcuts) {
   if (!keyStr) return null;
-  var bindings = state.currentShortcuts && state.currentShortcuts[ctx];
+  var bindings = config && config[ctx];
   if (!bindings) return null;
   for (var other in bindings) {
     if (other === action) continue;
-    if (bindings[other] === keyStr) return other;
+    if (bindings[other] === keyStr) return SHORTCUT_LABELS[ctx]?.[other] || 'another shortcut';
+  }
+  const rapidAction = ctx === 'pipeline_rapid_review' ? action :
+    ctx === 'browse' ? Object.keys(RAPID_SHARED).find(id => RAPID_SHARED[id] === action && !(id in (config?.pipeline_rapid_review || {}))) : null;
+  if (rapidAction && config) {
+    for (const [other, key] of Object.entries(effectiveRapidBindings(config))) {
+      if (other !== rapidAction && key === keyStr) return 'Rapid Review · ' + SHORTCUT_LABELS.pipeline_rapid_review?.[other];
+    }
   }
   return null;
 }
@@ -100,20 +109,38 @@ export function isBarePageShortcut(keyStr) {
   return false;
 }
 
-/** @param {string} ctx @param {string} action */
-export function resetShortcut(ctx, action) {
+// Validate the candidate before changing the live editor state or saving.
+/** @param {string} ctx @param {Record<string,string | undefined>} values @param {string[]} actions */
+function commitReset(ctx, values, actions) {
   if (!state.currentShortcuts) return;
-  (state.currentShortcuts[ctx] = state.currentShortcuts[ctx] || {})[action] = (SHORTCUT_DEFAULTS[ctx] || {})[action];
+  const candidate = {...state.currentShortcuts, [ctx]: values};
+  const bindings = ctx === 'pipeline_rapid_review' ? effectiveRapidBindings(candidate) : values;
+  for (const action of actions) {
+    const conflict = findConflict(ctx, action, bindings[action], candidate);
+    if (conflict) {
+      window.showToast?.('Cannot reset shortcut: conflicts with ' + conflict + '.', 'error');
+      return;
+    }
+  }
+  state.currentShortcuts = candidate;
   renderShortcutsEditor();
   saveShortcuts();
 }
 
+/** @param {string} ctx @param {string} action */
+export function resetShortcut(ctx, action) {
+  if (!state.currentShortcuts) return;
+  const values = {...state.currentShortcuts[ctx]};
+  if (ctx === 'pipeline_rapid_review' && action in RAPID_SHARED) delete values[action];
+  else values[action] = SHORTCUT_DEFAULTS[ctx]?.[action] || '';
+  commitReset(ctx, values, [action]);
+}
+
 /** @param {string} ctx */
 export function resetContext(ctx) {
-  if (!state.currentShortcuts) return;
-  state.currentShortcuts[ctx] = defaultsFor(ctx);
-  renderShortcutsEditor();
-  saveShortcuts();
+  const values = defaultsFor(ctx);
+  const actions = Object.keys(ctx === 'pipeline_rapid_review' ? SHORTCUT_LABELS.pipeline_rapid_review || {} : values);
+  commitReset(ctx, values, actions);
 }
 
 export function saveShortcuts() {

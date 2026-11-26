@@ -1,3 +1,4 @@
+import { doRedo, doUndo } from '../navbar-shared-helpers.js';
 import { navbarState } from '../navbar-state.js';
 import { lbState } from './shared-state.js';
 import { vireoLightboxSession, vireoLightboxViewport } from './state.js';
@@ -122,17 +123,16 @@ function handleZoomToggleKey(e, editable) {
 /** @param {KeyboardEvent} e @param {boolean} editable */
 function handleFlagKey(e, editable) {
   if (editable) return false;
-  var flagKey = (navbarState.shortcuts && navbarState.shortcuts.browse && navbarState.shortcuts.browse.flag) || 'p';
-  var rejectKey = (navbarState.shortcuts && navbarState.shortcuts.browse && navbarState.shortcuts.browse.reject) || 'x';
-  var unflagKey = (navbarState.shortcuts && navbarState.shortcuts.browse && navbarState.shortcuts.browse.unflag) || 'u';
+  var flagKey = navbarState.shortcuts?.browse?.flag ?? 'p';
+  var rejectKey = navbarState.shortcuts?.browse?.reject ?? 'x';
+  var unflagKey = navbarState.shortcuts?.browse?.unflag ?? 'u';
   /** @type {LightboxFlag | null} */ var lbFlag = null;
   if (matchesShortcut(e, flagKey)) lbFlag = 'flagged';
   else if (matchesShortcut(e, rejectKey)) lbFlag = 'rejected';
   else if (matchesShortcut(e, unflagKey)) lbFlag = 'none';
   var pid = vireoLightboxSession.requestedPhotoId();
   if (lbFlag === null || pid == null) return false;
-  var missesFlagShortcut = Vireo.pageHook('handleMissesLightboxFlagShortcut');
-  if (!(missesFlagShortcut && missesFlagShortcut(pid, lbFlag) === true)) _lbApplyFlag(pid, lbFlag);
+  _lbApplyFlag(pid, lbFlag);
   consumeKey(e);
   return true;
 }
@@ -162,6 +162,19 @@ function onLightboxKeydown(e) {
   // <select>) change its value, not the photo, and modals opened from the
   // lightbox (e.g. iNaturalist) need '-' / '0' as literal input.
   var editable = _lbKeyTargetEditable(e.target);
+  if (!editable && location.pathname === '/browse') {
+    const browse = navbarState.shortcuts?.browse;
+    if (matchesShortcut(e, browse?.undo ?? 'ctrl+z')) {
+      consumeKey(e);
+      doUndo();
+      return;
+    }
+    if (matchesShortcut(e, browse?.redo ?? 'ctrl+shift+z')) {
+      consumeKey(e);
+      doRedo();
+      return;
+    }
+  }
   if (handleArrowKey(e, editable)) return;
   // The outgoing photo is still visible while the incoming source decodes.
   // Suppress photo-targeted shortcuts until the visible identity commits so
@@ -222,8 +235,11 @@ export function matchesShortcut(/** @type {KeyboardEvent} */ e, /** @type {strin
 
 /** @param {string} str */ export function formatShortcut(str) {
   if (!str) return 'Unassigned';
+  const command = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl';
+  /** @type {Record<string,string>} */
+  const names = {ctrl: command, meta: command, arrowleft: '←', arrowright: '→', arrowup: '↑', arrowdown: '↓', ' ': 'Space'};
   return str.split('+').map(function(p) {
-    if (p === ' ') return 'Space';
+    if (Object.hasOwn(names, p)) return names[p];
     return p.charAt(0).toUpperCase() + p.slice(1);
   }).join('+');
 }

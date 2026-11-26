@@ -52,15 +52,7 @@ export function bindMissLifeListEvents() {
   });
 }
 
-// Reject via the shared lightbox does NOT route through flagFocusedMiss /
-// bulkFlagSelection: handleMissesLightboxFlagShortcut only intercepts
-// flag === 'none' (unflag-as-miss), and every other flag lands in _lbApplyFlag's
-// generic /api/photos/<id>/flag fallback because Misses registers no
-// setFlagFor / setReviewFlag page hook. That path never clears the local
-// representative state, so a card whose rep badge was rendered stays showing
-// "Representative" after a lightbox reject until the next loadMisses().
-// _lbApplyFlag emits lightbox:flagchanged with the settled flag; listen here
-// and reuse the same clearing helper the keyboard/bulk reject paths use.
+// Synchronize the grid after a photo flag changes in the lightbox.
 export function bindMissLightboxFlagEvents() {
   document.addEventListener('lightbox:flagchanged', function(e) {
     var detail = e && e.detail ? e.detail : {};

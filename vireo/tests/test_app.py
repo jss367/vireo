@@ -23052,6 +23052,8 @@ var currentModel = __filters.model || 'all';
 var currentLabelsFingerprint = __filters.labels_fingerprint || '';
 var currentTab = __filters.tab || 'all';
 var currentSort = 'default';
+var skippedPredictionOrder = new Map();
+var predictionSkipSequence = 0;
 var reviewQueue = {workspace: 1};
 var __renders = 0;
 function renderAll() { __renders++; }

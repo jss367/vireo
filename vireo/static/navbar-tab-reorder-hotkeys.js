@@ -1,3 +1,4 @@
+import {effectiveRapidBindings, SHORTCUT_LABELS} from './shortcuts/labels.js';
 import { navbarState } from './navbar-state.js';
 import { vireoSetNumberedNavigationMode } from './navbar-command-palette-open.js';
 import { _navTabs, vireoResolveNavigationHref } from './navbar-tabs.js';
@@ -293,7 +294,7 @@ function applyHotkeyHints(navShortcuts) {
 // built-in suppression, so each registered nav action checks it itself
 // (Option B from the migration review). Without this, pressing a configured
 // navigation chord while the lightbox is open would close it AND navigate.
-export var OVERLAY_SELECTOR = '.lightbox-overlay.active, .pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .inspect-overlay.open, .shortcuts-overlay.open, .help-overlay.active, .report-overlay.active';
+export var OVERLAY_SELECTOR = '.lightbox-overlay.active, .pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .inspect-overlay.open, .shortcuts-overlay.open, .help-overlay.active, .report-overlay.active, #queuePrompt:not([hidden])';
 
 /** @param {Record<string,string>} navShortcuts */
 function setupNavKeydown(navShortcuts) {
@@ -402,18 +403,11 @@ fetch('/api/config')
     id_conflicts: 'ID Conflicts', workspace: 'Workspace', keywords: 'Keywords',
     shortcuts: 'Shortcuts', settings: 'Settings',
   },
-  review: {
-    _title: 'Review',
-    accept: 'Accept prediction', skip: 'Skip / reject',
-  },
-  pipeline_rapid_review: {
-    _title: 'Rapid Review',
-    pick: 'Pick', reject: 'Reject', next: 'Next / review',
-    back: 'Back / undo', clear: 'Clear to review',
-    apply: 'Apply', exit: 'Exit', zoom: 'Toggle zoom',
-  },
+  review: SHORTCUT_LABELS.review || {},
+  pipeline_rapid_review: SHORTCUT_LABELS.pipeline_rapid_review || {},
   browse: {
     _title: 'Browse',
+    open: 'Open focused photo',
     rate_0: 'Clear rating', rate_1: 'Rate 1', rate_2: 'Rate 2',
     rate_3: 'Rate 3', rate_4: 'Rate 4', rate_5: 'Rate 5',
     flag: 'Flag', reject: 'Reject', unflag: 'Unflag',
@@ -429,7 +423,7 @@ fetch('/api/config')
     extend_previous: 'Extend selection to previous miss',
     flag: 'Flag focused or selected photo',
     reject: 'Reject focused or selected photo',
-    unmark_missed: 'Unmark as missed',
+    unflag: 'Clear photo flag',
     open: 'Open focused photo',
     clear_selection: 'Clear selection',
   },
@@ -466,12 +460,9 @@ fetch('/api/config')
     dashboard: '', storage: '', audit: '', id_conflicts: '', workspace: '',
     shortcuts: '', settings: '', keywords: '',
   },
-  review: { accept: 'a', skip: 's' },
-  pipeline_rapid_review: {
-    pick: 'p', reject: 'x', next: 'arrowright', back: 'arrowleft',
-    clear: 'u', apply: 'enter', exit: 'escape', zoom: 'z',
-  },
+  review: {accept: 'a', reject: 'x', skip_pending: 's'},
   browse: {
+    open: 'enter',
     rate_0: '0', rate_1: '1', rate_2: '2', rate_3: '3',
     rate_4: '4', rate_5: '5',
     flag: 'p', reject: 'x', unflag: 'u',
@@ -480,13 +471,13 @@ fetch('/api/config')
     toggle_ui: 'h',
   },
   misses: {
-    next: 'j',
-    previous: 'k',
+    next: 'arrowright',
+    previous: 'arrowleft',
     extend_next: 'shift+j',
     extend_previous: 'shift+k',
     flag: 'p',
     reject: 'x',
-    unmark_missed: 'u',
+    unflag: 'u',
     open: 'enter',
     clear_selection: 'escape',
   },
@@ -512,20 +503,21 @@ function sheetShortcutValue(shortcuts, ctx, action) {
   // Misses and Lightbox intentionally reuse configurable Browse bindings
   // for photo flag actions. Show the effective key and contextual label
   // here without making those fixed page behaviors editable separately.
+  if (ctx === 'pipeline_rapid_review') return effectiveRapidBindings(shortcuts)[action];
   if (ctx === 'misses') {
     var browse = (shortcuts && shortcuts.browse) || {};
     var browseDefaults = SC_DEFAULTS.browse || {};
-    if (action === 'flag') return browse.flag || browseDefaults.flag || SC_DEFAULTS.misses.flag;
-    if (action === 'reject') return browse.reject || browseDefaults.reject || SC_DEFAULTS.misses.reject;
-    if (action === 'unmark_missed') return browse.unflag || browseDefaults.unflag || SC_DEFAULTS.misses.unmark_missed;
+    if (action === 'flag') return browse.flag ?? browseDefaults.flag ?? SC_DEFAULTS.misses.flag;
+    if (action === 'reject') return browse.reject ?? browseDefaults.reject ?? SC_DEFAULTS.misses.reject;
+    if (action === 'unflag') return browse.unflag ?? browseDefaults.unflag ?? SC_DEFAULTS.misses.unflag;
   }
   if (ctx === 'lightbox') {
     var browse2 = (shortcuts && shortcuts.browse) || {};
     var browseDefaults2 = SC_DEFAULTS.browse || {};
-    if (action === 'flag') return browse2.flag || browseDefaults2.flag || SC_DEFAULTS.lightbox.flag;
-    if (action === 'reject') return browse2.reject || browseDefaults2.reject || SC_DEFAULTS.lightbox.reject;
-    if (action === 'unflag') return browse2.unflag || browseDefaults2.unflag || SC_DEFAULTS.lightbox.unflag;
-    if (action === 'zoom') return browse2.zoom || browseDefaults2.zoom || SC_DEFAULTS.lightbox.zoom;
+    if (action === 'flag') return browse2.flag ?? browseDefaults2.flag ?? SC_DEFAULTS.lightbox.flag;
+    if (action === 'reject') return browse2.reject ?? browseDefaults2.reject ?? SC_DEFAULTS.lightbox.reject;
+    if (action === 'unflag') return browse2.unflag ?? browseDefaults2.unflag ?? SC_DEFAULTS.lightbox.unflag;
+    if (action === 'zoom') return browse2.zoom ?? browseDefaults2.zoom ?? SC_DEFAULTS.lightbox.zoom;
     if (action === 'toggle_boxes') return browse2.toggle_boxes || browseDefaults2.toggle_boxes || SC_DEFAULTS.lightbox.toggle_boxes;
     if (action === 'toggle_ui') {
       // Presence-checked so an explicit '' (migrated on install to resolve
@@ -538,7 +530,7 @@ function sheetShortcutValue(shortcuts, ctx, action) {
   }
   var values = (shortcuts && shortcuts[ctx]) || {};
   var defaults = SC_DEFAULTS[ctx] || {};
-  return values[action] || defaults[action] || '';
+  return values[action] ?? defaults[action] ?? '';
 }
 
 function renderSheet() {

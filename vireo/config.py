@@ -259,17 +259,16 @@ DEFAULTS = {
         },
         "review": {
             "accept": "a",
-            "skip": "s",
+            "reject": "x",
+            "skip_pending": "s",
         },
         "pipeline_rapid_review": {
-            "pick": "p",
-            "reject": "x",
-            "next": "arrowright",
-            "back": "arrowleft",
-            "clear": "u",
-            "apply": "enter",
+            "forward": "arrowright",
+            "previous": "arrowleft",
+            "leave": "s",
+            "undo": "ctrl+z",
+            "apply": "ctrl+enter",
             "exit": "escape",
-            "zoom": "z",
         },
         "browse": {
             "rate_0": "0",
@@ -282,6 +281,11 @@ DEFAULTS = {
             "reject": "x",
             "unflag": "u",
             "undo": "ctrl+z",
+            "redo": "ctrl+shift+z",
+            "color_red": "6",
+            "color_yellow": "7",
+            "color_green": "8",
+            "color_blue": "9",
             "select_all": "ctrl+a",
             "compare": "c",
             "zoom": "z",
@@ -333,13 +337,69 @@ def _preserve_corrupt_config():
         log.warning("Could not back up the unreadable config file to %s", backup, exc_info=True)
 
 
+# Old Rapid Review bindings remain per-view overrides only when customized.
+RAPID_SHARED_ACTIONS = {"pick": "flag", "reject": "reject", "clear": "unflag", "zoom": "zoom"}
+
+
+def migrate_keyboard_shortcuts(shortcuts):
+    """Upgrade saved actions before merging defaults. Preserve custom and unassigned keys."""
+    if not isinstance(shortcuts, dict):
+        return
+    review = shortcuts.get("review")
+    if isinstance(review, dict) and "reject" not in review and "skip_pending" not in review:
+        old = review.pop("skip", "s")
+        review.setdefault("reject", "x" if old == "s" else old)
+        if review.get("accept") == review["reject"] and old == "s":
+            review["reject"] = "s"
+        if "s" in (review.get("accept"), review["reject"]):
+            review.setdefault("skip_pending", "")
+    rapid = shortcuts.setdefault("pipeline_rapid_review", {})
+    if not isinstance(rapid, dict) or rapid.keys() & {"forward", "previous", "leave", "undo"}:
+        return
+    for old_name, new_name, old_default in (("next", "leave", "arrowright"), ("back", "undo", "arrowleft")):
+        if old_name in rapid:
+            old = rapid.pop(old_name)
+            if old != old_default:
+                rapid[new_name] = old
+    if rapid.get("apply") == "enter":
+        del rapid["apply"]
+    photo_defaults = DEFAULTS["keyboard_shortcuts"]["browse"]
+    for local, shared in RAPID_SHARED_ACTIONS.items():
+        if rapid.get(local) == photo_defaults[shared]:
+            del rapid[local]
+    # Preserve a local customization even when a previously independent
+    # Browse binding would now claim its key.
+    occupied = {value for value in rapid.values() if isinstance(value, str)}
+    browse = shortcuts.get("browse", {})
+    if isinstance(browse, dict):
+        for local, shared in RAPID_SHARED_ACTIONS.items():
+            if local in rapid:
+                continue
+            default = photo_defaults[shared]
+            inherited = browse.get(shared, default)
+            if not isinstance(inherited, str):
+                continue
+            if inherited and inherited in occupied:
+                rapid[local] = default if default not in occupied else ""
+            occupied.add(rapid.get(local, inherited))
+    for key, default in DEFAULTS["keyboard_shortcuts"]["pipeline_rapid_review"].items():
+        if key not in rapid and default in occupied:
+            rapid[key] = ""
+
+
+def _merge_saved_config(defaults, data):
+    if isinstance(data, dict):
+        migrate_keyboard_shortcuts(data.get("keyboard_shortcuts"))
+    return _deep_merge(defaults, data)
+
+
 def load():
     """Load config, returning defaults for any missing keys."""
     config = copy.deepcopy(DEFAULTS)
     if os.path.exists(CONFIG_PATH):
         try:
             with open(CONFIG_PATH) as f:
-                config = _deep_merge(config, json.load(f))
+                config = _merge_saved_config(config, json.load(f))
         except Exception:
             # broad: config.load() runs on nearly every request and
             # at startup, and a corrupt file must fall back to defaults rather
@@ -382,7 +442,7 @@ def load_strict():
     except Exception:
         _preserve_corrupt_config()
         raise
-    return _repair_types(_deep_merge(config, data))
+    return _repair_types(_merge_saved_config(config, data))
 
 
 def save(config):

@@ -1747,20 +1747,20 @@ def test_browse_photo_id_deep_link_loads_target_after_first_folder_page(live_ser
     page.evaluate(
         """() => new Promise(resolve => {
           const container = document.getElementById('gridContainer');
-          container.scrollTo({top: 600, behavior: 'instant'});
+          // Start outside the 800px prefetch zone before installing the request gate.
+          container.scrollTo({top: 1200, behavior: 'instant'});
           requestAnimationFrame(() => requestAnimationFrame(resolve));
         })"""
     )
     page.evaluate(
         """expectedPage => {
           const originalSafeFetch = window.safeFetch;
-          let release;
-          window.__releasePreviousPage = () => release && release();
+          window.__releasePreviousPage = null;
           window.safeFetch = async function(url, options, behavior) {
             const body = options && options.body ? JSON.parse(options.body) : null;
             if (url === '/api/photos/query' && body && body.page === expectedPage) {
               const response = originalSafeFetch.call(this, url, options, behavior);
-              await new Promise(resolve => { release = resolve; });
+              await new Promise(resolve => { window.__releasePreviousPage = resolve; });
               return response;
             }
             return originalSafeFetch.call(this, url, options, behavior);
@@ -4856,6 +4856,13 @@ def test_browse_e_f_g_keyboard_modes(live_server, page):
 
     overlay = page.locator("#lightboxOverlay")
     filename_display = page.locator("#lightboxFilename")
+
+    page.keyboard.press("ArrowRight")
+    page.keyboard.press("Enter")
+    expect(overlay).to_have_class("lightbox-overlay active")
+    expect(filename_display).to_have_text(first_filename)
+    page.keyboard.press("Escape")
+    expect(overlay).to_have_class("lightbox-overlay")
 
     page.keyboard.press("e")
     expect(overlay).to_have_class("lightbox-overlay active")
