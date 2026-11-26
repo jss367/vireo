@@ -8932,6 +8932,118 @@ def test_progress_event_says_its_rate_is_per_minute():
     assert data["rate_unit"] == "per_minute"
 
 
+def test_progress_event_defaults_rate_to_none_for_rate_less_phases():
+    """A pipeline phase that reports no rate (model loading,
+    taxonomy/weight download) must leave `rate=None` in its payload so the
+    merge in JobRunner.push_event clears the previous phase's throughput.
+    Without this default, bpRateText would keep rendering the outgoing
+    phase's files/min across the whole rate-less phase."""
+    from pipeline_job import _progress_event
+
+    stages = _empty_stages()
+    stages["model_loader"]["status"] = "running"
+
+    data = _progress_event(
+        stages, "model_loader", "Loading model", current_file="Downloading weights",
+    )
+    assert data["rate"] is None
+    # And a caller with a real rate still overrides.
+    data = _progress_event(
+        stages, "model_loader", "Loading model", rate=0,
+    )
+    assert data["rate"] == 0
+
+
+def test_emit_progress_clears_stale_rate_at_phase_transition():
+    """End-to-end: after scan emits a rate (files/min), the next rate-less
+    emission (a taxonomy download, say) must land in the merged
+    job['progress'] with rate cleared. Without this, /api/jobs polling —
+    and the navbar status line — would keep showing the scan's throughput
+    labelled as the current phase's files/min."""
+    import queue as _queue
+    import sys as _sys
+
+    _sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
+    from jobs import JobRunner
+    from pipeline_job import _emit_progress
+    from wait import wait_for_job_via_runner
+
+    runner = JobRunner()
+    seen_progress = _queue.Queue()
+
+    def work(job):
+        stages = _empty_stages()
+        stages["scan"]["status"] = "running"
+        _emit_progress(
+            runner, job["id"], stages, "scan", "Scanning photos",
+            rate=120.0,
+        )
+        seen_progress.put(dict(job["progress"]))
+
+        stages["scan"]["status"] = "completed"
+        stages["model_loader"]["status"] = "running"
+        _emit_progress(
+            runner, job["id"], stages, "model_loader",
+            "Loading model", current_file="Downloading weights",
+        )
+        seen_progress.put(dict(job["progress"]))
+
+        return {"ok": True}
+
+    job_id = runner.start("scan", work)
+    wait_for_job_via_runner(runner, job_id)
+
+    scan_prog = seen_progress.get_nowait()
+    assert scan_prog["rate"] == 120.0
+    assert scan_prog["rate_unit"] == "per_minute"
+
+    loader_prog = seen_progress.get_nowait()
+    assert loader_prog["rate"] is None
+
+
+def test_update_stages_clears_stale_rate_in_merged_job_progress():
+    """_update_stages is the other code path that lands in
+    job['progress'] via push_event's merge. A stage transition pushed
+    through it (e.g. scan finishing, grouping starting) must also clear
+    the previous phase's rate so a stale files/min does not persist."""
+    import queue as _queue
+    import sys as _sys
+
+    _sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
+    from jobs import JobRunner
+    from pipeline_job import _emit_progress, _update_stages
+    from wait import wait_for_job_via_runner
+
+    runner = JobRunner()
+    seen_progress = _queue.Queue()
+
+    def work(job):
+        stages = _empty_stages()
+        stages["scan"]["status"] = "running"
+        _emit_progress(
+            runner, job["id"], stages, "scan", "Scanning photos",
+            rate=90.0,
+        )
+        seen_progress.put(dict(job["progress"]))
+
+        stages["scan"]["status"] = "completed"
+        stages["regroup"]["status"] = "running"
+        _update_stages(runner, job["id"], stages)
+        seen_progress.put(dict(job["progress"]))
+
+        return {"ok": True}
+
+    job_id = runner.start("scan", work)
+    wait_for_job_via_runner(runner, job_id)
+
+    scan_prog = seen_progress.get_nowait()
+    assert scan_prog["rate"] == 90.0
+
+    transition_prog = seen_progress.get_nowait()
+    assert transition_prog["rate"] is None
+    assert transition_prog["rate_unit"] is None
+
+
 def test_emit_progress_clears_stale_phase_in_merged_job_progress():
     """End-to-end: JobRunner.push_event merges into job['progress']; after a
     scan sub-phase emission followed by a plain status emission, the merged

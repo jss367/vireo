@@ -1462,7 +1462,14 @@ def _progress_event(stages, stage_id, phase, **extra):
         phase_label=None,
         # Every pipeline stage reports `rate` in files per minute, while
         # standalone jobs report items per second; the navbar status line
-        # reads this to label the number.
+        # reads this to label the number. `rate` defaults to None for the
+        # same merge reason as the phase triple: without it a transition
+        # from a rate-reporting phase (scan) into a rate-less one
+        # (model loading, taxonomy/weight download) would leave the
+        # previous phase's `rate` in job["progress"] and bpRateText would
+        # keep rendering stale throughput as the new phase's files/min.
+        # Callers with a real rate still override through update() below.
+        rate=None,
         rate_unit="per_minute",
     )
     data.update(extra)
@@ -1497,6 +1504,12 @@ def _update_stages(runner, job_id, stages):
             "current": current,
             "total": total,
             "stages": {k: dict(v) for k, v in stages.items()},
+            # Clear any stale rate the previous emit_progress left in the
+            # merged job["progress"]. This path is used at stage
+            # transitions, where the outgoing phase's throughput no longer
+            # describes anything the UI is counting.
+            "rate": None,
+            "rate_unit": None,
         })
 
 
