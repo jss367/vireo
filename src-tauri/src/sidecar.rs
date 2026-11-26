@@ -364,10 +364,6 @@ fn remove_gui_client(marker: &Option<std::path::PathBuf>) {
     }
 }
 
-fn live_gui_client_count() -> usize {
-    live_gui_client_pids().map(|pids| pids.len()).unwrap_or(0)
-}
-
 /// The process ids of the GUI clients registered on the shared backend that
 /// are still running. Markers of exited clients are removed on the way. A
 /// missing registry means no clients; one that cannot be read is an error.
@@ -592,9 +588,22 @@ pub fn stop_sidecar(state: &SidecarState) -> bool {
 
     with_gui_clients_lock(|| {
         remove_gui_client(&state.client_marker);
-        if live_gui_client_count() > 0 {
-            log::info!("Leaving Vireo backend running for another GUI client");
-            return false;
+        // A registry we cannot read may still list another live GUI client,
+        // and shutting the shared backend down under its window would strand
+        // it. Treat the unreadable registry conservatively, the same way
+        // `other_gui_clients_attached()` does.
+        match live_gui_client_pids() {
+            Ok(pids) if !pids.is_empty() => {
+                log::info!("Leaving Vireo backend running for another GUI client");
+                return false;
+            }
+            Ok(_) => {}
+            Err(error) => {
+                log::warn!(
+                    "Could not read the Vireo GUI client registry; leaving backend running: {error}"
+                );
+                return false;
+            }
         }
 
         let has_child = state
