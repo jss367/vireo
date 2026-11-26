@@ -559,6 +559,43 @@ def test_only_the_tab_strip_gives_way_in_a_narrow_window(live_server, page):
     assert wheel_prevented(-90) is False
     assert wheel_prevented(90) is True
 
+    # Firefox and some mice report wheel movement in lines or pages, not
+    # pixels. A raw delta of 3 then has to produce a meaningful scroll —
+    # otherwise the tabs appear stuck and the page cannot scroll either
+    # because preventDefault still fires.
+    def scroll_from_line_wheel(delta_y: int) -> int:
+        return strip.evaluate(
+            """(el, dy) => {
+              el.scrollLeft = 0;
+              const ev = new WheelEvent('wheel', {
+                deltaY: dy, deltaX: 0, deltaMode: 1,
+                bubbles: true, cancelable: true,
+              });
+              el.dispatchEvent(ev);
+              return el.scrollLeft;
+            }""",
+            delta_y,
+        )
+
+    assert scroll_from_line_wheel(3) == 48
+    assert scroll_from_line_wheel(1) == 16
+
+    # Page-mode gestures should scroll by roughly a strip width per notch,
+    # not by one pixel per page.
+    client_width = strip.evaluate("el => el.clientWidth")
+    scrolled = strip.evaluate(
+        """el => {
+          el.scrollLeft = 0;
+          const ev = new WheelEvent('wheel', {
+            deltaY: 1, deltaX: 0, deltaMode: 2,
+            bubbles: true, cancelable: true,
+          });
+          el.dispatchEvent(ev);
+          return el.scrollLeft;
+        }"""
+    )
+    assert scrolled == client_width
+
     # Wide enough for every tab, neither edge fades.
     page.set_viewport_size({"width": 2400, "height": 800})
     expect(strip).to_have_class("nav-tab-strip")

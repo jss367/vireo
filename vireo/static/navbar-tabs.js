@@ -169,6 +169,9 @@ function updateStripOverflow() {
 // moves the tabs sideways instead. A sideways gesture keeps its own scroll.
 // At the boundary in the wheel direction the strip cannot move, so the
 // wheel falls through to the page instead of being swallowed in place.
+// Firefox and some devices report deltaY in lines or pages, not pixels
+// (WheelEvent.deltaMode 1 or 2), so a 1-3 raw delta would advance the
+// strip by 1-3 pixels while preventDefault() swallowed the native scroll.
 /** @param {WheelEvent} event */
 function scrollStripWithWheel(event) {
   const strip = STRIP();
@@ -178,7 +181,10 @@ function scrollStripWithWheel(event) {
   if (event.deltaY > 0 && hidden - strip.scrollLeft <= 1) return;
   if (event.deltaY < 0 && strip.scrollLeft <= 1) return;
   event.preventDefault();
-  strip.scrollLeft += event.deltaY;
+  const step = event.deltaMode === 1 ? event.deltaY * 16
+             : event.deltaMode === 2 ? event.deltaY * strip.clientWidth
+             : event.deltaY;
+  strip.scrollLeft += step;
 }
 
 function watchStripOverflow() {
