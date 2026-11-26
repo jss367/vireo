@@ -282,6 +282,38 @@ def test_ensure_schema_refuses_to_migrate_without_room_for_backup(tmp_path, monk
     assert glob.glob(f"{db_path}.pre-v*") == []
 
 
+def test_ensure_schema_near_threshold_shortfall_reports_nonzero_amount(tmp_path, monkeypatch):
+    """A deficit smaller than 0.05 GB must not round to "Free at least 0.0 GB":
+    the instruction stays actionable by falling back to MB."""
+    import collections
+
+    db_path = _db_one_upgrade_behind(tmp_path)
+    needed = schema._backup_space_needed(db_path)
+    # Leave the user 5 MB short of what the backup needs.
+    free = max(0, needed - 5 * 1024 * 1024)
+    usage = collections.namedtuple("usage", "total used free")
+    monkeypatch.setattr(schema.shutil, "disk_usage", lambda _path: usage(0, 0, free))
+
+    with pytest.raises(schema.MigrationBackupError) as excinfo:
+        schema.ensure_schema(db_path)
+
+    message = str(excinfo.value)
+    assert "Free at least" in message
+    assert "0.0 GB on that drive" not in message
+    assert " MB on that drive" in message
+
+
+def test_format_minimum_to_free_rounds_up_small_deficits():
+    """A 1-byte shortfall still asks the user to free at least 1 MB, and
+    sub-tenth-of-GB values are rendered in MB instead of rounding to 0.0 GB."""
+    assert schema._format_minimum_to_free(1) == "1 MB"
+    assert schema._format_minimum_to_free(5 * 1024 * 1024) == "5 MB"
+    # Exactly 1 GB tips into GB formatting.
+    assert schema._format_minimum_to_free(1024 ** 3) == "1.0 GB"
+    # 1 GB + 1 byte rounds up to the next tenth.
+    assert schema._format_minimum_to_free(1024 ** 3 + 1) == "1.1 GB"
+
+
 def test_ensure_schema_refuses_to_migrate_when_backup_write_fails(tmp_path, monkeypatch):
     """A backup that fails after the space check (read-only volume, the
     disk filling during the copy) stops the upgrade and leaves no partial

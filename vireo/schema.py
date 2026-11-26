@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import glob
 import logging
+import math
 import os
 import re
 import shutil
@@ -880,6 +881,19 @@ def _format_gb(size: int) -> str:
     return f"{size / (1024 ** 3):.1f} GB"
 
 
+def _format_minimum_to_free(size: int) -> str:
+    """Positive amount to free, in a unit that stays non-zero.
+
+    Shown in MB below 1 GB and rounded up, so a near-threshold shortfall
+    prints as a usable instruction ("Free at least 5 MB") instead of
+    rounding to "0.0 GB".
+    """
+    if size >= 1024 ** 3:
+        gb = math.ceil(size * 10 / (1024 ** 3)) / 10
+        return f"{gb:.1f} GB"
+    return f"{max(1, math.ceil(size / (1024 ** 2)))} MB"
+
+
 def _backup_space_needed(db_path: str) -> int:
     """Bytes the backup and the migrations after it need on the volume.
 
@@ -909,7 +923,7 @@ def _check_backup_space(db_path: str, backup: str) -> None:
             backup,
             f"the drive holding {folder} has {_format_gb(free)} free and the "
             f"backup needs about {_format_gb(needed)}. Free at least "
-            f"{_format_gb(needed - free)} on that drive",
+            f"{_format_minimum_to_free(needed - free)} on that drive",
         )
 
 
