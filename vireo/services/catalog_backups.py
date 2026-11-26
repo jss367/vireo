@@ -342,11 +342,36 @@ def _mask_refs_from_db_file(db_path: str) -> set[str]:
         return set()
 
 
+def _copy_snapshot_atomically(src: str, dest: str, name: str) -> bool:
+    """Copy ``src`` to ``dest`` via a ``.partial`` sibling and ``replace_file``.
+
+    An interrupted copy leaves the tmp (never the final name), so a later
+    pass does not mistake a truncated file for a complete one. Returns
+    True on success and False when the source disappeared between the
+    directory listing and the copy (a ``gc_edit_masks`` sweep ran against
+    the live catalog in between); every other failure propagates so the
+    caller can abort rather than publish an incomplete backup or restore.
+    """
+    tmp = dest + ".partial"
+    try:
+        shutil.copy2(src, tmp)
+    except FileNotFoundError:
+        log.warning("Edit-mask snapshot %s disappeared before it could be copied", name)
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(tmp)
+        return False
+    replace_file(tmp, dest)
+    return True
+
+
 def _copy_referenced_snapshots(media_dir: str, dest_dir: str, refs: set[str]) -> int:
     """Copy every ``<photo>.<ref>.png`` snapshot whose ref is referenced.
 
-    Missing source files are logged and skipped: a snapshot already lost on
-    disk cannot be captured here, and the backup should not fail for it.
+    A snapshot that disappeared between the directory listing and the copy
+    is skipped (it is already lost on disk and nothing here can bring it
+    back). Every other error propagates so the caller aborts the backup
+    rather than publishing a copy whose recipes point at snapshots the
+    backup does not carry.
     """
     if not refs or not media_dir:
         return 0
@@ -361,20 +386,23 @@ def _copy_referenced_snapshots(media_dir: str, dest_dir: str, refs: set[str]) ->
         match = _SNAPSHOT_FILE_RE.match(name)
         if match is None or match.group(2) not in refs:
             continue
-        try:
-            shutil.copy2(os.path.join(source, name), os.path.join(dest_dir, name))
-        except OSError:
-            log.warning("Could not copy edit-mask snapshot %s", name, exc_info=True)
-            continue
-        copied += 1
+        if _copy_snapshot_atomically(
+            os.path.join(source, name), os.path.join(dest_dir, name), name,
+        ):
+            copied += 1
     return copied
 
 
 def _restore_edit_mask_snapshots(source_dir: str, media_dir: str) -> int:
     """Copy snapshot files from ``source_dir`` into the live edit-masks folder.
 
-    Existing files are left alone: a snapshot's filename is the hash of its
-    contents, so a name match is a bytes match. Returns how many were added.
+    Existing files are left alone: a snapshot's filename is the hash of
+    its contents, so a name match is a bytes match. Copies run through a
+    tmp file and ``replace_file`` so a launch interrupted mid-copy leaves
+    no truncated file at the final name that a resumed restore would
+    then treat as complete. A copy failure propagates so ``_apply_phases``
+    rolls the restore back instead of swapping in a catalog whose recipes
+    reference absent snapshots.
     """
     if not media_dir:
         return 0
@@ -391,12 +419,8 @@ def _restore_edit_mask_snapshots(source_dir: str, media_dir: str) -> int:
         dest = os.path.join(target, name)
         if os.path.exists(dest):
             continue
-        try:
-            shutil.copy2(os.path.join(source_dir, name), dest)
-        except OSError:
-            log.warning("Could not restore edit-mask snapshot %s", name, exc_info=True)
-            continue
-        added += 1
+        if _copy_snapshot_atomically(os.path.join(source_dir, name), dest, name):
+            added += 1
     return added
 
 

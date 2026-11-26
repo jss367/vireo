@@ -388,6 +388,98 @@ def test_restore_keeps_existing_live_snapshots(tmp_path):
     assert (tmp_path / cb.EDIT_MASKS_SUBDIR / f"1.{ref}.png").read_bytes() == b"locally edited"
 
 
+def test_backup_fails_when_a_referenced_snapshot_cannot_be_written(tmp_path, monkeypatch):
+    db_path = _catalog(tmp_path)
+    ref = "0123456789ab"
+    _write_mask_snapshot(tmp_path, 1, ref, payload=b"frozen")
+    _add_local_recipe(db_path, 1, ref)
+    real_copy = cb.shutil.copy2
+
+    def fail_on_snapshot(src, dst, *args, **kwargs):
+        if cb.EDIT_MASKS_SUBDIR in os.fspath(dst):
+            raise OSError("No space left on device")
+        return real_copy(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(cb.shutil, "copy2", fail_on_snapshot)
+    with pytest.raises(OSError, match="No space left"):
+        cb.create_backup(db_path, kind="daily", keep=3, hooks=_hooks()[0],
+                         media_dir=str(tmp_path))
+    assert cb.list_backups(db_path) == []
+    assert not [p for p in os.listdir(tmp_path / "backups") if p.startswith(cb.PARTIAL_PREFIX)]
+
+
+def test_restore_rolls_back_when_a_snapshot_cannot_be_written(tmp_path, monkeypatch):
+    db_path = _catalog(tmp_path, photos=2)
+    ref = "0123456789ab"
+    _write_mask_snapshot(tmp_path, 1, ref, payload=b"frozen")
+    _add_local_recipe(db_path, 1, ref)
+    backup = cb.create_backup(db_path, kind="daily", keep=3, hooks=_hooks()[0],
+                              media_dir=str(tmp_path))["backup"]
+    _add_photos(db_path, 3)
+    # Clear the live snapshot so the restore has to copy it back.
+    (tmp_path / cb.EDIT_MASKS_SUBDIR / f"1.{ref}.png").unlink()
+    cb.stage_restore(db_path, backup, _hooks()[0])
+
+    real_copy = cb.shutil.copy2
+    masks_live_root = str(tmp_path / cb.EDIT_MASKS_SUBDIR)
+
+    def fail_on_live_mask_copy(src, dst, *args, **kwargs):
+        if os.fspath(dst).startswith(masks_live_root):
+            raise OSError("No space left on device")
+        return real_copy(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(cb.shutil, "copy2", fail_on_live_mask_copy)
+    outcome = cb.apply_pending_restore(db_path, media_dir=str(tmp_path))
+
+    assert not outcome["ok"]
+    assert "No space left" in outcome["error"]
+    assert _photo_count(db_path) == 5  # the pre-restore live catalog is back
+    assert cb.pending_restore(db_path) is None
+    dest = tmp_path / cb.EDIT_MASKS_SUBDIR / f"1.{ref}.png"
+    partial = tmp_path / cb.EDIT_MASKS_SUBDIR / f"1.{ref}.png.partial"
+    # Neither a truncated final name nor a stale tmp survives the rollback.
+    assert not dest.exists()
+    assert not partial.exists()
+
+
+def test_restore_never_leaves_a_truncated_snapshot_at_the_final_name(tmp_path, monkeypatch):
+    """Finding 3: an interrupted copy must not leave a partial file at the
+    final destination that a resumed restore then treats as complete."""
+    db_path = _catalog(tmp_path)
+    ref = "0123456789ab"
+    _write_mask_snapshot(tmp_path, 1, ref, payload=b"complete-bytes")
+    _add_local_recipe(db_path, 1, ref)
+    backup = cb.create_backup(db_path, kind="daily", keep=3, hooks=_hooks()[0],
+                              media_dir=str(tmp_path))["backup"]
+    (tmp_path / cb.EDIT_MASKS_SUBDIR / f"1.{ref}.png").unlink()
+    cb.stage_restore(db_path, backup, _hooks()[0])
+
+    real_copy = cb.shutil.copy2
+    masks_live_root = str(tmp_path / cb.EDIT_MASKS_SUBDIR)
+    dest = tmp_path / cb.EDIT_MASKS_SUBDIR / f"1.{ref}.png"
+
+    def truncated_write_then_crash(src, dst, *args, **kwargs):
+        if os.fspath(dst).startswith(masks_live_root):
+            # Simulate a partial write before the crash.
+            with open(dst, "wb") as fh:
+                fh.write(b"trunc")
+            raise OSError("power cut")
+        return real_copy(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(cb.shutil, "copy2", truncated_write_then_crash)
+    cb.apply_pending_restore(db_path, media_dir=str(tmp_path))
+    # The crash wrote to the .partial sibling (not the final name), so the
+    # destination name does not exist and a resumed restore will recopy.
+    assert not dest.exists()
+
+    # Second pass with the patch undone succeeds and lands the correct bytes.
+    monkeypatch.undo()
+    cb.stage_restore(db_path, backup, _hooks()[0])
+    outcome = cb.apply_pending_restore(db_path, media_dir=str(tmp_path))
+    assert outcome["ok"], outcome
+    assert dest.read_bytes() == b"complete-bytes"
+
+
 def test_api_backs_up_and_prepares_a_restore(app_and_db):
     app, _db = app_and_db
     client = app.test_client()
