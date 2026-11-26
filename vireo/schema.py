@@ -898,12 +898,16 @@ def _backup_space_needed(db_path: str) -> int:
     """Bytes the backup and the migrations after it need on the volume.
 
     ``VACUUM INTO`` drops freelist pages, so a catalog that held many deleted
-    rows produces a backup much smaller than its raw file length. The live
-    page count from SQLite bounds the backup; estimating from
-    ``os.path.getsize`` would refuse upgrades that fit easily. SQLite failing
-    to answer falls back to the raw size — conservative but still safe. The
-    WAL file size stays in the total as an upper bound for scratch and for
-    uncheckpointed frames.
+    rows produces a backup much smaller than its raw file length, and it
+    folds the current logical state into the output rather than copying the
+    WAL separately. The live page count from SQLite bounds the backup;
+    estimating from ``os.path.getsize`` would refuse upgrades that fit
+    easily. SQLite failing to answer falls back to the raw size —
+    conservative but still safe. The existing ``-wal`` file is already part
+    of the volume's used bytes and need not be added again: a tiny catalog
+    whose WAL is pinned large by another connection would otherwise be
+    refused indefinitely. Scratch for migrations that follow the backup is
+    covered by ``_BACKUP_HEADROOM_FRACTION`` / ``_BACKUP_HEADROOM_MIN_BYTES``.
     """
     try:
         with contextlib.closing(sqlite3.connect(db_path)) as conn:
@@ -913,8 +917,6 @@ def _backup_space_needed(db_path: str) -> int:
         size = max(0, page_count - freelist_count) * page_size
     except sqlite3.Error:
         size = os.path.getsize(db_path)
-    with contextlib.suppress(OSError):
-        size += os.path.getsize(db_path + "-wal")
     headroom = max(int(size * _BACKUP_HEADROOM_FRACTION), _BACKUP_HEADROOM_MIN_BYTES)
     return size + headroom
 

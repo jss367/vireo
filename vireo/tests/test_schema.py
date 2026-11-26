@@ -335,6 +335,27 @@ def test_backup_space_needed_excludes_freelist_pages(tmp_path):
     )
 
 
+def test_backup_space_needed_ignores_pinned_wal(tmp_path):
+    """Another connection can pin a WAL much larger than the live catalog.
+    Those bytes already sit on the volume, so the preflight must not add
+    them again — otherwise a tiny catalog with a big pinned WAL is refused
+    indefinitely even when the backup would fit."""
+    db_path = str(tmp_path / "vireo.db")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA journal_mode = DELETE")
+        conn.execute("CREATE TABLE t (data BLOB)")
+        conn.commit()
+
+    baseline = schema._backup_space_needed(db_path)
+
+    # A WAL left behind by another connection — often many times the live
+    # catalog when it has been pinned through repeated updates.
+    with open(db_path + "-wal", "wb") as wal:
+        wal.write(b"\0" * (128 * 1024 * 1024))
+
+    assert schema._backup_space_needed(db_path) == baseline
+
+
 def test_format_minimum_to_free_rounds_up_small_deficits():
     """A 1-byte shortfall still asks the user to free at least 1 MB, and
     sub-tenth-of-GB values are rendered in MB instead of rounding to 0.0 GB."""
