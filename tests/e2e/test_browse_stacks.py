@@ -1,4 +1,5 @@
 import re
+import time
 
 from playwright.sync_api import expect
 from services import keyword_tagging
@@ -1289,6 +1290,52 @@ def test_deleting_a_stacks_cover_in_the_lightbox_drops_its_dangling_members(
         arg=other_id,
     )
     assert page.evaluate("() => pageModules.selection.getActiveSelection()") == [other_id]
+
+
+def test_deleting_a_stacks_cover_in_the_lightbox_keeps_the_stack_in_the_total(
+    live_server, page,
+):
+    """A stack is one row of the result. Deleting its cover leaves the stack
+    a row under another cover, so the counter's total must not drop; the page
+    takes the total from the server instead of subtracting a row."""
+    db = live_server["db"]
+    burst_ids = live_server["data"]["photos"][:3]
+    seed_browse_stack(db, burst_ids)
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET quality_score = 0.99 WHERE id = ?",
+            (burst_ids[1],),
+        )
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator("#browseStacksToggle").check()
+    cover = page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')
+    cover.wait_for(state="visible")
+    page.wait_for_function("pageModules.pagination.pagination.total === 3")
+    totals_requests = []
+    page.on(
+        "request",
+        lambda request: totals_requests.append(request.url)
+        if request.url.endswith("/api/photos/query")
+        and (request.post_data_json or {}).get("per_page") == 1
+        else None,
+    )
+
+    cover.dblclick()
+    expect(page.locator("#lightboxFilename")).to_have_text("hawk2.jpg")
+    expect(page.locator("#lightboxCounter")).to_contain_text("/ 3 ")
+    page.locator("#lightboxDeleteBtn").click()
+    page.locator("#deleteConfirmBtn").click()
+    expect(page.locator("#lightboxFilename")).to_have_text("robin1.jpg")
+
+    # hawk1 and hawk3 are still a stack: three rows, as the server says.
+    deadline = time.monotonic() + 5
+    while not totals_requests and time.monotonic() < deadline:
+        page.wait_for_timeout(25)
+    assert len(totals_requests) == 1
+    page.wait_for_load_state("networkidle")
+    assert page.evaluate("pageModules.pagination.pagination.total") == 3
+    expect(page.locator("#lightboxCounter")).to_contain_text("/ 3 ")
 
 
 def test_lightbox_navigation_follows_a_double_clicked_stack(live_server, page):

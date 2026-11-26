@@ -17,7 +17,7 @@ import { refreshCardSelectionVisuals, selectPhoto } from './selection.js';
 import { refreshBrowseSidebarCounts } from './sidebar-collections.js';
 import {
   browseNavigationListIsTopLevel, browsePhotoNavigationList, browseStackCoverIdForPhoto,
-  browseStackMemberIds, refreshBrowseStackBadge,
+  browseStackMemberIds, browseStacksEnabled, refreshBrowseStackBadge,
 } from './stacks.js';
 
 /* ---------- Grid dblclick delegation (XSS-safe) ---------- */
@@ -88,10 +88,12 @@ function removeDeletedCompanionRow(/** @type {BrowsePhoto} */ primary, /** @type
 /* Page hook for the lightbox's Delete: drop the deleted photo's row, and its
    companion's when the server deleted both, from the grid before the lightbox
    moves on to the next photo. The result's total shrinks by the rows that
-   left the loaded window. The server's `deleted` count is catalog-wide: a row
-   it counts beyond those may be a companion this result holds on a page that
-   is not loaded, or one the result never held. The page cannot tell which,
-   so it then asks the server for the total. */
+   left the loaded window when that is the whole change. Two cases are not:
+   the server's `deleted` count is catalog-wide, and a row it counts beyond
+   those may be a companion this result holds on a page that is not loaded,
+   or one the result never held; and with stacks on, a deleted cover's stack
+   stays a row under another cover while a deleted single photo's row goes.
+   The page cannot tell these apart, so it asks the server for the total. */
 export function removeDeletedLightboxPhoto(/** @type {number} */ photoId, /** @type {{deleted?: number} | null | undefined} */ deleteResult) {
   /** @type {number[]} */ var removedIds = [photoId];
   var index = state.photos.findIndex(function(photo) { return photo.id === photoId; });
@@ -100,8 +102,11 @@ export function removeDeletedLightboxPhoto(/** @type {number} */ photoId, /** @t
     state.photos.splice(index, 1);
     var companionId = removeDeletedCompanionRow(primary, deleteResult);
     if (companionId != null) removedIds.push(companionId);
-    pagination.removePhotos(removedIds.length);
-    if (Number(deleteResult && deleteResult.deleted) > removedIds.length) refreshBrowseTotals();
+    var stacked = browseStacksEnabled();
+    if (!stacked) pagination.removePhotos(removedIds.length);
+    if (stacked || Number(deleteResult && deleteResult.deleted) > removedIds.length) {
+      refreshBrowseTotals();
+    }
     // The available-only list the lightbox pages through beside offline
     // photos is a copy of the window, so it loses the same rows.
     syncBrowseAvailableLightboxPhotos();
