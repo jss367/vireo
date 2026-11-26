@@ -391,6 +391,26 @@ export async function lightboxToggleWildlifeExcluded() {
   }
 }
 
+// The photo to show after a delete: the nearest photo after the deleted one,
+// in the order the user was paging through, that the list still holds, else
+// the nearest before it.
+/** @returns {LightboxPhoto | null} */
+export function _lbNextAfterDelete(/** @type {readonly LightboxPhoto[]} */ order, /** @type {number} */ deletedIndex, /** @type {readonly LightboxPhoto[]} */ remaining) {
+  /** @param {LightboxPhoto | undefined} photo */
+  var survivor = function(photo) {
+    return (photo && remaining.find(function(x) { return x.id === photo.id; })) || null;
+  };
+  for (var after = deletedIndex + 1; after < order.length; after++) {
+    var following = survivor(order[after]);
+    if (following) return following;
+  }
+  for (var before = deletedIndex - 1; before >= 0; before--) {
+    var preceding = survivor(order[before]);
+    if (preceding) return preceding;
+  }
+  return null;
+}
+
 export function lightboxDelete() {
   if (_lbGuardReadOnly()) return false;
   var overlay = document.getElementById('lightboxOverlay');
@@ -414,39 +434,30 @@ export function lightboxDelete() {
       return;
     }
 
-    // Capture the lightbox position before Browse updates its grid. Browse's
-    // lazy-loaded lightbox deliberately shares the same array object, so a
-    // grid removal may also remove the lightbox entry in one splice.
-    var idx = lbState.photoList.findIndex(function(x) { return x.id === currentId; });
-    var removedFromSharedLightboxList = false;
+    // The order the user was paging through, taken before the page updates
+    // its grid: Browse's lightbox shares the grid's array, and the page may
+    // drop more rows than the deleted photo (its RAW+JPEG companion), so an
+    // index into the list does not survive the hook.
+    var order = lbState.photoList.slice();
+    var idx = order.findIndex(function(x) { return x.id === currentId; });
 
     // Update the page's grid before touching lightbox state. Otherwise
     // Browse's `lightbox:closed` handler still finds the deleted row in
     // its photo list and re-selects it (loading stale detail state that this
     // block would then null out — leaving the sidebar blank).
     var removeDeletedLightboxPhoto = Vireo.pageHook('removeDeletedLightboxPhoto');
-    if (removeDeletedLightboxPhoto) {
-      // ``data.deleted`` is the server's authoritative count: when the primary
-      // had a cataloged companion row and the user left the companion checkbox
-      // on, the backend dropped both rows and reports deleted === 2. The hook
-      // reads it so the companion leaves the grid and the pagination total
-      // matches the catalog.
-      removedFromSharedLightboxList = removeDeletedLightboxPhoto(
-        currentId, lbState.photoList, data,
-      );
-    }
+    if (removeDeletedLightboxPhoto) removeDeletedLightboxPhoto(currentId, data);
 
-    // Remove from a page-specific lightbox list. When Browse shared its live
-    // array, the grid splice above already performed this removal.
-    if (!removedFromSharedLightboxList && idx >= 0) {
-      lbState.photoList.splice(idx, 1);
-    }
+    // Remove the photo from the lightbox's list by id, unless the page's
+    // list is this list and the hook already removed it.
+    var remainingIdx = lbState.photoList.findIndex(function(x) { return x.id === currentId; });
+    if (remainingIdx >= 0) lbState.photoList.splice(remainingIdx, 1);
 
     if (lbState.photoList.length === 0) {
       closeLightbox();
     } else {
-      var nextIdx = Math.min(idx, lbState.photoList.length - 1);
-      var next = lbState.photoList[nextIdx]; if (!next) return;
+      var next = idx >= 0 ? _lbNextAfterDelete(order, idx, lbState.photoList) : null;
+      if (!next) return;
       // Re-evaluate the owning page's read-only decision for the next photo,
       // mirroring lightboxNav. The deleted photo was editable (_lbReadOnly ===
       // false), so without this hook openLightbox would inherit that and leave

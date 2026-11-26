@@ -817,6 +817,28 @@ function buildBrowsePageRequest(/** @type {number} */ page, /** @type {number} *
   };
 }
 
+/* Ask the server for the result's size again, leaving the loaded rows alone.
+   For a change whose effect on the total the page cannot work out from the
+   rows it holds: a delete that also removed a row this window never loaded.
+   A failed request leaves the total as it is; the next page request brings
+   the server's count. */
+export async function refreshBrowseTotals() {
+  var windowIsCurrent = observeBrowseWindow();
+  var request = buildBrowsePageRequest(1, 1);
+  /** @type {BrowsePage | undefined} */ var data;
+  try {
+    data = await /** @type {Promise<BrowsePage>} */ (safeFetch(request.url, request.options, { toast: false }));
+  } catch (e) {
+    return false;
+  }
+  if (!data || !windowIsCurrent()) return false;
+  pagination.setTotals(data);
+  if (VireoFilter && VireoFilter.setResultTotal) VireoFilter.setResultTotal(pagination.underlyingTotal);
+  updateFilterSummary();
+  refreshBrowseLightboxCounter();
+  return true;
+}
+
 /* Extend a focused deep-link window upward by one page. Unlike the explicit
    "Browse from beginning" action, this preserves the user's viewport: the
    first previously-loaded card remains at the same screen position while the

@@ -432,6 +432,25 @@ test('formatBytes (vireo-utils.js) picks the unit at each 1024 boundary', () => 
   assert.equal(ctx.formatBytes(3 * 1024 ** 4), '3.00 TB');
 });
 
+test('_lbNextAfterDelete picks the nearest surviving photo, after the deleted one first', () => {
+  const ctx = load([fn('lightbox/delete.js', '_lbNextAfterDelete')]);
+  const order = [1, 2, 3, 4, 5].map(id => ({id}));
+  const next = (deletedIndex, remainingIds) => {
+    const found = ctx._lbNextAfterDelete(order, deletedIndex, remainingIds.map(id => ({id})));
+    return found && found.id;
+  };
+  assert.equal(next(2, [1, 2, 4, 5]), 4);
+  // The row before the deleted photo left too (its companion): the photo
+  // after it is still the next one, not the one an old index would name.
+  assert.equal(next(2, [1, 4, 5]), 4);
+  // So did the row after it.
+  assert.equal(next(2, [1, 2, 5]), 5);
+  // Nothing after it survives: step back.
+  assert.equal(next(4, [1, 2, 3]), 3);
+  assert.equal(next(4, [1, 2]), 2);
+  assert.equal(next(0, []), null);
+});
+
 test('exposureSummaryParts (vireo-utils.js) lists focal length, aperture, shutter and ISO', () => {
   const ctx = load([fn('vireo-utils.js', 'exposureSummaryParts')]);
   const parts = exif => Array.from(ctx.exposureSummaryParts({EXIF: exif}));

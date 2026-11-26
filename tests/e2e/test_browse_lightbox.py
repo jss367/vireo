@@ -534,6 +534,14 @@ def test_browse_lightbox_delete_with_catalog_companion_shrinks_total(
     )
     initial_total = page.evaluate("pageModules.pagination.pagination.total")
     initial_photos = page.evaluate("browseState.photos.length")
+    totals_requests = []
+    page.on(
+        "request",
+        lambda request: totals_requests.append(request.url)
+        if request.url.endswith("/api/photos/query")
+        and (request.post_data_json or {}).get("per_page") == 1
+        else None,
+    )
 
     page.locator(f'.grid-card[data-id="{primary_id}"]').dblclick()
     page.wait_for_function(
@@ -558,6 +566,9 @@ def test_browse_lightbox_delete_with_catalog_companion_shrinks_total(
         page.evaluate("pageModules.pagination.pagination.total")
         == initial_total - 2
     )
+    # Both deleted rows left the loaded window, so the count is known and
+    # the page does not ask the server for it.
+    assert totals_requests == []
 
 
 def test_browse_lightbox_delete_in_offline_view_prunes_companion_from_lightbox_list(
@@ -628,15 +639,27 @@ def test_browse_lightbox_delete_in_offline_view_prunes_companion_from_lightbox_l
         "ids => ids.every(id => !pageModules.lightbox.browseAvailableLightboxPhotos.some(p => p.id === id))",
         [primary_id, companion_id],
     )
+    # The lightbox moved on to a photo that still exists, and kept every
+    # other photo: the companion leaving the list must not shift the removal
+    # onto a neighbor.
+    after = page.evaluate(
+        """() => ({
+            shown: vireoLightboxSession.requestedPhotoId(),
+            list: lbState.photoList.map(p => p.id),
+            grid: browseState.photos.map(p => p.id),
+        })"""
+    )
+    assert after["shown"] in after["list"]
+    assert after["list"] == after["grid"]
 
 
-def test_browse_lightbox_delete_decrements_total_by_rows_in_projection(
+def test_browse_lightbox_delete_asks_the_server_when_it_deleted_an_unseen_row(
     live_server, page,
 ):
-    """The server's ``deleted`` count is catalog-wide; ``pagination.total``
-    is filter-scoped. A pair whose companion was filtered out of the result
-    (so it is not in ``state.photos``) must decrement the total by one, not
-    two, or the counter reads one low until the next page request."""
+    """The server's ``deleted`` count is catalog-wide. A companion row it
+    deleted that the loaded window does not hold may be in the result on a
+    page not loaded, or outside the result; the page cannot tell which, so it
+    takes the total from the server instead of guessing."""
     db = live_server["db"]
     folder_id = live_server["data"]["folders"][0]
     primary_id = photo_ingest.add_photo(
@@ -661,14 +684,30 @@ def test_browse_lightbox_delete_decrements_total_by_rows_in_projection(
         "id => browseState.photos.some(p => p.id === id)", arg=primary_id,
     )
     initial_total = page.evaluate("pageModules.pagination.pagination.total")
+    assert initial_total >= 4
+
+    # The server's answer to the totals request: two rows fewer, as when the
+    # companion was in the result on a page that had not been loaded.
+    totals_requests = []
+
+    def serve_query(route):
+        body = route.request.post_data_json or {}
+        if body.get("per_page") != 1:
+            route.continue_()
+            return
+        totals_requests.append(body)
+        route.fulfill(json={
+            "photos": [], "total": initial_total - 2,
+            "page": 1, "per_page": 1,
+        })
+
+    page.route("**/api/photos/query", serve_query)
 
     page.locator(f'.grid-card[data-id="{primary_id}"]').dblclick()
     page.wait_for_function(
         "photoId => vireoLightboxSession.displayedPhotoId() === photoId",
         arg=primary_id,
     )
-    # Server reports two catalog rows deleted (the JPEG companion was never
-    # imported into the grid, so it was filtered out of this projection).
     page.evaluate(
         """() => {
           window.lightboxDelete();
@@ -679,12 +718,10 @@ def test_browse_lightbox_delete_decrements_total_by_rows_in_projection(
     )
 
     page.wait_for_function(
-        "id => !browseState.photos.some(p => p.id === id)", arg=primary_id,
+        "total => pageModules.pagination.pagination.total === total",
+        arg=initial_total - 2,
     )
-    assert (
-        page.evaluate("pageModules.pagination.pagination.total")
-        == initial_total - 1
-    )
+    assert len(totals_requests) == 1
 
 
 def test_browse_lightbox_stale_boundary_retry_does_not_advance_reopened_session(

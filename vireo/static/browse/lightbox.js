@@ -11,7 +11,7 @@ import { updateBatchBar } from './batch-bar.js';
 import { _shortcuts } from './config.js';
 import { renderGrid } from './grid.js';
 import { scrollToCard } from './keyboard.js';
-import { loadPhotos, prependPreviousPhotos } from './loading.js';
+import { loadPhotos, prependPreviousPhotos, refreshBrowseTotals } from './loading.js';
 import { findBrowsePhoto } from './selection-panel.js';
 import { refreshCardSelectionVisuals, selectPhoto } from './selection.js';
 import { refreshBrowseSidebarCounts } from './sidebar-collections.js';
@@ -68,77 +68,50 @@ import {
 
 /** @type {BrowsePhoto[]} */ export var browseAvailableLightboxPhotos = [];
 
-/* Page hook for the lightbox's Delete: drop the deleted photo from the grid
-   before the lightbox moves on to the next one. ``deleteResult`` is the
-   server's ``BatchDeleteResult``; its ``deleted`` count tells us whether the
-   primary's cataloged companion row went with it (``test_delete_photos_
-   resolves_companions``: a primary whose ``companion_path`` points at a
-   catalogued JPEG deletes two rows on one click). Returns true when the
-   grid's list is the lightbox's own list, so the lightbox does not remove
-   it twice. */
-export function removeDeletedLightboxPhoto(
-  /** @type {number} */ photoId,
-  /** @type {readonly unknown[]} */ lightboxPhotos,
-  /** @type {{deleted?: number} | null | undefined} */ deleteResult,
-) {
-  var removedFromLightboxList = false;
-  var index = state.photos.findIndex(function(photo) { return photo.id === photoId; });
-  if (index < 0) {
-    selection.removeFromBatch(photoId);
-    if (selection.focusedPhotoId === photoId) selection.focus(null);
-    renderGrid();
-    refreshBrowseSidebarCounts();
-    return removedFromLightboxList;
-  }
-  // Hold the primary's (folder_id, companion_path) before the splice: the
-  // backend resolves the companion the same way (same folder, filename ==
-  // companion_path), so matching that here keeps the grid consistent with the
-  // catalog without having to ask the server which rows it actually dropped.
-  var primary = state.photos[index];
-  var companionFolder = primary && typeof primary.folder_id === 'number'
-    ? primary.folder_id : null;
-  var companionName = primary && primary.companion_path ? primary.companion_path : '';
-  removedFromLightboxList = state.photos === lightboxPhotos;
+/* The catalogued RAW+JPEG companion row of a photo the server just deleted,
+   dropped from the loaded window; its id, or null when the window holds no
+   such row. The server deletes a companion row with its primary and reports
+   both in `deleted`. It finds the companion by folder and `companion_path`,
+   so the same match names the row here. */
+function removeDeletedCompanionRow(/** @type {BrowsePhoto} */ primary, /** @type {{deleted?: number} | null | undefined} */ deleteResult) {
+  if (!(Number(deleteResult && deleteResult.deleted) > 1)) return null;
+  if (typeof primary.folder_id !== 'number' || !primary.companion_path) return null;
+  var index = state.photos.findIndex(function(photo) {
+    return photo.folder_id === primary.folder_id && photo.filename === primary.companion_path;
+  });
+  var companion = state.photos[index];
+  if (!companion) return null;
   state.photos.splice(index, 1);
-  var deletedCount = Math.max(1, Number(deleteResult && deleteResult.deleted) || 1);
-  // ``deleted > 1`` means the companion row was also dropped. Drop it from the
-  // loaded window too, or the next photo reads a stale neighbour and the
-  // counter's ``state.photos.length`` guard keeps the pre-delete total.
-  /** @type {number | null} */ var companionId = null;
-  if (deletedCount > 1 && companionFolder != null && companionName) {
-    var companionIdx = state.photos.findIndex(function(photo) {
-      return photo.folder_id === companionFolder && photo.filename === companionName;
-    });
-    var companion = state.photos[companionIdx];
-    if (companionIdx >= 0 && companion) {
-      companionId = companion.id;
-      state.photos.splice(companionIdx, 1);
-      // ``browseAvailableLightboxPhotos`` (offline-view lightbox list) is a
-      // separate array from ``state.photos``; ``delete.js`` splices only the
-      // clicked primary from ``lbState.photoList``, so without this the
-      // companion stays navigable and the counter reads one high.
-      var availIdx = browseAvailableLightboxPhotos.findIndex(function(photo) {
-        return photo.id === companionId;
-      });
-      if (availIdx >= 0) browseAvailableLightboxPhotos.splice(availIdx, 1);
-    }
+  return companion.id;
+}
+
+/* Page hook for the lightbox's Delete: drop the deleted photo's row, and its
+   companion's when the server deleted both, from the grid before the lightbox
+   moves on to the next photo. The result's total shrinks by the rows that
+   left the loaded window. The server's `deleted` count is catalog-wide: a row
+   it counts beyond those may be a companion this result holds on a page that
+   is not loaded, or one the result never held. The page cannot tell which,
+   so it then asks the server for the total. */
+export function removeDeletedLightboxPhoto(/** @type {number} */ photoId, /** @type {{deleted?: number} | null | undefined} */ deleteResult) {
+  /** @type {number[]} */ var removedIds = [photoId];
+  var index = state.photos.findIndex(function(photo) { return photo.id === photoId; });
+  var primary = state.photos[index];
+  if (primary) {
+    state.photos.splice(index, 1);
+    var companionId = removeDeletedCompanionRow(primary, deleteResult);
+    if (companionId != null) removedIds.push(companionId);
+    pagination.removePhotos(removedIds.length);
+    if (Number(deleteResult && deleteResult.deleted) > removedIds.length) refreshBrowseTotals();
+    // The available-only list the lightbox pages through beside offline
+    // photos is a copy of the window, so it loses the same rows.
+    syncBrowseAvailableLightboxPhotos();
   }
-  // Decrement by the rows actually dropped from the current projection — the
-  // primary, plus the companion only when it was in ``state.photos`` (a
-  // RAW-only or primary-only filter leaves it out, and ``pagination.total``
-  // never counted it). Subtracting the server's raw count in that case would
-  // read the counter one low until the next page request.
-  var removedFromProjection = 1 + (companionId != null ? 1 : 0);
-  pagination.removePhotos(removedFromProjection);
-  selection.removeFromBatch(photoId);
-  if (companionId != null) selection.removeFromBatch(companionId);
-  if (selection.focusedPhotoId === photoId) selection.focus(null);
-  if (companionId != null && selection.focusedPhotoId === companionId) {
-    selection.focus(null);
-  }
+  removedIds.forEach(function(id) {
+    selection.removeFromBatch(id);
+    if (selection.focusedPhotoId === id) selection.focus(null);
+  });
   renderGrid();
   refreshBrowseSidebarCounts();
-  return removedFromLightboxList;
 }
 
 export function browsePhotoIsAvailable(/** @type {BrowsePhoto} */ photo) {
