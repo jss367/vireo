@@ -592,13 +592,17 @@ def test_rapid_review_filter_change_prompts_with_staged_decisions(live_server, p
         ],
         "summary": {"keep_count": 1, "review_count": 1, "reject_count": 0},
     }
-    _mock_pipeline_rapid_review(page, results=results, save_payloads=save_payloads)
+    _mock_pipeline_rapid_review(page, results=results, save_payloads=save_payloads,
+        shortcut_config={"keyboard_shortcuts": {"navigation": {"browse": "Alt+b"}}},)
 
     _goto_rapid_review(page, live_server)
     expect(page.locator("#applyBtn")).to_be_enabled()
     page.keyboard.press("x")
     page.locator("#queueFilter").select_option("all")
 
+    expect(page.locator("#queuePrompt")).to_be_visible()
+    page.keyboard.press("Alt+b")
+    expect(page).to_have_url(re.compile(r"/pipeline/rapid-review$"))
     expect(page.locator("#queuePrompt")).to_be_visible()
     page.keyboard.press("Control+Enter")
     expect(page.locator("#queuePrompt")).to_be_visible()

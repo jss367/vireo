@@ -51,19 +51,19 @@ export function renderShortcutsEditor() {
   /** @type {HTMLElement} */ (document.getElementById('shortcutsEditor')).innerHTML = html;
 }
 
-/** The other action in `ctx` already bound to `keyStr`, if any. @param {string} ctx @param {string} action @param {string | undefined} keyStr */
-export function findConflict(ctx, action, keyStr) {
+/** The other action in `ctx` already bound to `keyStr`, if any. @param {string} ctx @param {string} action @param {string | undefined} keyStr @param {ShortcutConfig | null} [config] */
+export function findConflict(ctx, action, keyStr, config = state.currentShortcuts) {
   if (!keyStr) return null;
-  var bindings = state.currentShortcuts && state.currentShortcuts[ctx];
+  var bindings = config && config[ctx];
   if (!bindings) return null;
   for (var other in bindings) {
     if (other === action) continue;
     if (bindings[other] === keyStr) return SHORTCUT_LABELS[ctx]?.[other] || 'another shortcut';
   }
   const rapidAction = ctx === 'pipeline_rapid_review' ? action :
-    ctx === 'browse' ? Object.keys(RAPID_SHARED).find(id => RAPID_SHARED[id] === action && !(id in (state.currentShortcuts?.pipeline_rapid_review || {}))) : null;
-  if (rapidAction && state.currentShortcuts) {
-    for (const [other, key] of Object.entries(effectiveRapidBindings(state.currentShortcuts))) {
+    ctx === 'browse' ? Object.keys(RAPID_SHARED).find(id => RAPID_SHARED[id] === action && !(id in (config?.pipeline_rapid_review || {}))) : null;
+  if (rapidAction && config) {
+    for (const [other, key] of Object.entries(effectiveRapidBindings(config))) {
       if (other !== rapidAction && key === keyStr) return 'Rapid Review · ' + SHORTCUT_LABELS.pipeline_rapid_review?.[other];
     }
   }
@@ -109,21 +109,38 @@ export function isBarePageShortcut(keyStr) {
   return false;
 }
 
-/** @param {string} ctx @param {string} action */
-export function resetShortcut(ctx, action) {
+// Validate the candidate before changing the live editor state or saving.
+/** @param {string} ctx @param {Record<string,string | undefined>} values @param {string[]} actions */
+function commitReset(ctx, values, actions) {
   if (!state.currentShortcuts) return;
-  if (ctx === 'pipeline_rapid_review' && action in RAPID_SHARED) delete state.currentShortcuts[ctx]?.[action];
-  else (state.currentShortcuts[ctx] = state.currentShortcuts[ctx] || {})[action] = (SHORTCUT_DEFAULTS[ctx] || {})[action];
+  const candidate = {...state.currentShortcuts, [ctx]: values};
+  const bindings = ctx === 'pipeline_rapid_review' ? effectiveRapidBindings(candidate) : values;
+  for (const action of actions) {
+    const conflict = findConflict(ctx, action, bindings[action], candidate);
+    if (conflict) {
+      window.showToast?.('Cannot reset shortcut: conflicts with ' + conflict + '.', 'error');
+      return;
+    }
+  }
+  state.currentShortcuts = candidate;
   renderShortcutsEditor();
   saveShortcuts();
 }
 
+/** @param {string} ctx @param {string} action */
+export function resetShortcut(ctx, action) {
+  if (!state.currentShortcuts) return;
+  const values = {...state.currentShortcuts[ctx]};
+  if (ctx === 'pipeline_rapid_review' && action in RAPID_SHARED) delete values[action];
+  else values[action] = SHORTCUT_DEFAULTS[ctx]?.[action] || '';
+  commitReset(ctx, values, [action]);
+}
+
 /** @param {string} ctx */
 export function resetContext(ctx) {
-  if (!state.currentShortcuts) return;
-  state.currentShortcuts[ctx] = defaultsFor(ctx);
-  renderShortcutsEditor();
-  saveShortcuts();
+  const values = defaultsFor(ctx);
+  const actions = Object.keys(ctx === 'pipeline_rapid_review' ? SHORTCUT_LABELS.pipeline_rapid_review || {} : values);
+  commitReset(ctx, values, actions);
 }
 
 export function saveShortcuts() {

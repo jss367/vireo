@@ -30,7 +30,7 @@ function moveFocus(delta, withinCategory = false) {
     !document.getElementById('missesSection-' + cat)?.classList.contains('collapsed'));
   const cat = state.focusedCategory;
   if (!cat || !categories.includes(cat)) {
-    if (categories[0]) setFocused(categories[0], 0);
+    if (!withinCategory && categories[0]) setFocused(categories[0], 0);
     return;
   }
   const length = state.missesData[cat].length;
@@ -133,6 +133,7 @@ function missNavigationDelta(key) {
     moveFocus(delta);
     return;
   }
+  if (document.getElementById('missesSection-' + state.focusedCategory)?.classList.contains('collapsed')) return;
   var photos = state.missesData[state.focusedCategory] || [];
   var oldP = photos[state.focusedIndex];
   if (oldP) setSelected(oldP.id, true);

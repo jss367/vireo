@@ -8,7 +8,9 @@ if (window.Keymap && window.Keymap.setScope) {
 bindQueuePromptChoices();
 registerRapidHistoryHooks();
 
-loadRapidShortcuts().then(initRapidReview);
+loadRapidShortcuts().catch(error => {
+  console.warn('Could not load Rapid Review shortcuts.', error);
+}).then(initRapidReview);
 /** @type {HTMLElement} */ (document.getElementById('photoStage')).addEventListener('pointerdown', rapidZoomPointerDown);
 /** @type {HTMLElement} */ (document.getElementById('photoStage')).addEventListener('pointermove', rapidZoomPointerMove);
 /** @type {HTMLElement} */ (document.getElementById('photoStage')).addEventListener('pointerup', rapidZoomPointerUp);

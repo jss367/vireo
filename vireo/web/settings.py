@@ -574,6 +574,13 @@ def _apply_config_keyboard_shortcuts(body: JsonDict, current: JsonDict) -> None:
     if "keyboard_shortcuts" in body:
         shortcuts = body["keyboard_shortcuts"]
         if isinstance(shortcuts, dict):
+            shortcuts = {
+                ctx_name: {
+                    action: key.strip().lower() for action, key in actions.items()
+                    if isinstance(key, str)
+                }
+                for ctx_name, actions in shortcuts.items() if isinstance(actions, dict)
+            }
             cfg.migrate_keyboard_shortcuts(shortcuts)
             valid_contexts = cfg.DEFAULTS["keyboard_shortcuts"]
             validated = {}

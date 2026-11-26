@@ -294,7 +294,7 @@ function applyHotkeyHints(navShortcuts) {
 // built-in suppression, so each registered nav action checks it itself
 // (Option B from the migration review). Without this, pressing a configured
 // navigation chord while the lightbox is open would close it AND navigate.
-export var OVERLAY_SELECTOR = '.lightbox-overlay.active, .pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .inspect-overlay.open, .shortcuts-overlay.open, .help-overlay.active, .report-overlay.active';
+export var OVERLAY_SELECTOR = '.lightbox-overlay.active, .pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .inspect-overlay.open, .shortcuts-overlay.open, .help-overlay.active, .report-overlay.active, #queuePrompt:not([hidden])';
 
 /** @param {Record<string,string>} navShortcuts */
 function setupNavKeydown(navShortcuts) {

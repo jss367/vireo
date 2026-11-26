@@ -19,17 +19,20 @@ function bindReviewKeyboard() {
     if (document.querySelector(/** @type {'div'} */ ('.lightbox-overlay.active, .pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .inspect-overlay.open, .shortcuts-overlay.open, .help-overlay.active, .report-overlay.active'))) return;
     // The toolbar hint promises "first visible card": use the grid's filtered
     // + sorted view, not the API-ordered raw predictions array.
-    var pending = visiblePendingCards();
-    const first = pending[0];
-    if (!first) return;
-    if (matchesShortcut(e, _shortcuts.accept)) { e.preventDefault(); acceptPrediction(first.id); }
-    else if (matchesShortcut(e, _shortcuts.reject)) { e.preventDefault(); rejectPrediction(first.id); }
-    else if (matchesShortcut(e, _shortcuts.skip_pending)) {
+    if (matchesShortcut(e, _shortcuts.skip_pending)) {
+      const pending = getVisibleItems().filter(p => p.status === 'pending');
+      const first = pending[0];
+      if (!first) return;
       e.preventDefault();
       if (pending.length > 1) {
         skippedPredictionOrder.set(first.id, ++predictionSkipSequence);
         renderGrid();
       } else showToast('This is the last pending prediction in this view.', 'info');
+      return;
     }
+    const first = visiblePendingCards()[0];
+    if (!first) return;
+    if (matchesShortcut(e, _shortcuts.accept)) { e.preventDefault(); acceptPrediction(first.id); }
+    else if (matchesShortcut(e, _shortcuts.reject)) { e.preventDefault(); rejectPrediction(first.id); }
   });
 }

@@ -117,7 +117,7 @@ function bindQueuePromptChoices() {
 
 /** @param {Partial<RapidQueue>} patch */
 async function changeQueue(patch) {
-  if (rapid.applying) {
+  if (rapid.applying || isQueuePromptOpen()) {
     renderQueueControls();
     return;
   }

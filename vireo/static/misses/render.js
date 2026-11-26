@@ -129,7 +129,7 @@ export function render() {
         '</span>' +
         (p.is_species_representative ? '<span class="miss-card-representative">Top highlight</span>' : '') +
         '<button class="miss-card-unflag" ' +
-          'title="Unflag as miss (U)" ' +
+          'title="Unmark missed" ' +
           'data-testid="miss-unflag-' + cat + '-' + p.id + '" ' +
           (state.previewActive ? 'disabled' : '') + '>&times;</button>' +
       '</div>' +

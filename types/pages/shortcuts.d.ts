@@ -4,6 +4,7 @@
 type ShortcutConfig = Record<string, Record<string, string | undefined>>;
 interface ShortcutParts {key: string; ctrl: boolean; meta: boolean; shift: boolean; alt: boolean}
 interface Window {
+  showToast?(message: string, kind?: string): void;
   safeFetch<T>(url: string, init?: RequestInit, options?: {toast?: boolean}): Promise<T>;
   parseShortcut(shortcut: string): ShortcutParts;
   formatShortcut(shortcut: string | undefined): string;
