@@ -71,6 +71,10 @@
     }
     switcher.open = true;
     var menu = /** @type {HTMLElement} */ (switcher.document.getElementById('wsMenu'));
+    // closeMenu leaves the previous filter's rows in the DOM; render the cached
+    // workspaces so the visible list matches the reset query before the menu
+    // becomes visible, and stays correct if the reload below fails.
+    if (switcher.workspaces.length) renderWorkspaceMenu(switcher);
     var loading = loadWorkspaceMenu(switcher).then(function() { focusSearch(switcher); });
     menu.classList.add('open');
     // On a reopen the field is already showing, so typing can start before the list returns.

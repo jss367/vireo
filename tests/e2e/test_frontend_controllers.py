@@ -246,6 +246,49 @@ def test_workspace_menu_has_no_search_field_for_a_short_list(page):
     expect(page.locator("#wsMenuSearch")).to_be_hidden()
 
 
+def test_workspace_menu_reopen_clears_stale_filter_before_reload(page):
+    """After a filter and close, reopening re-renders the cached list before the
+    reload resolves, so stale filter rows never flash and survive a failed reload."""
+    page.set_content('''
+        <button id="wsCurrentBtn"></button>
+        <div id="wsDropdown"><div id="wsMenu">
+          <input type="search" id="wsMenuSearch" hidden><div id="wsMenuList"></div>
+        </div></div>
+        <span id="wsCurrentName"></span>
+    ''')
+    page.add_script_tag(path=str(STATIC / "vireo-workspace-switcher.js"))
+    page.evaluate('''([names]) => {
+        window.pending = [];
+        window.autoResolve = true;
+        const workspaces = names.map((name, i) => ({id: i + 1, name, pinned_at: null}));
+        window.controller = VireoWorkspaceSwitcher.create({
+            fetch: (url) => new Promise((resolve, reject) => {
+                const reply = url === '/api/workspaces' ? workspaces : {id: 1};
+                if (window.autoResolve) resolve(reply);
+                else pending.push({ resolve: () => resolve(reply), reject });
+            }),
+            navigate() {},
+            clearWorkspaceCursors() {},
+        });
+    }''', [TRIPS])
+    page.evaluate("async () => { await controller.toggle(); }")
+    # Filter down to one row, close, then block the reload so the test can
+    # inspect the DOM before loadWorkspaceMenu has a chance to re-render.
+    search = page.locator("#wsMenuSearch")
+    search.fill("Peru")
+    expect(page.locator("#wsMenuList")).to_have_text("No workspace matches “Peru”")
+    page.keyboard.press("Escape")
+    page.evaluate("() => { window.autoResolve = false; controller.toggle(); }")
+    # The cached workspaces re-render before the reload resolves; the stale
+    # "No workspace matches" row from the last filter is gone.
+    expect(page.locator(".ws-menu-item")).to_have_count(len(TRIPS))
+    expect(page.locator("#wsMenuList")).not_to_contain_text("Peru")
+    # The reload failing leaves the cached list visible, not stale filter rows.
+    page.evaluate("() => { pending.forEach(p => p.reject(new Error('offline'))); }")
+    expect(page.locator(".ws-menu-item")).to_have_count(len(TRIPS))
+    expect(page.locator("#wsMenuList")).not_to_contain_text("Peru")
+
+
 def test_workspace_modal_closes_menu_and_cancels_deferred_listener(page):
     mount_workspace_switcher(page)
     page.evaluate('''() => {
