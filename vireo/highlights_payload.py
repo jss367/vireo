@@ -552,12 +552,20 @@ def species_canonicalizer(db):
 
     Bucket collection resolves the same handful of species strings for
     thousands of candidate rows; caching avoids a keyword lookup per row.
+    The casing for names no keyword holds yet is read once, on the first
+    name: detecting it loads the settings file and scans every species
+    keyword, and a workspace-wide page resolves a thousand such names.
     """
     cache = {}
+    convention = []
 
     def canonicalize(name):
         if name not in cache:
-            cache[name] = db.keyword_taxa.resolve_species_display(name)
+            if not convention:
+                convention.append(db.keyword_taxa.species_case_convention())
+            cache[name] = db.keyword_taxa.resolve_species_display(
+                name, case_convention=convention[0],
+            )
         return cache[name]
 
     return canonicalize

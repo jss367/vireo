@@ -1018,6 +1018,53 @@ def test_get_duplicate_loser_disk_summary(db, folder):
     assert (row["n"], row["total_bytes"]) == (2, 40)
 
 
+def _unindexed_scans(db, call):
+    """Tables ``call`` reads row by row, taken from each statement's query plan."""
+    statements = []
+    db.conn.set_trace_callback(statements.append)
+    try:
+        call()
+    finally:
+        db.conn.set_trace_callback(None)
+    assert statements
+    scans = []
+    for sql in statements:
+        for step in db.conn.execute("EXPLAIN QUERY PLAN " + sql):
+            detail = step["detail"]
+            if detail.startswith("SCAN ") and " USING " not in detail:
+                scans.append(detail)
+    return scans
+
+
+@pytest.mark.parametrize("read", ["loser_disk_summary", "cleanup_rows"])
+def test_duplicate_loser_reads_never_scan_the_photos_table(db, folder, read):
+    """The navbar asks for the summary on every page: it must start from the
+    file-hash index, not read every photo row to find the rejected ones."""
+    fid, _ = folder
+    _photo(db, fid, "keep.jpg", "H")
+    _photo(db, fid, "loser.jpg", "H", flag="rejected")
+    db.conn.commit()
+
+    scans = _unindexed_scans(db, getattr(db.duplicates, read))
+
+    # The only row-by-row read is of the handful of shared hashes.
+    assert scans in ([], ["SCAN shared"])
+
+
+def test_duplicate_loser_summary_ignores_hashes_no_kept_photo_holds(db, folder):
+    fid, _ = folder
+    # Two rejected copies of one file, with nothing kept: not cleanup candidates.
+    _photo(db, fid, "r1.jpg", "GONE", flag="rejected")
+    _photo(db, fid, "r2.jpg", "GONE", flag="rejected")
+    # Two kept copies of another: unresolved, nothing rejected to clean up.
+    _photo(db, fid, "k1.jpg", "BOTH")
+    _photo(db, fid, "k2.jpg", "BOTH")
+    db.conn.commit()
+
+    assert tuple(db.duplicates.loser_disk_summary()) == (0, 0)
+    assert db.duplicates.cleanup_rows() == []
+
+
 def test_photo_rows_with_folder_chunks_by_the_callers_cap(db, folder):
     """The duplicate scan's row read: caller columns and filter, caller chunk size."""
     fid, path = folder

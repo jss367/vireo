@@ -44,6 +44,16 @@ class _DeferredPlan:
 
 DEFERRED_PLAN = _DeferredPlan()
 
+# Hashes held by more than one catalog row, read from the file_hash index
+# alone. A duplicate loser shares its hash with a kept row, so the queries
+# that look for losers start here: selecting on ``flag`` first has no index
+# to use and reads every row of ``photos``, which holds the embeddings and
+# EXIF and is gigabytes on a large catalog.
+_SHARED_HASHES_SQL = (
+    "SELECT file_hash FROM photos WHERE file_hash IS NOT NULL"
+    " GROUP BY file_hash HAVING COUNT(*) > 1"
+)
+
 
 def _volume_offline(path):
     """True when ``path`` sits on a mount-shaped volume that is not reachable.
@@ -219,11 +229,11 @@ class DuplicatesRepository:
         ``total_bytes`` sums their stored ``file_size`` (0 when there are none).
         """
         return self.conn.execute(
-            """
-            SELECT COUNT(*) AS n, COALESCE(SUM(file_size), 0) AS total_bytes
-            FROM photos p
+            f"""
+            SELECT COUNT(*) AS n, COALESCE(SUM(p.file_size), 0) AS total_bytes
+            FROM ({_SHARED_HASHES_SQL}) shared
+            CROSS JOIN photos p ON p.file_hash = shared.file_hash
             WHERE p.flag = 'rejected'
-              AND p.file_hash IS NOT NULL
               AND EXISTS (
                   SELECT 1 FROM photos q
                   WHERE q.file_hash = p.file_hash AND (q.flag IS NULL OR q.flag != 'rejected')
@@ -239,13 +249,14 @@ class DuplicatesRepository:
         their flags consistent if another request resolves a group meanwhile.
         """
         return self.conn.execute(
-            """
+            f"""
             SELECT p.id, p.filename, p.file_hash, p.file_mtime, p.rating,
                    p.file_size, p.flag, f.path AS folder_path
             FROM photos p LEFT JOIN folders f ON f.id = p.folder_id
             WHERE p.file_hash IN (
-                SELECT r.file_hash FROM photos r
-                WHERE r.flag = 'rejected' AND r.file_hash IS NOT NULL
+                SELECT r.file_hash FROM ({_SHARED_HASHES_SQL}) shared
+                CROSS JOIN photos r ON r.file_hash = shared.file_hash
+                WHERE r.flag = 'rejected'
                   AND EXISTS (
                       SELECT 1 FROM photos k WHERE k.file_hash = r.file_hash
                       AND (k.flag IS NULL OR k.flag != 'rejected')

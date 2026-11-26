@@ -35,3 +35,41 @@ def test_search_uses_canonical_accepted_name_without_classifier_guess():
     assert [p["id"] for b in found for p in b["photos"]] == [1]
     found, _ = filter_highlight_sections(buckets, other, "Least Grebe")
     assert not found
+
+
+def test_species_canonicalizer_reads_the_case_convention_once(tmp_path, monkeypatch):
+    """A workspace-wide Highlights page resolves about a thousand predicted
+    names no keyword holds. Learning the casing to apply reloads the settings
+    file and scans every species keyword, so it happens once per page."""
+    from db import Database
+    from highlights_payload import species_canonicalizer
+    from repositories.keyword_taxa import KeywordTaxonRepository
+
+    db = Database(str(tmp_path / "catalog.db"))
+    try:
+        for name in ("Black phoebe", "Wood duck", "Least grebe"):
+            db.keywords.add(name, is_species=True)
+        names = ["Canada Jay", "Steller's Jay", "Black Phoebe", "Canada Jay"]
+        expected = [db.keyword_taxa.resolve_species_display(name) for name in names]
+        assert expected[:2] == ["Canada jay", "Steller's jay"]
+
+        calls = []
+        detect = KeywordTaxonRepository.species_case_convention
+        monkeypatch.setattr(
+            KeywordTaxonRepository, "species_case_convention",
+            lambda self: calls.append(1) or detect(self),
+        )
+        canonicalize = species_canonicalizer(db)
+        assert [canonicalize(name) for name in names] == expected
+        assert len(calls) == 1
+    finally:
+        db.close()
+
+
+def test_species_match_key_remembers_names_without_changing_any_answer():
+    from keyword_normalization import keyword_match_key
+    from species_memberships import species_match_key
+
+    for name in ("Black Phoebe", "  black   PHOEBE ", "Éclair", "’Apapane", "", None):
+        assert species_match_key(name) == keyword_match_key(name)
+        assert species_match_key(name) == keyword_match_key(name)

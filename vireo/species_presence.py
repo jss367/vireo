@@ -46,10 +46,10 @@ Pure: no database, config or I/O.
 import math
 from dataclasses import dataclass
 
-from keyword_normalization import keyword_match_key
 from species_memberships import (
     candidate_subjects,
     primary_subject,
+    species_match_key,
     subject_is_background_like,
     subject_is_chosen,
     subject_is_whole_frame,
@@ -185,7 +185,7 @@ def species_presence(row, memberships, canonicalize_species=None):
         name = subject["species"]
         if canonicalize_species is not None:
             name = canonicalize_species(name) or name
-        return keyword_match_key(name)
+        return species_match_key(name)
 
     subjects = [
         s for s in candidate_subjects(row)
@@ -203,22 +203,22 @@ def species_presence(row, memberships, canonicalize_species=None):
         in_view = subjects
         main = primary_subject(subjects)
     main_key = key_of(main) if main is not None else None
-    if main_key not in {keyword_match_key(n) for n in names}:
+    if main_key not in {species_match_key(n) for n in names}:
         return presence
     tagged = {
-        keyword_match_key(m.species) for m in memberships
+        species_match_key(m.species) for m in memberships
         if m.accepted_name is not None
     }
 
     viewed = {id(s) for s in in_view}
     floor = CO_SUBJECT_AREA_RATIO * _area(main)
-    bucket_keys = {keyword_match_key(n) for n in names}
+    bucket_keys = {species_match_key(n) for n in names}
     unnamed_co_subject = any(
         key_of(s) not in bucket_keys and floor > 0 and _area(s) >= floor
         for s in in_view
     )
     for name in names:
-        key = keyword_match_key(name)
+        key = species_match_key(name)
         if key in tagged and (main_key not in tagged or unnamed_co_subject):
             continue
         located = [s for s in subjects if key_of(s) == key]

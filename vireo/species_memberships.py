@@ -22,6 +22,7 @@ scored 0.37: the strip runs the frame's full height and the hawk crop
 matches its species label better.
 """
 
+import functools
 from dataclasses import dataclass
 
 from background_match import CONFIDENT_DETECTION, is_background_like
@@ -43,6 +44,17 @@ SECONDARY_SUBJECT_FLOOR = CONFIDENT_DETECTION
 FRAME_SPANNING_EXTENT = 0.95
 
 FULL_IMAGE_DETECTOR = "full-image"
+
+
+@functools.lru_cache(maxsize=16384)
+def species_match_key(name):
+    """``keyword_match_key(name)``, remembered per name.
+
+    Bucketing asks for the key of every keyword and every subject's
+    prediction on every photo, and a workspace has a few hundred distinct
+    species names across tens of thousands of photos.
+    """
+    return keyword_match_key(name)
 
 
 @dataclass(frozen=True)
@@ -238,7 +250,7 @@ def photo_species_memberships(
     accepted_keys = set()
     subjects = candidate_subjects(row)
     keyed = [
-        (keyword_match_key(canonical(s["species"])), canonical(s["species"]), s)
+        (species_match_key(canonical(s["species"])), canonical(s["species"]), s)
         for s in subjects
     ]
     best_by_key = {}
@@ -247,7 +259,7 @@ def photo_species_memberships(
     top = subjects[0] if subjects else None
     for name in names:
         bucket = canonical(name)
-        key = keyword_match_key(bucket)
+        key = species_match_key(bucket)
         if key in accepted_keys:
             continue
         accepted_keys.add(key)
@@ -293,9 +305,9 @@ def explain_subject_roles(row, canonicalize_species=None):
         return canonicalize_species(name) or name
 
     names = row.get("species_names") or []
-    tag_keys = {keyword_match_key(canonical(n)) for n in names}
+    tag_keys = {species_match_key(canonical(n)) for n in names}
     subjects = candidate_subjects(row)
-    keys = [(s, keyword_match_key(canonical(s["species"]))) for s in subjects]
+    keys = [(s, species_match_key(canonical(s["species"]))) for s in subjects]
     opened = {
         id(m.prediction): m.species
         for m in photo_species_memberships(row, canonicalize_species)
