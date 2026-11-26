@@ -13,6 +13,7 @@ import glob
 import logging
 import os
 import re
+import shutil
 import sqlite3
 import threading
 from collections.abc import Callable
@@ -846,15 +847,84 @@ def _backup_path(db_path, target_version):
     return f"{db_path}.pre-v{target_version}.bak"
 
 
+# Room the backup must leave on the volume beyond its own size: the
+# migrations that follow write a WAL on the same volume, and SQLite needs
+# scratch pages while it vacuums. The larger of the two bounds applies.
+_BACKUP_HEADROOM_FRACTION = 0.05
+_BACKUP_HEADROOM_MIN_BYTES = 64 * 1024 * 1024
+
+
+class MigrationBackupError(RuntimeError):
+    """The pre-migration backup could not be written, so the upgrade stopped.
+
+    Raised before any migration touches the catalog, so the live file is
+    still at its old schema version and opens again with the build that
+    wrote it, or with this build once the backup can be written. The message
+    is shown to the user as the startup failure reason, so it names the
+    catalog, the backup it tried to write and what to free or fix.
+    """
+
+    def __init__(self, db_path: str, backup_path: str, cause: str) -> None:
+        self.db_path = db_path
+        self.backup_path = backup_path
+        self.cause = cause
+        super().__init__(
+            f"Vireo needs to upgrade the catalog at {db_path} and backs it up "
+            f"first, but could not write the backup {backup_path}: {cause}. "
+            "The catalog was not changed. Fix this and relaunch Vireo to "
+            "finish the upgrade."
+        )
+
+
+def _format_gb(size: int) -> str:
+    return f"{size / (1024 ** 3):.1f} GB"
+
+
+def _backup_space_needed(db_path: str) -> int:
+    """Bytes the backup and the migrations after it need on the volume.
+
+    ``VACUUM INTO`` writes the live pages of the main file plus whatever the
+    WAL holds that has not been checkpointed, so their combined size bounds
+    the backup.
+    """
+    size = os.path.getsize(db_path)
+    with contextlib.suppress(OSError):
+        size += os.path.getsize(db_path + "-wal")
+    headroom = max(int(size * _BACKUP_HEADROOM_FRACTION), _BACKUP_HEADROOM_MIN_BYTES)
+    return size + headroom
+
+
+def _check_backup_space(db_path: str, backup: str) -> None:
+    folder = os.path.dirname(os.path.abspath(backup))
+    needed = _backup_space_needed(db_path)
+    try:
+        free = shutil.disk_usage(folder).free
+    except OSError as e:
+        raise MigrationBackupError(
+            db_path, backup, f"could not read the free space in {folder} ({e})"
+        ) from e
+    if free < needed:
+        raise MigrationBackupError(
+            db_path,
+            backup,
+            f"the drive holding {folder} has {_format_gb(free)} free and the "
+            f"backup needs about {_format_gb(needed)}. Free at least "
+            f"{_format_gb(needed - free)} on that drive",
+        )
+
+
 def _snapshot_before_migrations(db_path, target_version):
     """Snapshot the database before pending migrations touch it.
 
     ``VACUUM INTO`` produces a consistent single-file copy even under WAL.
     A snapshot from an earlier (possibly failed) attempt at the same target
     version is kept as-is — it reflects an older, safer state than whatever
-    partial progress the failed run left behind. Backup failure (disk full,
-    read-only volume) is logged but never blocks startup: per-migration
-    transactions still protect the live file.
+    partial progress the failed run left behind.
+
+    No migration runs without this snapshot. The free space is checked
+    first, and a backup that still fails (read-only volume, permission
+    denied, the disk filling up during the copy) raises
+    ``MigrationBackupError`` before the catalog is opened for migration.
     """
     backup = _backup_path(db_path, target_version)
     if os.path.exists(backup):
@@ -862,27 +932,29 @@ def _snapshot_before_migrations(db_path, target_version):
     tmp = backup + ".tmp"
     with contextlib.suppress(OSError):
         os.remove(tmp)
+    _check_backup_space(db_path, backup)
     try:
         with contextlib.closing(sqlite3.connect(db_path)) as conn:
             conn.execute("VACUUM INTO ?", (tmp,))
         replace_file(tmp, backup)
-        log.info("Backed up database to %s before schema migration", backup)
-    except (sqlite3.Error, OSError):
-        log.warning(
-            "Could not back up %s before schema migration; continuing without "
-            "a snapshot", db_path, exc_info=True,
+    except (sqlite3.Error, OSError) as e:
+        log.error(
+            "Could not back up %s before schema migration; not migrating",
+            db_path, exc_info=True,
         )
         with contextlib.suppress(OSError):
             os.remove(tmp)
+        raise MigrationBackupError(db_path, backup, str(e)) from e
+    log.info("Backed up database to %s before schema migration", backup)
 
 
 _BACKUP_SUFFIX_RE = re.compile(r"\.pre-v(\d+)\.bak\Z")
 
 
 def _prune_stale_backups(db_path, keep_version):
-    # If the target-version snapshot never landed (VACUUM INTO failed, the
-    # volume filled up, etc.), keep every older `.pre-v*.bak` — deleting them
-    # would leave the upgraded database with no recovery snapshot at all.
+    # Without the target-version snapshot, keep every older `.pre-v*.bak`:
+    # deleting them would leave the upgraded database with no recovery
+    # snapshot at all.
     keep = _backup_path(db_path, keep_version)
     if not os.path.exists(keep):
         return

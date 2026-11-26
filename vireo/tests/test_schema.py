@@ -237,14 +237,89 @@ def test_ensure_schema_keeps_older_backups_when_snapshot_fails(tmp_path, monkeyp
     with sqlite3.connect(db_path) as conn:
         conn.execute(f"PRAGMA user_version = {schema.OLDEST_UPGRADABLE_VERSION}")
 
-    # Simulate _snapshot_before_migrations failing silently (its except
-    # branch already swallows sqlite3.Error / OSError and logs a warning).
+    # Guard the prune on its own: a snapshot step that returns without
+    # writing the target-version backup must not cost the older ones.
     monkeypatch.setattr(schema, "_snapshot_before_migrations", lambda *a, **k: None)
 
     schema.ensure_schema(db_path)
 
     assert not os.path.exists(f"{db_path}.pre-v{latest}.bak")
     assert os.path.exists(stale_backup)
+
+
+def _db_one_upgrade_behind(tmp_path):
+    db_path = str(tmp_path / "vireo.db")
+    schema.ensure_schema(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(f"PRAGMA user_version = {schema.OLDEST_UPGRADABLE_VERSION}")
+    return db_path
+
+
+def _user_version(db_path):
+    with sqlite3.connect(db_path) as conn:
+        return conn.execute("PRAGMA user_version").fetchone()[0]
+
+
+def test_ensure_schema_refuses_to_migrate_without_room_for_backup(tmp_path, monkeypatch):
+    """Too little free space for the backup stops the upgrade before any
+    migration runs, and the error tells the user how much to free."""
+    import collections
+    import glob
+
+    db_path = _db_one_upgrade_behind(tmp_path)
+    usage = collections.namedtuple("usage", "total used free")
+    monkeypatch.setattr(schema.shutil, "disk_usage", lambda _path: usage(0, 0, 1024))
+
+    with pytest.raises(schema.MigrationBackupError) as excinfo:
+        schema.ensure_schema(db_path)
+
+    message = str(excinfo.value)
+    assert db_path in message
+    assert "has 0.0 GB free" in message
+    assert "Free at least" in message
+    assert "The catalog was not changed" in message
+    assert _user_version(db_path) == schema.OLDEST_UPGRADABLE_VERSION
+    assert glob.glob(f"{db_path}.pre-v*") == []
+
+
+def test_ensure_schema_refuses_to_migrate_when_backup_write_fails(tmp_path, monkeypatch):
+    """A backup that fails after the space check (read-only volume, the
+    disk filling during the copy) stops the upgrade and leaves no partial
+    backup behind."""
+    import errno
+    import glob
+
+    db_path = _db_one_upgrade_behind(tmp_path)
+
+    def fail_replace(_src, _dst):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(schema, "replace_file", fail_replace)
+
+    with pytest.raises(schema.MigrationBackupError) as excinfo:
+        schema.ensure_schema(db_path)
+
+    assert "No space left on device" in str(excinfo.value)
+    assert _user_version(db_path) == schema.OLDEST_UPGRADABLE_VERSION
+    assert glob.glob(f"{db_path}.pre-v*") == []
+
+
+def test_ensure_schema_existing_backup_skips_space_check(tmp_path, monkeypatch):
+    """A backup from an earlier attempt at the same target already protects
+    the catalog, so a full disk does not block finishing the upgrade."""
+    db_path = _db_one_upgrade_behind(tmp_path)
+    latest = schema._latest_version()
+    with open(f"{db_path}.pre-v{latest}.bak", "w") as f:
+        f.write("earlier snapshot")
+
+    def no_disk_usage(_path):
+        raise AssertionError("free space checked although the backup exists")
+
+    monkeypatch.setattr(schema.shutil, "disk_usage", no_disk_usage)
+
+    schema.ensure_schema(db_path)
+
+    assert _user_version(db_path) == latest
 
 
 def test_ensure_schema_newer_db_raises_incompatible_database_error(tmp_path):
