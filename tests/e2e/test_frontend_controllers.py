@@ -246,6 +246,66 @@ def test_workspace_menu_has_no_search_field_for_a_short_list(page):
     expect(page.locator("#wsMenuSearch")).to_be_hidden()
 
 
+def test_workspace_menu_clears_query_when_the_field_is_hidden(page):
+    """A reload that brings the count below the search threshold hides the field,
+    so any query typed before the reload resolves is dropped — otherwise an
+    invisible filter would leave an apparently truncated list."""
+    page.set_content('''
+        <button id="wsCurrentBtn"></button>
+        <div id="wsDropdown"><div id="wsMenu">
+          <input type="search" id="wsMenuSearch" hidden><div id="wsMenuList"></div>
+        </div></div>
+        <span id="wsCurrentName"></span>
+    ''')
+    page.add_script_tag(path=str(STATIC / "vireo-workspace-switcher.js"))
+    page.evaluate('''([eight, seven]) => {
+        window.pending = [];
+        window.workspaces = eight.map((name, i) => ({id: i + 1, name, pinned_at: null}));
+        window.controller = VireoWorkspaceSwitcher.create({
+            fetch: (url) => new Promise((resolve) => {
+                const reply = url === '/api/workspaces' ? window.workspaces : {id: 1};
+                if (pending.hold) pending.push({ resolve: () => resolve(reply) });
+                else resolve(reply);
+            }),
+            navigate() {},
+            clearWorkspaceCursors() {},
+        });
+    }''', [TRIPS, TRIPS[:7]])
+    page.evaluate("async () => { await controller.toggle(); }")
+    expect(page.locator("#wsMenuSearch")).to_be_visible()
+    # Close and reopen with a reload that returns a shorter list, held pending so
+    # the user can type during the gap between sync focus and completion.
+    page.keyboard.press("Escape")
+    page.evaluate("() => { pending.hold = true; window.workspaces = window.workspaces.slice(0, 7); controller.toggle(); }")
+    page.locator("#wsMenuSearch").fill("Peru")
+    # Field is still visible because the reload is pending; the cached list is filtered.
+    expect(page.locator("#wsMenuList")).to_have_text("No workspace matches “Peru”")
+    page.evaluate("() => { pending.forEach(p => p.resolve()); }")
+    # The reload drops the count below the threshold: the field hides and the filter clears.
+    expect(page.locator("#wsMenuSearch")).to_be_hidden()
+    expect(page.locator("#wsMenuSearch")).to_have_value("")
+    expect(page.locator(".ws-menu-item")).to_have_count(7)
+
+
+def test_workspace_menu_reload_does_not_steal_focus_after_user_moved_it(page):
+    """On a cached reopen the sync focusSearch focuses the field; the reload
+    callback then runs with the fetch result, but must not pull focus back out
+    of a row the user has just tabbed to."""
+    mount_workspace_search(page, TRIPS)
+    page.keyboard.press("Escape")
+    # Start a reopen whose reload will complete asynchronously; move focus
+    # before the completion callback runs.
+    page.evaluate('''async () => {
+        window.loading = controller.toggle();
+        document.getElementById('wsCurrentBtn').focus();
+        await loading;
+    }''')
+    # The cached list is still rendered and the button still owns focus — the
+    # reload's completion callback did not pull focus back into the field.
+    expect(page.locator("#wsCurrentBtn")).to_be_focused()
+    expect(page.locator(".ws-menu-item")).to_have_count(len(TRIPS))
+
+
 def test_workspace_menu_reopen_clears_stale_filter_before_reload(page):
     """After a filter and close, reopening re-renders the cached list before the
     reload resolves, so stale filter rows never flash and survive a failed reload."""

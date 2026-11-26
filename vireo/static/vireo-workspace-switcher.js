@@ -75,7 +75,21 @@
     // workspaces so the visible list matches the reset query before the menu
     // becomes visible, and stays correct if the reload below fails.
     if (switcher.workspaces.length) renderWorkspaceMenu(switcher);
-    var loading = loadWorkspaceMenu(switcher).then(function() { focusSearch(switcher); });
+    // The sync focusSearch below only lands when the field is already visible
+    // (a cached reopen). The post-reload focus is for the hidden-then-visible
+    // transition on a first open — and only when this open is still current
+    // and the user hasn't moved focus somewhere specific in the meantime.
+    var preloadSearch = searchInput(switcher);
+    var fieldWasHiddenAtOpen = !preloadSearch || preloadSearch.hidden;
+    var activeAtOpen = switcher.document.activeElement;
+    var loading = loadWorkspaceMenu(switcher);
+    var openGeneration = switcher.generation;
+    var withFocus = loading.then(function() {
+      if (openGeneration !== switcher.generation) return;
+      if (!fieldWasHiddenAtOpen) return;
+      if (switcher.document.activeElement !== activeAtOpen) return;
+      focusSearch(switcher);
+    });
     menu.classList.add('open');
     // On a reopen the field is already showing, so typing can start before the list returns.
     focusSearch(switcher);
@@ -83,7 +97,7 @@
       switcher.outsideClickTimer = null;
       if (switcher.open) switcher.document.addEventListener('click', switcher.onOutsideClick);
     }, 0);
-    return loading;
+    return withFocus;
   }
 
   /** @param {MouseEvent} e */
@@ -131,7 +145,17 @@
   function renderWorkspaceMenu(/** @type {WorkspaceSwitcherContext} */ switcher) {
     var list = /** @type {HTMLElement} */ (switcher.document.getElementById('wsMenuList'));
     var search = searchInput(switcher);
-    if (search) search.hidden = switcher.workspaces.length < SEARCH_MIN_WORKSPACES;
+    if (search) {
+      var hide = switcher.workspaces.length < SEARCH_MIN_WORKSPACES;
+      if (hide && (switcher.query || search.value)) {
+        // Hiding the field leaves no visible way to see or clear the filter,
+        // so drop the query here so the list matches what is now typable.
+        switcher.query = '';
+        search.value = '';
+        switcher.highlightId = null;
+      }
+      search.hidden = hide;
+    }
     list.innerHTML = '';
     var listed = listedWorkspaces(switcher);
     var searching = !!switcher.query.trim();
