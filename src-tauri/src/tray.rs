@@ -70,6 +70,7 @@ const SHOW_WINDOW: &str = "show_window";
 const HIDE_WINDOW: &str = "hide_window";
 const OPEN_IN_BROWSER: &str = "open_in_browser";
 const JOB_STATUS: &str = "job_status";
+const RESTART_TO_UPDATE: &str = "restart_to_update";
 const QUIT: &str = "quit";
 
 /// Build the tray icon with its context menu and start job polling.
@@ -124,6 +125,9 @@ pub fn create_tray(
 }
 
 /// Build (or rebuild) the tray context menu with a given job status string.
+/// While a downloaded update waits for a restart, the menu leads with a
+/// "Restart to Update" item: in browser mode the tray and the app menu are the
+/// only places that say an update is ready.
 pub fn build_menu(
     app: &AppHandle,
     job_status: &str,
@@ -133,19 +137,41 @@ pub fn build_menu(
     let jobs = MenuItem::with_id(app, JOB_STATUS, job_status, false, None::<&str>)?;
     let sep2 = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, QUIT, "Quit Vireo", true, None::<&str>)?;
+    let update_sep = PredefinedMenuItem::separator(app)?;
+    let update = crate::updater::ready_version()
+        .map(|version| {
+            MenuItem::with_id(
+                app,
+                RESTART_TO_UPDATE,
+                format!("Restart to Update (v{version})"),
+                true,
+                None::<&str>,
+            )
+        })
+        .transpose()?;
 
+    let mut items: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = Vec::new();
+    if let Some(update) = &update {
+        items.push(update);
+        items.push(&update_sep);
+    }
+    let show;
+    let hide;
+    let open;
     if browser_mode {
         // Browser-launch mode: there is no app window to show or hide, so
         // we offer a single "Open in browser" item that re-opens the URL
         // (handy if the user closed the tab).
-        let open = MenuItem::with_id(app, OPEN_IN_BROWSER, "Open in browser", true, None::<&str>)?;
-        Menu::with_items(app, &[&open, &sep1, &jobs, &sep2, &quit])
+        open = MenuItem::with_id(app, OPEN_IN_BROWSER, "Open in browser", true, None::<&str>)?;
     } else {
-        let show = MenuItem::with_id(app, SHOW_WINDOW, "Show Window", true, None::<&str>)?;
-        let hide = MenuItem::with_id(app, HIDE_WINDOW, "Hide Window", true, None::<&str>)?;
-        let open = MenuItem::with_id(app, OPEN_IN_BROWSER, "Open in Browser", true, None::<&str>)?;
-        Menu::with_items(app, &[&show, &hide, &open, &sep1, &jobs, &sep2, &quit])
+        show = MenuItem::with_id(app, SHOW_WINDOW, "Show Window", true, None::<&str>)?;
+        hide = MenuItem::with_id(app, HIDE_WINDOW, "Hide Window", true, None::<&str>)?;
+        open = MenuItem::with_id(app, OPEN_IN_BROWSER, "Open in Browser", true, None::<&str>)?;
+        items.push(&show);
+        items.push(&hide);
     }
+    items.extend_from_slice(&[&open, &sep1, &jobs, &sep2, &quit]);
+    Menu::with_items(app, &items)
 }
 
 /// Handle a menu item click.
@@ -154,6 +180,7 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
         SHOW_WINDOW => show_main_window(app),
         HIDE_WINDOW => hide_main_window(app),
         OPEN_IN_BROWSER => open_ui_in_browser(app),
+        RESTART_TO_UPDATE => crate::updater::spawn_update_check(app, true),
         QUIT => {
             // Stop the polling thread
             if let Some(poll_state) = app.try_state::<TrayPollState>() {
@@ -222,11 +249,7 @@ pub fn open_ui_in_browser(app: &AppHandle) {
     // First time we flip from window → browser, rebuild the tray menu so
     // the Show/Hide Window items are replaced by the browser-mode layout.
     if was_window_mode {
-        let status = app
-            .try_state::<TrayMode>()
-            .and_then(|m| m.job_status.lock().ok().map(|s| s.clone()))
-            .unwrap_or_else(|| "No active jobs".to_string());
-        update_tray_menu(app, &status);
+        refresh_tray_menu(app);
     }
 }
 
@@ -342,6 +365,16 @@ fn update_dock_job_indicator(app: &AppHandle, count: usize, progress: DockProgre
             log::debug!("Failed to update dock badge: {}", e);
         }
     }
+}
+
+/// Rebuild the tray menu with its current job status, after a change that is
+/// not a job count (an update becoming ready, or its install failing).
+pub fn refresh_tray_menu(app: &AppHandle) {
+    let status = app
+        .try_state::<TrayMode>()
+        .and_then(|m| m.job_status.lock().ok().map(|s| s.clone()))
+        .unwrap_or_else(|| "No active jobs".to_string());
+    update_tray_menu(app, &status);
 }
 
 /// Rebuild the tray menu with updated job status text.

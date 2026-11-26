@@ -54,6 +54,7 @@
     "../vireo/static/navbar-state.js",
     "../vireo/static/navbar-tab-reorder-hotkeys.js",
     "../vireo/static/navbar-tabs.js",
+    "../vireo/static/navbar-update-notice.js",
     "../vireo/static/navbar-workspace-switcher-init.js"
   ]
 }

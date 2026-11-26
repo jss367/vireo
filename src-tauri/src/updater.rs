@@ -32,8 +32,8 @@ impl<T> UpdateState<T> {
             self.user_visible |= user_initiated;
             return false;
         }
-        // Once the user chooses Later, only an explicit menu request should
-        // offer that download again. Background checks leave it ready.
+        // A downloaded update stays ready until the user asks to restart;
+        // background checks neither download it again nor announce it again.
         if self.pending.is_some() && !user_initiated {
             return false;
         }
@@ -50,9 +50,29 @@ impl<T> UpdateState<T> {
 
 static STATE: Mutex<UpdateState<PendingUpdate>> = Mutex::new(UpdateState::new());
 
-/// Download in the background and ask once, when the update is ready to install.
-/// Manual checks also report no-update and error results. Repeated clicks promote
-/// an existing check to user-visible without opening another progress dialog.
+const CHECK_TEXT: &str = "Check for Updates...";
+const RESTART_TEXT: &str = "Restart to Update";
+
+/// The version of the downloaded update waiting for a restart, if any. The
+/// tray menu and the web UI's "Needs attention" notice read it.
+pub fn ready_version() -> Option<String> {
+    STATE
+        .lock()
+        .unwrap()
+        .pending
+        .as_ref()
+        .map(|pending| pending.update.version.clone())
+}
+
+/// Download in the background without interrupting. A background download
+/// only marks the update ready: the app menu item becomes "Restart to Update",
+/// the tray menu gains the same item, and the web UI shows a notice under the
+/// bell. Nothing is installed until the user asks. A manual check that finds
+/// an update asks once, because the user is waiting for the answer, and also
+/// reports no-update and error results. Asking for an update that is already
+/// ready (the menu item, tray item or notice) installs it and restarts.
+/// Repeated clicks promote an existing check to user-visible without opening
+/// another progress dialog.
 pub fn spawn_update_check(app: &AppHandle, user_initiated: bool) {
     let pending = {
         let mut state = STATE.lock().unwrap();
@@ -62,32 +82,29 @@ pub fn spawn_update_check(app: &AppHandle, user_initiated: bool) {
         state.pending.take()
     };
 
-    set_update_menu_text(app, "Checking for Updates…");
+    if pending.is_none() {
+        set_update_menu_text(app, "Checking for Updates…");
+    }
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
         let result = match pending {
-            Some(pending) => Ok(Some(pending)),
-            None => download_update(&handle).await,
-        };
-        let result = match result {
-            Ok(Some(pending)) => {
-                offer_restart(&handle, pending);
+            Some(pending) => {
+                install_and_restart(&handle, pending);
                 Ok(true)
             }
-            Ok(None) => Ok(false),
-            Err(error) => Err(error),
+            None => match download_update(&handle).await {
+                Ok(Some(pending)) => {
+                    announce_ready(&handle, pending);
+                    Ok(true)
+                }
+                Ok(None) => Ok(false),
+                Err(error) => Err(error),
+            },
         };
         // Restore the menu before releasing the check guard. Never hold the
         // mutex during a native UI call, which may dispatch to the main thread.
         let ready = STATE.lock().unwrap().pending.is_some();
-        set_update_menu_text(
-            &handle,
-            if ready {
-                "Restart to Update…"
-            } else {
-                "Check for Updates..."
-            },
-        );
+        set_update_menu_text(&handle, if ready { RESTART_TEXT } else { CHECK_TEXT });
         let visible = STATE.lock().unwrap().finish();
         match result {
             Ok(false) if visible => {
@@ -196,8 +213,23 @@ async fn download_update(
     }
 }
 
+/// A finished download asks only when the user is waiting on a manual check;
+/// a background download is kept until the user chooses to restart.
+fn announce_ready(app: &AppHandle, pending: PendingUpdate) {
+    let user_visible = STATE.lock().unwrap().user_visible;
+    if user_visible {
+        offer_restart(app, pending);
+    } else {
+        log::info!(
+            "Update v{} is ready; waiting for the user to restart",
+            pending.update.version
+        );
+        keep_ready(app, pending);
+    }
+}
+
 fn offer_restart(app: &AppHandle, pending: PendingUpdate) {
-    set_update_menu_text(app, "Restart to Update…");
+    set_update_menu_text(app, RESTART_TEXT);
     // This runs on a background task. Holding the check guard through the
     // dialog prevents overlapping checks while leaving the UI responsive.
     let restart = app
@@ -215,11 +247,53 @@ fn offer_restart(app: &AppHandle, pending: PendingUpdate) {
         ))
         .blocking_show();
 
-    if !restart {
-        STATE.lock().unwrap().pending = Some(pending);
-        return;
+    if restart {
+        install_and_restart(app, pending);
+    } else {
+        keep_ready(app, pending);
     }
+}
 
+/// Keep a downloaded update for this session and show it as ready.
+fn keep_ready(app: &AppHandle, pending: PendingUpdate) {
+    STATE.lock().unwrap().pending = Some(pending);
+    crate::tray::refresh_tray_menu(app);
+}
+
+fn install_and_restart(app: &AppHandle, pending: PendingUpdate) {
+    if let Err(error) = install(app, pending) {
+        app.dialog()
+            .message(format!("Could not install the update:\n{error}"))
+            .title("Update Error")
+            .kind(MessageDialogKind::Error)
+            .show(|_| {});
+    }
+}
+
+/// Install the ready update and restart, for the web UI's notice, which shows
+/// a failure itself instead of a native dialog. Runs under the same guard as a
+/// check, so it cannot overlap one.
+pub fn restart_to_update(app: &AppHandle) -> Result<(), String> {
+    let pending = {
+        let mut state = STATE.lock().unwrap();
+        if state.running {
+            return Err("Vireo is already checking for or installing an update.".into());
+        }
+        let Some(pending) = state.pending.take() else {
+            return Err("No downloaded update is waiting to be installed.".into());
+        };
+        state.running = true;
+        pending
+    };
+    let result = install(app, pending);
+    set_update_menu_text(app, RESTART_TEXT);
+    STATE.lock().unwrap().finish();
+    result
+}
+
+/// Install a downloaded update and restart. On failure the update stays ready
+/// so the user can try again, and the error is returned for the caller to show.
+fn install(app: &AppHandle, pending: PendingUpdate) -> Result<(), String> {
     // Windows installation exits the process, so consent must come before
     // install() on every platform, not just before app.restart().
     set_update_menu_text(app, "Installing Update…");
@@ -230,12 +304,8 @@ fn offer_restart(app: &AppHandle, pending: PendingUpdate) {
         Ok(()) => app.restart(),
         Err(error) => {
             log::error!("Update installation failed: {error}");
-            STATE.lock().unwrap().pending = Some(pending);
-            app.dialog()
-                .message(format!("Could not install the update:\n{error}"))
-                .title("Update Error")
-                .kind(MessageDialogKind::Error)
-                .show(|_| {});
+            keep_ready(app, pending);
+            Err(error.to_string())
         }
     }
 }

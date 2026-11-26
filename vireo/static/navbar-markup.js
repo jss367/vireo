@@ -44,6 +44,7 @@ import {
   reviewNewImagesImport, runRescan, toggleAllMissingPhotos, updateMissingPhotosThumbSize,
 } from './navbar-folder-banners.js';
 import { openCommandPalette, renderCommandPalette } from './navbar-command-palette.js';
+import { restartToUpdate } from './navbar-update-notice.js';
 
 /** @typedef {(this: HTMLElement, event: Event) => unknown} NavbarHandler */
 
@@ -101,6 +102,7 @@ const HANDLERS = {
   recheckNewImages: function() { recheckNewImages(); },
   dismissNewImagesBanner: function() { dismissNewImagesBanner(); },
   dismissDupCleanupBanner: function() { dismissDupCleanupBanner(); },
+  restartToUpdate: function() { restartToUpdate(); },
   removeAllMissingFolders: function() { removeAllMissingFolders(); },
   loadMissingFolders: function() { loadMissingFolders(); },
   closeMissingFoldersModal: function() { closeMissingFoldersModal(); },
