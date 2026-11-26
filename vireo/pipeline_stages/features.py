@@ -1152,7 +1152,7 @@ class _MaskPass:
                 and os.path.isfile(existing["path"])
                 and cached_mask_frame_matches(existing["path"], frame)):
             return False
-        if existing["set_aside_by"] is not None and not self._reactivate_set_aside(item):
+        if existing.get("set_aside_by") is not None and not self._reactivate_set_aside(item):
             return False
         # The cheap skip (re-activate only) is correct
         # ONLY when the photos row is already fully

@@ -472,7 +472,7 @@ class _MaskExtractionRun:
                 and os.path.isfile(existing["path"])
                 and cached_mask_frame_matches(existing["path"], frame)):
             return False
-        if existing["set_aside_by"] is not None:
+        if existing.get("set_aside_by") is not None:
             # An upgrade set this mask aside; the checks above are the proof
             # it needs. One that was not the photo's active mask stays set
             # aside, and SAM replaces it below.
