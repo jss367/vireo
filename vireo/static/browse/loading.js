@@ -821,9 +821,12 @@ function buildBrowsePageRequest(/** @type {number} */ page, /** @type {number} *
    For a change whose effect on the total the page cannot work out from the
    rows it holds: a delete that also removed a row this window never loaded.
    A failed request leaves the total as it is; the next page request brings
-   the server's count. */
+   the server's count. When the totals change while the request is in flight
+   (another delete, or a page load), its answer may predate that change, so
+   it is dropped and the server is asked again. */
 export async function refreshBrowseTotals() {
   var windowIsCurrent = observeBrowseWindow();
+  var revision = pagination.totalsRevision;
   var request = buildBrowsePageRequest(1, 1);
   /** @type {BrowsePage | undefined} */ var data;
   try {
@@ -832,6 +835,7 @@ export async function refreshBrowseTotals() {
     return false;
   }
   if (!data || !windowIsCurrent()) return false;
+  if (pagination.totalsRevision !== revision) return refreshBrowseTotals();
   pagination.setTotals(data);
   if (VireoFilter && VireoFilter.setResultTotal) VireoFilter.setResultTotal(pagination.underlyingTotal);
   updateFilterSummary();

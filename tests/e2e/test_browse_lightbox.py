@@ -724,6 +724,49 @@ def test_browse_lightbox_delete_asks_the_server_when_it_deleted_an_unseen_row(
     assert len(totals_requests) == 1
 
 
+def test_browse_totals_refresh_drops_an_answer_older_than_a_local_change(
+    live_server, page,
+):
+    """A totals answer read before the page lowered its own total (another
+    delete finishing while the request was in flight) must not put the older
+    count back: the page drops it and asks again."""
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.wait_for(state="visible")
+    page.wait_for_function("pageModules.pagination.pagination.ready")
+    initial_total = page.evaluate("pageModules.pagination.pagination.total")
+
+    held = []
+
+    def hold_totals(route):
+        body = route.request.post_data_json or {}
+        if body.get("per_page") != 1:
+            route.continue_()
+            return
+        held.append(route)
+
+    def wait_for_held(count):
+        deadline = time.monotonic() + 5
+        while len(held) < count and time.monotonic() < deadline:
+            page.wait_for_timeout(25)
+        assert len(held) == count
+
+    page.route("**/api/photos/query", hold_totals)
+    page.evaluate(
+        """() => {
+            window.__totalsRefresh = pageModules.loading.refreshBrowseTotals();
+        }"""
+    )
+    wait_for_held(1)
+    page.evaluate("pageModules.pagination.pagination.removePhotos(1)")
+    # Read before the local change: it still counts the removed row.
+    held[0].fulfill(json={"photos": [], "total": initial_total})
+    wait_for_held(2)
+    assert page.evaluate("pageModules.pagination.pagination.total") == initial_total - 1
+    held[1].fulfill(json={"photos": [], "total": initial_total - 1})
+    assert page.evaluate("window.__totalsRefresh") is True
+    assert page.evaluate("pageModules.pagination.pagination.total") == initial_total - 1
+
+
 def test_browse_lightbox_stale_boundary_retry_does_not_advance_reopened_session(
     live_server, page,
 ):
