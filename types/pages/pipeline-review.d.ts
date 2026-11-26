@@ -52,7 +52,8 @@ interface ReviewCardDrag {card: HTMLElement; photoId: string; startX: number; st
 interface ReviewLoupeDrag {startX: number; startY: number; moved: boolean; targets: ReviewOffsetTarget[];}
 interface ReviewOffsetTarget {card: HTMLElement; photoId: string; origTx: number; origTy: number;}
 interface ReviewPageInit {workspace_id?: number; results?: ReviewResults | null; results_cache_info?: ReviewCacheInfo | null; workspace_overrides?: {review_min_confidence?: number} | null; review_readiness?: ReviewReadiness | null;}
-declare function safeFetch(url: '/api/pipeline/page-init', init?: RequestInit, options?: {toast?: boolean}): Promise<ReviewPageInit>;
+declare function safeFetch(url: '/api/pipeline/page-init?include=results', init?: RequestInit, options?: {toast?: boolean}): Promise<ReviewPageInit>;
+declare function safeFetch(url: '/api/pipeline/page-init?include=readiness', init?: RequestInit, options?: {toast?: boolean}): Promise<ReviewPageInit>;
 declare function safeFetch(url: '/api/pipeline/regroup-live', init?: RequestInit, options?: {toast?: boolean}): Promise<ReviewResults>;
 declare function safeFetch(url: '/api/pipeline/reflow', init?: RequestInit, options?: {toast?: boolean}): Promise<ReviewResults>;
 declare function safeFetch(url: '/api/pipeline/selection-results', init?: RequestInit, options?: {toast?: boolean}): Promise<ReviewResults>;

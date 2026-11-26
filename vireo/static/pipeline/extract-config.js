@@ -217,7 +217,7 @@ function _showSam2CoverageError(msg) {
 
 async function refreshSam2Coverage() {
   try {
-    var data = await safeFetch('/api/pipeline/page-init', {}, { toast: false });
+    var data = await safeFetch('/api/pipeline/page-init?include=masks', {}, { toast: false });
     renderSam2Coverage(data.mask_variant_coverage || []);
   } catch(e) {
     _showSam2CoverageError('Failed to load mask coverage');

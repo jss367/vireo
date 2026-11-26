@@ -75,7 +75,7 @@ async function runCulling() {
 
 async function loadCullingResults() {
   try {
-    var data = await safeFetch('/api/pipeline/page-init', {}, { toast: false });
+    var data = await safeFetch('/api/pipeline/page-init?include=results', {}, { toast: false });
     if (data && data.results) {
       setPipelineResults(data.results);
     } else {

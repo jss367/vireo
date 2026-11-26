@@ -28,7 +28,7 @@ function harness() {
     grmState: {source: 'pipeline', burstIdx: null}, reviewEncounterSpecies: async body => body,
     safeFetch: async (url, init) => {
       requests.push({url, body: init.body ? JSON.parse(init.body) : null});
-      if (url === '/api/pipeline/page-init') {
+      if (url === '/api/pipeline/page-init?include=results') {
         if (reload instanceof Error) throw reload;
         assert.ok(reload, 'Unexpected full-tree reload');
         return typeof reload === 'function' ? reload() : reload;
@@ -125,7 +125,7 @@ for (const stale of ['selected split', 'unrelated reorder', 'unmatched removal']
     h.setReload({workspace_id: 1, results: server});
     assert.equal(await h.ctx.applySpeciesResponse(response, 'old'), true);
     assert.equal(h.reloaded.length, 1);
-    assert.equal(h.requests[0].url, '/api/pipeline/page-init');
+    assert.equal(h.requests[0].url, '/api/pipeline/page-init?include=results');
     assert.equal(h.results.encounters[0].confirmed_species, undefined, 'patch was not applied before reload');
     const ids = h.results.encounters.flatMap(enc => enc.photo_ids);
     assert.equal(new Set(ids).size, ids.length, 'no duplicate photos after stale-tree recovery');

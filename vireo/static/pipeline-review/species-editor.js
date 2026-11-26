@@ -433,7 +433,7 @@ async function reloadReviewAfterSpeciesChange() {
   var seq = ++reviewScopeRequestSeq;
   var workspaceId = pipelineReviewWorkspaceId;
   try {
-    var data = await safeFetch('/api/pipeline/page-init', {}, {toast: false});
+    var data = await safeFetch('/api/pipeline/page-init?include=results', {}, {toast: false});
     if (seq !== reviewScopeRequestSeq || workspaceId !== pipelineReviewWorkspaceId || isScopedReviewView()) return false;
     if (!data.results || (data.workspace_id != null && data.workspace_id !== workspaceId)) {
       showToast('Species saved, but the review changed. Reload to see the latest photo groups.', 'info');
@@ -508,7 +508,7 @@ function registerPipelineReviewHistoryHooks() {
     afterHistoryChange: async function(change) {
       renderHistoryCacheStaleBanner(/** @type {{pipeline_cache_stale?: boolean; undone?: string; redone?: string; entry_id?: number}} */ (change));
       var seq = ++reviewScopeRequestSeq;
-      var data = await safeFetch('/api/pipeline/page-init', {}, {toast: false});
+      var data = await safeFetch('/api/pipeline/page-init?include=results', {}, {toast: false});
       if (seq !== reviewScopeRequestSeq || !data || !data.results) return;
       var results = data.results;
       cachedPipelineResults = cloneReviewData(results);

@@ -42,7 +42,7 @@ def test_filter_change_during_collection_load_restarts_collection_source(live_se
 
 
 def test_failed_initial_scoped_follow_up_blocks_apply(live_server, page):
-    page.route('**/api/pipeline/page-init', lambda route: route.fulfill(json={'results': None}))
+    page.route('**/api/pipeline/page-init*', lambda route: route.fulfill(json={'results': None}))
     requests = []
     def analyze(route):
         requests.append(route.request.post_data_json)

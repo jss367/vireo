@@ -41,7 +41,7 @@ def _pipeline_results_for_cull_keyboard():
 
 def test_cull_arrow_keys_move_between_encounters(live_server, page):
     page.route(
-        "**/api/pipeline/page-init",
+        "**/api/pipeline/page-init*",
         lambda route: route.fulfill(json={"results": _pipeline_results_for_cull_keyboard()}),
     )
 
@@ -78,7 +78,7 @@ def test_cull_arrow_keys_move_between_encounters(live_server, page):
 
 def test_cull_arrow_keys_ignore_form_controls(live_server, page):
     page.route(
-        "**/api/pipeline/page-init",
+        "**/api/pipeline/page-init*",
         lambda route: route.fulfill(json={"results": _pipeline_results_for_cull_keyboard()}),
     )
 
@@ -93,7 +93,7 @@ def test_cull_arrow_keys_ignore_form_controls(live_server, page):
 
 def test_cull_arrow_keys_ignore_modified_browser_shortcuts(live_server, page):
     page.route(
-        "**/api/pipeline/page-init",
+        "**/api/pipeline/page-init*",
         lambda route: route.fulfill(json={"results": _pipeline_results_for_cull_keyboard()}),
     )
 
@@ -109,7 +109,7 @@ def test_cull_arrow_keys_ignore_modified_browser_shortcuts(live_server, page):
 
 def test_cull_arrow_keys_ignore_active_overlays(live_server, page):
     page.route(
-        "**/api/pipeline/page-init",
+        "**/api/pipeline/page-init*",
         lambda route: route.fulfill(json={"results": _pipeline_results_for_cull_keyboard()}),
     )
 

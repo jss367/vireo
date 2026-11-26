@@ -37,7 +37,7 @@ def _open_grid(page, live_server, encounter_count=1124):
         "summary": {"total_photos": len(photos), "encounter_count": len(encounters), "burst_count": sum(e["burst_count"] for e in encounters),
                     "review_count": len(photos), "keep_count": 0, "reject_count": 0},
     }
-    page.route("**/api/pipeline/page-init", lambda route: route.fulfill(json={
+    page.route("**/api/pipeline/page-init*", lambda route: route.fulfill(json={
         "results": results, "workspace_overrides": {},
         "review_readiness": {"state": "ready", "total_photos": len(photos)},
     }))

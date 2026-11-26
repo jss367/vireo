@@ -40,7 +40,7 @@ def _results():
 
 def _open(page, live_server, results=None, requests=None, cards=None):
     results = results or _results()
-    page.route('**/api/pipeline/page-init', lambda route: route.fulfill(json={'results': results}))
+    page.route('**/api/pipeline/page-init*', lambda route: route.fulfill(json={'results': results}))
 
     def recompute(route):
         body = route.request.post_data_json
@@ -366,7 +366,7 @@ def test_collection_and_date_filters_analyze_only_their_intersection(live_server
 
 
 def test_date_can_be_chosen_before_the_first_analysis(live_server, page):
-    page.route('**/api/pipeline/page-init', lambda route: route.fulfill(json={'results': None}))
+    page.route('**/api/pipeline/page-init*', lambda route: route.fulfill(json={'results': None}))
     requests = []
     results = _results()
 
