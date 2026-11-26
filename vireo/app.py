@@ -28,7 +28,7 @@ from flask import (
     Flask,
 )
 from jobs import JobRunner, LogBroadcaster
-from schema import ensure_schema
+from schema import MigrationBackupError, ensure_schema
 from services import scan_work, startup_tasks
 from services.folder_moves import FolderMoves
 from services.gps_locations import BulkGpsLocations
@@ -1417,6 +1417,24 @@ def _emit_incompatible_database_exit(e):
     raise SystemExit(3) from e
 
 
+def _emit_migration_backup_exit(e):
+    # ensure_schema refused to migrate because the pre-migration backup
+    # could not be written. The catalog is unchanged. Mirror the
+    # startup_failed signal create_app's broad-exception handler emits,
+    # so the sidecar host surfaces a controlled dialog instead of a raw
+    # traceback.
+    import sys as _sys
+    log.error(
+        "Vireo could not back up %s before schema migration: %s",
+        e.db_path, e.cause,
+    )
+    _sys.stderr.write(json.dumps({
+        "error": "startup_failed",
+        "reason": str(e),
+    }) + "\n")
+    raise SystemExit(2) from e
+
+
 def _parse_main_args():
     parser = argparse.ArgumentParser(description="Vireo Photo Browser")
     parser.add_argument(
@@ -1486,6 +1504,13 @@ def _load_taxonomy_and_exit(db_path):
         ensure_schema(db_path)
     except IncompatibleDatabaseError as e:
         _emit_incompatible_database_exit(e)
+    except MigrationBackupError as e:
+        # The pre-migration backup failed (full disk, read-only volume,
+        # permission denied). ensure_schema has not touched the catalog, so
+        # emit the same structured startup_failed signal create_app's
+        # broad-exception handler uses instead of letting a raw traceback
+        # escape this CLI entry point.
+        _emit_migration_backup_exit(e)
     db = Database(db_path)
     log.info("Loading taxonomy tree from iNaturalist...")
     stats = load_taxonomy(db)
