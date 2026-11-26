@@ -170,11 +170,12 @@ pub struct UpdateStatus {
 
 /// The downloaded update and what Vireo is doing about it. Reading a running
 /// countdown marks it shown, which is what lets the restart happen on its own.
-/// A hidden webview (the main window closed to the tray) still runs JS, so a
-/// read from one leaves it unmarked and the native dialog asks instead:
-/// nothing restarts until a window the user can see showed the warning.
+/// A webview out of sight (the main window closed to the tray or minimized)
+/// still runs JS, so a read from one leaves it unmarked and the native dialog
+/// asks instead: nothing restarts until a window the user can see showed the
+/// warning.
 pub fn status(app: &AppHandle) -> Option<UpdateStatus> {
-    let visible = main_window_visible(app);
+    let visible = main_window_on_screen(app);
     let mut state = state();
     let version = state.pending.as_ref()?.update.version.clone();
     let waiting_for = state.waiting_for.clone();
@@ -746,20 +747,15 @@ fn run_countdown(app: &AppHandle, generation: u64) -> CountdownOutcome {
             .unwrap_or_default()
     };
     let started = Instant::now();
-    // The banner is a visible warning only in a visible window; a window
-    // closed to the tray, or browser mode, gets the native dialog. So does a
-    // backend shared with another Vireo window: installing replaces the app
-    // that window runs, so the restart needs the user's answer, never a timer.
-    let shared = crate::sidecar::other_gui_clients_attached();
-    let page_can_show = !shared && !crate::tray::is_browser_mode(app) && main_window_visible(app);
+    let page_can_show = unattended_restart_check(app).allowed();
     if page_can_show {
         notify_page(app);
     }
 
     let mut last_seconds = None;
-    let ask_natively = loop {
+    let end = loop {
         if !page_can_show {
-            break true;
+            break CountdownEnd::AskNatively;
         }
         std::thread::sleep(COUNTDOWN_TICK);
         let state = state();
@@ -776,10 +772,10 @@ fn run_countdown(app: &AppHandle, generation: u64) -> CountdownOutcome {
                 stop_waiting_keep_download(app);
                 return CountdownOutcome::Stopped;
             }
-            Some(CountdownResponse::Now) => break false,
-            None if now >= countdown.deadline => break false,
+            Some(CountdownResponse::Now) => break CountdownEnd::UserChoseNow,
+            None if now >= countdown.deadline => break CountdownEnd::Expired,
             None if !countdown.shown && now.duration_since(started) >= COUNTDOWN_SHOWN_TIMEOUT => {
-                break true;
+                break CountdownEnd::AskNatively;
             }
             None => {}
         }
@@ -816,11 +812,20 @@ fn run_countdown(app: &AppHandle, generation: u64) -> CountdownOutcome {
         return CountdownOutcome::Stopped;
     };
 
+    // The countdown ran out on its own: check again that nothing changed
+    // while it ran (the window was minimized or hidden, another Vireo window
+    // attached), since a restart nobody answered needs all of it to hold.
+    let check = unattended_restart_check(app);
+    let ask_natively = match end {
+        CountdownEnd::AskNatively => true,
+        CountdownEnd::Expired => !check.allowed(),
+        CountdownEnd::UserChoseNow => false,
+    };
     if ask_natively {
         set_update_menu_text(app, RESTART_TEXT);
         let restart = app
             .dialog()
-            .message(jobs_finished_message(&version, shared))
+            .message(jobs_finished_message(&version, check.shared))
             .title("Update Ready")
             .kind(MessageDialogKind::Info)
             .buttons(MessageDialogButtons::OkCancelCustom(
@@ -852,6 +857,38 @@ fn run_countdown(app: &AppHandle, generation: u64) -> CountdownOutcome {
     CountdownOutcome::Restart(Box::new(pending))
 }
 
+/// How the countdown loop ended.
+enum CountdownEnd {
+    /// The deadline passed with no answer.
+    Expired,
+    /// The user clicked Restart Now on the banner.
+    UserChoseNow,
+    /// No visible page could show the countdown.
+    AskNatively,
+}
+
+/// What an automatic restart, one nobody answered, depends on.
+struct UnattendedCheck {
+    /// Another Vireo window shares this backend; installing replaces the
+    /// application it runs.
+    shared: bool,
+    /// A page the user can see can show the countdown banner.
+    page_on_screen: bool,
+}
+
+impl UnattendedCheck {
+    fn allowed(&self) -> bool {
+        !self.shared && self.page_on_screen
+    }
+}
+
+fn unattended_restart_check(app: &AppHandle) -> UnattendedCheck {
+    UnattendedCheck {
+        shared: crate::sidecar::other_gui_clients_attached(),
+        page_on_screen: !crate::tray::is_browser_mode(app) && main_window_on_screen(app),
+    }
+}
+
 fn stop_waiting_keep_download(app: &AppHandle) {
     let text = {
         let mut state = state();
@@ -863,12 +900,13 @@ fn stop_waiting_keep_download(app: &AppHandle) {
     notify_page(app);
 }
 
-/// Whether the main window is on screen. A window closed to the tray keeps
-/// its webview running, hidden, where a banner warns nobody.
-fn main_window_visible(app: &AppHandle) -> bool {
-    app.get_webview_window("main")
-        .and_then(|window| window.is_visible().ok())
-        .unwrap_or(false)
+/// Whether the main window is on screen. A window closed to the tray or
+/// minimized keeps its webview running, out of sight, where a banner warns
+/// nobody; some platforms report a minimized window as visible.
+fn main_window_on_screen(app: &AppHandle) -> bool {
+    app.get_webview_window("main").is_some_and(|window| {
+        window.is_visible().unwrap_or(false) && !window.is_minimized().unwrap_or(true)
+    })
 }
 
 /// Tell the page the update status changed, so it reads `update_status` again
@@ -1245,6 +1283,20 @@ mod tests {
             paused: vec![],
         };
         assert!(!ready_message("1.2.3", Some(&idle)).contains("couldn't check"));
+    }
+
+    #[test]
+    fn unattended_restart_needs_an_unshared_backend_and_a_page_on_screen() {
+        let check = |shared, page_on_screen| {
+            UnattendedCheck {
+                shared,
+                page_on_screen,
+            }
+            .allowed()
+        };
+        assert!(check(false, true));
+        assert!(!check(true, true));
+        assert!(!check(false, false));
     }
 
     #[test]
