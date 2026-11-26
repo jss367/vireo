@@ -129,6 +129,25 @@ fn set_job_progress(
         .map_err(|e| e.to_string())
 }
 
+/// A downloaded update waiting for a restart, for the web UI's "Needs
+/// attention" notice: its version, the jobs a restart is waiting for, and the
+/// countdown before an automatic restart.
+#[tauri::command]
+fn update_status() -> Option<updater::UpdateStatus> {
+    updater::status()
+}
+
+/// Restart for the downloaded update, from the web UI's notice. It may ask
+/// about running jobs in a native dialog and then installs, so it runs on a
+/// blocking thread. It returns only when nothing restarted: an install failure
+/// is the error, and Ok means the user chose to wait or to keep working.
+#[tauri::command]
+async fn restart_to_update(app: tauri::AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || updater::restart_to_update(&app))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
 #[tauri::command]
 fn open_external_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
     navigation::open_external_url(&app, &url)
@@ -409,7 +428,8 @@ pub fn run() {
             sync_navigation_shortcuts,
             set_job_progress,
             open_external_url,
-            updater::update_restart_countdown,
+            update_status,
+            restart_to_update,
             updater::respond_update_restart,
         ])
         .build(tauri::generate_context!())

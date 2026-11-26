@@ -112,3 +112,87 @@ def test_notices_are_counted_on_the_bell_and_take_no_row_above_the_photos(live_s
     expect(page.locator("#syncPreviewOverlay")).to_be_visible()
     expect(page.locator("#notificationHistory")).to_be_hidden()
     expect(badge).to_have_text("1")
+
+
+# A desktop shell with a downloaded update: update_status reports its version,
+# and the first restart_to_update fails as a failed install does.
+_FAKE_SHELL_WITH_READY_UPDATE = """
+window.__vireoInvoked = [];
+window.__TAURI_INTERNALS__ = {
+  invoke(command) {
+    window.__vireoInvoked.push(command);
+    if (command === 'update_status') {
+      return Promise.resolve({version: '0.99.0', waiting_for: null, restart_in: null});
+    }
+    if (command === 'restart_to_update') return Promise.reject('Synthetic install failure');
+    return Promise.resolve(null);
+  },
+};
+"""
+
+
+def test_a_downloaded_update_waits_under_the_bell(live_server, page):
+    """A ready update badges the bell instead of opening a dialog, and a failed
+    install keeps it ready with the reason."""
+    page.add_init_script(_FAKE_SHELL_WITH_READY_UPDATE)
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.wait_for(state="visible")
+    expect(page.locator("#notificationBadge")).to_have_text("1")
+    open_notices(page)
+    notice = page.locator("#updateReadyNotice")
+    expect(notice).to_contain_text("Vireo v0.99.0 has been downloaded.")
+    notice.get_by_role("button", name="Restart to Update").click()
+    expect(notice).to_contain_text("The last attempt failed: Synthetic install failure")
+    expect(notice.get_by_role("button", name="Restart to Update")).to_be_enabled()
+    assert "restart_to_update" in page.evaluate("window.__vireoInvoked")
+
+
+# A desktop shell waiting for an import before it restarts. A status event from
+# the shell starts the countdown; Not Now answers it and the countdown ends.
+_FAKE_SHELL_WAITING_FOR_JOBS = """
+window.__vireoInvoked = [];
+window.__updateStatus = {version: '0.99.0', waiting_for: 'Import', restart_in: null};
+window.__TAURI_INTERNALS__ = {
+  invoke(command, args) {
+    window.__vireoInvoked.push([command, args || null]);
+    if (command === 'update_status') return Promise.resolve(window.__updateStatus);
+    if (command === 'respond_update_restart') {
+      window.__updateStatus = {version: '0.99.0', waiting_for: null, restart_in: null};
+      window.dispatchEvent(new Event('vireo:update-status'));
+    }
+    return Promise.resolve(null);
+  },
+};
+"""
+
+
+def test_a_restart_waiting_for_jobs_names_them_and_counts_down(live_server, page):
+    """While a restart waits for the user's jobs, the notice names them; when
+    they finish, a banner counts down and Not Now keeps the update ready."""
+    page.add_init_script(_FAKE_SHELL_WAITING_FOR_JOBS)
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.wait_for(state="visible")
+    open_notices(page)
+    notice = page.locator("#updateReadyNotice")
+    expect(notice).to_contain_text("Vireo will restart to install it after Import finishes.")
+    expect(notice.get_by_role("button", name="Restart Now")).to_be_visible()
+    expect(page.locator("#updateRestartBanner")).to_have_count(0)
+
+    page.evaluate("""() => {
+      window.__updateStatus = {version: '0.99.0', waiting_for: null, restart_in: 29};
+      window.dispatchEvent(new Event('vireo:update-status'));
+    }""")
+    banner = page.locator("#updateRestartBanner")
+    expect(banner).to_contain_text("Vireo will restart to install v0.99.0 in")
+    banner.get_by_role("button", name="Not Now").click()
+    expect(banner).to_have_count(0)
+    expect(notice).to_contain_text("Restart Vireo to finish updating.")
+    assert ["respond_update_restart", {"action": "cancel"}] in page.evaluate(
+        "window.__vireoInvoked"
+    )
+
+
+def test_no_update_notice_without_a_desktop_shell(live_server, page):
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.wait_for(state="visible")
+    expect(page.locator("#updateReadyNotice")).to_be_hidden()

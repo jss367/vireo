@@ -13,7 +13,8 @@ use tauri_plugin_updater::{Update, UpdaterExt};
 use crate::sidecar::SidecarState;
 
 const CHECK_TEXT: &str = "Check for Updates...";
-const READY_TEXT: &str = "Restart to Update…";
+const RESTART_TEXT: &str = "Restart to Update";
+const WAITING_TEXT: &str = "Restart to Update Now…";
 
 /// What choosing Later means; see `install_pending_on_exit`.
 #[cfg(not(windows))]
@@ -52,7 +53,6 @@ enum CountdownResponse {
 }
 
 struct Countdown {
-    version: String,
     deadline: Instant,
     shown: bool,
     response: Option<CountdownResponse>,
@@ -62,14 +62,15 @@ struct Countdown {
 /// restart decision so another check cannot download or prompt a second time.
 ///
 /// `after_jobs` is set while the user waits for their jobs to finish before
-/// restarting. `waiter` is a generation number: whoever takes the restart
-/// decision away from a waiting thread bumps it, and the thread exits when it
-/// sees a generation that is not its own.
+/// restarting, and `waiting_for` names those jobs. `waiter` is a generation
+/// number: whoever takes the restart decision away from a waiting thread bumps
+/// it, and the thread exits when it sees a generation that is not its own.
 struct UpdateState<T> {
     running: bool,
     user_visible: bool,
     pending: Option<T>,
     after_jobs: bool,
+    waiting_for: Option<String>,
     waiter: u64,
     countdown: Option<Countdown>,
 }
@@ -81,6 +82,7 @@ impl<T> UpdateState<T> {
             user_visible: false,
             pending: None,
             after_jobs: false,
+            waiting_for: None,
             waiter: 0,
             countdown: None,
         }
@@ -91,9 +93,8 @@ impl<T> UpdateState<T> {
             self.user_visible |= user_initiated;
             return false;
         }
-        // Once the user chooses Later or to wait for their jobs, only an
-        // explicit menu request should offer that download again. Background
-        // checks leave it ready.
+        // A downloaded update stays ready until the user asks to restart;
+        // background checks neither download it again nor announce it again.
         if self.pending.is_some() && !user_initiated {
             return false;
         }
@@ -112,15 +113,17 @@ impl<T> UpdateState<T> {
     fn stop_waiting(&mut self) -> bool {
         self.waiter += 1;
         self.countdown = None;
+        self.waiting_for = None;
         std::mem::take(&mut self.after_jobs)
     }
 
     /// Start waiting for the user's jobs with `pending`; returns the
     /// generation the new waiting thread owns.
-    fn wait_for_jobs(&mut self, pending: T) -> u64 {
+    fn wait_for_jobs(&mut self, pending: T, waiting_for: String) -> u64 {
         self.stop_waiting();
         self.pending = Some(pending);
         self.after_jobs = true;
+        self.waiting_for = Some(waiting_for);
         self.waiter
     }
 
@@ -130,9 +133,9 @@ impl<T> UpdateState<T> {
 
     fn menu_text(&self) -> &'static str {
         if self.after_jobs {
-            "Restart to Update Now…"
+            WAITING_TEXT
         } else if self.pending.is_some() {
-            READY_TEXT
+            RESTART_TEXT
         } else {
             CHECK_TEXT
         }
@@ -145,44 +148,107 @@ fn state() -> std::sync::MutexGuard<'static, UpdateState<PendingUpdate>> {
     STATE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Download in the background and ask once, when the update is ready to install.
-/// Manual checks also report no-update and error results. Repeated clicks promote
-/// an existing check to user-visible without opening another progress dialog.
+/// The version of the downloaded update waiting for a restart, if any. The
+/// tray menu reads it.
+pub fn ready_version() -> Option<String> {
+    state()
+        .pending
+        .as_ref()
+        .map(|pending| pending.update.version.clone())
+}
+
+/// What the web UI shows about a downloaded update (`update_status`).
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct UpdateStatus {
+    version: String,
+    /// The jobs Vireo is waiting for before it restarts, when the user chose
+    /// to restart after they finish.
+    waiting_for: Option<String>,
+    /// Seconds until the automatic restart, while the countdown runs.
+    restart_in: Option<u64>,
+}
+
+/// The downloaded update and what Vireo is doing about it. Reading a running
+/// countdown marks it shown, which is what lets the restart happen on its own.
+pub fn status() -> Option<UpdateStatus> {
+    let mut state = state();
+    let version = state.pending.as_ref()?.update.version.clone();
+    let waiting_for = state.waiting_for.clone();
+    let restart_in = state.countdown.as_mut().map(|countdown| {
+        countdown.shown = true;
+        countdown
+            .deadline
+            .saturating_duration_since(Instant::now())
+            .as_secs()
+    });
+    Some(UpdateStatus {
+        version,
+        waiting_for,
+        restart_in,
+    })
+}
+
+/// Download in the background without interrupting. A background download
+/// only marks the update ready: the app menu item becomes "Restart to Update",
+/// the tray menu gains the same item, and the web UI shows a notice under the
+/// bell. Nothing is installed until the user asks. A manual check that finds
+/// an update asks once, because the user is waiting for the answer, and also
+/// reports no-update and error results. Asking for an update that is already
+/// ready (the menu item, tray item or notice) restarts for it, after asking
+/// when jobs the user started are still running (`decide_restart`).
+/// Repeated clicks promote an existing check to user-visible without opening
+/// another progress dialog.
 pub fn spawn_update_check(app: &AppHandle, user_initiated: bool) {
-    let (pending, was_waiting, had_countdown) = {
+    let (pending, was_waiting) = {
         let mut state = state();
         if !state.begin(user_initiated) {
             return;
         }
-        let had_countdown = state.countdown.is_some();
         let was_waiting = state.stop_waiting();
-        (state.pending.take(), was_waiting, had_countdown)
+        (state.pending.take(), was_waiting)
     };
-    if had_countdown {
-        refresh_countdown_banner(app);
+    if was_waiting {
+        notify_page(app);
     }
 
-    set_update_menu_text(app, "Checking for Updates…");
+    if pending.is_none() {
+        set_update_menu_text(app, "Checking for Updates…");
+    }
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
         let result = match pending {
-            Some(pending) => Ok(Some(pending)),
-            // The boxed error is not Send, and the prompt below is awaited.
-            None => download_update(&handle).await.map_err(|e| e.to_string()),
-        };
-        let result = match result {
-            Ok(Some(pending)) => {
-                // The prompt asks the backend about jobs over blocking HTTP and
-                // blocks on a native dialog, so keep both off the async workers.
-                let prompt_handle = handle.clone();
-                let _ = tauri::async_runtime::spawn_blocking(move || {
-                    offer_restart(&prompt_handle, pending, was_waiting)
+            Some(pending) => {
+                prompt_off_async(&handle, move |app| {
+                    if let Err(error) = decide_restart(app, pending, false, was_waiting) {
+                        show_install_error(app, &error);
+                    }
                 })
                 .await;
                 Ok(true)
             }
-            Ok(None) => Ok(false),
-            Err(error) => Err(error),
+            // The boxed error is not Send, and the prompt below is awaited.
+            None => match download_update(&handle).await.map_err(|e| e.to_string()) {
+                Ok(Some(pending)) => {
+                    let user_visible = state().user_visible;
+                    if user_visible {
+                        prompt_off_async(&handle, move |app| {
+                            if let Err(error) = decide_restart(app, pending, true, false) {
+                                show_install_error(app, &error);
+                            }
+                        })
+                        .await;
+                    } else {
+                        log::info!(
+                            "Update v{} is ready; waiting for the user to restart",
+                            pending.update.version
+                        );
+                        keep_ready(&handle, pending);
+                    }
+                    Ok(true)
+                }
+                Ok(None) => Ok(false),
+                Err(error) => Err(error),
+            },
         };
         // Restore the menu before releasing the check guard. Never hold the
         // mutex during a native UI call, which may dispatch to the main thread.
@@ -223,6 +289,15 @@ pub fn spawn_update_check(app: &AppHandle, user_initiated: bool) {
     });
 }
 
+/// Run a restart decision, which asks the backend about jobs over blocking
+/// HTTP and blocks on native dialogs, off the async workers.
+async fn prompt_off_async(app: &AppHandle, decide: impl FnOnce(&AppHandle) + Send + 'static) {
+    let handle = app.clone();
+    if let Err(error) = tauri::async_runtime::spawn_blocking(move || decide(&handle)).await {
+        log::error!("Update restart prompt failed: {error}");
+    }
+}
+
 async fn download_update(
     app: &AppHandle,
 ) -> Result<Option<PendingUpdate>, Box<dyn std::error::Error>> {
@@ -260,7 +335,7 @@ async fn download_update(
         prune_packages(dir, Some(&version));
         if let Some(bytes) = load_package(dir, &version) {
             // install() verifies again; checking here discards a damaged
-            // file before the user is asked to restart for it.
+            // file before the update is shown as ready.
             match update.verify(&bytes) {
                 Ok(()) => {
                     log::info!("Using update v{version} downloaded earlier");
@@ -314,7 +389,7 @@ async fn download_update(
 
     let bytes = download_result?;
     if let Some(dir) = &cache_dir {
-        // Saved so that choosing Later survives a quit or crash. A failure
+        // Saved so that a ready update survives a quit or crash. A failure
         // only costs a second download.
         if let Err(error) = save_package(dir, &version, &bytes) {
             log::warn!("Could not save update v{version} for later: {error}");
@@ -323,38 +398,52 @@ async fn download_update(
     Ok(Some(PendingUpdate { update, bytes }))
 }
 
-/// Ask whether to restart for `pending`. When jobs the user started are still
-/// running, the default answer waits for them to finish, and Restart Now names
-/// what it would stop.
-fn offer_restart(app: &AppHandle, pending: PendingUpdate, was_waiting: bool) {
-    set_update_menu_text(app, READY_TEXT);
+/// Restart for `pending`, which the caller has taken out of the state while
+/// holding the check guard.
+///
+/// When jobs the user started are queued or running, ask first: the default
+/// waits for them to finish, Restart Now names what it would stop, and Later
+/// keeps the download. Otherwise a request to restart (the menu item, tray
+/// item or notice) installs at once, and a manual check that just found the
+/// update (`ask_when_idle`) asks Restart or Later. Returns an install failure
+/// for the caller to show; the update is then ready again.
+fn decide_restart(
+    app: &AppHandle,
+    pending: PendingUpdate,
+    ask_when_idle: bool,
+    was_waiting: bool,
+) -> Result<(), String> {
     let version = pending.update.version.clone();
     let readiness = fetch_readiness(app);
     if let Err(error) = &readiness {
         log::warn!("Could not check for running jobs before updating: {error}");
     }
 
-    let busy = matches!(&readiness, Ok(r) if !r.idle);
-    if !busy {
-        let restart = app
-            .dialog()
-            .message(ready_message(&version, readiness.as_ref().ok()))
-            .title("Update Ready")
-            .kind(MessageDialogKind::Info)
-            .buttons(MessageDialogButtons::OkCancelCustom(
-                RESTART_BUTTON.into(),
-                LATER_BUTTON.into(),
-            ))
-            .blocking_show();
-        if restart {
-            install_and_restart(app, pending);
-        } else {
-            state().pending = Some(pending);
+    let readiness = match readiness {
+        Ok(readiness) if !readiness.idle => readiness,
+        readiness => {
+            if !ask_when_idle {
+                return install(app, pending);
+            }
+            set_update_menu_text(app, RESTART_TEXT);
+            let restart = app
+                .dialog()
+                .message(ready_message(&version, readiness.as_ref().ok()))
+                .title("Update Ready")
+                .kind(MessageDialogKind::Info)
+                .buttons(MessageDialogButtons::OkCancelCustom(
+                    RESTART_BUTTON.into(),
+                    LATER_BUTTON.into(),
+                ))
+                .blocking_show();
+            if restart {
+                return install(app, pending);
+            }
+            keep_ready(app, pending);
+            return Ok(());
         }
-        return;
-    }
+    };
 
-    let readiness = readiness.expect("busy implies a readiness answer");
     let choice = app
         .dialog()
         .message(busy_message(&version, &readiness, was_waiting))
@@ -369,13 +458,14 @@ fn offer_restart(app: &AppHandle, pending: PendingUpdate, was_waiting: bool) {
 
     match busy_choice(&choice) {
         BusyChoice::AfterJobs => {
-            let generation = state().wait_for_jobs(pending);
-            set_update_menu_text(app, &waiting_menu_text(&readiness.blocking));
-            let handle = app.clone();
-            std::thread::spawn(move || wait_for_jobs(&handle, generation));
+            start_waiting(app, pending, &readiness);
+            Ok(())
         }
-        BusyChoice::Now => install_and_restart(app, pending),
-        BusyChoice::Later => state().pending = Some(pending),
+        BusyChoice::Now => install(app, pending),
+        BusyChoice::Later => {
+            keep_ready(app, pending);
+            Ok(())
+        }
     }
 }
 
@@ -398,8 +488,57 @@ fn busy_choice(result: &MessageDialogResult) -> BusyChoice {
     }
 }
 
-/// Install `pending` and restart, or put it back and report the failure.
-fn install_and_restart(app: &AppHandle, pending: PendingUpdate) {
+/// Keep a downloaded update for this session and show it as ready.
+fn keep_ready(app: &AppHandle, pending: PendingUpdate) {
+    state().pending = Some(pending);
+    set_update_menu_text(app, RESTART_TEXT);
+    crate::tray::refresh_tray_menu(app);
+    notify_page(app);
+}
+
+fn show_install_error(app: &AppHandle, error: &str) {
+    app.dialog()
+        .message(format!("Could not install the update:\n{error}"))
+        .title("Update Error")
+        .kind(MessageDialogKind::Error)
+        .show(|_| {});
+}
+
+/// Restart for the ready update, from the web UI's notice, which shows an
+/// install failure itself instead of a native dialog. Runs under the same
+/// guard as a check, so it cannot overlap one. Asks first when the user's
+/// jobs are running, like every other way to restart.
+pub fn restart_to_update(app: &AppHandle) -> Result<(), String> {
+    let (pending, was_waiting) = {
+        let mut state = state();
+        if state.running {
+            return Err("Vireo is already checking for or installing an update.".into());
+        }
+        if state.pending.is_none() {
+            return Err("No downloaded update is waiting to be installed.".into());
+        }
+        state.running = true;
+        let was_waiting = state.stop_waiting();
+        (state.pending.take().expect("checked above"), was_waiting)
+    };
+    if was_waiting {
+        notify_page(app);
+    }
+    let result = decide_restart(app, pending, false, was_waiting);
+    let (waiting, text) = {
+        let state = state();
+        (state.after_jobs, state.menu_text())
+    };
+    if !waiting {
+        set_update_menu_text(app, text);
+    }
+    state().finish();
+    result
+}
+
+/// Install a downloaded update and restart. On failure the update stays ready
+/// so the user can try again, and the error is returned for the caller to show.
+fn install(app: &AppHandle, pending: PendingUpdate) -> Result<(), String> {
     // Windows installation exits the process, so consent must come before
     // install() on every platform, not just before app.restart().
     set_update_menu_text(app, "Installing Update…");
@@ -411,24 +550,19 @@ fn install_and_restart(app: &AppHandle, pending: PendingUpdate) {
             if let Some(dir) = package_cache_dir(app) {
                 prune_packages(&dir, None);
             }
-            app.restart();
+            app.restart()
         }
         Err(error) => {
             log::error!("Update installation failed: {error}");
-            state().pending = Some(pending);
-            set_update_menu_text(app, READY_TEXT);
-            app.dialog()
-                .message(format!("Could not install the update:\n{error}"))
-                .title("Update Error")
-                .kind(MessageDialogKind::Error)
-                .show(|_| {});
+            keep_ready(app, pending);
+            Err(error.to_string())
         }
     }
 }
 
-/// Install a downloaded update while Vireo quits, so choosing Later never
-/// costs anything: the next launch runs the new version. Runs after the
-/// backend has stopped, since installation replaces its files.
+/// Install a downloaded update while Vireo quits, so a ready update never
+/// waits past the session: the next launch runs the new version. Runs after
+/// the backend has stopped, since installation replaces its files.
 ///
 /// Not on Windows, where installing runs the installer, which shows its own
 /// window and can relaunch Vireo right after the user quit it. There the
@@ -505,6 +639,16 @@ fn fetch_readiness(app: &AppHandle) -> Result<Readiness, String> {
     serde_json::from_str(&body).map_err(|e| e.to_string())
 }
 
+/// Hand `pending` to a new waiting thread and show what it waits for.
+fn start_waiting(app: &AppHandle, pending: PendingUpdate, readiness: &Readiness) {
+    let generation = state().wait_for_jobs(pending, waiting_for_text(&readiness.blocking));
+    set_update_menu_text(app, &waiting_menu_text(&readiness.blocking));
+    crate::tray::refresh_tray_menu(app);
+    notify_page(app);
+    let handle = app.clone();
+    std::thread::spawn(move || wait_for_jobs(&handle, generation));
+}
+
 /// Poll the backend until the user's jobs are done, warn with a countdown,
 /// then install and restart. Exits as soon as the decision changes hands.
 fn wait_for_jobs(app: &AppHandle, mut generation: u64) {
@@ -518,7 +662,19 @@ fn wait_for_jobs(app: &AppHandle, mut generation: u64) {
         let idle = match fetch_readiness(app) {
             Ok(readiness) if !readiness.idle => {
                 failures = 0;
+                let text = waiting_for_text(&readiness.blocking);
+                let changed = {
+                    let mut state = state();
+                    let changed = state.waiting_for.as_deref() != Some(text.as_str());
+                    if changed && state.is_waiter(generation) {
+                        state.waiting_for = Some(text);
+                    }
+                    changed
+                };
                 set_update_menu_text(app, &waiting_menu_text(&readiness.blocking));
+                if changed {
+                    notify_page(app);
+                }
                 false
             }
             Ok(_) => true,
@@ -539,7 +695,9 @@ fn wait_for_jobs(app: &AppHandle, mut generation: u64) {
         if idle {
             match run_countdown(app, generation) {
                 CountdownOutcome::Restart(pending) => {
-                    install_and_restart(app, *pending);
+                    if let Err(error) = install(app, *pending) {
+                        show_install_error(app, &error);
+                    }
                     state().finish();
                     return;
                 }
@@ -559,7 +717,7 @@ enum CountdownOutcome {
     Restart(Box<PendingUpdate>),
     /// The user cancelled, or another prompt took over.
     Stopped,
-    /// A job started during the countdown; keep waiting as this generation.
+    /// Jobs are running again; keep waiting as this generation.
     Busy(u64),
 }
 
@@ -572,19 +730,21 @@ fn run_countdown(app: &AppHandle, generation: u64) -> CountdownOutcome {
         if !state.is_waiter(generation) {
             return CountdownOutcome::Stopped;
         }
-        let version = state.pending.as_ref().map(|p| p.update.version.clone());
         state.countdown = Some(Countdown {
-            version: version.clone().unwrap_or_default(),
             deadline: Instant::now() + COUNTDOWN,
             shown: false,
             response: None,
         });
-        version.unwrap_or_default()
+        state
+            .pending
+            .as_ref()
+            .map(|p| p.update.version.clone())
+            .unwrap_or_default()
     };
     let started = Instant::now();
     let page_can_show = !crate::tray::is_browser_mode(app);
     if page_can_show {
-        refresh_countdown_banner(app);
+        notify_page(app);
     }
 
     let mut last_seconds = None;
@@ -634,28 +794,26 @@ fn run_countdown(app: &AppHandle, generation: u64) -> CountdownOutcome {
             // next poll rather than leave nobody waiting.
             state.countdown = None;
             drop(state);
-            refresh_countdown_banner(app);
+            notify_page(app);
             return CountdownOutcome::Busy(generation);
         }
         state.begin(true);
         state.stop_waiting();
         state.pending.take()
     };
-    if page_can_show {
-        refresh_countdown_banner(app);
-    }
+    notify_page(app);
     let Some(pending) = pending else {
         state().finish();
         return CountdownOutcome::Stopped;
     };
 
     if ask_natively {
-        set_update_menu_text(app, READY_TEXT);
+        set_update_menu_text(app, RESTART_TEXT);
         let restart = app
             .dialog()
             .message(format!(
                 "Your jobs have finished, and Vireo v{version} is ready to install.\n\n\
-                 Restart Vireo now to finish updating, or choose Later to keep working."
+                 Restart Vireo now to finish updating, or choose Later to keep working.{LATER_NOTE}"
             ))
             .title("Update Ready")
             .kind(MessageDialogKind::Info)
@@ -665,8 +823,7 @@ fn run_countdown(app: &AppHandle, generation: u64) -> CountdownOutcome {
             ))
             .blocking_show();
         if !restart {
-            state().pending = Some(pending);
-            set_update_menu_text(app, READY_TEXT);
+            keep_ready(app, pending);
             state().finish();
             return CountdownOutcome::Stopped;
         }
@@ -679,9 +836,10 @@ fn run_countdown(app: &AppHandle, generation: u64) -> CountdownOutcome {
             let next = {
                 let mut state = state();
                 state.finish();
-                state.wait_for_jobs(pending)
+                state.wait_for_jobs(pending, waiting_for_text(&readiness.blocking))
             };
             set_update_menu_text(app, &waiting_menu_text(&readiness.blocking));
+            notify_page(app);
             return CountdownOutcome::Busy(next);
         }
     }
@@ -695,43 +853,22 @@ fn stop_waiting_keep_download(app: &AppHandle) {
         state.menu_text()
     };
     set_update_menu_text(app, text);
-    refresh_countdown_banner(app);
+    crate::tray::refresh_tray_menu(app);
+    notify_page(app);
 }
 
-/// Ask the page to read the countdown again (`refreshUpdateRestartCountdown`
-/// in tauri-bridge.js), which shows, updates or removes its banner.
-fn refresh_countdown_banner(app: &AppHandle) {
+/// Tell the page the update status changed, so it reads `update_status` again
+/// now instead of at its next poll (navbar-update-notice.js listens).
+fn notify_page(app: &AppHandle) {
     if crate::tray::is_browser_mode(app) {
         return;
     }
     if let Some(window) = app.get_webview_window("main") {
-        let js = "if (typeof window.refreshUpdateRestartCountdown === 'function') { window.refreshUpdateRestartCountdown(); }";
+        let js = "window.dispatchEvent(new Event('vireo:update-status'));";
         if let Err(error) = window.eval(js) {
-            log::debug!("Could not refresh the update countdown banner: {error}");
+            log::debug!("Could not notify the page of the update status: {error}");
         }
     }
-}
-
-#[derive(Debug, Serialize, PartialEq, Eq)]
-pub struct CountdownView {
-    version: String,
-    seconds_left: u64,
-}
-
-/// The countdown the page should show, if one is running. Calling it marks
-/// the countdown as shown, which is what lets the restart happen on its own.
-#[tauri::command]
-pub fn update_restart_countdown() -> Option<CountdownView> {
-    let mut state = state();
-    let countdown = state.countdown.as_mut()?;
-    countdown.shown = true;
-    Some(CountdownView {
-        version: countdown.version.clone(),
-        seconds_left: countdown
-            .deadline
-            .saturating_duration_since(Instant::now())
-            .as_secs(),
-    })
 }
 
 /// The page's answer to the countdown: `"now"` restarts at once, `"cancel"`
@@ -807,16 +944,23 @@ fn busy_message(version: &str, readiness: &Readiness, was_waiting: bool) -> Stri
     )
 }
 
-fn waiting_menu_text(blocking: &[ReadinessJob]) -> String {
+/// The jobs a waiting restart is held by, as the page's notice names them.
+fn waiting_for_text(blocking: &[ReadinessJob]) -> String {
     match blocking {
-        [] => "Restart to Update Now…".to_string(),
-        [job] => format!("Restart to Update Now (waiting for {})…", job.name),
-        [job, rest @ ..] => format!(
-            "Restart to Update Now (waiting for {} and {} more)…",
-            job.name,
-            rest.len()
-        ),
+        [] => "your jobs".to_string(),
+        [job] => job.name.clone(),
+        [job, rest @ ..] => format!("{} and {} more", job.name, rest.len()),
     }
+}
+
+fn waiting_menu_text(blocking: &[ReadinessJob]) -> String {
+    if blocking.is_empty() {
+        return WAITING_TEXT.to_string();
+    }
+    format!(
+        "Restart to Update Now (waiting for {})…",
+        waiting_for_text(blocking)
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -974,27 +1118,29 @@ mod tests {
     #[test]
     fn background_checks_leave_a_waiting_update_alone() {
         let mut state = UpdateState::new();
-        let generation = state.wait_for_jobs(7);
+        let generation = state.wait_for_jobs(7, "Import".into());
         assert!(state.is_waiter(generation));
         assert!(!state.begin(false));
         assert!(state.is_waiter(generation));
-        assert_eq!(state.menu_text(), "Restart to Update Now…");
+        assert_eq!(state.menu_text(), WAITING_TEXT);
+        assert_eq!(state.waiting_for.as_deref(), Some("Import"));
     }
 
     #[test]
     fn menu_request_takes_the_decision_from_the_waiter() {
         let mut state = UpdateState::new();
-        let generation = state.wait_for_jobs(7);
+        let generation = state.wait_for_jobs(7, "Import".into());
         assert!(state.begin(true));
         assert!(state.stop_waiting());
         assert!(!state.is_waiter(generation));
+        assert_eq!(state.waiting_for, None);
         assert_eq!(state.pending, Some(7));
-        assert_eq!(state.menu_text(), READY_TEXT);
+        assert_eq!(state.menu_text(), RESTART_TEXT);
 
         // Choosing to wait again starts a new generation; the old thread
         // still sees it is no longer the waiter.
         let pending = state.pending.take().unwrap();
-        let next = state.wait_for_jobs(pending);
+        let next = state.wait_for_jobs(pending, "Import".into());
         assert_ne!(next, generation);
         assert!(state.is_waiter(next));
         assert!(!state.is_waiter(generation));
@@ -1003,9 +1149,8 @@ mod tests {
     #[test]
     fn stop_waiting_clears_the_countdown() {
         let mut state = UpdateState::new();
-        state.wait_for_jobs(1);
+        state.wait_for_jobs(1, "Import".into());
         state.countdown = Some(Countdown {
-            version: "1.0.0".into(),
             deadline: Instant::now(),
             shown: true,
             response: None,
@@ -1039,7 +1184,7 @@ mod tests {
     }
 
     #[test]
-    fn waiting_menu_names_the_job() {
+    fn waiting_text_names_the_job() {
         assert_eq!(
             waiting_menu_text(&[job("Import", "running")]),
             "Restart to Update Now (waiting for Import)…"
@@ -1048,6 +1193,7 @@ mod tests {
             waiting_menu_text(&[job("Import", "running"), job("Process run", "queued")]),
             "Restart to Update Now (waiting for Import and 1 more)…"
         );
+        assert_eq!(waiting_for_text(&[]), "your jobs");
     }
 
     #[test]
@@ -1081,6 +1227,19 @@ mod tests {
         let readiness: Readiness = serde_json::from_str(body).unwrap();
         assert!(!readiness.idle);
         assert_eq!(readiness.blocking[0].name, "Import");
+    }
+
+    #[test]
+    fn status_serializes_for_the_page() {
+        let status = UpdateStatus {
+            version: "1.2.3".into(),
+            waiting_for: Some("Import".into()),
+            restart_in: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&status).unwrap(),
+            serde_json::json!({"version": "1.2.3", "waiting_for": "Import", "restart_in": null})
+        );
     }
 
     #[test]
