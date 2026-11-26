@@ -482,36 +482,84 @@ fn decide_restart(
 /// What a Restart dialog told the user a restart would stop or replace.
 #[derive(Debug, Default)]
 struct Asked {
-    jobs: Vec<String>,
+    /// Identifiers of the jobs the dialog named. `name` is a generic label
+    /// (several import types all show as "Import", every pipeline as "Process
+    /// run"), so identity is the backend's unique job id; a new job that
+    /// happens to share a generic name is not treated as previously disclosed.
+    /// An empty id (an older backend that omitted it) falls back to name so
+    /// the dialog still recognizes the same job.
+    jobs: Vec<JobIdentity>,
     shared: bool,
+    /// Whether the dialog was based on a successful readiness response. When
+    /// true, the user answered for a specific picture: a recheck that fails
+    /// can no longer confirm that picture holds, so the answer must be
+    /// re-asked. When false, the dialog already warned that readiness was
+    /// unknown and a continuing failure adds nothing new.
+    readiness_known: bool,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct JobIdentity {
+    id: String,
+    name: String,
+}
+
+impl JobIdentity {
+    fn of(job: &ReadinessJob) -> Self {
+        Self {
+            id: job.id.clone(),
+            name: job.name.clone(),
+        }
+    }
+
+    /// Whether two entries name the same live job. Prefer the unique id;
+    /// fall back to name only when both sides lack an id (older backend).
+    fn same(&self, other: &ReadinessJob) -> bool {
+        if !self.id.is_empty() || !other.id.is_empty() {
+            return self.id == other.id;
+        }
+        self.name == other.name
+    }
 }
 
 impl Asked {
     fn new(readiness: Option<&Readiness>, shared: bool) -> Self {
-        let jobs = readiness
-            .map(|r| {
+        let (jobs, readiness_known) = match readiness {
+            Some(r) => (
                 r.blocking
                     .iter()
                     .chain(&r.paused)
-                    .map(|j| j.name.clone())
-                    .collect()
-            })
-            .unwrap_or_default();
-        Self { jobs, shared }
+                    .map(JobIdentity::of)
+                    .collect(),
+                true,
+            ),
+            None => (Vec::new(), false),
+        };
+        Self {
+            jobs,
+            shared,
+            readiness_known,
+        }
     }
 
     /// Whether `readiness` and `shared`, read after the answer, include
     /// something the dialog did not name: a job, or another Vireo window. A
-    /// check that fails after the answer adds nothing the user can be told.
+    /// failed recheck after a dialog that named specific jobs is also a miss,
+    /// since the picture the user answered for can no longer be confirmed. A
+    /// failed recheck after a dialog that already warned that readiness was
+    /// unknown adds nothing new, so the answer still holds.
     fn missed(&self, readiness: &Result<Readiness, String>, shared: bool) -> bool {
         if shared && !self.shared {
             return true;
         }
-        matches!(readiness, Ok(r) if r
-            .blocking
-            .iter()
-            .chain(&r.paused)
-            .any(|job| !self.jobs.contains(&job.name)))
+        match readiness {
+            Ok(r) => r
+                .blocking
+                .iter()
+                .chain(&r.paused)
+                .any(|job| !self.jobs.iter().any(|known| known.same(job))),
+            Err(_) => self.readiness_known,
+        }
     }
 }
 
@@ -678,6 +726,8 @@ struct Readiness {
 
 #[derive(Debug, Deserialize)]
 struct ReadinessJob {
+    #[serde(default)]
+    id: String,
     name: String,
     #[serde(default)]
     status: String,
@@ -1299,6 +1349,15 @@ mod tests {
 
     fn job(name: &str, status: &str) -> ReadinessJob {
         ReadinessJob {
+            id: format!("{}-id", name.to_lowercase().replace(' ', "-")),
+            name: name.into(),
+            status: status.into(),
+        }
+    }
+
+    fn job_with_id(id: &str, name: &str, status: &str) -> ReadinessJob {
+        ReadinessJob {
+            id: id.into(),
             name: name.into(),
             status: status.into(),
         }
@@ -1671,5 +1730,75 @@ mod tests {
             package_path(dir, "../../x"),
             dir.join("vireo-.._.._x.update")
         );
+    }
+
+    #[test]
+    fn asked_matches_jobs_by_id_not_generic_name() {
+        let readiness = Readiness {
+            idle: false,
+            blocking: vec![job_with_id("import-1", "Import", "running")],
+            paused: vec![],
+        };
+        let asked = Asked::new(Some(&readiness), false);
+        // A second Import with a different id started while the dialog was
+        // open; the generic name matches but the identity does not.
+        let after = Ok(Readiness {
+            idle: false,
+            blocking: vec![
+                job_with_id("import-1", "Import", "running"),
+                job_with_id("import-2", "Import", "queued"),
+            ],
+            paused: vec![],
+        });
+        assert!(asked.missed(&after, false));
+
+        // The same id with the same state is not missed.
+        let unchanged = Ok(Readiness {
+            idle: false,
+            blocking: vec![job_with_id("import-1", "Import", "running")],
+            paused: vec![],
+        });
+        assert!(!asked.missed(&unchanged, false));
+    }
+
+    #[test]
+    fn asked_falls_back_to_name_when_both_sides_lack_an_id() {
+        let readiness = Readiness {
+            idle: false,
+            blocking: vec![job_with_id("", "Import", "running")],
+            paused: vec![],
+        };
+        let asked = Asked::new(Some(&readiness), false);
+        let unchanged = Ok(Readiness {
+            idle: false,
+            blocking: vec![job_with_id("", "Import", "running")],
+            paused: vec![],
+        });
+        assert!(!asked.missed(&unchanged, false));
+    }
+
+    #[test]
+    fn asked_re_prompts_when_a_confirmed_recheck_now_fails() {
+        // Dialog named a specific job; a later recheck times out. The user
+        // answered for a confirmed picture, so re-ask rather than install.
+        let readiness = Readiness {
+            idle: false,
+            blocking: vec![job("Import", "running")],
+            paused: vec![],
+        };
+        let asked = Asked::new(Some(&readiness), false);
+        assert!(asked.missed(&Err::<Readiness, String>("timed out".into()), false));
+
+        // A dialog that already warned readiness was unknown treats a
+        // continuing failure as the same unknown state the user accepted.
+        let asked_unknown = Asked::new(None, false);
+        assert!(!asked_unknown.missed(&Err::<Readiness, String>("timed out".into()), false));
+    }
+
+    #[test]
+    fn asked_notices_a_new_shared_backend_window() {
+        let asked = Asked::new(None, false);
+        let readiness: Result<Readiness, String> = Err("timed out".into());
+        assert!(asked.missed(&readiness, true));
     }
 }
