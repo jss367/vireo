@@ -32,6 +32,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import threading
@@ -62,6 +63,13 @@ PENDING_RESTORE = "restore-pending.json"
 LAST_RESTORE = "last-restore.json"
 STAGED_DB = "restore-staged.db"
 PARTIAL_PREFIX = ".partial-"
+
+# Edit-mask snapshots a recipe's ``local.mask.ref`` points at. A snapshot
+# file is content-addressed (``<photo>.<ref>.png``), so copying by filename
+# is safe to merge. Kept in sync with ``local_masks``.
+EDIT_MASKS_SUBDIR = "edit-masks"
+_SNAPSHOT_FILE_RE = re.compile(r"^(\d+)\.([0-9a-f]{12})\.png$")
+_LOCAL_MASK_REF_RE = re.compile(r'"ref":\s*"([0-9a-f]{12})"')
 
 BACKUP_JOB = "catalog-backup"
 RESTORE_JOB = "catalog-restore-prepare"
@@ -301,6 +309,97 @@ def _remove_partials(root: str) -> None:
         shutil.rmtree(path, ignore_errors=True)
 
 
+def _referenced_mask_refs(conn: sqlite3.Connection) -> set[str]:
+    """Edit-mask refs any recipe or edit-history row in ``conn`` points at.
+
+    Mirrors the three reads behind ``local_masks._referenced_refs`` so the
+    backup can enumerate refs from its ``VACUUM INTO`` copy without opening
+    a full ``Database``. A missing table (older schema) contributes no refs.
+    """
+    refs: set[str] = set()
+    queries = (
+        "SELECT recipe_json FROM photo_edit_recipes WHERE recipe_json LIKE '%\"local\"%'",
+        "SELECT value_json FROM photo_versions WHERE value_json LIKE '%\"local\"%'",
+        "SELECT old_value FROM edit_history_items WHERE old_value LIKE '%\"local\"%'",
+        "SELECT new_value FROM edit_history_items WHERE new_value LIKE '%\"local\"%'",
+    )
+    for query in queries:
+        try:
+            rows = conn.execute(query).fetchall()
+        except sqlite3.OperationalError:
+            continue
+        for row in rows:
+            refs.update(_LOCAL_MASK_REF_RE.findall(row[0] or ""))
+    return refs
+
+
+def _mask_refs_from_db_file(db_path: str) -> set[str]:
+    try:
+        with contextlib.closing(sqlite3.connect(db_path, timeout=60)) as conn:
+            return _referenced_mask_refs(conn)
+    except sqlite3.Error:
+        log.warning("Could not read edit-mask refs from %s", db_path, exc_info=True)
+        return set()
+
+
+def _copy_referenced_snapshots(media_dir: str, dest_dir: str, refs: set[str]) -> int:
+    """Copy every ``<photo>.<ref>.png`` snapshot whose ref is referenced.
+
+    Missing source files are logged and skipped: a snapshot already lost on
+    disk cannot be captured here, and the backup should not fail for it.
+    """
+    if not refs or not media_dir:
+        return 0
+    source = os.path.join(media_dir, EDIT_MASKS_SUBDIR)
+    try:
+        entries = os.listdir(source)
+    except FileNotFoundError:
+        return 0
+    copied = 0
+    os.makedirs(dest_dir, exist_ok=True)
+    for name in entries:
+        match = _SNAPSHOT_FILE_RE.match(name)
+        if match is None or match.group(2) not in refs:
+            continue
+        try:
+            shutil.copy2(os.path.join(source, name), os.path.join(dest_dir, name))
+        except OSError:
+            log.warning("Could not copy edit-mask snapshot %s", name, exc_info=True)
+            continue
+        copied += 1
+    return copied
+
+
+def _restore_edit_mask_snapshots(source_dir: str, media_dir: str) -> int:
+    """Copy snapshot files from ``source_dir`` into the live edit-masks folder.
+
+    Existing files are left alone: a snapshot's filename is the hash of its
+    contents, so a name match is a bytes match. Returns how many were added.
+    """
+    if not media_dir:
+        return 0
+    try:
+        entries = os.listdir(source_dir)
+    except FileNotFoundError:
+        return 0
+    target = os.path.join(media_dir, EDIT_MASKS_SUBDIR)
+    os.makedirs(target, exist_ok=True)
+    added = 0
+    for name in entries:
+        if _SNAPSHOT_FILE_RE.match(name) is None:
+            continue
+        dest = os.path.join(target, name)
+        if os.path.exists(dest):
+            continue
+        try:
+            shutil.copy2(os.path.join(source_dir, name), dest)
+        except OSError:
+            log.warning("Could not restore edit-mask snapshot %s", name, exc_info=True)
+            continue
+        added += 1
+    return added
+
+
 def _restorable(version: object) -> tuple[bool, str | None]:
     if not isinstance(version, int):
         return False, "The backup does not record its catalog version."
@@ -375,12 +474,18 @@ def is_due(db_path: str, now: datetime | None = None) -> bool:
 
 
 def create_backup(
-    db_path: str, *, kind: str, keep: int, hooks: BackupHooks, now: datetime | None = None,
+    db_path: str, *, kind: str, keep: int, hooks: BackupHooks,
+    media_dir: str | None = None, now: datetime | None = None,
 ) -> JsonDict:
     """Back up the catalog, then delete rotating copies beyond ``keep``.
 
     At least one rotating copy is kept whatever ``keep`` says, so a backup
     made while the daily backup is off is not deleted as soon as it lands.
+    ``media_dir`` is the root under which ``edit-masks/<photo>.<ref>.png``
+    snapshots live; the backup keeps a copy of every snapshot its catalog
+    still references, so a later ``gc_edit_masks`` sweep cannot leave a
+    restored recipe rendering without its local adjustment. When omitted,
+    defaults to the catalog's directory (the default-install layout).
     """
     if not _LOCK.acquire(blocking=False):
         raise BackupBusy("Another catalog backup or restore is in progress.")
@@ -389,6 +494,7 @@ def create_backup(
         os.makedirs(root, exist_ok=True)
         _remove_partials(root)
         catalog_dir = os.path.dirname(os.path.abspath(db_path))
+        masks_root = media_dir or catalog_dir
         results_bytes = sum(_file_size(path) for path, _k, _w in result_files(catalog_dir))
         _require_free_space(root, _file_size(db_path) + results_bytes, "a catalog backup")
         when = now or _now()
@@ -404,8 +510,14 @@ def create_backup(
             results = _copy_results(catalog_dir, partial)
             facts = _describe_db(os.path.join(partial, BACKUP_DB), hooks)
             _stop_if_cancelled(hooks)
+            hooks.progress("Copying edit-mask snapshots", 0, 0)
+            refs = _mask_refs_from_db_file(os.path.join(partial, BACKUP_DB))
+            snapshots = _copy_referenced_snapshots(
+                masks_root, os.path.join(partial, EDIT_MASKS_SUBDIR), refs,
+            )
+            _stop_if_cancelled(hooks)
             manifest: JsonDict = {"kind": kind, "created_at": _iso(when), **facts,
-                                  "result_files": results}
+                                  "result_files": results, "edit_masks": snapshots}
             _write_json(os.path.join(partial, MANIFEST), manifest)
             replace_file(partial, os.path.join(root, name))
             published = True
@@ -535,11 +647,16 @@ def _checkpoint_live(db_path: str) -> None:
     _remove(db_path + "-shm")
 
 
-def _set_aside_live_catalog(db_path: str, root: str, marker: JsonDict) -> JsonDict:
+def _set_aside_live_catalog(
+    db_path: str, root: str, marker: JsonDict, media_dir: str,
+) -> JsonDict:
     """Move the live catalog and its result files into a before-restore backup.
 
     Each move is skipped when its source is already gone, so a launch that
-    stopped part way through finishes the remaining moves.
+    stopped part way through finishes the remaining moves. Edit-mask
+    snapshots the set-aside catalog still references are copied into the
+    before-restore folder: that preserves them for an undo-by-restoring
+    even after a later ``gc_edit_masks`` sweep against the restored catalog.
     """
     before = marker.get("before_restore")
     if not isinstance(before, str):
@@ -555,10 +672,14 @@ def _set_aside_live_catalog(db_path: str, root: str, marker: JsonDict) -> JsonDi
     catalog_dir = os.path.dirname(os.path.abspath(db_path))
     for path, _kind, _workspace_id in result_files(catalog_dir):
         replace_file(path, os.path.join(before_dir, os.path.basename(path)))
-    facts = _describe_db(kept_db) if os.path.exists(kept_db) else {}
+    facts: JsonDict = _describe_db(kept_db) if os.path.exists(kept_db) else {}
+    snapshots = _copy_referenced_snapshots(
+        media_dir, os.path.join(before_dir, EDIT_MASKS_SUBDIR),
+        _mask_refs_from_db_file(kept_db) if os.path.exists(kept_db) else set(),
+    )
     _write_json(os.path.join(before_dir, MANIFEST), {
         "kind": BEFORE_RESTORE, "created_at": _iso(_now()), **facts,
-        "replaced_by": marker.get("backup"),
+        "replaced_by": marker.get("backup"), "edit_masks": snapshots,
     })
     marker = {**marker, "phase": "moved_live"}
     _write_json(os.path.join(root, PENDING_RESTORE), marker)
@@ -574,9 +695,15 @@ def _restore_result_files(source_dir: str, catalog_dir: str) -> None:
         replace_file(tmp, os.path.join(catalog_dir, name))
 
 
-def _put_backup_in_place(db_path: str, root: str, marker: JsonDict) -> JsonDict:
+def _put_backup_in_place(
+    db_path: str, root: str, marker: JsonDict, media_dir: str,
+) -> JsonDict:
     catalog_dir = os.path.dirname(os.path.abspath(db_path))
-    _restore_result_files(os.path.join(root, str(marker["backup"])), catalog_dir)
+    backup_dir = os.path.join(root, str(marker["backup"]))
+    _restore_result_files(backup_dir, catalog_dir)
+    _restore_edit_mask_snapshots(
+        os.path.join(backup_dir, EDIT_MASKS_SUBDIR), media_dir,
+    )
     staged = os.path.join(root, STAGED_DB)
     if os.path.exists(staged):
         _remove(db_path + "-wal")
@@ -617,12 +744,14 @@ def _put_live_catalog_back(db_path: str, root: str, marker: JsonDict) -> None:
     shutil.rmtree(before_dir, ignore_errors=True)
 
 
-def _apply_phases(db_path: str, root: str, marker: JsonDict) -> JsonDict:
+def _apply_phases(
+    db_path: str, root: str, marker: JsonDict, media_dir: str,
+) -> JsonDict:
     if marker.get("phase") == "staged":
         if not os.path.exists(os.path.join(root, STAGED_DB)):
             raise BackupError("The prepared copy of the backup is missing, so nothing was changed.")
         try:
-            marker = _set_aside_live_catalog(db_path, root, marker)
+            marker = _set_aside_live_catalog(db_path, root, marker, media_dir)
         except (OSError, sqlite3.Error, BackupError) as exc:
             # The marker on disk names the before-restore folder once one
             # was chosen; the local copy does not.
@@ -630,7 +759,7 @@ def _apply_phases(db_path: str, root: str, marker: JsonDict) -> JsonDict:
             raise BackupError(f"Could not set the current catalog aside: {exc}") from exc
     if marker.get("phase") == "moved_live":
         try:
-            marker = _put_backup_in_place(db_path, root, marker)
+            marker = _put_backup_in_place(db_path, root, marker, media_dir)
         except (OSError, BackupError) as exc:
             # Raises when the live catalog cannot be put back either: Vireo
             # must not start and create an empty catalog in its place.
@@ -641,12 +770,17 @@ def _apply_phases(db_path: str, root: str, marker: JsonDict) -> JsonDict:
     return marker
 
 
-def apply_pending_restore(db_path: str) -> JsonDict | None:
+def apply_pending_restore(db_path: str, media_dir: str | None = None) -> JsonDict | None:
     """Finish a staged restore before the catalog is opened.
 
     Returns the outcome written to ``last-restore.json``, or None when no
     restore was waiting. A failure that leaves the live catalog in place is
     recorded and Vireo starts on it; one that cannot put it back raises.
+    ``media_dir`` is the root under which ``edit-masks/`` lives; the
+    restore copies the backup's referenced snapshots back into it and
+    preserves the pre-restore ones in the before-restore folder so undo
+    stays complete. Defaults to the catalog's directory for the default
+    install layout.
     """
     root = backups_dir(db_path)
     marker = pending_restore(db_path)
@@ -655,12 +789,13 @@ def apply_pending_restore(db_path: str) -> JsonDict | None:
     if not isinstance(marker.get("backup"), str):
         _remove(os.path.join(root, PENDING_RESTORE))
         return None
+    masks_root = media_dir or os.path.dirname(os.path.abspath(db_path))
     outcome: JsonDict = {
         "backup": marker["backup"], "backup_created_at": marker.get("backup_created_at"),
         "finished_at": None, "ok": False, "error": None, "before_restore": None,
     }
     try:
-        marker = _apply_phases(db_path, root, marker)
+        marker = _apply_phases(db_path, root, marker, masks_root)
         outcome.update(ok=True, before_restore=marker.get("before_restore"))
         log.info("Restored the catalog from backup %s; the previous catalog is in %s",
                  marker["backup"], marker.get("before_restore"))
@@ -693,8 +828,11 @@ class CatalogBackups:
     backs up soon after it next opens.
     """
 
-    def __init__(self, db_path: str, get_runner: Callable[[], JobRunner]) -> None:
+    def __init__(
+        self, db_path: str, get_runner: Callable[[], JobRunner], media_dir: str | None = None,
+    ) -> None:
         self.db_path = db_path
+        self.media_dir = media_dir or os.path.dirname(os.path.abspath(db_path))
         self._get_runner = get_runner
         self._timer: threading.Timer | None = None
         self._stopped = threading.Event()
@@ -736,7 +874,10 @@ class CatalogBackups:
     def start_backup(self, *, kind: str, lineage: JobLineage | None = None) -> tuple[str, bool]:
         """Start a backup job, or join the one running; return (id, joined)."""
         def work(job: JobDict) -> JsonDict:
-            return create_backup(self.db_path, kind=kind, keep=keep_setting(), hooks=self._hooks(job))
+            return create_backup(
+                self.db_path, kind=kind, keep=keep_setting(), hooks=self._hooks(job),
+                media_dir=self.media_dir,
+            )
 
         job_id, joined, _snapshot = self._get_runner().start_singleton(
             BACKUP_JOB, work, singleton_key=BACKUP_JOB, workspace_id=None,

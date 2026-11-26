@@ -855,7 +855,10 @@ def _start_catalog_backups(app, db_path, startup):
     """
     from services.catalog_backups import CatalogBackups
 
-    app._catalog_backups = CatalogBackups(db_path, lambda: app._job_runner)
+    app._catalog_backups = CatalogBackups(
+        db_path, lambda: app._job_runner,
+        media_dir=media_root(app.config["THUMB_CACHE_DIR"]),
+    )
     if not os.environ.get("VIREO_DISABLE_STARTUP_BACKFILL_TIMERS"):
         app._catalog_backups.schedule()
 
@@ -866,16 +869,18 @@ def _start_catalog_backups(app, db_path, startup):
     return cleanup_app_resources
 
 
-def _apply_pending_catalog_restore(db_path):
+def _apply_pending_catalog_restore(db_path, thumb_dir):
     """Finish a restore Settings prepared, before anything opens the catalog.
 
     Runs after the single-instance lock, so no other Vireo has the catalog
     open. A restore that could not put the previous catalog back raises:
-    starting would create an empty catalog in its place.
+    starting would create an empty catalog in its place. ``thumb_dir`` is
+    the same value ``create_app`` receives, so the restore reaches the
+    ``edit-masks/`` folder its snapshots belong in.
     """
     from services.catalog_backups import apply_pending_restore
 
-    outcome = apply_pending_restore(db_path)
+    outcome = apply_pending_restore(db_path, media_dir=media_root(thumb_dir))
     if outcome is not None and not outcome["ok"]:
         log.error("Catalog restore did not happen: %s", outcome["error"])
 
@@ -1692,7 +1697,7 @@ def main():
     )
 
     _reserve_single_instance_or_exit()
-    _apply_pending_catalog_restore(args.db)
+    _apply_pending_catalog_restore(args.db, args.thumb_dir)
 
     api_token = generate_token()
     mode = "headless" if args.headless else "gui"

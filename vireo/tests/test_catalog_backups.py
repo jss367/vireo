@@ -49,6 +49,25 @@ def _results(tmp_path, workspace_id, text):
     (tmp_path / f"pipeline_results_ws{workspace_id}.json").write_text(text)
 
 
+def _write_mask_snapshot(media_dir, photo_id, ref, payload=b"\x89PNG\r\n\x1a\n"):
+    """Create a file at the content-addressed snapshot path and return it."""
+    folder = media_dir / cb.EDIT_MASKS_SUBDIR
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{photo_id}.{ref}.png"
+    path.write_bytes(payload)
+    return path
+
+
+def _add_local_recipe(db_path, photo_id, ref):
+    """Save a recipe whose ``local.mask.ref`` matches a snapshot file."""
+    with Database(db_path) as db:
+        db.conn.execute(
+            "INSERT OR REPLACE INTO photo_edit_recipes (photo_id, recipe_json) VALUES (?, ?)",
+            (photo_id, json.dumps({"local": {"mask": {"ref": ref}}})),
+        )
+        db.commit()
+
+
 def test_backup_copies_catalog_and_result_files(tmp_path):
     db_path = _catalog(tmp_path)
     _results(tmp_path, 1, '{"v": "live"}')
@@ -275,6 +294,98 @@ def test_cancel_restore_drops_the_staged_copy(tmp_path):
     assert not (tmp_path / "backups" / cb.STAGED_DB).exists()
     assert cb.apply_pending_restore(db_path) is None
     assert cb.cancel_restore(db_path) is False
+
+
+def test_backup_includes_referenced_edit_mask_snapshots(tmp_path):
+    db_path = _catalog(tmp_path)
+    referenced = "0123456789ab"
+    orphan = "ba9876543210"
+    _write_mask_snapshot(tmp_path, 1, referenced, payload=b"kept")
+    _write_mask_snapshot(tmp_path, 2, orphan, payload=b"orphan")
+    _add_local_recipe(db_path, 1, referenced)
+
+    result = cb.create_backup(db_path, kind="manual", keep=3, hooks=_hooks()[0],
+                              media_dir=str(tmp_path))
+
+    folder = tmp_path / "backups" / result["backup"]
+    backed_up = folder / cb.EDIT_MASKS_SUBDIR / f"1.{referenced}.png"
+    assert backed_up.read_bytes() == b"kept"
+    assert not (folder / cb.EDIT_MASKS_SUBDIR / f"2.{orphan}.png").exists()
+    assert json.loads((folder / cb.MANIFEST).read_text())["edit_masks"] == 1
+
+
+def test_backup_without_edit_masks_folder(tmp_path):
+    db_path = _catalog(tmp_path)
+
+    result = cb.create_backup(db_path, kind="manual", keep=3, hooks=_hooks()[0],
+                              media_dir=str(tmp_path))
+
+    folder = tmp_path / "backups" / result["backup"]
+    assert json.loads((folder / cb.MANIFEST).read_text())["edit_masks"] == 0
+    assert not (folder / cb.EDIT_MASKS_SUBDIR).exists()
+
+
+def test_restore_rewrites_gc_deleted_mask_snapshots(tmp_path):
+    db_path = _catalog(tmp_path)
+    ref = "0123456789ab"
+    snapshot = _write_mask_snapshot(tmp_path, 1, ref, payload=b"frozen")
+    _add_local_recipe(db_path, 1, ref)
+
+    backup = cb.create_backup(db_path, kind="daily", keep=3, hooks=_hooks()[0],
+                              media_dir=str(tmp_path))["backup"]
+    snapshot.unlink()  # stand-in for local_masks.gc_edit_masks reclaiming it
+    cb.stage_restore(db_path, backup, _hooks()[0])
+
+    outcome = cb.apply_pending_restore(db_path, media_dir=str(tmp_path))
+
+    assert outcome["ok"], outcome
+    assert snapshot.read_bytes() == b"frozen"
+
+
+def test_restore_preserves_pre_restore_masks_for_undo(tmp_path):
+    db_path = _catalog(tmp_path)
+    backup_ref, live_ref = "aaaa11112222", "bbbb33334444"
+    _write_mask_snapshot(tmp_path, 1, backup_ref, payload=b"old")
+    _add_local_recipe(db_path, 1, backup_ref)
+    backup = cb.create_backup(db_path, kind="daily", keep=3, hooks=_hooks()[0],
+                              media_dir=str(tmp_path))["backup"]
+
+    _write_mask_snapshot(tmp_path, 1, live_ref, payload=b"new")
+    _add_local_recipe(db_path, 1, live_ref)
+    cb.stage_restore(db_path, backup, _hooks()[0])
+
+    outcome = cb.apply_pending_restore(db_path, media_dir=str(tmp_path))
+
+    before_dir = tmp_path / "backups" / outcome["before_restore"] / cb.EDIT_MASKS_SUBDIR
+    assert (before_dir / f"1.{live_ref}.png").read_bytes() == b"new"
+    manifest = json.loads(
+        (tmp_path / "backups" / outcome["before_restore"] / cb.MANIFEST).read_text()
+    )
+    assert manifest["edit_masks"] == 1
+
+    # And undoing the restore by restoring the before-restore copy puts the
+    # live-era snapshot back if a later GC had removed it.
+    (tmp_path / cb.EDIT_MASKS_SUBDIR / f"1.{live_ref}.png").unlink()
+    cb.stage_restore(db_path, outcome["before_restore"], _hooks()[0])
+    assert cb.apply_pending_restore(db_path, media_dir=str(tmp_path))["ok"]
+    assert (tmp_path / cb.EDIT_MASKS_SUBDIR / f"1.{live_ref}.png").read_bytes() == b"new"
+
+
+def test_restore_keeps_existing_live_snapshots(tmp_path):
+    db_path = _catalog(tmp_path)
+    ref = "0123456789ab"
+    _write_mask_snapshot(tmp_path, 1, ref, payload=b"snapshot")
+    _add_local_recipe(db_path, 1, ref)
+    backup = cb.create_backup(db_path, kind="daily", keep=3, hooks=_hooks()[0],
+                              media_dir=str(tmp_path))["backup"]
+    cb.stage_restore(db_path, backup, _hooks()[0])
+
+    # A caller-local tampering with the live snapshot proves the restore
+    # does not overwrite a snapshot that's already on disk.
+    (tmp_path / cb.EDIT_MASKS_SUBDIR / f"1.{ref}.png").write_bytes(b"locally edited")
+    cb.apply_pending_restore(db_path, media_dir=str(tmp_path))
+
+    assert (tmp_path / cb.EDIT_MASKS_SUBDIR / f"1.{ref}.png").read_bytes() == b"locally edited"
 
 
 def test_api_backs_up_and_prepares_a_restore(app_and_db):
