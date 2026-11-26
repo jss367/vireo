@@ -441,6 +441,56 @@ def test_get_predictions_chunks_and_resorts(db, cat):
     assert len([s for s in dict.fromkeys(statements) if "FROM predictions pr" in s]) == 2
 
 
+def test_get_predictions_by_id_tests_each_photos_visibility(db, cat):
+    """An id list is scoped by a per-photo test, never by joining the view.
+
+    The view is a UNION, so joining it builds every photo the workspace can
+    see once per chunk; Review passes every photo of its queue. A photo in an
+    unlinked folder stays out, and a per-photo grant brings it in.
+    """
+    p0 = cat["p"][0]
+    db.predictions.add(_det(db, p0), "Robin", 0.5, "m1")
+    db.predictions.add(_det(db, cat["outside"]), "Hidden", 0.99, "m1")
+    db.commit()
+    ids = [cat["outside"], p0]
+    statements = _trace(db)
+    assert [r["species"] for r in db.predictions.get_rows(photo_ids=ids)] == ["Robin"]
+    db.conn.set_trace_callback(None)
+    queries = [s for s in statements if "FROM predictions pr" in s]
+    assert queries and not any("photo_workspace_visibility" in s for s in queries)
+
+    db.photo_visibility.grant(cat["ws"], [cat["outside"]])
+    db.commit()
+    assert [r["species"] for r in db.predictions.get_rows(photo_ids=ids)] == ["Hidden", "Robin"]
+    assert [r["species"] for r in db.predictions.get_rows()] == ["Hidden", "Robin"]
+
+
+def test_get_predictions_by_id_binds_every_filter_in_order(db, cat):
+    """Model, status and rules still bind to their own placeholders."""
+    p0, p1 = cat["p"][:2]
+    d0 = _det(db, p0)
+    db.predictions.add(d0, "Robin", 0.5, "m1", labels_fingerprint="fp1")
+    db.predictions.add(d0, "Sparrow", 0.9, "m2", labels_fingerprint="fp1", status="accepted")
+    db.predictions.add(_det(db, p1), "Jay", 0.95, "m1", labels_fingerprint="fp1")
+    db.predictions.add(_det(db, cat["outside"]), "Hidden", 0.99, "m1")
+    db.commit()
+    ids = [p0, p1, cat["outside"]]
+    rules = [{"field": "prediction_confidence", "op": ">=", "value": 0.8}]
+
+    def species(**filters):
+        return [r["species"] for r in db.predictions.get_rows(photo_ids=ids, **filters)]
+
+    assert species() == ["Jay", "Sparrow", "Robin"]
+    assert species(model="m1") == ["Jay", "Robin"]
+    assert species(status="accepted") == ["Sparrow"]
+    assert species(rules=rules) == ["Jay", "Sparrow"]
+    assert species(rules=rules, model="m1", status="pending") == ["Jay"]
+    for filters in ({}, {"model": "m1"}, {"status": "accepted"}, {"rules": rules}):
+        by_id = db.predictions.get_rows(photo_ids=ids, **filters)
+        whole = db.predictions.get_rows(**filters)
+        assert [tuple(r) for r in by_id] == [tuple(r) for r in whole]
+
+
 def test_get_predictions_rules_route_through_facade(db, cat, monkeypatch):
     p0, p1 = cat["p"][:2]
     db.predictions.add(_det(db, p0), "Robin", 0.5, "m1")

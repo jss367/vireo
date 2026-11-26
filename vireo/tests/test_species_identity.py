@@ -76,6 +76,77 @@ def db(tmp_path):
     database.close()
 
 
+def _identity_rows():
+    votes_red = json.dumps({"Red-crowned Parrot": 3, "Lilac-crowned Parrot": 1})
+    votes_lilac = json.dumps({"Red-crowned Parrot": 1, "Lilac-crowned Parrot": 3})
+    custom = {"species": "Red-crowned Parrot", "classifier_model": "BioCLIP-2", "labels_fingerprint": "abc"}
+    return [
+        custom,
+        {**custom, "scientific_name": "Amazona finschi"},
+        {**custom, "scientific_name": "Amazona finschi", "labels_fingerprint": "tol"},
+        {**custom, "scientific_name": "Amazona finschi", "classifier_model": "iNat21"},
+        {**custom, "model": "iNat21", "classifier_model": None, "scientific_name": "Amazona finschi"},
+        {**custom, "source_taxon_id": LILAC["taxon_id"], "scientific_name": "Amazona finschi"},
+        {**custom, "source_taxon_id": BROWED["taxon_id"]},
+        {**custom, "group_id": "burst", "individual": votes_red},
+        {**custom, "group_id": "burst", "individual": votes_lilac},
+        # Votes count only on a grouped row.
+        {**custom, "group_id": None, "individual": votes_lilac},
+        {**custom, "group_id": "burst", "individual": None},
+        {**custom, "group_id": "burst", "individual": "not json"},
+        # Parsed votes are not hashable: resolved without the cache, and ignored.
+        {**custom, "group_id": "burst", "individual": {"Lilac-crowned Parrot": 3}},
+        {"species": "Lilac-crowned Parrot (Amazona finschi)", "classifier_model": "BioCLIP-2"},
+        {"species": "Unknown warbler", "classifier_model": "BioCLIP-2"},
+        {"species": None, "classifier_model": None},
+        {"species": "", "group_id": "burst", "individual": votes_red},
+    ]
+
+
+def test_resolver_cache_answers_as_a_fresh_resolver_does(db):
+    """Rows that share a label keep their own source, model and burst votes."""
+    rows = _identity_rows()
+    shared = SpeciesResolver(db=db)
+    for row in rows + rows[::-1]:
+        fresh = SpeciesResolver(db=db)
+        assert shared.prediction(row) == fresh.prediction(row), row
+        assert shared.consensus(row) == fresh.consensus(row), row
+    assert shared.consensus(rows[7]).display_name == "Red-crowned Parrot"
+    assert shared.consensus(rows[8]).display_name == "Lilac-crowned Parrot"
+    assert shared.consensus(rows[9]).display_name == "Red-crowned Parrot"
+    assert shared.consensus(rows[12]).display_name == "Red-crowned Parrot"
+
+
+def test_resolver_resolves_each_distinct_label_once(db):
+    """Review resolves every row of its queue; rows repeat a few labels."""
+    rows = _identity_rows()
+    resolver = SpeciesResolver(db=db)
+    for row in rows:
+        resolver.prediction(row)
+        resolver.consensus(row)
+    with patch.object(SpeciesResolver, "resolve", side_effect=AssertionError("resolved again")):
+        for _ in range(3):
+            for index, row in enumerate(rows):
+                if index == 12:
+                    continue  # unhashable votes are never cached
+                resolver.prediction(row)
+                resolver.consensus(row)
+
+
+def test_resolver_reads_database_rows(db):
+    db.conn.execute("CREATE TEMP TABLE identity_rows (species, scientific_name, source_taxon_id,"
+                    " classifier_model, labels_fingerprint, group_id, individual)")
+    db.conn.execute("INSERT INTO identity_rows VALUES (?, ?, ?, ?, ?, ?, ?)", (
+        "Red-crowned Parrot", None, None, "BioCLIP-2", "abc", "burst",
+        json.dumps({"Lilac-crowned Parrot": 2, "Red-crowned Parrot": 1}),
+    ))
+    row = db.conn.execute("SELECT * FROM identity_rows").fetchone()
+    resolver = SpeciesResolver(db=db)
+    assert resolver.prediction(row).display_name == "Red-crowned Parrot"
+    assert resolver.consensus(row).display_name == "Lilac-crowned Parrot"
+    assert resolver.consensus(row) == SpeciesResolver(db=db).consensus(dict(row))
+
+
 def test_corrects_bad_alias_without_merging_red_browed_species(taxonomy):
     resolver = SpeciesResolver(taxonomy=taxonomy)
     assert resolver.resolve("Red-crowned Amazon").key == resolver.resolve("Red-crowned Parrot").key

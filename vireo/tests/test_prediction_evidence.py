@@ -121,6 +121,22 @@ def test_location_is_honest_context_and_never_an_exclusion(app_and_db):
     assert 'taxon_name=American+Golden-Plover' in geo['observations_url']
 
 
+@pytest.mark.parametrize('name', [
+    'Corvus caurinus', "Hawai\u02bbi \u02bbAmakihi", "Swinhoe's White-eye", 'A & B/C?=#', '\u00c9clair', None, '',
+])
+@pytest.mark.parametrize('position', [(32.7157, -117.1611), (0, 0), (-89.5, 180), (1e-07, -2.5e-10)])
+def test_observation_link_is_the_form_encoding_of_its_fields(name, position):
+    from urllib.parse import urlencode
+
+    from services.prediction_evidence import geographic_context
+    lat, lon = position
+    params = {'lat': lat, 'lng': lon, 'radius': 50}
+    if name:
+        params['taxon_name'] = name
+    geo = geographic_context({'latitude': lat, 'longitude': lon}, {'scientific_name': name})
+    assert geo['observations_url'] == 'https://www.inaturalist.org/observations?' + urlencode(params)
+
+
 @pytest.mark.parametrize('decision', ['not_enough_evidence', 'invalid_subject', 'subject_valid', 'unreviewed'])
 def test_assessments_preserve_predictions_tags_flags_and_can_be_revisited(app_and_db, decision):
     app, db = app_and_db
