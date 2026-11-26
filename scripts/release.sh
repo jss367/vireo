@@ -155,6 +155,15 @@ echo "==> Updating Cargo.lock (workspace version only)..."
 (cd src-tauri && cargo update --workspace)
 echo ""
 
+# --- Save this release's catalog for the upgrade test ---
+# vireo/tests/test_release_catalog_upgrades.py opens a small catalog made by
+# every release with current code, and requires one for the version in
+# pyproject.toml. Write it now, with the code being released, so it lands in
+# the release commit.
+echo "==> Saving the v$NEW_VERSION release catalog..."
+python scripts/release_catalogs.py make --current
+echo ""
+
 # --- Verify the Rust dependency graph compiles (publish path only) ---
 # The publish path never builds locally — CI does that, but only *after* the tag
 # is pushed, so a dependency that does not compile is discovered 20 minutes into
@@ -254,7 +263,8 @@ fi
 
 # --- Commit version bump ---
 echo "==> Committing version bump..."
-git add pyproject.toml package.json package-lock.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock
+git add pyproject.toml package.json package-lock.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock \
+    "vireo/tests/fixtures/release_catalogs/v$NEW_VERSION.db.gz" "vireo/tests/fixtures/release_catalogs/v$NEW_VERSION.json"
 git commit -m "release: v$NEW_VERSION"
 echo ""
 
