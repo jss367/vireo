@@ -432,6 +432,43 @@ test('formatBytes (vireo-utils.js) picks the unit at each 1024 boundary', () => 
   assert.equal(ctx.formatBytes(3 * 1024 ** 4), '3.00 TB');
 });
 
+test('_lbNextAfterDelete picks the nearest surviving photo, after the deleted one first', () => {
+  const ctx = load([fn('lightbox/delete.js', '_lbNextAfterDelete')]);
+  const order = [1, 2, 3, 4, 5].map(id => ({id}));
+  const next = (deletedIndex, remainingIds) => {
+    const found = ctx._lbNextAfterDelete(order, deletedIndex, remainingIds.map(id => ({id})));
+    return found && found.id;
+  };
+  assert.equal(next(2, [1, 2, 4, 5]), 4);
+  // The row before the deleted photo left too (its companion): the photo
+  // after it is still the next one, not the one an old index would name.
+  assert.equal(next(2, [1, 4, 5]), 4);
+  // So did the row after it.
+  assert.equal(next(2, [1, 2, 5]), 5);
+  // Nothing after it survives: step back.
+  assert.equal(next(4, [1, 2, 3]), 3);
+  assert.equal(next(4, [1, 2]), 2);
+  assert.equal(next(0, []), null);
+});
+
+test('exposureSummaryParts (vireo-utils.js) lists focal length, aperture, shutter and ISO', () => {
+  const ctx = load([fn('vireo-utils.js', 'exposureSummaryParts')]);
+  const parts = exif => Array.from(ctx.exposureSummaryParts({EXIF: exif}));
+  assert.deepEqual(
+    parts({FocalLength: 600, FNumber: 6.3, ExposureTime: 0.003125, ISO: 64}),
+    ['600mm', 'f/6.3', '1/320s', 'ISO 64']);
+  // A slow shutter reads in seconds; 0.6s is not "1/2s".
+  assert.deepEqual(parts({ExposureTime: 0.6}), ['0.6s']);
+  assert.deepEqual(parts({ExposureTime: 2}), ['2s']);
+  assert.deepEqual(parts({ExposureTime: 0.25}), ['1/4s']);
+  assert.deepEqual(parts({FocalLength: 104.6, ISO: '400'}), ['105mm', 'ISO 400']);
+  // Missing, zero and unreadable values are left out.
+  assert.deepEqual(parts({FocalLength: 0, FNumber: 'n/a', ISO: null}), []);
+  assert.deepEqual(Array.from(ctx.exposureSummaryParts(null)), []);
+  assert.deepEqual(Array.from(ctx.exposureSummaryParts({EXIF: 'x'})), []);
+  assert.deepEqual(Array.from(ctx.exposureSummaryParts({Composite: {Aperture: 4}})), []);
+});
+
 test('escapeHtml and escapeAttr (vireo-utils.js) encode the same five characters', () => {
   const ctx = load([fn('vireo-utils.js', 'escapeHtml'), fn('vireo-utils.js', 'escapeAttr')]);
   assert.equal(ctx.escapeHtml(null), '');

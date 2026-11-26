@@ -245,6 +245,7 @@ declare var VireoTextSearch: {readOptions(namespace: string): TextSearchOptions;
 declare function escapeHtml(value: unknown): string;
 declare function escapeAttr(value: unknown): string;
 declare function formatBytes(value: number): string;
+declare function exposureSummaryParts(metadata: unknown): string[];
 declare function isTauri(): boolean;
 declare function openExternalWithRecovery(url: string): unknown;
 declare function formatShortcut(value: string): string;

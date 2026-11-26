@@ -35,7 +35,9 @@ import {
 } from './folder-health.js';
 import { getGridCard, renderGrid } from './grid.js';
 import { moveBrowseSelection } from './keyboard.js';
-import { openBrowseShortcutPhoto, removeDeletedLightboxPhoto } from './lightbox.js';
+import {
+  getLightboxListPosition, openBrowseShortcutPhoto, removeDeletedLightboxPhoto,
+} from './lightbox.js';
 import {
   onBrowseFilterChange, resetAndLoad,
   updatePreviousPhotosButton,
@@ -91,6 +93,7 @@ registerPageHooks({
   openCaptureTimeModal: openCaptureTimeModal,
   batchDelete: batchDelete,
   removeDeletedLightboxPhoto: removeDeletedLightboxPhoto,
+  getLightboxListPosition: getLightboxListPosition,
   afterHistoryChange: afterHistoryChange,
   // The export modal's shared controllers (vireo-export-presets.js,
   // vireo-export-collisions.js).

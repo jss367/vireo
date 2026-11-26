@@ -112,6 +112,7 @@ const classicSharedGlobals = {
   escapeHtml: 'readonly',
   escapeAttr: 'readonly',
   formatBytes: 'readonly',
+  exposureSummaryParts: 'readonly',
   VireoViewPreferences: 'readonly',
   VireoTextSearch: 'readonly',
   // keymap.js, vireo-color-labels.js, vireo-workspace-switcher.js, help.js

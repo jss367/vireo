@@ -26,6 +26,7 @@
       "copyPhotoPaths",
       "getActiveSelection",
       "getDetailPhotoId",
+      "getLightboxListPosition",
       "getPhotos",
       "getSelectedPhotoId",
       "markExportCustom",

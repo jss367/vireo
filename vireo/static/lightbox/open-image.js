@@ -5,7 +5,9 @@
  * before it touches the page.
  */
 import { lbState } from './shared-state.js';
-import { _lbSetPhotoTransitionPending, vireoLightboxSession, vireoLightboxViewport } from './state.js';
+import {
+  _lbPhotoDataByPhoto, _lbSetPhotoTransitionPending, vireoLightboxSession, vireoLightboxViewport,
+} from './state.js';
 import { _lbDisplayedFlagFor, _lbSetFlagStatus } from './flags.js';
 import { _lbFlushDeferredOverlayApply } from './overlays.js';
 import {
@@ -24,8 +26,16 @@ export function _lbRenderKeywords(/** @type {{name: string}[] | undefined} */ ke
   label.setAttribute('aria-hidden', 'true');
   container.appendChild(label);
 
+  // A photo can carry two keywords with one name (a place under its region
+  // and a top-level keyword of the same name). A pill shows only the name, so
+  // the second one would repeat the first.
+  /** @type {Record<string, boolean>} */ var shown = Object.create(null);
   var entries = Array.isArray(keywords) ? keywords.filter(function(keyword) {
-    return keyword && keyword.name;
+    if (!keyword || !keyword.name) return false;
+    var key = String(keyword.name).trim().toLowerCase();
+    if (shown[key]) return false;
+    shown[key] = true;
+    return true;
   }) : [];
   if (!entries.length) {
     var empty = document.createElement('span');
@@ -44,21 +54,63 @@ export function _lbRenderKeywords(/** @type {{name: string}[] | undefined} */ ke
   });
 }
 
-function renderPhotoCounter(/** @type {LightboxOpenContext} */ open) {
+// Shutter, aperture, ISO and focal length come with the photo's detail, so the
+// line is empty until that arrives; an earlier visit's detail fills it at once.
+export function _lbRenderExposure(/** @type {LightboxPhoto | null | undefined} */ detail) {
+  var el = document.getElementById('lightboxExposure');
+  if (!el) return;
+  var text = exposureSummaryParts(detail && detail.metadata).join(' \u00b7 ');
+  el.textContent = text;
+  el.title = text;
+}
+
+// Where a photo sits among the photos the user is paging through. The
+// lightbox's list can be a loaded window of a longer result (Browse loads a
+// page at a time); the page then answers with the place in the whole result,
+// so the counter never reads a page size as the number of photos.
+/** @returns {{position: number, total: number}} */
+function listPosition(/** @type {number} */ photoId) {
+  var idx = lbState.photoList.findIndex(function(p) { return p.id === photoId; });
+  var getListPosition = Vireo.pageHook('getLightboxListPosition');
+  var paged = getListPosition ? getListPosition(photoId, lbState.photoList) : null;
+  if (paged && paged.position >= 1 && paged.total >= paged.position) return paged;
+  return { position: idx + 1, total: lbState.photoList.length };
+}
+
+function renderCounter(/** @type {number} */ photoId, /** @type {string} */ filename) {
   var counter = document.getElementById('lightboxCounter');
   if (!counter) return false;
-  if (lbState.photoList.length > 1) {
-    var idx = lbState.photoList.findIndex(function(p) { return p.id === open.photoId; });
-    var counterFilename = open.filename || (open.listed && open.listed.filename) || '';
-    counter.textContent = (idx + 1) + ' / ' + lbState.photoList.length
-      + (counterFilename ? ' · ' + counterFilename : '');
-    counter.title = counterFilename;
+  // Resolve the whole-result position before deciding visibility: a loaded
+  // window of one photo (the last page of a 101-photo result, or a Browse page
+  // of size one) is still part of a larger result, and the counter has to say
+  // so.
+  var place = listPosition(photoId);
+  if (place.total > 1) {
+    counter.textContent = place.position.toLocaleString() + ' / ' + place.total.toLocaleString()
+      + (filename ? ' · ' + filename : '');
+    counter.title = filename;
     counter.style.display = '';
   } else {
     counter.title = '';
     counter.style.display = 'none';
   }
   return true;
+}
+
+function renderPhotoCounter(/** @type {LightboxOpenContext} */ open) {
+  return renderCounter(open.photoId, open.filename || (open.listed && open.listed.filename) || '');
+}
+
+// Redraw the counter for the photo on screen after the page's list changed
+// under the open lightbox (Browse loading another page). The loaded window's
+// length is not a visibility gate: renderCounter decides from the resolved
+// whole-result total, so a one-photo window of a longer result still refreshes.
+export function refreshLightboxCounter() {
+  var visibleId = vireoLightboxSession.displayedPhotoId();
+  if (visibleId == null) visibleId = vireoLightboxSession.requestedPhotoId();
+  var listed = lbState.photoList.find(function(p) { return p.id === visibleId; });
+  if (visibleId == null || !listed) return;
+  renderCounter(visibleId, listed.filename || '');
 }
 
 // The browser keeps painting the outgoing bitmap while a newly assigned
@@ -71,6 +123,7 @@ export function commitVisiblePhotoIdentity(/** @type {LightboxOpenContext} */ op
   _lbRenderKeywords(
     open.detail && open.detail.keywords || open.listed && open.listed.keywords || []
   );
+  _lbRenderExposure(open.detail || _lbPhotoDataByPhoto[String(open.photoId)]);
   _lbSetFlagStatus(_lbDisplayedFlagFor(open.photoId));
   if (!renderPhotoCounter(open)) return;
   if (!open.identityCommitted) {

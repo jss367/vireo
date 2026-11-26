@@ -4,7 +4,8 @@ import { selection } from './selection-state.js';
 import {renderSpeciesProvenance, speciesDisplayLabel} from './species-provenance.js';
 import { searchLaneSeq, state } from './state.js';
 import {
-  VireoFilter, VireoTime, doRedo, doUndo, escapeHtml, safeFetch, searchLaneHeaders, showToast,
+  VireoFilter, VireoTime, doRedo, doUndo, escapeHtml, exposureSummaryParts, safeFetch,
+  searchLaneHeaders, showToast,
   vireoRememberPhotoEditRecipe, vireoRememberPhotoPair, vireoThumbnailUrl,
   vireoUpdatePairSourceControls,
 } from './shared.js';
@@ -227,18 +228,8 @@ function detailSummaryHtml(/** @type {BrowsePhoto} */ photo) {
     if (lens) summary += '<div class="summary-lens">' + escapeHtml(String(lens)) + '</div>';
 
     // Exposure line: focal | aperture | shutter | ISO
-    var parts = [];
-    if (exifTags.FocalLength) parts.push(Math.round(exifTags.FocalLength) + 'mm');
-    if (exifTags.FNumber) parts.push('f/' + exifTags.FNumber);
-    if (exifTags.ExposureTime) {
-      if (exifTags.ExposureTime < 1) {
-        parts.push('1/' + Math.round(1 / exifTags.ExposureTime) + 's');
-      } else {
-        parts.push(exifTags.ExposureTime + 's');
-      }
-    }
-    if (exifTags.ISO) parts.push('ISO ' + exifTags.ISO);
-    if (parts.length) summary += '<div class="summary-exposure">' + parts.join('&nbsp;&nbsp;') + '</div>';
+    var parts = exposureSummaryParts(meta);
+    if (parts.length) summary += '<div class="summary-exposure">' + parts.map(escapeHtml).join('&nbsp;&nbsp;') + '</div>';
   }
 
   // Date, dimensions, file size (always from photo fields)

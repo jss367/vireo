@@ -40,6 +40,7 @@ import {
   vireoRefreshEditRecipeCache,
 } from './lightbox/navigation.js';
 import { closeLightbox } from './lightbox/controls.js';
+import { refreshLightboxCounter } from './lightbox/open-image.js';
 import { showDeleteDialog } from './lightbox/delete.js';
 import { submitToInat, submitToInatBatch } from './lightbox/inat.js';
 import { formatShortcut, matchesShortcut, parseShortcut } from './lightbox/keyboard.js';
@@ -112,6 +113,7 @@ Object.assign(window, {
   openVireoSubjectBox: openSubjectBox,
   closeLightbox: closeLightbox,
   lightboxNav: lightboxNav,
+  refreshLightboxCounter: refreshLightboxCounter,
   requestLightboxFullscreen: requestLightboxFullscreen,
   exitLightboxFullscreen: exitLightboxFullscreen,
   setLightboxReadOnlyMode: setLightboxReadOnlyMode,

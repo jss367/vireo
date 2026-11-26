@@ -113,7 +113,8 @@ global by name. The hooks it uses:
 | `handleMissesLightboxFlagShortcut` | The flag keys and buttons on Misses, which keep unflag-as-miss local |
 | `setColorLabelFor`, `openPhotoExportModal`, `copyPhotoPaths`, `revealPhoto` / `revealReviewPhoto` | Context-menu items, shown only when registered (reveal falls back to the API) |
 | `setWildlifeExcludedFor` | The context menu's wildlife toggle |
-| `removeDeletedLightboxPhoto` | Delete: drops the photo from the page's grid before the lightbox moves on |
+| `removeDeletedLightboxPhoto` | Delete: drops the photo's row, and its companion's when the server deleted both, from the page's grid before the lightbox moves on |
+| `getLightboxListPosition` | The counter: the photo's place in the whole result when the lightbox's list is a loaded window of it (Browse) |
 | `getLightboxOpenOptions` | The read-only state for the next photo after navigation or Delete |
 | `getLightboxBrowseDisabledHint` | Edit Photo and Open in Browse, disabled while the page has unsaved work |
 | `getDetailPhotoId` | Refreshing the page's detail-panel image after an edit |

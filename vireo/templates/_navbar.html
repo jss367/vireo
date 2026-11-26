@@ -323,8 +323,10 @@
       <div id="lightboxEye" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;display:none;"></div>
     </div>
   </div>
-  <div class="lightbox-flag-status" id="lightboxFlagStatus" aria-live="polite"></div>
-  <div id="lightboxCounter" style="display:none;position:absolute;top:16px;left:50%;transform:translateX(-50%);max-width:calc(100vw - 160px);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:rgba(255,255,255,0.6);font-size:13px;background:rgba(0,0,0,0.5);padding:3px 10px;border-radius:4px;"></div>
+  <div class="lightbox-topline">
+    <div class="lightbox-counter" id="lightboxCounter" style="display:none;"></div>
+    <div class="lightbox-flag-status" id="lightboxFlagStatus" aria-live="polite"></div>
+  </div>
   <details id="lightboxSubjects" class="lb-subject-panel" hidden data-navbar-on="click:stopPropagation mousedown:stopPropagation keydown:stopPropagation">
     <summary id="lightboxSubjectSummary">Subjects</summary>
     <div id="lightboxSubjectList" class="lb-subject-list" aria-label="Choose primary subject"></div>
@@ -343,8 +345,12 @@
   </details>
   <div class="lightbox-bottom-bar">
     <div class="lightbox-info">
-      <div class="lightbox-filename" id="lightboxFilename"
-           title="Select and copy filename" data-navbar-on="mousedown:stopPropagation click:stopPropagation"></div>
+      <div class="lightbox-info-row">
+        <div class="lightbox-filename" id="lightboxFilename"
+             title="Select and copy filename" data-navbar-on="mousedown:stopPropagation click:stopPropagation"></div>
+        <div class="lightbox-exposure" id="lightboxExposure"
+             aria-label="Exposure" data-navbar-on="mousedown:stopPropagation click:stopPropagation"></div>
+      </div>
       <div class="lightbox-keywords" id="lightboxKeywords"
            aria-label="Keywords" data-navbar-on="click:stopPropagation"></div>
     </div>

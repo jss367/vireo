@@ -425,7 +425,8 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   position: fixed;
   inset: 0;
   z-index: 9999;
-  background: rgba(0,0,0,0.92);
+  /* Opaque: the page behind must not show through around a photo being judged. */
+  background: #0b0b0b;
   grid-template-rows: minmax(0, 1fr) auto;
   align-items: stretch;
   justify-items: center;
@@ -602,21 +603,47 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 .lb-zoom-max-label {
   right: 0;
 }
-.lightbox-flag-status {
+/* The line above the photo: its place in the list, its filename and its flag.
+   Centered with insets rather than a transform, so the flag keeps its own
+   place in the overlay's stacking order. */
+.lightbox-topline {
   position: absolute;
-  bottom: 48px;
-  left: 50%;
-  transform: translateX(-50%);
+  top: 16px;
+  left: 80px;
+  right: 80px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 8px;
+  pointer-events: none;
+}
+.lightbox-counter {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: rgba(255,255,255,0.6);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  background: rgba(0,0,0,0.5);
+  padding: 3px 10px;
+  border-radius: 4px;
+  pointer-events: auto;
+}
+.lightbox-flag-status {
+  position: relative;
+  flex: none;
   display: none;
   align-items: center;
   gap: 6px;
   background: rgba(0,0,0,0.7);
   border: 1px solid var(--text-faint);
   color: var(--text-secondary);
-  padding: 4px 10px;
+  padding: 2px 10px;
   border-radius: 4px;
   font-size: 12px;
   font-weight: 600;
+  white-space: nowrap;
   pointer-events: none;
   z-index: 10001;
 }
@@ -1207,11 +1234,40 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   align-items: flex-start;
   gap: 5px;
 }
+/* Filename and exposure share a line; a filename too long for that takes the
+   line and the exposure wraps under it. */
+.lightbox-info-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  max-width: 100%;
+  min-width: 0;
+}
 .lightbox-info .lightbox-filename {
-  flex: none;
+  flex: 0 1 auto;
+  min-width: 0;
   max-width: 100%;
   box-sizing: border-box;
 }
+.lightbox-exposure {
+  flex: none;
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  background: rgba(0,0,0,0.6);
+  padding: 4px 12px;
+  border-radius: 4px;
+  cursor: text;
+  user-select: text;
+  -webkit-user-select: text;
+  pointer-events: auto;
+}
+.lightbox-exposure:empty { display: none; }
 .lightbox-keywords {
   display: flex;
   max-width: 100%;

@@ -9,6 +9,7 @@ class BrowsePagination {
   #total = 0;
   #underlyingTotal = 0;
   #stackCount = 0;
+  #totalsRevision = 0;
   #load = /** @type {object | null} */ (null);
 
   get earliestPage() { return this.#first; }
@@ -19,6 +20,8 @@ class BrowsePagination {
   get total() { return this.#total; }
   get underlyingTotal() { return this.#underlyingTotal; }
   get stackCount() { return this.#stackCount; }
+  /** Changes whenever the totals do, so a response read before a change can be told from one read after it. */
+  get totalsRevision() { return this.#totalsRevision; }
   get loading() { return this.#load !== null; }
   get offset() { return (this.#first - 1) * this.#pageSize; }
 
@@ -30,6 +33,7 @@ class BrowsePagination {
     this.#stackCount = Number(data && data.stack_count) || 0;
     this.#underlyingTotal = data && data.underlying_total != null
       ? Number(data.underlying_total) || 0 : this.#total;
+    this.#totalsRevision++;
   }
   /** @param {number} first @param {number} next @param {number} count */
   place(first, next, count) {
@@ -50,6 +54,7 @@ class BrowsePagination {
   removePhotos(count) {
     this.#total = Math.max(0, this.#total - count);
     this.#underlyingTotal = Math.max(0, this.#underlyingTotal - count);
+    this.#totalsRevision++;
   }
   reset() { this.#first = this.#next = 1; this.#allLoaded = this.#ready = false; }
   cancelLoad() { this.#load = null; }

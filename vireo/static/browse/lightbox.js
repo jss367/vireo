@@ -5,19 +5,19 @@ import { selection } from './selection-state.js';
 import { state } from './state.js';
 import {
   lightboxNav, lightboxPhotoList, lightboxSession, matchesShortcut, openLightbox,
-  requestLightboxFullscreen,
+  refreshLightboxCounter, requestLightboxFullscreen,
 } from './shared.js';
 import { updateBatchBar } from './batch-bar.js';
 import { _shortcuts } from './config.js';
 import { renderGrid } from './grid.js';
 import { scrollToCard } from './keyboard.js';
-import { loadPhotos, prependPreviousPhotos } from './loading.js';
+import { loadPhotos, prependPreviousPhotos, refreshBrowseTotals } from './loading.js';
 import { findBrowsePhoto } from './selection-panel.js';
 import { refreshCardSelectionVisuals, selectPhoto } from './selection.js';
 import { refreshBrowseSidebarCounts } from './sidebar-collections.js';
 import {
   browseNavigationListIsTopLevel, browsePhotoNavigationList, browseStackCoverIdForPhoto,
-  browseStackMemberIds, refreshBrowseStackBadge,
+  browseStackMemberIds, browseStacksEnabled, refreshBrowseStackBadge,
 } from './stacks.js';
 
 /* ---------- Grid dblclick delegation (XSS-safe) ---------- */
@@ -68,21 +68,55 @@ import {
 
 /** @type {BrowsePhoto[]} */ export var browseAvailableLightboxPhotos = [];
 
-/* Page hook for the lightbox's Delete: drop the deleted photo from the grid
-   before the lightbox moves on to the next one. Returns true when the grid's
-   list is the lightbox's own list, so the lightbox does not remove it twice. */
-export function removeDeletedLightboxPhoto(/** @type {number} */ photoId, /** @type {readonly unknown[]} */ lightboxPhotos) {
-  var removedFromLightboxList = false;
+/* The catalogued RAW+JPEG companion row of a photo the server just deleted,
+   dropped from the loaded window; its id, or null when the window holds no
+   such row. The server deletes a companion row with its primary and reports
+   both in `deleted`. It finds the companion by folder and `companion_path`,
+   so the same match names the row here. */
+function removeDeletedCompanionRow(/** @type {BrowsePhoto} */ primary, /** @type {{deleted?: number} | null | undefined} */ deleteResult) {
+  if (!(Number(deleteResult && deleteResult.deleted) > 1)) return null;
+  if (typeof primary.folder_id !== 'number' || !primary.companion_path) return null;
+  var index = state.photos.findIndex(function(photo) {
+    return photo.folder_id === primary.folder_id && photo.filename === primary.companion_path;
+  });
+  var companion = state.photos[index];
+  if (!companion) return null;
+  state.photos.splice(index, 1);
+  return companion.id;
+}
+
+/* Page hook for the lightbox's Delete: drop the deleted photo's row, and its
+   companion's when the server deleted both, from the grid before the lightbox
+   moves on to the next photo. The result's total shrinks by the rows that
+   left the loaded window when that is the whole change. Two cases are not:
+   the server's `deleted` count is catalog-wide, and a row it counts beyond
+   those may be a companion this result holds on a page that is not loaded,
+   or one the result never held; and with stacks on, a deleted cover's stack
+   stays a row under another cover while a deleted single photo's row goes.
+   The page cannot tell these apart, so it asks the server for the total. */
+export function removeDeletedLightboxPhoto(/** @type {number} */ photoId, /** @type {{deleted?: number} | null | undefined} */ deleteResult) {
+  /** @type {number[]} */ var removedIds = [photoId];
   var index = state.photos.findIndex(function(photo) { return photo.id === photoId; });
-  if (index >= 0) {
-    removedFromLightboxList = state.photos === lightboxPhotos;
+  var primary = state.photos[index];
+  if (primary) {
     state.photos.splice(index, 1);
+    var companionId = removeDeletedCompanionRow(primary, deleteResult);
+    if (companionId != null) removedIds.push(companionId);
+    var stacked = browseStacksEnabled();
+    if (!stacked) pagination.removePhotos(removedIds.length);
+    if (stacked || Number(deleteResult && deleteResult.deleted) > removedIds.length) {
+      refreshBrowseTotals();
+    }
+    // The available-only list the lightbox pages through beside offline
+    // photos is a copy of the window, so it loses the same rows.
+    syncBrowseAvailableLightboxPhotos();
   }
-  selection.removeFromBatch(photoId);
-  if (selection.focusedPhotoId === photoId) selection.focus(null);
+  removedIds.forEach(function(id) {
+    selection.removeFromBatch(id);
+    if (selection.focusedPhotoId === id) selection.focus(null);
+  });
   renderGrid();
   refreshBrowseSidebarCounts();
-  return removedFromLightboxList;
 }
 
 export function browsePhotoIsAvailable(/** @type {BrowsePhoto} */ photo) {
@@ -232,20 +266,24 @@ export function browseLightboxOwnsLoadedWindow() {
 
 export function refreshBrowseLightboxCounter() {
   if (!browseLightboxOwnsLoadedWindow()) return;
-  var visibleId = lightboxSession().displayedPhotoId() != null
-    ? lightboxSession().displayedPhotoId()
-    : lightboxSession().requestedPhotoId();
-  var lightboxPhotos = lightboxPhotoList();
-  var index = lightboxPhotos.findIndex(function(photo) {
-    return photo.id === visibleId;
-  });
-  var counter = /** @type {HTMLElement} */ (document.getElementById('lightboxCounter'));
-  if (index < 0 || !counter || lightboxPhotos.length < 2) return;
-  var filename = lightboxPhotos[index]?.filename || '';
-  counter.textContent = (index + 1) + ' / ' + lightboxPhotos.length
-    + (filename ? ' \u00b7 ' + filename : '');
-  counter.title = filename;
-  counter.style.display = '';
+  refreshLightboxCounter();
+}
+
+/* Page hook for the lightbox's counter: the photo's place in the whole result
+   and the result's size, in grid rows (a stack is one row). The grid holds
+   only the pages loaded so far, so the lightbox cannot count them itself.
+   Answers null for any other list (a stack's members, or the available-only
+   list shown with offline photos), which the lightbox counts as it stands. */
+export function getLightboxListPosition(/** @type {number} */ photoId, /** @type {readonly unknown[]} */ lightboxPhotos) {
+  if (lightboxPhotos !== state.photos || !pagination.ready) return null;
+  var index = state.photos.findIndex(function(photo) { return photo.id === photoId; });
+  if (index < 0) return null;
+  // A total that has not caught up with the loaded rows must not read lower
+  // than the rows on screen.
+  return {
+    position: pagination.offset + index + 1,
+    total: Math.max(pagination.total, pagination.offset + state.photos.length),
+  };
 }
 
 function continueBrowseLightboxAcrossBoundary(/** @type {number} */ delta, /** @type {number} */ currentId, /** @type {number} */ session) {

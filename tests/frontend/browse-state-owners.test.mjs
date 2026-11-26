@@ -142,6 +142,21 @@ test('focused append and prepend keep a coherent contiguous window', () => {
   assert.equal(pages.ready, true);
 });
 
+test('the totals revision changes with every change to the totals', () => {
+  const pagination = createBrowsePagination();
+  const start = pagination.totalsRevision;
+  pagination.setTotals({total: 10});
+  const afterTotals = pagination.totalsRevision;
+  assert.notEqual(afterTotals, start);
+  pagination.removePhotos(1);
+  assert.notEqual(pagination.totalsRevision, afterTotals);
+  assert.equal(pagination.total, 9);
+  // Placing the window does not change what the result holds.
+  const beforePlace = pagination.totalsRevision;
+  pagination.place(1, 2, 9);
+  assert.equal(pagination.totalsRevision, beforePlace);
+});
+
 test('an empty response finishes pagination without advancing past the requested page', () => {
   const pages = createBrowsePagination();
   pages.setTotals({total: 100});

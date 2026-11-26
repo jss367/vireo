@@ -79,6 +79,7 @@
     'getLightboxBrowseDisabledHint',
     'getPhotoExternalEditDisabledHint',
     'removeDeletedLightboxPhoto',
+    'getLightboxListPosition',
     'loadHighlights',
     'updateHighlightsLightboxControls',
     // Undo/redo transport.

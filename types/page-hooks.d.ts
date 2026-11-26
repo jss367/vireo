@@ -83,11 +83,18 @@ interface VireoPageHooks {
   /** Why opening photos in an external editor is disabled, or null. */
   getPhotoExternalEditDisabledHint?(): string | null;
   /**
-   * Drop a photo the lightbox just deleted from the page's grid. Returns true
-   * when the page's list is the lightbox's list, so the photo is already gone
-   * from it.
+   * Drop a photo the lightbox just deleted from the page's grid, with any
+   * other row the delete removed: `deleteResult.deleted` above one means the
+   * photo's catalogued companion row went with it. The lightbox removes the
+   * photo from its own list by id afterwards.
    */
-  removeDeletedLightboxPhoto?(photoId: number, lightboxPhotos: readonly unknown[]): boolean;
+  removeDeletedLightboxPhoto?(photoId: number, deleteResult?: {deleted?: number} | null): void;
+  /**
+   * The photo's place (from 1) in the whole result the lightbox's list is a
+   * loaded window of, and that result's size. Null when the lightbox's list
+   * is everything there is to count.
+   */
+  getLightboxListPosition?(photoId: number, lightboxPhotos: readonly unknown[]): {position: number; total: number} | null;
   /** Handle the lightbox's flag keys for a miss; true when it did. */
   /** Reload the Highlights page after a lightbox curation change. */
   loadHighlights?(): Promise<void>;

@@ -48,6 +48,7 @@ function forwardIfPresent(name) {
 // ---- vireo-utils.js, vireo-api.js, keymap.js, tauri-bridge.js ----
 export const escapeHtml = window.escapeHtml;
 export const escapeAttr = window.escapeAttr;
+export const exposureSummaryParts = window.exposureSummaryParts;
 export const VireoViewPreferences = window.VireoViewPreferences;
 export const VireoTime = window.VireoTime;
 export const isTauri = forward('isTauri');
@@ -91,6 +92,7 @@ export const closeReportModal = forward('closeReportModal');
 export const openLightbox = forward('openLightbox');
 export const closeLightbox = forward('closeLightbox');
 export const lightboxNav = forward('lightboxNav');
+export const refreshLightboxCounter = forward('refreshLightboxCounter');
 export const requestLightboxFullscreen = forward('requestLightboxFullscreen');
 export const exitLightboxFullscreen = forward('exitLightboxFullscreen');
 export const showDeleteDialog = forward('showDeleteDialog');

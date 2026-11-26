@@ -7,7 +7,7 @@ import time
 import pytest
 from PIL import Image
 from playwright.sync_api import expect
-from services import photo_ingest, workspace_folders
+from services import keyword_tagging, photo_ingest, workspace_folders
 
 from e2e.viewport_test_support import install_viewport_test_helpers
 
@@ -89,6 +89,128 @@ def test_browse_lightbox_arrows_navigate(live_server, page):
     expect(keywords.locator(".lightbox-keyword")).to_have_text("Red-tailed Hawk")
 
 
+def test_browse_lightbox_counter_counts_the_whole_result(live_server, page):
+    """With one page of a longer result loaded, the counter reads the result's
+    size and the photo's place in it, not the page size."""
+    page.add_init_script(
+        """
+        class NoopIntersectionObserver {
+          observe() {}
+          unobserve() {}
+          disconnect() {}
+        }
+        window.IntersectionObserver = NoopIntersectionObserver;
+        """
+    )
+    page.route(
+        "**/api/config",
+        lambda route: route.fulfill(
+            json={"photos_per_page": 2, "keyboard_shortcuts": {}}
+        ),
+    )
+    page.route(
+        "**/photos/*/full*",
+        lambda route: route.fulfill(
+            body=base64.b64decode(_PNG_1X1), content_type="image/png"
+        ),
+    )
+    page.goto(f"{live_server['url']}/browse")
+    cards = page.locator(".grid-card")
+    cards.first.wait_for(state="visible")
+    page.wait_for_function(
+        "browseState.photos.length === 2"
+        " && pageModules.pagination.pagination.total === 5"
+    )
+
+    position = page.evaluate(
+        """() => {
+            const list = browseState.photos;
+            const hook = Vireo.pageHook('getLightboxListPosition');
+            return {
+                first: hook(list[0].id, list),
+                second: hook(list[1].id, list),
+                otherList: hook(list[0].id, list.slice()),
+                unknown: hook(-1, list),
+            };
+        }"""
+    )
+    assert position == {
+        "first": {"position": 1, "total": 5},
+        "second": {"position": 2, "total": 5},
+        "otherList": None,
+        "unknown": None,
+    }
+
+    cards.first.dblclick()
+    expect(page.locator("#lightboxCounter")).to_contain_text("1 / 5 ")
+
+
+def test_browse_lightbox_shows_exposure_and_keeps_labels_apart(live_server, page):
+    """The photo's exposure sits beside its filename, a keyword name shows
+    once, the backdrop hides the page, and the flag label is clear of the
+    action bar."""
+    db = live_server["db"]
+    hawk = live_server["data"]["photos"][0]
+    with db.conn:
+        db.conn.execute("UPDATE photos SET exif_data=? WHERE id=?", (
+            json.dumps({"EXIF": {
+                "FocalLength": 600, "FNumber": 6.3,
+                "ExposureTime": 0.003125, "ISO": 64,
+            }}),
+            hawk,
+        ))
+    region = db.keywords.add("Lake County", kw_type="location")
+    flat = db.keywords.add("Lake Park", kw_type="location")
+    placed = db.keywords.add("Lake Park", parent_id=region, kw_type="location")
+    assert flat != placed
+    keyword_tagging.tag_photo(db, hawk, flat)
+    keyword_tagging.tag_photo(db, hawk, placed)
+    db.commit()
+
+    page.route(
+        "**/photos/*/full*",
+        lambda route: route.fulfill(
+            body=base64.b64decode(_PNG_1X1), content_type="image/png"
+        ),
+    )
+    page.goto(f"{live_server['url']}/browse")
+    card = page.locator(".grid-card[data-filename='hawk1.jpg']")
+    card.wait_for(state="visible")
+    card.dblclick()
+
+    exposure = page.locator("#lightboxExposure")
+    expect(exposure).to_have_text("600mm · f/6.3 · 1/320s · ISO 64")
+    expect(page.locator("#lightboxKeywords .lightbox-keyword")).to_have_text(
+        ["Lake Park", "Red-tailed Hawk"]
+    )
+
+    flag = page.locator("#lightboxFlagStatus")
+    expect(flag).to_have_text("No flag")
+    layout = page.evaluate(
+        """() => {
+            const box = id => document.querySelector(id).getBoundingClientRect();
+            const flag = box('#lightboxFlagStatus');
+            const bar = box('.lightbox-bottom-bar');
+            const counter = box('#lightboxCounter');
+            return {
+                flagAboveBar: flag.bottom <= bar.top,
+                flagBesideCounter: flag.left >= counter.right && flag.top < counter.bottom,
+                backdrop: getComputedStyle(document.getElementById('lightboxOverlay')).backgroundColor,
+            };
+        }"""
+    )
+    assert layout["flagAboveBar"] is True
+    assert layout["flagBesideCounter"] is True
+    # No alpha channel: the page behind does not show through.
+    assert re.fullmatch(r"rgb\(\d+, \d+, \d+\)", layout["backdrop"])
+
+    # A photo with no exposure data shows no exposure line.
+    page.locator("[title='Next (→)']").click()
+    expect(page.locator("#lightboxFilename")).not_to_have_text("hawk1.jpg")
+    expect(exposure).to_be_hidden()
+    expect(exposure).to_have_text("")
+
+
 def test_browse_lightbox_full_request_carries_render_fingerprint(live_server, page):
     """The lightbox's /full request must carry an ``er`` fingerprint.
 
@@ -167,10 +289,9 @@ def test_browse_lightbox_autoloads_next_page_at_navigation_boundary(
         "photoId => vireoLightboxSession.displayedPhotoId() === photoId", arg=boundary_id
     )
     page.wait_for_function("browseState.photos.length > 2", timeout=5000)
-    loaded_count = page.evaluate("browseState.photos.length")
-    expect(page.locator("#lightboxCounter")).to_contain_text(
-        f"2 / {loaded_count}"
-    )
+    # The counter counts the whole result, not the pages loaded so far.
+    total = page.evaluate("pageModules.pagination.pagination.total")
+    expect(page.locator("#lightboxCounter")).to_contain_text(f"2 / {total} ")
     page.evaluate("lightboxNav(1)")
 
     page.wait_for_function(
@@ -371,6 +492,279 @@ def test_browse_lightbox_delete_preserves_live_pagination_list(live_server, page
     )
     page.wait_for_function("browseState.photos.length > 1", timeout=5000)
     assert page.evaluate("window._lightboxPhotoList === browseState.photos") is True
+
+
+def test_browse_lightbox_delete_with_catalog_companion_shrinks_total(
+    live_server, page,
+):
+    """A catalogued RAW+JPEG pair deletes two rows, so the loaded window and
+    the whole-result total both drop by two. Without this, the reopened
+    lightbox keeps the companion card (a 404 on open) and the counter stays
+    one high (CORE_PHILOSOPHY: no black boxes — the counter has to match the
+    catalog). Covers the Codex P2 finding on PR #2589."""
+    db = live_server["db"]
+    folder_id = live_server["data"]["folders"][0]
+    primary_id = photo_ingest.add_photo(
+        db, folder_id=folder_id,
+        filename="pair.nef", extension=".nef",
+        file_size=2000, file_mtime=1.0,
+        timestamp="2099-01-01T00:00:01",
+    )
+    companion_id = photo_ingest.add_photo(
+        db, folder_id=folder_id,
+        filename="pair.jpg", extension=".jpg",
+        file_size=1000, file_mtime=1.0,
+        timestamp="2099-01-01T00:00:00",
+    )
+    db.conn.execute(
+        "UPDATE photos SET companion_path='pair.jpg' WHERE id=?", (primary_id,),
+    )
+    db.conn.commit()
+
+    page.route(
+        "**/photos/*/full*",
+        lambda route: route.fulfill(
+            body=base64.b64decode(_PNG_1X1), content_type="image/png"
+        ),
+    )
+    page.goto(f"{live_server['url']}/browse")
+    page.wait_for_function(
+        "ids => ids.every(id => browseState.photos.some(p => p.id === id))",
+        arg=[primary_id, companion_id],
+    )
+    initial_total = page.evaluate("pageModules.pagination.pagination.total")
+    initial_photos = page.evaluate("browseState.photos.length")
+    totals_requests = []
+    page.on(
+        "request",
+        lambda request: totals_requests.append(request.url)
+        if request.url.endswith("/api/photos/query")
+        and (request.post_data_json or {}).get("per_page") == 1
+        else None,
+    )
+
+    page.locator(f'.grid-card[data-id="{primary_id}"]').dblclick()
+    page.wait_for_function(
+        "photoId => vireoLightboxSession.displayedPhotoId() === photoId",
+        arg=primary_id,
+    )
+    page.evaluate(
+        """() => {
+          window.lightboxDelete();
+          const callback = _deleteCallback;
+          hideDeleteModal();
+          callback({deleted: 2, failed_photo_ids: []});
+        }"""
+    )
+
+    page.wait_for_function(
+        "ids => ids.every(id => !browseState.photos.some(p => p.id === id))",
+        arg=[primary_id, companion_id],
+    )
+    assert page.evaluate("browseState.photos.length") == initial_photos - 2
+    assert (
+        page.evaluate("pageModules.pagination.pagination.total")
+        == initial_total - 2
+    )
+    # Both deleted rows left the loaded window, so the count is known and
+    # the page does not ask the server for it.
+    assert totals_requests == []
+
+
+def test_browse_lightbox_delete_in_offline_view_prunes_companion_from_lightbox_list(
+    live_server, page,
+):
+    """In the offline-collection view the lightbox navigates
+    ``browseAvailableLightboxPhotos``, a separate array from ``state.photos``.
+    A RAW+JPEG pair delete must splice the companion from that list too, or
+    the lightbox reopens on a card for a row the catalog no longer has."""
+    db = live_server["db"]
+    folder_id = live_server["data"]["folders"][0]
+    primary_id = photo_ingest.add_photo(
+        db, folder_id=folder_id,
+        filename="pair.nef", extension=".nef",
+        file_size=2000, file_mtime=1.0,
+        timestamp="2099-01-01T00:00:01",
+    )
+    companion_id = photo_ingest.add_photo(
+        db, folder_id=folder_id,
+        filename="pair.jpg", extension=".jpg",
+        file_size=1000, file_mtime=1.0,
+        timestamp="2099-01-01T00:00:00",
+    )
+    db.conn.execute(
+        "UPDATE photos SET companion_path='pair.jpg' WHERE id=?", (primary_id,),
+    )
+    db.conn.commit()
+
+    page.route(
+        "**/photos/*/full*",
+        lambda route: route.fulfill(
+            body=base64.b64decode(_PNG_1X1), content_type="image/png"
+        ),
+    )
+    page.goto(f"{live_server['url']}/browse")
+    page.wait_for_function(
+        "ids => ids.every(id => browseState.photos.some(p => p.id === id))",
+        arg=[primary_id, companion_id],
+    )
+    # Open the lightbox against the offline-view's separate list: filtering
+    # ``browsePhotoIsAvailable`` with no folder_status set keeps every photo,
+    # so the lightbox sees the pair and ``lbState.photoList`` is
+    # ``browseAvailableLightboxPhotos``, not ``state.photos``.
+    page.evaluate("() => { browseState.showOfflineCollectionPhotos = true; }")
+    page.locator(f'.grid-card[data-id="{primary_id}"]').dblclick()
+    page.wait_for_function(
+        "photoId => vireoLightboxSession.displayedPhotoId() === photoId",
+        arg=primary_id,
+    )
+    assert page.evaluate(
+        "() => lbState.photoList === pageModules.lightbox.browseAvailableLightboxPhotos",
+    )
+
+    page.evaluate(
+        """() => {
+          window.lightboxDelete();
+          const callback = _deleteCallback;
+          hideDeleteModal();
+          callback({deleted: 2, failed_photo_ids: []});
+        }"""
+    )
+
+    page.wait_for_function(
+        "ids => ids.every(id => !browseState.photos.some(p => p.id === id))",
+        arg=[primary_id, companion_id],
+    )
+    assert page.evaluate(
+        "ids => ids.every(id => !pageModules.lightbox.browseAvailableLightboxPhotos.some(p => p.id === id))",
+        [primary_id, companion_id],
+    )
+    # The lightbox moved on to a photo that still exists, and kept every
+    # other photo: the companion leaving the list must not shift the removal
+    # onto a neighbor.
+    after = page.evaluate(
+        """() => ({
+            shown: vireoLightboxSession.requestedPhotoId(),
+            list: lbState.photoList.map(p => p.id),
+            grid: browseState.photos.map(p => p.id),
+        })"""
+    )
+    assert after["shown"] in after["list"]
+    assert after["list"] == after["grid"]
+
+
+def test_browse_lightbox_delete_asks_the_server_when_it_deleted_an_unseen_row(
+    live_server, page,
+):
+    """The server's ``deleted`` count is catalog-wide. A companion row it
+    deleted that the loaded window does not hold may be in the result on a
+    page not loaded, or outside the result; the page cannot tell which, so it
+    takes the total from the server instead of guessing."""
+    db = live_server["db"]
+    folder_id = live_server["data"]["folders"][0]
+    primary_id = photo_ingest.add_photo(
+        db, folder_id=folder_id,
+        filename="solo.nef", extension=".nef",
+        file_size=2000, file_mtime=1.0,
+        timestamp="2099-01-01T00:00:01",
+    )
+    db.conn.execute(
+        "UPDATE photos SET companion_path='solo.jpg' WHERE id=?", (primary_id,),
+    )
+    db.conn.commit()
+
+    page.route(
+        "**/photos/*/full*",
+        lambda route: route.fulfill(
+            body=base64.b64decode(_PNG_1X1), content_type="image/png"
+        ),
+    )
+    page.goto(f"{live_server['url']}/browse")
+    page.wait_for_function(
+        "id => browseState.photos.some(p => p.id === id)", arg=primary_id,
+    )
+    initial_total = page.evaluate("pageModules.pagination.pagination.total")
+    assert initial_total >= 4
+
+    # The server's answer to the totals request: two rows fewer, as when the
+    # companion was in the result on a page that had not been loaded.
+    totals_requests = []
+
+    def serve_query(route):
+        body = route.request.post_data_json or {}
+        if body.get("per_page") != 1:
+            route.continue_()
+            return
+        totals_requests.append(body)
+        route.fulfill(json={
+            "photos": [], "total": initial_total - 2,
+            "page": 1, "per_page": 1,
+        })
+
+    page.route("**/api/photos/query", serve_query)
+
+    page.locator(f'.grid-card[data-id="{primary_id}"]').dblclick()
+    page.wait_for_function(
+        "photoId => vireoLightboxSession.displayedPhotoId() === photoId",
+        arg=primary_id,
+    )
+    page.evaluate(
+        """() => {
+          window.lightboxDelete();
+          const callback = _deleteCallback;
+          hideDeleteModal();
+          callback({deleted: 2, failed_photo_ids: []});
+        }"""
+    )
+
+    page.wait_for_function(
+        "total => pageModules.pagination.pagination.total === total",
+        arg=initial_total - 2,
+    )
+    assert len(totals_requests) == 1
+
+
+def test_browse_totals_refresh_drops_an_answer_older_than_a_local_change(
+    live_server, page,
+):
+    """A totals answer read before the page lowered its own total (another
+    delete finishing while the request was in flight) must not put the older
+    count back: the page drops it and asks again."""
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.wait_for(state="visible")
+    page.wait_for_function("pageModules.pagination.pagination.ready")
+    initial_total = page.evaluate("pageModules.pagination.pagination.total")
+
+    held = []
+
+    def hold_totals(route):
+        body = route.request.post_data_json or {}
+        if body.get("per_page") != 1:
+            route.continue_()
+            return
+        held.append(route)
+
+    def wait_for_held(count):
+        deadline = time.monotonic() + 5
+        while len(held) < count and time.monotonic() < deadline:
+            page.wait_for_timeout(25)
+        assert len(held) == count
+
+    page.route("**/api/photos/query", hold_totals)
+    page.evaluate(
+        """() => {
+            window.__totalsRefresh = pageModules.loading.refreshBrowseTotals();
+        }"""
+    )
+    wait_for_held(1)
+    page.evaluate("pageModules.pagination.pagination.removePhotos(1)")
+    # Read before the local change: it still counts the removed row.
+    held[0].fulfill(json={"photos": [], "total": initial_total})
+    wait_for_held(2)
+    assert page.evaluate("pageModules.pagination.pagination.total") == initial_total - 1
+    held[1].fulfill(json={"photos": [], "total": initial_total - 1})
+    assert page.evaluate("window.__totalsRefresh") is True
+    assert page.evaluate("pageModules.pagination.pagination.total") == initial_total - 1
 
 
 def test_browse_lightbox_stale_boundary_retry_does_not_advance_reopened_session(
