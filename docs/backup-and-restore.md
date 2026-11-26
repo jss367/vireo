@@ -29,6 +29,11 @@ one your installation uses, open **Storage** in Vireo and click **Open folder**
 next to **Catalog and masks**. To open a hidden folder yourself, choose
 **Go → Go to Folder** in Finder (`Shift-Command-G`) and paste the path.
 
+If you started Vireo with a custom `--db` path, the catalog is at that path
+instead of the folder above, and it may be outside the data folder entirely.
+Use the location **Storage** shows under **Catalog and masks**, not the
+default path.
+
 The data folder holds more than `vireo.db`:
 
 | Item | What it is |
@@ -45,13 +50,17 @@ The data folder holds more than `vireo.db`:
 | `ssh` | The keys Vireo uses to reach a storage server. |
 | `storage-layout-v1` | A marker in fresh installations that tells Vireo to use this folder. Keep it. |
 
-If you started Vireo with a custom `--thumb-dir`, the managed-media rows
-above (`staging`, `offline`, `local-folders`, `local-workspaces`,
-`external-edits`, `external-dng`, `edit-masks`) live next to that thumbnail
-folder, not inside the data folder. **Storage** lists every persistent
-location with its full path. When they are not all inside the data folder,
-back up each location **Storage** names, not just the data folder, or the
-backup can miss the only copy of a photo.
+A few things can live outside the data folder. If you started Vireo with a
+custom `--thumb-dir`, the managed-media rows above (`staging`, `offline`,
+`local-folders`, `local-workspaces`, `external-edits`, `external-dng`,
+`edit-masks`) live next to that thumbnail folder instead. Separately, when
+you use **Work Locally** you can pick any folder on disk as the destination,
+and the local copies then live there regardless of `--thumb-dir`. Either
+way, **Storage** lists every persistent location with its full path. Back
+up each location **Storage** names, not just the data folder, or the backup
+can miss the only copy of a photo. The alternative is to sync or discard
+every **Work Locally** copy before you back up, so no photo exists only in
+a local folder.
 
 The cache folder holds downloaded models, thumbnails, and saved computation
 results. Vireo downloads or rebuilds all of it, so it does not need a backup
