@@ -41,3 +41,4 @@ interface ImportLocationFrame extends Partial<ImportLocationSuggestions> { done?
 type ImportLocationTarget = { kind: 'skip'; reason: string } | { kind: 'keyword'; keyword_id?: number; name: string } | { kind: 'google'; place_id?: string; name: string } | { kind: 'new'; name: string; latitude: number; longitude: number };
 type ImportLocationChoice = Exclude<ImportLocationTarget, { kind: 'skip' }> & { cells: string[] };
 interface ImportLocationState { signature: string | null; pending: boolean; error: string; reading: number; naming: number; nearby: number; total: number; data: ImportLocationSuggestions | null; choices: Map<string, {enabled: boolean; value: string; pick?: string}>; abort: AbortController | null; }
+declare var Vireo: {confirm: VireoConfirm};

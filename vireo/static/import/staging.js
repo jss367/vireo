@@ -152,6 +152,23 @@ async function verifyStaging(path, btn) {
 
 /** @param {string} path @param {HTMLButtonElement} btn */
 async function deleteStaging(path, btn) {
+  if (btn.disabled) return;
+  // The delete removes the folder from disk, not to the Trash, so ask first
+  // and say what the verification did and did not prove.
+  const verified = stagingResultsByPath[path];
+  const size = verified
+    ? verified.file_count + ' file' + (verified.file_count === 1 ? '' : 's') + ' (' + formatBytes(verified.bytes) + ')'
+    : 'this folder';
+  const accepted = await Vireo.confirm({
+    title: 'Delete this staging copy permanently?',
+    message: 'Vireo deletes ' + size + ' from disk. The files are not moved to the Trash and cannot be recovered.\n\n' +
+      'Before deleting, Vireo checks again that every file has a cataloged copy in the archive with the same name and size. ' +
+      'It does not compare file contents.',
+    details: [path],
+    confirmLabel: 'Delete permanently',
+    danger: true,
+  });
+  if (!accepted || btn.disabled) return;
   btn.disabled = true;
   btn.textContent = 'Re-verifying...';
   try {

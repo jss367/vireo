@@ -116,7 +116,7 @@ class RunBatchDelete(Protocol):
     def __call__(
         self, db: Database, photo_ids: object, mode: str = "vireo",
         include_companions: bool = False,
-        progress_callback: DeleteProgress | None = None,
+        progress_callback: DeleteProgress | None = None, *, confirm_permanent: bool = False,
     ) -> BatchDeleteResult: ...
 
 

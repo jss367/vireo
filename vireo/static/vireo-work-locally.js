@@ -868,6 +868,14 @@
     }
   }
 
+  // A sync deletes from source storage every file the local copy no longer
+  // has. The server unlinks them; they do not go to the Trash.
+  /** @param {number} deleted */ function sourceDeletionWarning(deleted) {
+    return (deleted === 1 ? '1 file that is' : deleted + ' files that are') +
+      ' no longer in the local copy will be deleted from source storage. ' +
+      'Deleted source files are not moved to the Trash and cannot be recovered.';
+  }
+
   /** @param {number[]|null} folderIds */ async function sync(folderIds) {
     if (actionInFlight || activeJob) return;
     await load();
@@ -898,10 +906,17 @@
       deleted += count;
       (item.workspace_ids || []).forEach(function(id) { affected.add(id); });
     });
-    var message = 'Sync ' + unique.length + ' local folder' + (unique.length === 1 ? '' : 's') + ' back to source storage and remove the local copies?';
+    var message = 'Vireo copies your local changes to source storage, then removes the local copies.';
     if (affected.size > 1) message += '\n\nThis updates the folders for ' + affected.size + ' linked workspaces.';
-    if (deleted) message += '\n\nThis will delete ' + deleted + ' file' + (deleted === 1 ? '' : 's') + ' from source storage.';
-    if (!confirm(message)) return;
+    if (deleted) message += '\n\n' + sourceDeletionWarning(deleted);
+    if (!(await Vireo.confirm({
+      title: 'Sync ' + unique.length + ' local folder' + (unique.length === 1 ? '' : 's') + ' back to source storage?',
+      message: message,
+      confirmLabel: deleted ? 'Sync and delete ' + deleted + ' source file' + (deleted === 1 ? '' : 's') : 'Sync',
+      danger: deleted > 0
+    }))) return;
+    // The question is asked in the page, so a job may have started while it was open.
+    if (actionInFlight || activeJob) return;
     actionInFlight = true;
     try {
       /** @type {WorkLocalStarted} */ var result = await Vireo.api.json('/api/workspaces/active/local-folders/sync', {
@@ -937,9 +952,15 @@
     items.forEach(function(item) {
       (item.workspace_ids || []).forEach(function(id) { affected.add(id); });
     });
-    var message = 'Discard all changes in the selected local folder' + (items.length === 1 ? '' : 's') + '?\n\nThis cannot be undone. Source storage will not be modified.';
+    var message = 'Files you created or changed in the local ' + (items.length === 1 ? 'copy' : 'copies') + ' are deleted and cannot be recovered. Source storage will not be modified.';
     if (affected.size > 1) message += '\n\nThe local copies are shared by ' + affected.size + ' linked workspaces.';
-    if (!confirm(message)) return;
+    if (!(await Vireo.confirm({
+      title: 'Discard all changes in the selected local folder' + (items.length === 1 ? '' : 's') + '?',
+      message: message,
+      confirmLabel: 'Discard changes',
+      danger: true
+    }))) return;
+    if (actionInFlight || activeJob) return;
     actionInFlight = true;
     try {
       /** @type {WorkLocalStarted} */ var result = await Vireo.api.json('/api/workspaces/active/local-folders/discard', {
@@ -1008,16 +1029,28 @@
     var body;
     if (action === 'sync') {
       var deleted = Number(((legacy.changes || {}).deleted) || 0);
-      if (!confirm('Sync the older local workspace back to source storage?' + (deleted ? '\n\nThis deletes ' + deleted + ' source file(s).' : ''))) return;
+      if (!(await Vireo.confirm({
+        title: 'Sync the older local workspace back to source storage?',
+        message: 'Vireo copies your local changes to source storage, then removes the local copy.' +
+          (deleted ? '\n\n' + sourceDeletionWarning(deleted) : ''),
+        confirmLabel: deleted ? 'Sync and delete ' + deleted + ' source file' + (deleted === 1 ? '' : 's') : 'Sync',
+        danger: deleted > 0
+      }))) return;
       body = {confirm_deletions: deleted > 0, confirmed_deletion_count: deleted};
     } else {
-      if (!confirm('Discard the older local workspace? Source storage will not be modified.')) return;
+      if (!(await Vireo.confirm({
+        title: 'Discard the older local workspace?',
+        message: 'Files you created or changed in the local copy are deleted and cannot be recovered. Source storage will not be modified.',
+        confirmLabel: 'Discard changes',
+        danger: true
+      }))) return;
       body = {
         confirm: true,
         expected_state: legacy.state === 'recovery' ? 'recovery' : legacy.state,
         acknowledge_published: legacy.recovery_kind === 'sync'
       };
     }
+    if (actionInFlight || activeJob) return;
     actionInFlight = true;
     try {
       /** @type {WorkLocalStarted} */ var result = await Vireo.api.json('/api/workspaces/active/local-workspace/' + endpoint, {

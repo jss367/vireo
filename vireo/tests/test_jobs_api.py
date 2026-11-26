@@ -5446,6 +5446,7 @@ def test_automatic_staged_transfer_reserves_workspace_after_processing(app_and_d
         assert client.post(f"/api/workspaces/{original_workspace}/activate").status_code == 200
         deleted = client.post("/api/batch/delete", json={
             "photo_ids": imported["result"]["photo_ids"], "mode": "disk_permanent",
+            "confirm_permanent": True,
         })
         assert deleted.status_code == 409, deleted.get_json()
         scan = client.post("/api/jobs/scan", json={"root": imported["config"]["managed_staging"]["destination"]})
@@ -6898,7 +6899,9 @@ def test_pending_archive_failed_send_is_retryable_and_double_click_joins(app_and
         assert scan.status_code == 409, scan.get_json()
         assert "NAS transfer" in scan.get_json()["error"]
         photo_id = imported["result"]["photo_ids"][0]
-        deleted = client.post("/api/batch/delete", json={"photo_ids": [photo_id], "mode": "disk_permanent"})
+        deleted = client.post("/api/batch/delete", json={
+            "photo_ids": [photo_id], "mode": "disk_permanent", "confirm_permanent": True,
+        })
         assert deleted.status_code == 409, deleted.get_json()
         assert "NAS transfer" in deleted.get_json()["error"]
         assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (photo_id,)).fetchone()

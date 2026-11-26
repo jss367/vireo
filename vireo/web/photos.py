@@ -72,6 +72,7 @@ from render_source import (
     recipe_source_dimensions as _recipe_source_dimensions,
 )
 from services import browse_queries, workspace_config, workspace_folders
+from services.photo_deletion import permanent_delete_error
 from services.photo_review import flag_note
 from services.visual_scope import inject_active_visual_model, validate_visual_arg
 from sidecar_identity import delete_orphaned_sidecars
@@ -642,7 +643,8 @@ def create_photos_blueprint(
         """Delete Vireo rows for photos whose originals are still gone.
 
         Body: ``{"photo_ids": [int, ...], "delete_sidecars": bool,
-        "mode": "vireo"|"disk"|"disk_permanent"}``.
+        "mode": "vireo"|"disk"|"disk_permanent"}``. ``disk_permanent`` also
+        needs ``"confirm_permanent": true``.
 
         A ready ``/api/photos/missing`` cache is served for up to
         ``services.missing_originals.STALE_SECONDS`` (30 min) without a filesystem
@@ -670,6 +672,12 @@ def create_photos_blueprint(
             return json_error(
                 "mode must be 'vireo', 'disk', or 'disk_permanent'"
             )
+        # Checked before the sidecar cleanup below, so a refused request
+        # removes nothing.
+        confirm_permanent = body.get("confirm_permanent") is True
+        unconfirmed = permanent_delete_error(mode, confirm_permanent)
+        if unconfirmed:
+            return json_error(unconfirmed)
 
         db = get_db()
         ws_id = db.active_workspace_id
@@ -692,6 +700,7 @@ def create_photos_blueprint(
             try:
                 result = run_batch_delete(
                     db, confirmed_ids, mode, include_companions=False,
+                    confirm_permanent=confirm_permanent,
                 )
             except ValueError as exc:
                 return json_error(str(exc))

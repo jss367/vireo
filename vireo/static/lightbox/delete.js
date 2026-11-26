@@ -233,6 +233,32 @@ function updateDeleteProgress(/** @type {LightboxDeleteProgress} */ data) {
   if (detail) detail.textContent = parts.join(' · ');
 }
 
+// Ask before deleting, for good, the photos the Trash refused. The answer is
+// the only thing between a failed Trash and an unrecoverable delete, so it is
+// asked in the page: the desktop app never shows a native confirm(). Each
+// row names a file that stopped a photo and the server's reason for it.
+/** @param {{path?: string, error?: string}[]} trashFailed @param {number} photoCount @param {boolean} includeCompanions @returns {Promise<boolean>} */
+export function confirmPermanentDelete(trashFailed, photoCount, includeCompanions) {
+  var rows = trashFailed.map(function(f) {
+    return [f.path, f.error].filter(Boolean).join(' \u2014 ');
+  }).filter(Boolean);
+  var shown = rows.slice(0, 5);
+  if (rows.length > shown.length) shown.push('\u2026 and ' + (rows.length - shown.length) + ' more');
+  var one = photoCount === 1;
+  return Vireo.confirm({
+    title: 'Delete permanently instead?',
+    message: (one ? '1 photo' : photoCount + ' photos') + ' could not be moved to the Trash and ' +
+      (one ? 'was' : 'were') + ' kept.\n\n' +
+      'Deleting permanently removes ' + (one ? 'its' : 'their') + ' files from disk now' +
+      (includeCompanions ? ', companion files included' : '') +
+      '. They will not be in the Trash and cannot be recovered.',
+    details: shown,
+    confirmLabel: 'Delete permanently',
+    cancelLabel: one ? 'Keep the photo' : 'Keep the photos',
+    danger: true,
+  });
+}
+
 async function handleDeleteJobComplete(/** @type {LightboxDeleteCompletion} */ evt, /** @type {((data: LightboxDeleteResult) => void) | null} */ savedCallback, /** @type {string} */ mode, /** @type {boolean} */ includeCompanions) {
   var data = evt && evt.result;
   // A delete that retained some photos after file errors ends "failed" but
@@ -252,27 +278,28 @@ async function handleDeleteJobComplete(/** @type {LightboxDeleteCompletion} */ e
   var failedIds = (data.failed_photo_ids || []).filter(function(id, idx, all) {
     return all.indexOf(id) === idx;
   });
+  var permanentlyDeleted = 0;
   if (data.trash_failed && data.trash_failed.length > 0 && failedIds.length) {
-    var paths = data.trash_failed.map(function(f) { return f.path; });
-    if (confirm('Trash not available for ' + paths.length + ' file(s):\n' +
-        paths.slice(0, 5).join('\n') +
-        (paths.length > 5 ? '\n... and ' + (paths.length - 5) + ' more' : '') +
-        '\n\nPermanently delete instead?')) {
+    if (await confirmPermanentDelete(data.trash_failed, failedIds.length, !!includeCompanions)) {
       try {
         // The server retains catalog rows whose Trash operation failed, so
         // retry by photo id and let it remove each row only after its
         // permanent file deletion succeeds. There is no retry by raw path:
-        // the catalog row is what vouches for a file.
+        // the catalog row is what vouches for a file. ``confirm_permanent``
+        // tells the server the user answered the question above; it refuses
+        // a permanent delete without it.
         var retry = await /** @type {Promise<LightboxDeleteResult>} */ (safeFetch('/api/batch/delete', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({
             photo_ids: failedIds,
             mode: 'disk_permanent',
+            confirm_permanent: true,
             include_companions: !!includeCompanions,
           }),
         }));
-        data.deleted += Number(retry.deleted || 0);
+        permanentlyDeleted = Number(retry.deleted || 0);
+        data.deleted += permanentlyDeleted;
         data.trashed += Number(retry.trashed || 0);
         data.trash_failed = retry.trash_failed || [];
         data.failed_photo_ids = retry.failed_photo_ids || [];
@@ -282,9 +309,11 @@ async function handleDeleteJobComplete(/** @type {LightboxDeleteCompletion} */ e
     }
   }
 
+  var movedToTrash = data.deleted - permanentlyDeleted;
   var msg = mode === 'vireo'
     ? data.deleted + ' photo' + (data.deleted === 1 ? '' : 's') + ' removed'
-    : data.deleted + ' photo' + (data.deleted === 1 ? '' : 's') + ' moved to Trash';
+    : movedToTrash + ' photo' + (movedToTrash === 1 ? '' : 's') + ' moved to Trash';
+  if (permanentlyDeleted) msg += '; ' + permanentlyDeleted + ' deleted permanently';
   if (data.failed_photo_ids && data.failed_photo_ids.length) {
     msg += '; ' + data.failed_photo_ids.length + ' retained after file errors';
   }

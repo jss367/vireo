@@ -3,6 +3,7 @@
   "files": [
     "../types/pages/work-locally.d.ts",
     "../types/page-hooks.d.ts",
+    "../types/confirm.d.ts",
     "../vireo/static/vireo-work-locally.js"
   ]
 }
