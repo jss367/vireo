@@ -574,13 +574,17 @@ def _apply_config_keyboard_shortcuts(body: JsonDict, current: JsonDict) -> None:
     if "keyboard_shortcuts" in body:
         shortcuts = body["keyboard_shortcuts"]
         if isinstance(shortcuts, dict):
+            cfg.migrate_keyboard_shortcuts(shortcuts)
             valid_contexts = cfg.DEFAULTS["keyboard_shortcuts"]
             validated = {}
             for ctx_name, actions in shortcuts.items():
                 if ctx_name in valid_contexts and isinstance(actions, dict):
                     validated[ctx_name] = {}
+                    allowed = valid_contexts[ctx_name].keys()
+                    if ctx_name == "pipeline_rapid_review":
+                        allowed = allowed | cfg.RAPID_SHARED_ACTIONS.keys()
                     for action, key_str in actions.items():
-                        if action in valid_contexts[ctx_name] and isinstance(key_str, str):
+                        if action in allowed and isinstance(key_str, str):
                             validated[ctx_name][action] = key_str.strip().lower()
             current["keyboard_shortcuts"] = cfg._deep_merge(
                 cfg.DEFAULTS["keyboard_shortcuts"], validated

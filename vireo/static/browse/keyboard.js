@@ -35,6 +35,7 @@ document.addEventListener('keydown', function(e) {
   // handler dismisses just that dialog and leaves the export modal open.
   if (/** @type {HTMLElement | null} */ (document.querySelector('.export-preset-dialog-overlay.open'))) return;
 
+  if (e.defaultPrevented) return;
   if (handleOverlayKey(e)) return;
 
   if (/** @type {HTMLElement} */ (document.getElementById('lightboxOverlay')).classList.contains('active')) return;
@@ -179,7 +180,8 @@ function handleBrowseSelectionKey(/** @type {KeyboardEvent} */ e, /** @type {Non
 function handleBrowseViewKey(/** @type {KeyboardEvent} */ e) {
   if (!e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && !browseKeyMatchesConfiguredShortcut(e)) {
     var browseViewKey = e.key.toLowerCase();
-    if (browseViewKey === 'e') {
+    if (browseViewKey === 'e' || (browseViewKey === 'enter' && selection.focusedPhotoId &&
+        !(e.target instanceof Element && e.target.closest('button, a, [role=button], [contenteditable]')))) {
       if (openBrowseShortcutPhoto(false)) e.preventDefault();
       return;
     }

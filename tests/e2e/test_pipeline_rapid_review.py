@@ -33,16 +33,6 @@ def _mock_pipeline_rapid_review(
                 # legacy bare navigation shortcuts are ignored and leave P for
                 # the page-local Pick action.
                 "navigation": {"pipeline": "p"},
-                "pipeline_rapid_review": {
-                    "pick": "p",
-                    "reject": "x",
-                    "next": "arrowright",
-                    "back": "arrowleft",
-                    "clear": "u",
-                    "apply": "enter",
-                    "exit": "escape",
-                    "zoom": "z",
-                },
             }
         }
     if results is None:
@@ -155,8 +145,14 @@ def test_rapid_review_decision_keys_advance_through_queue(live_server, page):
 
     page.keyboard.press("ArrowRight")
     expect(page.locator("#filename")).to_have_text("c.jpg")
-    expect(page.locator("#metricReviewed")).to_have_text("2/3")
+    expect(page.locator("#metricReviewed")).to_have_text("1/3")
 
+    page.keyboard.press("Control+z")
+    expect(page.locator("#filename")).to_have_text("a.jpg")
+    expect(page.locator("#rejectCount")).to_have_text("0")
+    page.keyboard.press("s")
+    expect(page.locator("#filename")).to_have_text("b.jpg")
+    page.keyboard.press("ArrowRight")
     page.keyboard.press("ArrowLeft")
     expect(page.locator("#filename")).to_have_text("b.jpg")
     expect(page.locator("#metricReviewed")).to_have_text("1/3")
@@ -185,11 +181,11 @@ def test_rapid_review_honors_remapped_decision_shortcuts(live_server, page):
         shortcut_config={
             "keyboard_shortcuts": {
                 "navigation": {"pipeline": "p"},
+                "browse": {"reject": "j"},
                 "pipeline_rapid_review": {
                     "pick": "k",
-                    "reject": "j",
-                    "next": "n",
-                    "back": "h",
+                    "leave": "n",
+                    "undo": "h",
                     "clear": "u",
                     "apply": "enter",
                     "exit": "escape",
@@ -203,9 +199,10 @@ def test_rapid_review_honors_remapped_decision_shortcuts(live_server, page):
     page.wait_for_function(
         """() => window._vireoShortcuts
           && window._vireoShortcuts.pipeline_rapid_review
-          && window._vireoShortcuts.pipeline_rapid_review.reject === 'j'"""
+          && window.Keymap.shortcutsForScope('pipeline_rapid_review').some(s => s.name === 'reject' && s.key === 'j')"""
     )
 
+    expect(page.locator('kbd[data-rapid-key="reject"]')).to_have_text('J')
     page.keyboard.press("ArrowDown")
     expect(page.locator("#filename")).to_have_text("a.jpg")
     expect(page.locator("#rejectCount")).to_have_text("0")
@@ -256,6 +253,19 @@ def test_rapid_review_apply_button_summarizes_pending_writes(live_server, page):
         "title",
         'Apply will flag 1 photo as a pick, reject 1 photo, add species keyword "Test bird" to 3 burst frames.',
     )
+
+
+def test_apply_shortcut_requires_modifier(live_server, page):
+    saves = []
+    _mock_pipeline_rapid_review(page, save_payloads=saves)
+    _goto_rapid_review(page, live_server)
+    expect(page.locator('#applyBtn')).to_be_enabled()
+    page.keyboard.press('p')
+    page.keyboard.press('Enter')
+    expect(page.locator('#pickCount')).to_have_text('1')
+    assert saves == []
+    with page.expect_request('**/api/pipeline/save-cache'):
+        page.keyboard.press('Meta+Enter')
 
 
 def test_rapid_review_species_edit_refreshes_existing_keyword_state(live_server, page):
@@ -590,13 +600,12 @@ def test_rapid_review_filter_change_prompts_with_staged_decisions(live_server, p
     page.locator("#queueFilter").select_option("all")
 
     expect(page.locator("#queuePrompt")).to_be_visible()
+    page.keyboard.press("Control+Enter")
+    expect(page.locator("#queuePrompt")).to_be_visible()
     page.keyboard.press("Escape")
-    expect(page.locator("#queuePrompt")).to_be_visible()
+    expect(page.locator("#queuePrompt")).to_be_hidden()
     expect(page).to_have_url(re.compile(r"/pipeline/rapid-review$"))
-    page.keyboard.press("Enter")
-    expect(page.locator("#queuePrompt")).to_be_visible()
     assert save_payloads == []
-    page.locator('[data-queue-choice="stay"]').click()
     expect(page.locator("#queueFilter")).to_have_value("needs-species")
 
     page.locator("#queueFilter").select_option("all")

@@ -20,13 +20,13 @@ document.addEventListener('DOMContentLoaded', _syncReviewDetectionBoxesBtn);
 
 (async function() {
   try {
-    /** @type {{keyboard_shortcuts?:Record<string,{accept:string;skip:string}>}} */ var cfg = await safeFetch('/api/config', {}, { toast: false });
-    _shortcuts = (cfg.keyboard_shortcuts || {}).review || {accept: 'a', skip: 's'};
+    /** @type {{keyboard_shortcuts?:Record<string,{accept:string;reject:string;skip_pending:string}>}} */ var cfg = await safeFetch('/api/config', {}, { toast: false });
+    _shortcuts = (cfg.keyboard_shortcuts || {}).review || {accept: 'a', reject: 'x', skip_pending: 's'};
     window._vireoShortcuts = cfg.keyboard_shortcuts || {};
     var el = /** @type {HTMLElement} */ (document.getElementById('kbdHintReview'));
-    if (el && _shortcuts) el.textContent = 'Keyboard: ' + formatShortcut(_shortcuts.accept) + ' = accept, ' + formatShortcut(_shortcuts.skip) + ' = skip';
+    if (el && _shortcuts) el.textContent = 'Keyboard: ' + formatShortcut(_shortcuts.accept) + ' = accept, ' + formatShortcut(_shortcuts.reject) + ' = reject prediction, ' + formatShortcut(_shortcuts.skip_pending) + ' = skip for now';
   } catch(e) {
-    _shortcuts = {accept: 'a', skip: 's'};
+    _shortcuts = {accept: 'a', reject: 'x', skip_pending: 's'};
   }
 })();
 

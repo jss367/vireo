@@ -572,7 +572,7 @@
         <div id="burstSubtitle"></div>
       </div>
       <div class="top-actions">
-        <button class="rapid-btn" id="undoBtn" onclick="undoLast()" title="Undo last decision">Undo</button>
+        <button class="rapid-btn" id="undoBtn" onclick="undoLast()" title="Undo last decision">Undo <kbd data-rapid-key="undo"></kbd></button>
         <button class="rapid-btn" onclick="openClassic()" title="Open this burst in classic pipeline review">Classic</button>
         <button class="rapid-btn primary" id="applyBtn" onclick="applyCurrent(false)" title="Apply pick/reject flag changes and species keywords">Apply flags/species</button>
         <button class="rapid-btn primary" id="applyNextBtn" onclick="applyCurrent(true)" title="Apply pick/reject flag changes and species keywords, then open the next burst">Apply flags/species & Next</button>
@@ -610,10 +610,11 @@
           <input id="speciesInput" type="text" placeholder="Green-winged Teal, American Wigeon" oninput="rapidOnSpeciesInput()">
         </div>
         <div class="decision-grid">
-          <button class="decision-btn pick" onclick="decideCurrent('pick')" title="Pick and advance">Pick</button>
-          <button class="decision-btn review" onclick="decideCurrent('review')" title="Leave for review and advance">Review</button>
-          <button class="decision-btn reject" onclick="decideCurrent('reject')" title="Reject and advance">Reject</button>
+          <button class="decision-btn pick" onclick="decideCurrent('pick')" title="Pick and advance">Pick <kbd data-rapid-key="pick"></kbd></button>
+          <button class="decision-btn review" onclick="decideCurrent('review')" title="Leave for review and advance">Leave for review <kbd data-rapid-key="leave"></kbd></button>
+          <button class="decision-btn reject" onclick="decideCurrent('reject')" title="Reject and advance">Reject <kbd data-rapid-key="reject"></kbd></button>
         </div>
+        <div class="queue-count">Apply staged changes <kbd data-rapid-key="apply"></kbd></div>
         <div class="progress-block">
           <div class="progress-stat"><strong id="pickCount">0</strong><span>Picks</span></div>
           <div class="progress-stat"><strong id="reviewCount">0</strong><span>Review</span></div>

@@ -198,38 +198,3 @@ export async function bulkUnflagSelection() {
   pruneSelectionToVisible();
   render();
 }
-
-/** @param {number} photoId */ async function unflagLightboxMiss(photoId) {
-  if (state.previewActive) {
-    showToast('Save or reset the preview before unmarking misses', 'error');
-    return;
-  }
-  if (!state.missLightboxCurrent || state.missLightboxCurrent.photoId !== photoId) return;
-  var cat = state.missLightboxCurrent.category;
-  if (!cat) return;
-
-  var failures = 0;
-  await fetch('/api/misses/' + photoId + '/unflag', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ category: cat }),
-  }).then(function(r) { if (!r.ok) failures++; }).catch(function() { failures++; });
-  if (failures > 0) {
-    showToast('Unflag failed', 'error');
-    return;
-  }
-  state.missesData[cat] = (state.missesData[cat] || []).filter(function(p) {
-    return p.id !== photoId;
-  });
-  pruneSelectionToVisible();
-  render();
-}
-
-// The shared lightbox's flag-key page hook, which boot.js registers.
-/** @param {number} photoId @param {string} flag */
-export function handleMissesLightboxFlagShortcut(photoId, flag) {
-  if (flag !== 'none') return false;
-  if (!state.missLightboxCurrent || state.missLightboxCurrent.photoId !== photoId) return false;
-  unflagLightboxMiss(photoId);
-  return true;
-}

@@ -51,7 +51,7 @@ function harness({sheet = false, lightbox = false} = {}) {
   if (lightbox) elements.lightboxOverlay.classList.add('active');
   const ctx = vm.createContext({
     HTMLElement: Element, HTMLInputElement: class extends Element {},
-    navigator: {platform: 'MacIntel'},
+    navigator: {platform: 'MacIntel'}, location: {pathname: '/browse'},
     document: {body: new Element('BODY'), getElementById: id => elements[id] || null,
       createElement: () => new Element(), querySelector: selector => {
         if (selector.includes('.help-overlay.active') && elements.helpModal.classList.contains('active')) return elements.helpModal;

@@ -1,12 +1,13 @@
 // The accept/skip keyboard shortcuts for the first visible pending card.
 // Classic page script; load boot.js after all definitions.
 
-/** @type {{accept:string;skip:string}|null} */ var _shortcuts = null;
+/** @type {{accept:string;reject:string;skip_pending:string}|null} */ var _shortcuts = null;
 
 /* ---------- Keyboard Shortcuts ---------- */
 function bindReviewKeyboard() {
   document.addEventListener('keydown', function(e) {
     if ((e.target instanceof Element ? e.target.tagName : '') === 'INPUT' || (e.target instanceof Element ? e.target.tagName : '') === 'TEXTAREA' || (e.target instanceof Element ? e.target.tagName : '') === 'SELECT') return;
+    if (e.defaultPrevented || (e.target instanceof HTMLElement && e.target.isContentEditable)) return;
     if (mode !== 'review') return;
     if (!_shortcuts) return;
     // Ignore A/S while a filter-driven reload is in flight — the ``predictions``
@@ -19,8 +20,16 @@ function bindReviewKeyboard() {
     // The toolbar hint promises "first visible card": use the grid's filtered
     // + sorted view, not the API-ordered raw predictions array.
     var pending = visiblePendingCards();
-    if (pending.length === 0) return;
-    if (matchesShortcut(e, _shortcuts.accept)) { e.preventDefault(); acceptPrediction(pending[0]?.id || 0); }
-    else if (matchesShortcut(e, _shortcuts.skip)) { e.preventDefault(); rejectPrediction(pending[0]?.id || 0); }
+    const first = pending[0];
+    if (!first) return;
+    if (matchesShortcut(e, _shortcuts.accept)) { e.preventDefault(); acceptPrediction(first.id); }
+    else if (matchesShortcut(e, _shortcuts.reject)) { e.preventDefault(); rejectPrediction(first.id); }
+    else if (matchesShortcut(e, _shortcuts.skip_pending)) {
+      e.preventDefault();
+      if (pending.length > 1) {
+        skippedPredictionOrder.set(first.id, ++predictionSkipSequence);
+        renderGrid();
+      } else showToast('This is the last pending prediction in this view.', 'info');
+    }
   });
 }

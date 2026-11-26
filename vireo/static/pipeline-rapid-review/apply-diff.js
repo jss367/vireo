@@ -103,6 +103,7 @@ function rapidApplyButtonText(prefix, diff) {
 }
 
 function renderApplyState() {
+  window.renderHistoryControls?.();
   var disabled = !rapid.seeded || rapid.applying || rapid.sessionIndex < 0;
   /** @type {HTMLButtonElement} */ (document.getElementById('undoBtn')).disabled = disabled || rapid.history.length === 0;
   /** @type {NodeListOf<HTMLButtonElement>} */ (document.querySelectorAll('.decision-btn')).forEach(function(btn) {

@@ -4,7 +4,6 @@
 // ES module.
 
 import { state } from './state.js';
-import { SHORTCUT_LABELS } from './labels.js';
 import { pauseKeymapDispatch, resumeKeymapDispatch } from './shared.js';
 import { findConflict, isBarePageShortcut, renderShortcutsEditor, saveShortcuts } from './editor.js';
 
@@ -45,7 +44,7 @@ export function startCapture(btn, ctx, action) {
       btn.classList.remove('capturing');
       state.capturingBtn = null;
       endCapture();
-      btn.textContent = 'Conflict: ' + (SHORTCUT_LABELS[ctx] || {})[conflict];
+      btn.textContent = 'Conflict: ' + conflict;
       btn.style.borderColor = 'var(--danger)';
       btn.style.color = 'var(--danger)';
       setTimeout(function() { renderShortcutsEditor(); }, 1500);

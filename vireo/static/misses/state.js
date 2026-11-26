@@ -1,5 +1,5 @@
 // Misses page state: category order and labels, the loaded misses, the tuning
-// config and preview state, focus, the multi-selection, the lightbox tracking,
+// config and preview state, focus, the multi-selection,
 // the applied filter snapshot, and the fail-closed deep-link scope error.
 // ES module: the page's other modules import `state` and read and write its
 // fields; nothing here is a global.
@@ -38,8 +38,6 @@ export const MISS_TUNING_CONTROL_IDS = [
  * @property {boolean} missConfigLoaded
  * @property {MissCategory | null} focusedCategory
  * @property {number} focusedIndex
- * @property {Record<number,MissCategory>} missLightboxCategoryById
- * @property {{photoId:number;category:MissCategory}|null} missLightboxCurrent
  * @property {Set<number>} selection Multi-select state. Spans categories —
  *   ctrl-click on cards in different sections accumulates them all. The
  *   focused card doubles as the anchor for shift-click range selection (range
@@ -71,8 +69,6 @@ export const state = {
   missConfigLoaded: false,
   focusedCategory: null,
   focusedIndex: -1,
-  missLightboxCategoryById: {},
-  missLightboxCurrent: null,
   selection: new Set(),
   missLoadRequestId: 0,
   appliedMissFilters: { rules: [], visual: null },

@@ -84,7 +84,7 @@ function advanceToNext() {
 }
 
 function undoLast() {
-  if (!rapid.history.length || rapid.applying) return;
+  if (!rapid.seeded || !rapid.history.length || rapid.applying) return;
   var entry = /** @type {RapidHistory} */ (rapid.history.pop());
   setZone(entry.id, entry.prevZone);
   if (entry.prevReviewed) rapid.reviewed.add(entry.id);
@@ -94,6 +94,14 @@ function undoLast() {
   rapid.currentIndex = entry.prevIndex;
   resetRapidZoom();
   renderAll();
+}
+
+/** @param {number} delta */
+function moveRapidPhoto(delta) {
+  if (!rapid.seeded || rapid.applying) return;
+  const index = rapid.currentIndex < 0 && delta < 0 ? rapid.items.length - 1 : rapid.currentIndex + delta;
+  const photo = rapid.items[index];
+  if (photo) selectPhoto(photo.id);
 }
 
 /** @param {number} id */

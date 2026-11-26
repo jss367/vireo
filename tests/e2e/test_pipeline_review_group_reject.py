@@ -3039,6 +3039,8 @@ def test_rapid_review_can_retry_a_failed_history_refresh(live_server, page):
     page.locator('#historyUndoBtn').click()
     retry = page.get_by_role('button', name='Retry', exact=True)
     expect(retry).to_be_visible()
+    # The retry control appears before the failed undo finishes refreshing its history status.
+    page.wait_for_function('!vireoHistoryBusy()')
     page.evaluate('doRedo()')
     expect(page.get_by_text('Rapid Review could not load. Use Retry before undoing or redoing saved edits.', exact=True)).to_be_visible()
     assert live_server['db'].photos.get(rejected)['flag'] == 'none'

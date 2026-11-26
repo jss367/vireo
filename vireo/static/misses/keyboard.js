@@ -5,7 +5,7 @@
 import { state, CATEGORY_ORDER } from './state.js';
 import { browseShortcuts, matchesShortcut, preferredScrollBehavior } from './shared.js';
 import { openFocusedMissInBrowse, openMiss } from './photo-open.js';
-import { bulkFlagSelection, bulkUnflagSelection, flagFocusedMiss, unflagMiss } from './flagging.js';
+import { bulkFlagSelection, flagFocusedMiss } from './flagging.js';
 import { clearSelection, setSelected } from './selection.js';
 
 /* ---------- Focus tracking + keyboard shortcuts ---------- */
@@ -24,27 +24,30 @@ import { clearSelection, setSelected } from './selection.js';
   }
 }
 
-/** @param {number} delta */ function moveFocus(delta) {
-  // Pick the first non-empty category if nothing focused yet.
-  if (state.focusedCategory == null) {
-    for (var i = 0; i < CATEGORY_ORDER.length; i++) {
-      if (state.missesData[CATEGORY_ORDER[i] || 'no_subject'].length > 0) {
-        setFocused(CATEGORY_ORDER[i] || null, 0);
-        return;
-      }
-    }
+/** @param {number} delta @param {boolean} [withinCategory] */
+function moveFocus(delta, withinCategory = false) {
+  const categories = CATEGORY_ORDER.filter(cat => state.missesData[cat].length &&
+    !document.getElementById('missesSection-' + cat)?.classList.contains('collapsed'));
+  const cat = state.focusedCategory;
+  if (!cat || !categories.includes(cat)) {
+    if (categories[0]) setFocused(categories[0], 0);
     return;
   }
-  var photos = state.missesData[state.focusedCategory] || [];
-  var newIdx = state.focusedIndex + delta;
-  if (newIdx < 0) newIdx = 0;
-  if (newIdx >= photos.length) newIdx = photos.length - 1;
-  setFocused(state.focusedCategory, newIdx);
+  const length = state.missesData[cat].length;
+  const next = state.focusedIndex + delta;
+  if (!withinCategory && (next < 0 || next >= length)) {
+    const adjacent = categories[categories.indexOf(cat) + Math.sign(delta)];
+    if (adjacent) {
+      setFocused(adjacent, delta > 0 ? 0 : state.missesData[adjacent].length - 1);
+      return;
+    }
+  }
+  setFocused(cat, Math.max(0, Math.min(next, length - 1)));
 }
 
 export function bindMissKeyboard() {
   document.addEventListener('keydown', function(e) {
-    if (!(e.target instanceof Element)) return;
+    if (e.defaultPrevented || !(e.target instanceof HTMLElement) || e.target.isContentEditable) return;
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
     if (document.querySelector('.lightbox-overlay.active, .pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .help-overlay.active')) return;
 
@@ -54,9 +57,9 @@ export function bindMissKeyboard() {
     // guard below so modifier-based rebindings still match. Acts on the
     // multi-selection if non-empty, otherwise falls back to the focused card.
     var sc = browseShortcuts();
-    var flagKey = sc.flag || 'p';
-    var rejectKey = sc.reject || 'x';
-    var unflagKey = sc.unflag || 'u';
+    var flagKey = sc.flag ?? 'p';
+    var rejectKey = sc.reject ?? 'x';
+    var unflagKey = sc.unflag ?? 'u';
     var missFlag = null;
     if (matchesShortcut(e, flagKey)) missFlag = 'flagged';
     else if (matchesShortcut(e, rejectKey)) missFlag = 'rejected';
@@ -64,14 +67,12 @@ export function bindMissKeyboard() {
     if (missFlag !== null) {
       if (state.selection.size > 0) {
         e.preventDefault();
-        if (missFlag === 'none') bulkUnflagSelection();
-        else bulkFlagSelection(missFlag);
+        bulkFlagSelection(missFlag);
       } else if (state.focusedCategory != null && state.focusedIndex >= 0) {
         var fp = (state.missesData[state.focusedCategory] || [])[state.focusedIndex];
         if (fp) {
           e.preventDefault();
-          if (missFlag === 'none') unflagMiss(state.focusedCategory, fp.id);
-          else flagFocusedMiss(fp.id, missFlag);
+          flagFocusedMiss(fp.id, missFlag);
         }
       }
       return;
@@ -82,14 +83,14 @@ export function bindMissKeyboard() {
     if (e.metaKey || e.ctrlKey || e.altKey) return;
 
     var k = e.key;
-    if (k === 'j' || k === 'J') {
+    const delta = missNavigationDelta(k);
+    if (delta) {
       e.preventDefault();
-      if (e.shiftKey) extendSelectionByFocus(1);
-      else moveFocus(1);
-    } else if (k === 'k' || k === 'K') {
-      e.preventDefault();
-      if (e.shiftKey) extendSelectionByFocus(-1);
-      else moveFocus(-1);
+      if (e.shiftKey) extendSelectionByFocus(delta);
+      else {
+        clearSelection();
+        moveFocus(delta);
+      }
     } else if (k === 'Escape') {
       if (state.selection.size > 0) {
         e.preventDefault();
@@ -100,13 +101,27 @@ export function bindMissKeyboard() {
         e.preventDefault();
         openFocusedMissInBrowse();
       }
-    } else if (k === 'Enter') {
+    } else if (k === 'Enter' && !e.target.closest('button, a, [role=button]')) {
       if (state.focusedCategory != null && state.focusedIndex >= 0) {
         e.preventDefault();
         openMiss(state.focusedCategory, state.focusedIndex);
       }
     }
   });
+}
+
+/** @param {string} key */
+function missNavigationDelta(key) {
+  switch (key.toLowerCase()) {
+    case 'arrowright': case 'j': return 1;
+    case 'arrowleft': case 'k': return -1;
+    case 'arrowup': case 'arrowdown': {
+      const grid = document.querySelector('.misses-grid[data-cat="' + state.focusedCategory + '"]');
+      const columns = grid ? getComputedStyle(grid).gridTemplateColumns.split(/\s+/).length : 1;
+      return key === 'ArrowDown' ? columns : -columns;
+    }
+    default: return 0;
+  }
 }
 
 /* extendSelectionByFocus — Shift+J/K. Move focus by `delta`, then add the new
@@ -121,7 +136,7 @@ export function bindMissKeyboard() {
   var photos = state.missesData[state.focusedCategory] || [];
   var oldP = photos[state.focusedIndex];
   if (oldP) setSelected(oldP.id, true);
-  moveFocus(delta);
+  moveFocus(delta, true);
   var newP = photos[state.focusedIndex];
   if (newP) setSelected(newP.id, true);
 }

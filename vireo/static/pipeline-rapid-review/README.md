@@ -14,7 +14,7 @@ one-burst-at-a-time view that `openClassic()` hands back to it.
 | File | Responsibility |
 | --- | --- |
 | `state.js` | `rapid` (results, photo map, sessions, the open burst's staged decisions, zoom, `openToken`, the queue) and `QUEUE_FILTERS` |
-| `shortcuts.js` | The Keymap scope, `RAPID_SC_DEFAULTS`, `loadRapidShortcuts()`, and the keydown handler (`bindRapidKeyboard`) |
+| `shortcuts.js` | The Keymap scope, shared photo bindings, and staged decision shortcuts |
 | `photo-urls.js` | Preview, original and thumbnail URLs, and `burstIds()` |
 | `species-list.js` | The species field's list encoding (`parseSpeciesList`, `joinSpecies`, `speciesKey`), override vs encounter precedence, and `locateBurstByPhotoIds()` |
 | `sessions.js` | `buildSessions()` from the results, `sessionKey()`, and the per-photo flag and species readers |
@@ -29,22 +29,9 @@ one-burst-at-a-time view that `openClassic()` hands back to it.
 | `apply.js` | `applyCurrent()`: the flags-only `/group/apply` request, the `/api/encounters/species` requests, the cache save, and the next burst; `openClassic()` |
 | `boot.js` | The Keymap scope, the listener and hook bindings, the shortcut and results fetches, and the stage's pointer listeners |
 
-Load `boot.js` last. The other files only declare functions and initialize
-passive state (`rapidShortcuts` copies `RAPID_SC_DEFAULTS` from its own file),
-so their relative order does not matter at load time. The load-time
-statements of the inline script are wrapped in `bindQueuePromptChoices()`
-(`queue.js`), `registerRapidHistoryHooks()` (`loading.js`) and
-`bindRapidKeyboard()` (`shortcuts.js`); boot runs `Keymap.setScope`, those
-three, `loadRapidShortcuts()`, `initRapidReview()` and the four `#photoStage`
-pointer listeners in the order the inline script did. The scripts sit after
-the whole page, including the `#queuePrompt` dialog, so boot can look up any
-element. Adding a script requires an explicit template tag before boot. These
-are not ES modules and need no bundler.
-
-Page-wide state lives in `rapid` (`state.js`). Domain state stays beside its
-functions: `rapidShortcuts` / `rapidShortcutsRegistered` in `shortcuts.js`
-and the species refetch timer and token (`_rapidSpeciesRefetch*`) in
-`species-keywords.js`.
+Load `boot.js` last, after the queue prompt and other markup. It registers
+the page history hooks and the Rapid Review scope. The shortcut handler
+inherits the photo bindings from the shortcut editor's shared definitions.
 
 `vireo/tests/test_species_identity.py` runs `hasMixedSpecies()` under node by
 slicing `queue-filters.js` from `function hasMixedSpecies` to
@@ -80,7 +67,7 @@ changing this code:
 - `changeQueue()` prompts when `hasStagedChanges()`; "apply" runs
   `applyCurrent(false)` and stays put if it fails. `beforeHistoryChange`
   refuses undo/redo while loading, applying, staged or prompting.
-- The keydown handler swallows every key while the queue prompt is open and
+- The scoped shortcuts yield to overlays, suppress decisions during the queue prompt, and the dispatcher
   ignores `INPUT`, `SELECT`, `TEXTAREA` and contenteditable targets (the
   `#queueFilter` select needs its arrows and Enter).
 

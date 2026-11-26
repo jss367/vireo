@@ -4,7 +4,7 @@
 // ES module.
 
 import { state, CATEGORY_ORDER, CATEGORY_LABELS } from './state.js';
-import { escapeAttr, escapeHtml, photoThumbnailUrl } from './shared.js';
+import { browseShortcuts, escapeAttr, escapeHtml, photoThumbnailUrl } from './shared.js';
 import { parseDetectionBox } from './helpers.js';
 import { updateSelectionBar } from './selection.js';
 
@@ -31,9 +31,11 @@ export function render() {
   html +=
     '<div class="misses-hint">' +
       'Shortcuts: ' +
-      '<kbd>J</kbd>/<kbd>K</kbd> next/prev &middot; ' +
+      'Arrow keys move by photo or row; <kbd>J</kbd>/<kbd>K</kbd> next/prev &middot; ' +
       '<kbd>Shift+J/K</kbd> extend selection &middot; ' +
-      '<kbd>U</kbd>/<kbd>P</kbd>/<kbd>X</kbd> unflag/flag/reject (focused or selection) &middot; ' +
+      [browseShortcuts().unflag ?? 'u', browseShortcuts().flag ?? 'p', browseShortcuts().reject ?? 'x']
+        .map(key => '<kbd>' + escapeHtml(key.toUpperCase() || 'Unassigned') + '</kbd>').join('/') +
+      ' clear/pick/reject (focused or selected) &middot; <kbd>Enter</kbd> open focused photo &middot; ' +
       '<kbd>B</kbd> open focused in Browse &middot; ' +
       '<kbd>Esc</kbd> clear selection &middot; ' +
       'Click to select; Shift-click range; double-click to open lightbox' +

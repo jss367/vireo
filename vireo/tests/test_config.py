@@ -111,9 +111,9 @@ def test_keyboard_shortcut_defaults_include_rapid_review():
 
     shortcuts = DEFAULTS["keyboard_shortcuts"]
     assert shortcuts["navigation"]["pipeline"] == ""
-    assert shortcuts["pipeline_rapid_review"]["pick"] == "p"
-    assert shortcuts["pipeline_rapid_review"]["reject"] == "x"
-    assert shortcuts["pipeline_rapid_review"]["zoom"] == "z"
+    assert "pick" not in shortcuts["pipeline_rapid_review"]
+    assert shortcuts["browse"]["reject"] == "x"
+    assert shortcuts["pipeline_rapid_review"]["apply"] == "ctrl+enter"
     assert shortcuts["browse"]["compare"] == "c"
     assert shortcuts["browse"]["toggle_ui"] == "h"
 
@@ -247,7 +247,7 @@ def test_load_preserves_user_pipeline_p_shortcut(tmp_path):
     loaded = cfg.load()
 
     assert loaded["keyboard_shortcuts"]["navigation"]["pipeline"] == "p"
-    assert loaded["keyboard_shortcuts"]["pipeline_rapid_review"]["pick"] == "p"
+    assert loaded["keyboard_shortcuts"]["browse"]["flag"] == "p"
 
 
 def test_conftest_autouse_fixture_restores_cfg_path(tmp_path):
@@ -855,3 +855,24 @@ def test_remote_target_reads_do_not_touch_the_mounted_filesystem(tmp_path, monke
     # Save-time validation still uses the stronger filesystem-aware check.
     with pytest.raises(AssertionError, match='settings read probed'):
         cfg._coerce_remote_target(target)
+
+
+def test_shortcut_upgrade_preserves_custom_actions_across_saves(tmp_path, monkeypatch):
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    cfg.save({"keyboard_shortcuts": {
+        "browse": {"flag": "alt+p"},
+        "pipeline_rapid_review": {"pick": "p", "reject": "j", "clear": "", "apply": "enter",
+                                  "back": "h", "next": "n"},
+        "review": {"skip": "r"},
+    }})
+    config = cfg.load()
+    shortcuts = config["keyboard_shortcuts"]
+    rapid = shortcuts["pipeline_rapid_review"]
+    assert "pick" not in rapid
+    assert (rapid["reject"], rapid["clear"], rapid["undo"], rapid["leave"]) == ("j", "", "h", "n")
+    assert (rapid["forward"], rapid["apply"]) == ("arrowright", "ctrl+enter")
+    assert shortcuts["browse"]["flag"] == "alt+p"
+    assert shortcuts["review"] == {"accept": "a", "reject": "r", "skip_pending": "s"}
+    cfg.save(config)
+    assert cfg.load_strict()["keyboard_shortcuts"] == shortcuts

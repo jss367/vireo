@@ -29,7 +29,7 @@ EXPECTED_HOOKS = {
     } | _EXPORT_MODAL,
     "/misses": {
         "getActiveSelection", "openBrowseShortcutPhoto", "afterHistoryChange",
-        "loadMisses", "handleMissesLightboxFlagShortcut",
+        "loadMisses",
     },
     "/review": {
         "getGroupModalSelection", "getPredictions", "setReviewRating",
@@ -47,7 +47,7 @@ EXPECTED_HOOKS = {
     "/locations/review": _HISTORY | {"runSync"},
     "/life-list": {"afterHistoryChange", "openExportModal"},
     "/edit": _HISTORY | _EXPORT_MODAL | {"openExportModal", "localHistoryStatus", "changeLocalHistory"},
-    "/pipeline/rapid-review": _HISTORY,
+    "/pipeline/rapid-review": _HISTORY | {"changeLocalHistory", "localHistoryStatus"},
     "/cull": _HISTORY,
     "/highlights": {"afterHistoryChange", "loadHighlights", "updateHighlightsLightboxControls"},
     "/pipeline": {"startPipeline"},

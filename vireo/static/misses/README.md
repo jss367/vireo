@@ -26,7 +26,7 @@ they are.
 | `render.js` | `render()`, each category section and its cards, and section collapse |
 | `card-events.js` | The delegated click and double-click listeners on `#missesRoot` for section headers, Reject all buttons, cards and their unflag buttons |
 | `photo-open.js` | Opening a miss in the lightbox or Browse, the focused/selected photo lookups, and `pruneSelectionToVisible` |
-| `flagging.js` | Bulk reject per category, per-card and selection flag changes, per-card and lightbox unflag, and the Representative badge clearing they share |
+| `flagging.js` | Bulk reject per category, per-card and selection flag changes, unmarking a miss from a card or selection, and the Representative badge clearing they share |
 | `selection.js` | Clearing and toggling the selection, the selection bar, shift-click ranges, and card click and double-click |
 | `context-menu.js` | The right-click menu for miss cards |
 | `delete.js` | Deleting the selected photos through the shared delete dialog |
@@ -67,7 +67,6 @@ code asks for them with `Vireo.pageHook(name)` instead of looking for a global:
 - `loadMisses` — the Missing Originals delete refresh in `navbar-folder-banners.js`
 - `getActiveSelection` — the native menu's selected photos
 - `openBrowseShortcutPhoto` — the native menu's Open in Lightbox
-- `handleMissesLightboxFlagShortcut` — the lightbox's unflag key
 
 These names are the page's `pageHooks` in `frontend-module-pages.json`, which
 `vireo/tests/test_module_pages.py` checks against the registration. The page
@@ -92,7 +91,7 @@ import while it is being evaluated. Boot then:
    bar's four buttons, Recompute and Reset preview) and the delegated card
    listeners (`card-events.js`),
 3. binds the listeners the original inline script attached at load, in its
-   order: `bindMissLightboxTracking()`, `bindMissContextMenu()`,
+   order: `bindMissContextMenu()`,
    `bindMissKeyboard()`, `bindMissLifeListEvents()`,
    `bindMissLightboxFlagEvents()`,
 4. runs `installMissSliderHandlers()` and the `VireoFilter.init()` chain.

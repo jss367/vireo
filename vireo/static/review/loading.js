@@ -45,11 +45,11 @@ async function fetchReviewScope(params) {
 
 async function loadPredictions() {
   var myEpoch = ++_loadPredictionsEpoch;
+  skippedPredictionOrder.clear();
   rqBeginReload();
   // Disable the header Accept All immediately so it cannot iterate the
   // stale ``predictions`` array while this reload is in flight. The
-  // per-card actions are gated inline in their handlers because they
-  // are rendered by ``renderGrid()`` and cheaper to guard on click.
+  // per-card actions check this flag in their own handlers.
   var _acceptAllReloadBtn = /** @type {HTMLButtonElement} */ (document.getElementById('acceptAllBtn'));
   if (_acceptAllReloadBtn) {
     _acceptAllReloadBtn.disabled = true;

@@ -37,6 +37,10 @@ function reviewCategoryBadge(pred) {
   return {cls: kind === 'new' ? 'badge-new' : 'badge-disagreement', text: kind};
 }
 
+// Session-only ordering keeps skipped cards available at the end of the grid.
+/** @type {Map<number, number>} */ var skippedPredictionOrder = new Map();
+var predictionSkipSequence = 0;
+
 /** @param {boolean} [includeGroupMembers] @param {boolean} [includeAllStatuses] */
 function getVisibleItems(includeGroupMembers, includeAllStatuses) {
   var filtered = predictions.slice(); // copy for sorting
@@ -88,7 +92,7 @@ function getVisibleItems(includeGroupMembers, includeAllStatuses) {
 
   // Deduplicate groups — show only the first photo per group
   /** @type {Record<string,boolean>} */ var seenGroups = {};
-  return filtered.filter(function(p) {
+  const cards = filtered.filter(function(p) {
     if (reviewEvidenceFilter !== 'all') {
       var subject = 'detection:' + p.detection_id;
       if (seenGroups[subject]) return false;
@@ -100,6 +104,10 @@ function getVisibleItems(includeGroupMembers, includeAllStatuses) {
     seenGroups[key] = true;
     return true;
   });
+  if (skippedPredictionOrder.size) {
+    cards.sort((a, b) => (skippedPredictionOrder.get(a.id) || 0) - (skippedPredictionOrder.get(b.id) || 0));
+  }
+  return cards;
 }
 
 function renderGrid() {

@@ -13,28 +13,13 @@ import { setFocused } from './keyboard.js';
   if (!photos || !photos[idx]) return;
   var p = photos[idx];
   setFocused(cat, idx);
-  state.missLightboxCategoryById = {};
   var photoList = photos.map(function(q) {
-    state.missLightboxCategoryById[q.id] = category;
     return { id: q.id, filename: q.filename, missCategory: category };
   });
-  state.missLightboxCurrent = { photoId: p.id, category: category };
 
   if (!hasLightbox()) return;
   // shared.js resets the lightbox's click-to-zoom latch before opening.
   openLightbox(p.id, p.filename || '', photoList);
-}
-
-export function bindMissLightboxTracking() {
-  document.addEventListener('lightbox:photochanged', function(e) {
-    var photoId = e && e.detail ? e.detail.photoId : null;
-    var cat = photoId != null ? state.missLightboxCategoryById[photoId] : null;
-    state.missLightboxCurrent = cat && photoId != null ? { photoId: photoId, category: cat } : null;
-  });
-
-  document.addEventListener('lightbox:closed', function() {
-    state.missLightboxCurrent = null;
-  });
 }
 
 function getFocusedMiss() {
