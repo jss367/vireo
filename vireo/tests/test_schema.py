@@ -374,6 +374,46 @@ def test_ensure_schema_newer_db_raises_incompatible_database_error(tmp_path):
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 99
 
 
+def test_load_taxonomy_cli_structured_exit_on_backup_failure(tmp_path, monkeypatch, capsys):
+    """``--load-taxonomy`` also opens the catalog through ensure_schema, so
+    a pre-migration backup failure (full disk, read-only volume) must emit
+    the same structured startup_failed signal create_app does instead of
+    letting a raw MigrationBackupError traceback escape."""
+    import collections
+    import json as _json
+
+    import app as vireo_app
+
+    db_path = _db_one_upgrade_behind(tmp_path)
+    usage = collections.namedtuple("usage", "total used free")
+    monkeypatch.setattr(schema.shutil, "disk_usage", lambda _path: usage(0, 0, 1024))
+
+    monkeypatch.setattr(
+        "sys.argv",
+        ["vireo", "--db", db_path, "--thumb-dir", str(tmp_path / "thumbs"),
+         "--load-taxonomy"],
+    )
+    # Guard against actually touching the DB or the network if the fix
+    # regresses and control ever reaches Database(args.db)/load_taxonomy.
+    def _boom(*_a, **_kw):  # pragma: no cover - regression guard
+        raise AssertionError("--load-taxonomy touched the DB after backup failure")
+
+    monkeypatch.setattr("db.Database", _boom)
+    monkeypatch.setattr(vireo_app, "_setup_file_logging", lambda: None)
+
+    with pytest.raises(SystemExit) as excinfo:
+        vireo_app.main()
+    assert excinfo.value.code == 2
+
+    captured = capsys.readouterr()
+    payload = _json.loads(captured.err.strip().splitlines()[-1])
+    assert payload["error"] == "startup_failed"
+    assert db_path in payload["reason"]
+    assert "backup" in payload["reason"].lower()
+
+    assert _user_version(db_path) == schema.OLDEST_UPGRADABLE_VERSION
+
+
 def test_load_taxonomy_cli_refuses_newer_db(tmp_path, monkeypatch, capsys):
     """``--load-taxonomy`` must not run legacy DDL against a catalog stamped
     by a newer Vireo. Previously it bypassed ensure_schema and constructed
