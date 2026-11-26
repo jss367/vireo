@@ -1658,8 +1658,9 @@ mod tests {
             &readiness(vec![], vec![job("Move folder", "paused")]),
             false
         ));
-        assert!(!asked.missed(&Err("timed out".into()), false));
-        // A job or another window the dialog never named: ask again.
+        // A job or another window the dialog never named, or a check that
+        // can no longer confirm what it named: ask again.
+        assert!(asked.missed(&Err("timed out".into()), false));
         assert!(asked.missed(
             &readiness(vec![job("Process run", "queued")], vec![]),
             false
