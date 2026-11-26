@@ -144,9 +144,9 @@ def _add_photo(db, services, folder_id, index, photo):
         "width": 8256, "height": 5504,
         "file_hash": f"release-fixture-{stem.lower()}",
     }
-    ingest = services.get("photo_ingest")
-    if ingest is not None and hasattr(ingest, "add_photo"):
-        return ingest.add_photo(db, *args, **kwargs)
+    photo_ingest = services.get("photo_ingest")
+    if photo_ingest is not None and hasattr(photo_ingest, "add_photo"):
+        return photo_ingest.add_photo(db, *args, **kwargs)
     return _first("photos", (db, "add_photo"))(*args, **kwargs)
 
 
@@ -202,6 +202,9 @@ def _save_mask(db, services, photo_id, box):
 def write_catalog(db_path):
     """Write the dataset through the release's code and return its snapshot."""
     _init_schema(db_path)
+    # The app imports config before it opens a catalog: importing it is what
+    # gives the data layer the user's settings.
+    import config  # noqa: F401
     from db import Database
 
     services = {
