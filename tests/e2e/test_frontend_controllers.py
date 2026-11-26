@@ -306,6 +306,60 @@ def test_workspace_menu_reload_does_not_steal_focus_after_user_moved_it(page):
     expect(page.locator(".ws-menu-item")).to_have_count(len(TRIPS))
 
 
+def test_workspace_menu_registers_with_the_keymap_escape_stack(page):
+    """Keymap's capture-phase dispatcher pops the top of its Esc stack and stops
+    propagation before the input's keydown runs, so a competing surface
+    (notification history, …) that pushed first would otherwise swallow Escape.
+    Opening the workspace menu pushes its own token on top; closing pops it."""
+    page.set_content('''
+        <button id="wsCurrentBtn"></button>
+        <div id="wsDropdown"><div id="wsMenu">
+          <input type="search" id="wsMenuSearch" hidden><div id="wsMenuList"></div>
+        </div></div>
+        <span id="wsCurrentName"></span>
+    ''')
+    page.add_script_tag(path=str(STATIC / "vireo-workspace-switcher.js"))
+    page.evaluate('''([names]) => {
+        const workspaces = names.map((name, i) => ({id: i + 1, name, pinned_at: null}));
+        window.escStack = [];
+        window.nextToken = 1;
+        window.Keymap = {
+            pushEsc(handler) {
+                const token = nextToken++;
+                escStack.push({token, handler});
+                return token;
+            },
+            popEsc(token) {
+                for (let i = escStack.length - 1; i >= 0; i--) {
+                    if (escStack[i].token === token) { escStack.splice(i, 1); return true; }
+                }
+                return false;
+            },
+        };
+        // A competing surface (e.g. notification history) already has an Esc owner.
+        window.competingClosed = false;
+        Keymap.pushEsc(() => { window.competingClosed = true; });
+        window.controller = VireoWorkspaceSwitcher.create({
+            fetch: async (url) => url === '/api/workspaces' ? workspaces : {id: 1},
+            navigate() {},
+            clearWorkspaceCursors() {},
+        });
+    }''', [TRIPS])
+    page.evaluate("async () => { await controller.toggle(); }")
+    # Menu is on top of the stack now — fire the top handler to simulate Escape.
+    assert page.evaluate("escStack.length") == 2
+    page.evaluate("() => { escStack[escStack.length - 1].handler(); }")
+    expect(page.locator("#wsMenu")).not_to_have_class("open")
+    expect(page.locator("#wsCurrentBtn")).to_be_focused()
+    # Closing popped only the menu's token, leaving the competing surface intact.
+    assert page.evaluate("[escStack.length, competingClosed]") == [1, False]
+    # Reopen + close via outside click also pops the token, so the stack never grows unbounded.
+    page.evaluate("async () => { await controller.toggle(); }")
+    assert page.evaluate("escStack.length") == 2
+    page.evaluate("() => { controller.close(); }")
+    assert page.evaluate("escStack.length") == 1
+
+
 def test_workspace_menu_reopen_clears_stale_filter_before_reload(page):
     """After a filter and close, reopening re-renders the cached list before the
     reload resolves, so stale filter rows never flash and survive a failed reload."""

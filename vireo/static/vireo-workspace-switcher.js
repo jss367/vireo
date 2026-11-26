@@ -54,6 +54,11 @@
     if (switcher.outsideClickTimer !== null) switcher.window.clearTimeout(switcher.outsideClickTimer);
     switcher.outsideClickTimer = null;
     switcher.document.removeEventListener('click', switcher.onOutsideClick);
+    if (switcher.escapeToken !== null) {
+      var keymap = switcher.window.Keymap;
+      if (keymap && typeof keymap.popEsc === 'function') keymap.popEsc(switcher.escapeToken);
+      switcher.escapeToken = null;
+    }
   }
 
   async function loadCurrentName(/** @type {WorkspaceSwitcherContext} */ switcher) {
@@ -75,6 +80,18 @@
     // workspaces so the visible list matches the reset query before the menu
     // becomes visible, and stays correct if the reload below fails.
     if (switcher.workspaces.length) renderWorkspaceMenu(switcher);
+    // Keymap's capture-phase dispatcher pops the top of its Esc stack and
+    // stops propagation before the input's keydown handler runs. If another
+    // surface (notification history, …) owns an older token, Escape would
+    // close it instead of this menu, so register our own token on top.
+    var pushEsc = switcher.window.Keymap && switcher.window.Keymap.pushEsc;
+    if (typeof pushEsc === 'function') {
+      switcher.escapeToken = pushEsc(function() {
+        closeMenu(switcher);
+        var btn = switcher.document.getElementById('wsCurrentBtn');
+        if (btn) btn.focus();
+      });
+    }
     // The sync focusSearch below only lands when the field is already visible
     // (a cached reopen). The post-reload focus is for the hidden-then-visible
     // transition on a first open — and only when this open is still current
@@ -356,6 +373,7 @@
       highlightId: null,
       generation: 0,
       outsideClickTimer: null,
+      escapeToken: null,
       onOutsideClick: function(e) { closeWsDropdownOutside(switcher, e); }
     };
     bindSearch(switcher);

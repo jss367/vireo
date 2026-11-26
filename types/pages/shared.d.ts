@@ -82,6 +82,8 @@ interface WorkspaceSwitcherContext {
   /** Bumped by every menu load and by close; a response from an earlier value is dropped. */
   generation: number;
   outsideClickTimer: number | null;
+  /** Keymap Esc stack token while the menu is open; null when closed. */
+  escapeToken: number | null;
   /** The document click listener that closes the menu, one function so it can be removed. */
   readonly onOutsideClick: (event: MouseEvent) => void;
 }
