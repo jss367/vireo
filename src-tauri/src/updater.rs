@@ -408,11 +408,12 @@ async fn download_update(
 ///
 /// When jobs the user started are queued or running, ask first: the default
 /// waits for them to finish, Restart Now names what it would stop, and Later
-/// keeps the download. When the check fails, Restart or Later asks and says
-/// the jobs could not be checked. Otherwise a request to restart (the menu
-/// item, tray item or notice) installs at once, and a manual check that just
-/// found the update (`ask_when_idle`) asks Restart or Later. Returns an install failure
-/// for the caller to show; the update is then ready again.
+/// keeps the download. A request to restart (the menu item, tray item or
+/// notice) installs at once only when `restart_without_asking` holds; anything
+/// else it would stop or replace (a paused job, a failed check, another Vireo
+/// window on the backend) asks Restart or Later and says so. A manual check
+/// that just found the update (`ask_when_idle`) always asks. Returns an
+/// install failure for the caller to show; the update is then ready again.
 fn decide_restart(
     app: &AppHandle,
     pending: PendingUpdate,
@@ -425,18 +426,18 @@ fn decide_restart(
         log::warn!("Could not check for running jobs before updating: {error}");
     }
 
+    let shared = crate::sidecar::other_gui_clients_attached();
+
     let readiness = match readiness {
         Ok(readiness) if !readiness.idle => readiness,
         readiness => {
-            // A failed check says nothing about running jobs, so it asks
-            // even where an idle backend would let a click restart at once.
-            if !ask_when_idle && readiness.is_ok() {
+            if !ask_when_idle && restart_without_asking(&readiness, shared) {
                 return install(app, pending);
             }
             set_update_menu_text(app, RESTART_TEXT);
             let restart = app
                 .dialog()
-                .message(ready_message(&version, readiness.as_ref().ok()))
+                .message(ready_message(&version, readiness.as_ref().ok(), shared))
                 .title("Update Ready")
                 .kind(MessageDialogKind::Info)
                 .buttons(MessageDialogButtons::OkCancelCustom(
@@ -454,7 +455,7 @@ fn decide_restart(
 
     let choice = app
         .dialog()
-        .message(busy_message(&version, &readiness, was_waiting))
+        .message(busy_message(&version, &readiness, was_waiting, shared))
         .title("Update Ready")
         .kind(MessageDialogKind::Info)
         .buttons(MessageDialogButtons::YesNoCancelCustom(
@@ -475,6 +476,13 @@ fn decide_restart(
             Ok(())
         }
     }
+}
+
+/// Whether a click on Restart to Update may restart without a dialog: the job
+/// check answered, nothing the user started is running or paused, and no
+/// other Vireo window runs on this backend's application files.
+fn restart_without_asking(readiness: &Result<Readiness, String>, shared: bool) -> bool {
+    matches!(readiness, Ok(r) if r.idle && r.paused.is_empty()) && !shared
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -970,7 +978,16 @@ fn paused_note(paused: &[ReadinessJob]) -> String {
     format!("\n\nPaused jobs stop when Vireo restarts: {names}.")
 }
 
-fn ready_message(version: &str, readiness: Option<&Readiness>) -> String {
+fn shared_note(shared: bool) -> &'static str {
+    if shared {
+        "\n\nAnother Vireo window shares this one's backend. Installing replaces the \
+         application it is running, so quit that window before you restart."
+    } else {
+        ""
+    }
+}
+
+fn ready_message(version: &str, readiness: Option<&Readiness>, shared: bool) -> String {
     let note = match readiness {
         Some(readiness) => paused_note(&readiness.paused),
         None => "\n\nVireo couldn't check for running jobs. A restart stops any that are running."
@@ -978,24 +995,20 @@ fn ready_message(version: &str, readiness: Option<&Readiness>) -> String {
     };
     format!(
         "Vireo v{version} has been downloaded and is ready to install.\n\n\
-         Restart Vireo to finish updating, or choose Later to keep working.{LATER_NOTE}{note}"
+         Restart Vireo to finish updating, or choose Later to keep working.{LATER_NOTE}{note}{}",
+        shared_note(shared)
     )
 }
 
 fn jobs_finished_message(version: &str, shared: bool) -> String {
-    let shared_note = if shared {
-        "\n\nAnother Vireo window shares this one's backend. Installing replaces the \
-         application it is running, so quit that window before you restart."
-    } else {
-        ""
-    };
     format!(
         "Your jobs have finished, and Vireo v{version} is ready to install.\n\n\
-         Restart Vireo now to finish updating, or choose Later to keep working.{LATER_NOTE}{shared_note}"
+         Restart Vireo now to finish updating, or choose Later to keep working.{LATER_NOTE}{}",
+        shared_note(shared)
     )
 }
 
-fn busy_message(version: &str, readiness: &Readiness, was_waiting: bool) -> String {
+fn busy_message(version: &str, readiness: &Readiness, was_waiting: bool, shared: bool) -> String {
     let lead = if was_waiting {
         format!(
             "Vireo is waiting for these jobs to finish before it restarts to install v{version}:"
@@ -1006,9 +1019,10 @@ fn busy_message(version: &str, readiness: &Readiness, was_waiting: bool) -> Stri
     format!(
         "{lead}\n\n{}\n\n\
          Restart After Jobs Finish waits for them, then restarts after a 30-second warning. \
-         Restart Now stops them.{}",
+         Restart Now stops them.{}{}",
         describe_jobs(&readiness.blocking),
         paused_note(&readiness.paused),
+        shared_note(shared),
     )
 }
 
@@ -1271,21 +1285,21 @@ mod tests {
             blocking: vec![job("Import", "running"), job("Process run", "queued")],
             paused: vec![job("Move folder", "paused")],
         };
-        let message = busy_message("1.2.3", &readiness, false);
+        let message = busy_message("1.2.3", &readiness, false, false);
         assert!(message.contains("Import, Process run (waiting to start)"));
         assert!(message.contains("Paused jobs stop when Vireo restarts: Move folder."));
-        assert!(busy_message("1.2.3", &readiness, true).starts_with("Vireo is waiting"));
+        assert!(busy_message("1.2.3", &readiness, true, false).starts_with("Vireo is waiting"));
     }
 
     #[test]
     fn ready_message_says_when_jobs_could_not_be_checked() {
-        assert!(ready_message("1.2.3", None).contains("couldn't check for running jobs"));
+        assert!(ready_message("1.2.3", None, false).contains("couldn't check for running jobs"));
         let idle = Readiness {
             idle: true,
             blocking: vec![],
             paused: vec![],
         };
-        assert!(!ready_message("1.2.3", Some(&idle)).contains("couldn't check"));
+        assert!(!ready_message("1.2.3", Some(&idle), false).contains("couldn't check"));
     }
 
     #[test]
@@ -1300,6 +1314,28 @@ mod tests {
         assert!(check(false, true));
         assert!(!check(true, true));
         assert!(!check(false, false));
+    }
+
+    #[test]
+    fn a_click_restarts_without_asking_only_when_nothing_would_be_lost() {
+        let readiness = |idle: bool, paused: Vec<ReadinessJob>| -> Result<Readiness, String> {
+            Ok(Readiness {
+                idle,
+                blocking: vec![],
+                paused,
+            })
+        };
+        assert!(restart_without_asking(&readiness(true, vec![]), false));
+        // A paused job would stop, another window would lose its files, and a
+        // failed check says nothing about running jobs.
+        assert!(!restart_without_asking(
+            &readiness(true, vec![job("Process run", "paused")]),
+            false
+        ));
+        assert!(!restart_without_asking(&readiness(true, vec![]), true));
+        assert!(!restart_without_asking(&Err("timed out".into()), false));
+        assert!(!restart_without_asking(&readiness(false, vec![]), false));
+        assert!(ready_message("1.2.3", None, true).contains("Another Vireo window"));
     }
 
     #[test]
