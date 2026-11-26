@@ -359,22 +359,27 @@ class _FolderTransfer:
         except OSError as exc:
             return self._refuse(
                 f"Verification failed: the source folder could not be read "
-                f"({exc}). Originals preserved.")
+                f"({exc}). Originals preserved.", source_listed=False)
         error = (self._verify_remote_copy() if self.remote
                  else self._verify_local_copy())
         if error is not None:
-            return self._refuse(error)
+            return self._refuse(error, source_listed=bool(record))
         self.source_record = record
         return None
 
-    def _refuse(self, message):
+    def _refuse(self, message, *, source_listed):
         """Fail verification, removing only a local destination this move made.
 
         A destination that was already there may hold the user's own files and
         is never removed. A remote destination is not reachable from this
         filesystem, so it is left for the next run to resume into.
+
+        ``source_listed`` is whether the source could be listed and held
+        anything. When it could not (a disconnected drive, a dropped mount),
+        the copy just made may be the only one that can still be read, so it
+        is kept even though it failed verification.
         """
-        if not self.remote and self._owns_destination():
+        if source_listed and not self.remote and self._owns_destination():
             shutil.rmtree(self.target.transfer_dest, ignore_errors=True)
         return {"moved": 0, "errors": [message]}
 
@@ -440,14 +445,16 @@ class _FolderTransfer:
             phase = "Verifying copy locally (NAS verification unavailable)"
             report(0, "")
 
-        if self.target.dest_exists:
+        if self.target.dest_exists or self.target.merge:
             # Merge: the destination may legitimately hold extra unrelated
             # files (and leftover temp files from an interrupted run), so a
             # count comparison is meaningless. Instead require that every
             # source file is present at the destination with the same bytes.
+            # A move that asked to merge is checked this way even when the
+            # destination turned out not to exist yet.
             missing = _first_missing_source_file(
-                src_path, transfer_dest, verify_contents=True, is_merge=True,
-                progress=report)
+                src_path, transfer_dest, verify_contents=True,
+                is_merge=self.target.dest_exists, progress=report)
             return None if missing is None else _unconfirmed(missing)
         mismatch = _fresh_copy_mismatch(src_path, transfer_dest, progress=report)
         if mismatch is None:

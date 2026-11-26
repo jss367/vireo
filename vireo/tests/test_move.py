@@ -7236,7 +7236,7 @@ def test_timestamp_plan_runs_before_the_copy_is_verified(tmp_path, monkeypatch):
     db, _src, dst, fid, _ids = _catalog_folder_with_current_stats(tmp_path)
     order = []
     real_plan = move_mod._plan_moved_file_mtimes
-    real_verify = move_mod.folder_transfer._fresh_copy_mismatch
+    real_verify = move_mod._first_missing_source_file
 
     def traced_plan(*a, **kw):
         order.append("plan")
@@ -7247,7 +7247,7 @@ def test_timestamp_plan_runs_before_the_copy_is_verified(tmp_path, monkeypatch):
         return real_verify(*a, **kw)
 
     monkeypatch.setattr(move_mod.folder_transfer, "_plan_moved_file_mtimes", traced_plan)
-    monkeypatch.setattr(move_mod.folder_transfer, "_fresh_copy_mismatch", traced_verify)
+    monkeypatch.setattr(move_mod.folder_transfer, "_first_missing_source_file", traced_verify)
     _lose_timestamps_in_transfer(monkeypatch)
 
     result = move_mod.move_folder(db=db, folder_id=fid, destination=str(dst),

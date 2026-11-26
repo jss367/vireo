@@ -219,6 +219,48 @@ def test_merge_keeps_originals_and_the_destination_when_a_copy_has_wrong_bytes(t
     assert (dst / "shoot" / "mine.jpg").read_bytes() == b"already in the archive"
 
 
+def test_merge_into_a_new_destination_keeps_originals_when_a_copy_has_wrong_bytes(tmp_path, monkeypatch):
+    """A move that asks to merge is verified by content even when the
+    destination did not exist yet (the NAS archive flows always ask)."""
+    import move as move_mod
+
+    db, src, dst, fid, _ids = _folder(tmp_path)
+    _transfer_that_corrupts(monkeypatch, "a.jpg")
+
+    result = move_mod.move_folder(db=db, folder_id=fid, destination=str(dst), merge=True)
+
+    assert result["moved"] == 0
+    assert any("a.jpg" in error and "Originals preserved" in error
+               for error in result["errors"])
+    assert (src / "a.jpg").exists()
+    assert (src / "b.jpg").exists()
+    assert not (dst / "shoot").exists()
+
+
+def test_a_copy_is_kept_when_the_source_can_no_longer_be_read(tmp_path, monkeypatch):
+    """If the source drive drops out after the copy, the copy may be the
+    only one that can still be read. Failing verification must not remove it."""
+    import move as move_mod
+
+    db, src, dst, fid, _ids = _folder(tmp_path)
+
+    def source_is_gone(src_path):
+        raise OSError(6, "Device not configured", src_path)
+
+    monkeypatch.setattr(move_mod.folder_transfer, "record_source_tree", source_is_gone)
+
+    result = move_mod.move_folder(db=db, folder_id=fid, destination=str(dst))
+
+    assert result["moved"] == 0
+    assert any("the source folder could not be read" in error
+               for error in result["errors"])
+    assert (dst / "shoot" / "a.jpg").exists()
+    assert (dst / "shoot" / "b.jpg").exists()
+    assert (src / "a.jpg").exists()
+    assert db.conn.execute(
+        "SELECT path FROM folders WHERE id = ?", (fid,)).fetchone()["path"] == str(src)
+
+
 def test_a_file_added_after_verification_is_kept_and_reported(tmp_path, monkeypatch):
     import move as move_mod
 
