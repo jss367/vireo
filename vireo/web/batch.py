@@ -623,7 +623,11 @@ def create_batch_blueprint(
 
     @blueprint.route("/api/batch/delete", methods=["POST"])
     def api_batch_delete() -> ResponseReturnValue:
-        """Delete photos from Vireo, optionally moving files to trash."""
+        """Delete photos from Vireo, optionally moving files to trash.
+
+        ``mode: "disk_permanent"`` deletes the files with no Trash copy and
+        is refused without ``confirm_permanent: true``.
+        """
         db = get_db()
         body = request.get_json(silent=True) or {}
         photo_ids = body.get("photo_ids", [])
@@ -631,7 +635,10 @@ def create_batch_blueprint(
         include_companions = body.get("include_companions", False)
 
         try:
-            result = run_batch_delete(db, photo_ids, mode, include_companions)
+            result = run_batch_delete(
+                db, photo_ids, mode, include_companions,
+                confirm_permanent=body.get("confirm_permanent") is True,
+            )
         except ValueError as exc:
             return json_error(str(exc))
         if result.get("deleted"):

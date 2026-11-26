@@ -18,6 +18,108 @@ window.Vireo.dom = window.Vireo.dom || {
 };
 
 /*
+ * Ask a yes/no question in the page and resolve with the answer.
+ *
+ * window.confirm() cannot gate an action: the desktop app's webview replaces
+ * it with an async function, so `if (!confirm(...)) return;` sees a promise
+ * (always truthy) and carries on without showing anything. Call this before
+ * any action that removes files:
+ *
+ *   if (!(await Vireo.confirm({title: ..., message: ..., confirmLabel: ...}))) return;
+ *
+ * Resolves true only when the confirm button is pressed. Cancel, Esc and a
+ * second call while a question is already open resolve false.
+ */
+window.Vireo.confirm = window.Vireo.confirm || (function() {
+  var open = false;
+
+  /** @param {string} tag @param {string} className @param {string} text */
+  function element(tag, className, text) {
+    var node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text) node.textContent = text;
+    return node;
+  }
+
+  /** @param {VireoConfirmOptions} options @param {HTMLDialogElement} dialog */
+  function fill(options, dialog) {
+    var title = element('h3', '', options.title);
+    title.id = 'vireoConfirmTitle';
+    dialog.setAttribute('aria-labelledby', title.id);
+    dialog.appendChild(title);
+    String(options.message || '').split('\n\n').forEach(function(paragraph) {
+      if (paragraph) dialog.appendChild(element('p', 'vireo-confirm-text', paragraph));
+    });
+    var details = options.details || [];
+    if (details.length) {
+      var list = element('ul', 'vireo-confirm-details', '');
+      details.forEach(function(line) { list.appendChild(element('li', '', line)); });
+      dialog.appendChild(list);
+    }
+  }
+
+  /** @param {VireoConfirmOptions} options @returns {Promise<boolean>} */
+  return function confirmInPage(options) {
+    if (open) return Promise.resolve(false);
+    open = true;
+    var dialog = /** @type {HTMLDialogElement} */ (element('dialog', 'modal vireo-confirm', ''));
+    dialog.id = 'vireoConfirmDialog';
+    fill(options, dialog);
+    var actions = element('div', 'modal-actions', '');
+    var cancel = /** @type {HTMLButtonElement} */ (
+      element('button', 'modal-btn modal-btn-cancel', options.cancelLabel || 'Cancel'));
+    var accept = /** @type {HTMLButtonElement} */ (element(
+      'button',
+      'modal-btn ' + (options.danger ? 'vireo-confirm-danger' : 'modal-btn-primary'),
+      options.confirmLabel || 'OK'));
+    cancel.type = accept.type = 'button';
+    cancel.dataset.vireoConfirm = 'cancel';
+    accept.dataset.vireoConfirm = 'accept';
+    actions.append(cancel, accept);
+    dialog.appendChild(actions);
+    document.body.appendChild(dialog);
+    var previousFocus = document.activeElement;
+
+    return new Promise(function(resolve) {
+      /** @param {boolean} answer */
+      function finish(answer) {
+        if (!open) return;
+        open = false;
+        window.removeEventListener('keydown', onKeydown, true);
+        dialog.close();
+        dialog.remove();
+        if (previousFocus instanceof HTMLElement && previousFocus.isConnected) previousFocus.focus();
+        resolve(answer);
+      }
+      // Every key belongs to the question while it is open. The page's
+      // shortcuts listen on document and would otherwise act on the photo
+      // behind the dialog, and Esc would also close the lightbox under it.
+      // Enter and Space still press the focused button: stopping
+      // propagation does not cancel a key's default action.
+      /** @param {KeyboardEvent} event */
+      function onKeydown(event) {
+        event.stopImmediatePropagation();
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          finish(false);
+        } else if (event.key === 'Tab') {
+          // WebKit's default keyboard setting skips buttons on Tab.
+          event.preventDefault();
+          (document.activeElement === cancel ? accept : cancel).focus();
+        }
+      }
+      window.addEventListener('keydown', onKeydown, true);
+      cancel.addEventListener('click', function() { finish(false); });
+      accept.addEventListener('click', function() { finish(true); });
+      dialog.addEventListener('cancel', function(event) { event.preventDefault(); finish(false); });
+      dialog.showModal();
+      // Cancel holds the focus, so a stray Enter never confirms.
+      cancel.focus();
+    });
+  };
+})();
+
+/*
  * Persistent presentation preferences.
  *
  * Stable view controls opt in with data-view-preference="vireo.page.name".

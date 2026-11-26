@@ -550,25 +550,78 @@ test('_vireoUrlWithRenderVersion applies only a known per-photo version', () => 
   assert.equal(ctx._vireoUrlWithRenderVersion('/p/5/full', null), '/p/5/full');
 });
 
-test('a partly failed delete job keeps its retained photos and reports both counts', () => {
-  const calls = {toasts: [], confirms: [], callback: null, hidden: 0};
-  const ctx = load([fn(lightbox, 'handleDeleteJobComplete')], {
-    hideDeleteModal: () => { calls.hidden++; },
-    showToast: (msg, kind) => { calls.toasts.push([msg, kind]); },
-    confirm: msg => { calls.confirms.push(msg); return false; },
-    safeFetch: () => { throw new Error('no retry expected'); },
-  });
-  ctx.handleDeleteJobComplete({
+// handleDeleteJobComplete with its permanent-delete question. `answer` is what
+// the in-page question resolves to; a native confirm() must never be consulted,
+// because the desktop app's returns a promise that is always truthy.
+function deleteFallback(answer, retryResult) {
+  const calls = {toasts: [], questions: [], requests: [], callback: null};
+  const ctx = load(
+    [fn(lightbox, 'confirmPermanentDelete'), fn(lightbox, 'handleDeleteJobComplete')],
+    {
+      hideDeleteModal: () => {},
+      showToast: (msg, kind) => { calls.toasts.push([msg, kind]); },
+      confirm: () => { throw new Error('native confirm() must not gate a delete'); },
+      Vireo: {confirm: async options => { calls.questions.push(options); return answer; }},
+      safeFetch: async (url, init) => {
+        calls.requests.push([url, JSON.parse(init.body)]);
+        return retryResult;
+      },
+    },
+  );
+  const partlyFailed = () => ({
     status: 'failed',
     errors: ['/a/2.jpg: SMB Trash unavailable'],
     result: {deleted: 1, trashed: 1, failed_photo_ids: [2],
              trash_failed: [{path: '/a/2.jpg', error: 'SMB Trash unavailable', photo_id: 2}]},
-  }, data => { calls.callback = data; }, 'disk', false);
-  // The permanent-delete fallback is still offered for the retained file...
-  assert.equal(calls.confirms.length, 1);
-  // ...and the grid callback still runs, so the deleted photo leaves the grid.
+  });
+  const run = () => ctx.handleDeleteJobComplete(
+    partlyFailed(), data => { calls.callback = data; }, 'disk', true);
+  return {calls, run};
+}
+
+test('a partly failed delete job keeps its retained photos and reports both counts', async () => {
+  const {calls, run} = deleteFallback(false);
+  await run();
+  // The permanent-delete fallback is offered for the retained file, naming it...
+  assert.equal(calls.questions.length, 1);
+  assert.deepEqual(Array.from(calls.questions[0].details), ['/a/2.jpg \u2014 SMB Trash unavailable']);
+  assert.match(calls.questions[0].message, /^1 photo could not be moved to the Trash and was kept\./);
+  assert.match(calls.questions[0].message, /companion files included/);
+  assert.equal(calls.questions[0].confirmLabel, 'Delete permanently');
+  assert.equal(calls.questions[0].danger, true);
+  // ...and declining it deletes nothing more.
+  assert.deepEqual(calls.requests, []);
+  // The grid callback still runs, so the deleted photo leaves the grid.
   assert.deepEqual(Array.from(calls.callback.failed_photo_ids), [2]);
   assert.deepEqual(calls.toasts, [['1 photo moved to Trash; 1 retained after file errors', 'error']]);
+});
+
+test('files the Trash refused are deleted permanently only after the user agrees', async () => {
+  const {calls, run} = deleteFallback(
+    true, {deleted: 1, trashed: 1, trash_failed: [], failed_photo_ids: []});
+  await run();
+  assert.equal(calls.questions.length, 1);
+  assert.deepEqual(calls.requests, [['/api/batch/delete', {
+    photo_ids: [2], mode: 'disk_permanent', confirm_permanent: true, include_companions: true,
+  }]]);
+  // The summary says which photos went to the Trash and which are gone for good.
+  assert.deepEqual(calls.toasts, [['1 photo moved to Trash; 1 deleted permanently', 'success']]);
+  assert.deepEqual(Array.from(calls.callback.failed_photo_ids), []);
+});
+
+test('the permanent-delete question lists five files and counts the rest', () => {
+  const asked = [];
+  const ctx = load([fn(lightbox, 'confirmPermanentDelete')], {
+    Vireo: {confirm: options => { asked.push(options); return Promise.resolve(false); }},
+  });
+  const failures = [1, 2, 3, 4, 5, 6, 7].map(n => ({path: '/a/' + n + '.jpg'}));
+  ctx.confirmPermanentDelete(failures, 4, false);
+  assert.equal(asked[0].details.length, 6);
+  assert.equal(asked[0].details[0], '/a/1.jpg');
+  assert.equal(asked[0].details[5], '\u2026 and 2 more');
+  assert.match(asked[0].message, /^4 photos could not be moved to the Trash and were kept\./);
+  assert.match(asked[0].message, /removes their files from disk now\. They will not be in the Trash and cannot be recovered\./);
+  assert.equal(asked[0].cancelLabel, 'Keep the photos');
 });
 
 test('a delete job that failed outright reports the failure and runs no callback', () => {
@@ -576,7 +629,7 @@ test('a delete job that failed outright reports the failure and runs no callback
   const ctx = load([fn(lightbox, 'handleDeleteJobComplete')], {
     hideDeleteModal: () => {},
     showToast: (msg, kind) => { calls.toasts.push([msg, kind]); },
-    confirm: () => { throw new Error('no prompt expected'); },
+    Vireo: {confirm: () => { throw new Error('no prompt expected'); }},
   });
   ctx.handleDeleteJobComplete(
     {status: 'failed', errors: ['database is locked'], result: null},

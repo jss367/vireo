@@ -41,6 +41,7 @@ from services.local_workspace import (
     stage_boundary_lock,
 )
 from services.mask_extraction import MaskExtractionOptions, extract_masks
+from services.photo_deletion import permanent_delete_error
 from services.preview_warmup import warm_previews
 from services.startup_tasks import metadata_repair_count
 from web.background_jobs import make_background_job
@@ -443,6 +444,11 @@ def create_job_launchers_blueprint(
             return json_error("photo_ids required")
         if not isinstance(photo_ids, list):
             return json_error("photo_ids must be a list")
+        # Refuse an unconfirmed permanent delete here, before a job exists.
+        confirm_permanent = body.get("confirm_permanent") is True
+        unconfirmed = permanent_delete_error(mode, confirm_permanent)
+        if unconfirmed:
+            return json_error(unconfirmed)
 
         def work(job: JobDict) -> JsonDict:
             thread_db = ctx.thread_db()
@@ -467,6 +473,7 @@ def create_job_launchers_blueprint(
                     mode,
                     include_companions,
                     progress_callback=progress,
+                    confirm_permanent=confirm_permanent,
                 )
                 if result.get("deleted"):
                     invalidate_missing_originals()

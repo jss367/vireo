@@ -2,6 +2,7 @@
   "extends": "../tsconfig.frontend.base.json",
   "files": [
     "../types/pages/import.d.ts",
+    "../types/confirm.d.ts",
     "../vireo/static/import/after-import.js",
     "../vireo/static/import/boot.js",
     "../vireo/static/import/clock-check.js",

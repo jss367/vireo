@@ -1560,6 +1560,25 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 .modal-btn-cancel { background: var(--bg-tertiary); color: var(--text-secondary); }
 .modal-error { color: var(--danger); font-size: 13px; margin-top: 8px; display: none; }
 
+/* In-page confirmation (Vireo.confirm in vireo-utils.js) */
+/* margin:auto centers the dialog; the pages' `* { margin: 0 }` reset removes
+   the browser's own. */
+.vireo-confirm { color: var(--text-primary); margin: auto; max-width: calc(100vw - 32px); }
+.vireo-confirm::backdrop { background: rgba(0,0,0,0.6); }
+.vireo-confirm-text {
+  font-size: 13px; line-height: 1.5; color: var(--text-secondary);
+  margin: 0 0 10px; white-space: pre-line;
+}
+.vireo-confirm-details {
+  list-style: none; margin: 0 0 10px; padding: 8px 10px;
+  max-height: 160px; overflow-y: auto;
+  background: var(--bg-tertiary); border-radius: 4px;
+  font-family: monospace; font-size: 11px; color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+.vireo-confirm-details li + li { margin-top: 4px; }
+.vireo-confirm-danger { background: var(--danger); color: white; }
+
 .color-label-description-heading {
   display: flex;
   align-items: center;
