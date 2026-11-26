@@ -38,12 +38,37 @@
     return next;
   }
 
+  var lastRecoveryId = '';
+  /** @param {Response} response */
+  function showConfigRecovery(response) {
+    var notice = response.headers?.get('X-Vireo-Config-Recovery');
+    if (!notice || typeof global.showToast !== 'function') return response;
+    try {
+      var recovery = JSON.parse(notice);
+      // Dedupe by recovery identity: a backup-failed read followed by a
+      // backup-succeeded one carries the same id but a different message,
+      // and two toasts for one recovery would read as a repeat event.
+      var recoveryId = recovery && recovery.id;
+      if (!recoveryId || recoveryId === lastRecoveryId) return response;
+      lastRecoveryId = recoveryId;
+      var key = 'vireo.configRecoveryId';
+      try { if (global.localStorage.getItem(key) === recoveryId) return response; } catch (_) {}
+      global.showToast(recovery.message, 'warning');
+      try { global.localStorage.setItem(key, recoveryId); } catch (_) {}
+    } catch (_) { /* A notice must never interrupt the request. */ }
+    return response;
+  }
+
   /** @param {RequestInfo | URL} input @param {RequestInit} [init] */
   function browserFetch(input, init) {
     var next = withBrowserHeader(input, init);
-    var send = function() { return nativeFetch(input, next); };
+    var sameOrigin = isSameOrigin(input);
+    var send = function() {
+      var response = nativeFetch(input, next);
+      return sameOrigin ? response.then(showConfigRecovery) : response;
+    };
     var historyRequest = Vireo.api && Vireo.api.trackHistoryRequest;
-    if (isSameOrigin(input) && typeof historyRequest === 'function') {
+    if (sameOrigin && typeof historyRequest === 'function') {
       return historyRequest(input, next, send);
     }
     return send();

@@ -13,7 +13,11 @@
   order is part of the security contract: a cross-site or malformed request
   is refused before it can take a reservation.
 * ``after_request``: action/slow/API logging plus the security headers and
-  browser session cookie (``_log_requests``).
+  browser session cookie (``_log_requests``); the
+  ``X-Vireo-Config-Recovery`` header on every successful response when the
+  previous read fell back to defaults (``_include_config_recovery_notice``),
+  so a user who edits settings via any blueprint still learns their
+  configuration was replaced.
 * ``errorhandler(Exception)``: ``_handle_error``, which answers a search
   interrupted by ``claim_search_lane`` with a quiet 409.
 * ``teardown_appcontext``: ``close_request_db`` closes the per-request
@@ -24,6 +28,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import re
 import secrets
@@ -34,6 +39,7 @@ from collections.abc import Callable, Collection
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
+from config import config_recovery_notice
 from db import Database
 from flask import g, jsonify, request
 from jobs import WorkspaceBusyError
@@ -423,6 +429,21 @@ def _release_workspace_mutation(exc: BaseException | None) -> None:
         reservation.__exit__(None, None, None)
 
 
+def _include_config_recovery_notice(response: Response) -> Response:
+    """Stamp every successful response with the recovery notice, if any.
+
+    Any writer that falls back to defaults (settings, export, …) sets the
+    in-memory notice, so every blueprint's responses must carry it — a
+    settings-only hook would hide the recovery from a user whose next
+    request happens to land in another blueprint.
+    """
+    if 200 <= response.status_code < 300:
+        notice = config_recovery_notice()
+        if notice:
+            response.headers["X-Vireo-Config-Recovery"] = json.dumps(notice)
+    return response
+
+
 def register_app_hooks(
     app: Flask, *, get_db: GetDb, get_runner: GetRunner, reservation_exempt_endpoints: Collection[str],
 ) -> None:
@@ -453,6 +474,8 @@ def register_app_hooks(
     def _log_requests(response: Response) -> Response:
         _log_request_timing(response)
         return _finish_response(response, app.config)
+
+    app.after_request(_include_config_recovery_notice)
 
     app.errorhandler(Exception)(_handle_error)
 

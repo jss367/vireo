@@ -16,6 +16,18 @@ function onLinkClick(id, action) {
   });
 }
 
+// Welcome has no navbar and so no showToast: the config-recovery notice from
+// /config-defaults.js (window.VIREO_CONFIG_RECOVERY) renders into the static
+// alert container below instead.
+var recovery = /** @type {{id: string, message: string} | null | undefined} */ (
+  window.VIREO_CONFIG_RECOVERY
+);
+if (recovery && recovery.message) {
+  var noticeEl = byId('configRecoveryNotice');
+  noticeEl.textContent = recovery.message;
+  noticeEl.hidden = false;
+}
+
 byId('downloadBtn').addEventListener('click', function() { getStarted(); });
 byId('retryBtn').addEventListener('click', function() { getStarted(); });
 onLinkClick('skipLink', finishSetup);

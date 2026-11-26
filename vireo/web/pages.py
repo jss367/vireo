@@ -161,6 +161,8 @@ def create_pages_blueprint(get_db: GetDb) -> Blueprint:
             + json.dumps(labels["name"])
             + ";\nwindow.VIREO_EDITOR_PATH_PLACEHOLDER = "
             + json.dumps(labels["editor_placeholder"])
+            + ";\nwindow.VIREO_CONFIG_RECOVERY = "
+            + json.dumps(cfg.config_recovery_notice())
             + ";\n",
             mimetype="application/javascript",
             headers={"Cache-Control": "no-store"},
@@ -179,9 +181,9 @@ def create_pages_blueprint(get_db: GetDb) -> Blueprint:
 
     @blueprint.route("/welcome")
     def welcome() -> ResponseReturnValue:
-        if request.args.get("force"):
-            return render_template("welcome.html")
-        if classification_readiness(get_db())["ready"] or cfg.load().get("setup_complete"):
+        if not request.args.get("force") and (
+            classification_readiness(get_db())["ready"] or cfg.load().get("setup_complete")
+        ):
             return redirect("/browse")
         return render_template("welcome.html")
 

@@ -193,6 +193,9 @@ def test_app_hooks_run_in_security_order(app_and_db):
         "_reject_non_object_json_body",
         "_reserve_workspace_mutation",
     ]
-    assert names(app.after_request_funcs[None]) == ["_log_requests"]
+    assert names(app.after_request_funcs[None]) == [
+        "_log_requests",
+        "_include_config_recovery_notice",
+    ]
     assert names(app.teardown_request_funcs[None]) == ["_release_workspace_mutation"]
     assert names(app.teardown_appcontext_funcs) == ["close_request_db"]
