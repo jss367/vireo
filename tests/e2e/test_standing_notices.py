@@ -183,7 +183,16 @@ def test_a_restart_waiting_for_jobs_names_them_and_counts_down(live_server, page
       window.dispatchEvent(new Event('vireo:update-status'));
     }""")
     banner = page.locator("#updateRestartBanner")
+    expect(banner).to_contain_text("Your jobs have finished.")
     expect(banner).to_contain_text("Vireo will restart to install v0.99.0 in")
+
+    # A countdown that started because the job check kept failing says so.
+    page.evaluate("""() => {
+      window.__updateStatus = {version: '0.99.0', waiting_for: null, restart_in: 29,
+                               jobs_checked: false};
+      window.dispatchEvent(new Event('vireo:update-status'));
+    }""")
+    expect(banner).to_contain_text("Vireo couldn't check whether your jobs have finished.")
     banner.get_by_role("button", name="Not Now").click()
     expect(banner).to_have_count(0)
     expect(notice).to_contain_text("Restart Vireo to finish updating.")

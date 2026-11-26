@@ -56,6 +56,9 @@ struct Countdown {
     deadline: Instant,
     shown: bool,
     response: Option<CountdownResponse>,
+    /// Whether a job check said the jobs finished. False when the countdown
+    /// started because the backend stopped answering.
+    jobs_checked: bool,
 }
 
 /// Keep deferred downloads for this session, and serialize checks through the
@@ -166,6 +169,9 @@ pub struct UpdateStatus {
     waiting_for: Option<String>,
     /// Seconds until the automatic restart, while the countdown runs.
     restart_in: Option<u64>,
+    /// While the countdown runs, whether a job check said the jobs finished;
+    /// false when Vireo could not check, so the banner says that instead.
+    jobs_checked: bool,
 }
 
 /// The downloaded update and what Vireo is doing about it. Reading a running
@@ -179,6 +185,7 @@ pub fn status(app: &AppHandle) -> Option<UpdateStatus> {
     let mut state = state();
     let version = state.pending.as_ref()?.update.version.clone();
     let waiting_for = state.waiting_for.clone();
+    let jobs_checked = state.countdown.as_ref().map_or(true, |c| c.jobs_checked);
     let restart_in = state.countdown.as_mut().map(|countdown| {
         countdown.shown |= visible;
         countdown
@@ -190,6 +197,7 @@ pub fn status(app: &AppHandle) -> Option<UpdateStatus> {
         version,
         waiting_for,
         restart_in,
+        jobs_checked,
     })
 }
 
@@ -779,7 +787,9 @@ fn wait_for_jobs(app: &AppHandle, mut generation: u64) {
         if !state().is_waiter(generation) {
             return;
         }
-        let idle = match fetch_readiness(app) {
+        // Some(checked) starts the countdown; checked says whether a job
+        // check said the jobs finished.
+        let start = match fetch_readiness(app) {
             Ok(readiness) if !readiness.idle => {
                 failures = 0;
                 let text = waiting_for_text(&readiness.blocking);
@@ -799,9 +809,9 @@ fn wait_for_jobs(app: &AppHandle, mut generation: u64) {
                 if changed {
                     notify_page(app);
                 }
-                false
+                None
             }
-            Ok(_) => true,
+            Ok(_) => Some(true),
             Err(error) => {
                 failures += 1;
                 log::warn!("Update readiness check failed ({failures}): {error}");
@@ -809,17 +819,17 @@ fn wait_for_jobs(app: &AppHandle, mut generation: u64) {
                     if state().is_waiter(generation) {
                         set_update_menu_text(app, "Restart to Update Now (can't check jobs)…");
                     }
-                    false
+                    None
                 } else {
                     log::warn!(
                         "Backend unreachable while waiting to update; starting the countdown"
                     );
-                    true
+                    Some(false)
                 }
             }
         };
-        if idle {
-            match run_countdown(app, generation) {
+        if let Some(jobs_checked) = start {
+            match run_countdown(app, generation, jobs_checked) {
                 CountdownOutcome::Restart(pending) => {
                     if let Err(error) = install(app, *pending) {
                         show_install_error(app, &error);
@@ -850,7 +860,7 @@ enum CountdownOutcome {
 /// Warn before an automatic restart. The page shows the countdown; when it
 /// cannot (browser mode, a page without the navbar), a native dialog asks
 /// instead and nothing restarts until the user answers.
-fn run_countdown(app: &AppHandle, generation: u64) -> CountdownOutcome {
+fn run_countdown(app: &AppHandle, generation: u64, jobs_checked: bool) -> CountdownOutcome {
     let version = {
         let mut state = state();
         if !state.is_waiter(generation) {
@@ -860,6 +870,7 @@ fn run_countdown(app: &AppHandle, generation: u64) -> CountdownOutcome {
             deadline: Instant::now() + COUNTDOWN,
             shown: false,
             response: None,
+            jobs_checked,
         });
         state
             .pending
@@ -1452,6 +1463,7 @@ mod tests {
             deadline: Instant::now(),
             shown: true,
             response: None,
+            jobs_checked: true,
         });
         assert!(state.stop_waiting());
         assert!(state.countdown.is_none());
@@ -1707,10 +1719,16 @@ mod tests {
             version: "1.2.3".into(),
             waiting_for: Some("Import".into()),
             restart_in: None,
+            jobs_checked: true,
         };
         assert_eq!(
             serde_json::to_value(&status).unwrap(),
-            serde_json::json!({"version": "1.2.3", "waiting_for": "Import", "restart_in": null})
+            serde_json::json!({
+                "version": "1.2.3",
+                "waiting_for": "Import",
+                "restart_in": null,
+                "jobs_checked": true
+            })
         );
     }
 

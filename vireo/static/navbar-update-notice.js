@@ -19,7 +19,7 @@ const text = document.getElementById('updateReadyMsg');
 const button = /** @type {HTMLButtonElement | null} */ (document.getElementById('updateReadyRestart'));
 
 /**
- * @typedef {{version: string, waiting_for?: string | null, restart_in?: number | null}} UpdateStatus
+ * @typedef {{version: string, waiting_for?: string | null, restart_in?: number | null, jobs_checked?: boolean}} UpdateStatus
  */
 
 /** The last failed install, kept so a later poll does not hide it. */
@@ -36,10 +36,18 @@ export function updateReadyMessage(version, error, waitingFor) {
   return error ? ready + ' The last attempt failed: ' + error : ready;
 }
 
-/** @param {string} version @param {number} seconds */
-export function countdownMessage(version, seconds) {
+/**
+ * The countdown banner's text. It says the jobs finished only when a job
+ * check said so; the shell also starts the countdown when the backend has
+ * stopped answering, and then the banner says Vireo couldn't check.
+ * @param {string} version @param {number} seconds @param {boolean} [jobsChecked]
+ */
+export function countdownMessage(version, seconds, jobsChecked = true) {
   if (seconds <= 0) return 'Restarting to install Vireo v' + version + '…';
-  return 'Your jobs have finished. Vireo will restart to install v' + version + ' in '
+  const lead = jobsChecked
+    ? 'Your jobs have finished.'
+    : "Vireo couldn't check whether your jobs have finished.";
+  return lead + ' Vireo will restart to install v' + version + ' in '
     + seconds + (seconds === 1 ? ' second.' : ' seconds.');
 }
 
@@ -77,9 +85,11 @@ function renderCountdown(status) {
   const banner = existing || buildCountdownBanner();
   const message = /** @type {HTMLElement} */ (banner.querySelector('.update-restart-text'));
   const version = status.version;
+  const jobsChecked = status.jobs_checked !== false;
   const deadline = Date.now() + status.restart_in * 1000;
   const tick = () => {
-    message.textContent = countdownMessage(version, Math.max(0, Math.ceil((deadline - Date.now()) / 1000)));
+    const seconds = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+    message.textContent = countdownMessage(version, seconds, jobsChecked);
   };
   tick();
   countdownTimer = setInterval(tick, 500);
