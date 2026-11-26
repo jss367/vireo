@@ -303,6 +303,38 @@ def test_ensure_schema_near_threshold_shortfall_reports_nonzero_amount(tmp_path,
     assert " MB on that drive" in message
 
 
+def test_backup_space_needed_excludes_freelist_pages(tmp_path):
+    """A catalog whose deleted rows left substantial freelist space produces
+    a smaller backup than its raw file length; the preflight must size the
+    estimate against the compacted pages, not ``os.path.getsize``."""
+    import os as _os
+
+    db_path = str(tmp_path / "vireo.db")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA journal_mode = DELETE")
+        conn.execute("CREATE TABLE big (data BLOB)")
+        conn.executemany(
+            "INSERT INTO big VALUES (?)", [(b"x" * 1024,) for _ in range(5000)]
+        )
+        conn.commit()
+        conn.execute("DELETE FROM big")
+        conn.commit()
+    raw_size = _os.path.getsize(db_path)
+
+    needed = schema._backup_space_needed(db_path)
+
+    # The old raw-size estimate stayed at the un-compacted file length plus
+    # headroom; the new one must come in below that because freelist pages
+    # are dropped by VACUUM INTO.
+    old_estimate = raw_size + max(
+        int(raw_size * schema._BACKUP_HEADROOM_FRACTION),
+        schema._BACKUP_HEADROOM_MIN_BYTES,
+    )
+    assert needed < old_estimate, (
+        f"needed={needed}, old_estimate={old_estimate}, raw_size={raw_size}"
+    )
+
+
 def test_format_minimum_to_free_rounds_up_small_deficits():
     """A 1-byte shortfall still asks the user to free at least 1 MB, and
     sub-tenth-of-GB values are rendered in MB instead of rounding to 0.0 GB."""

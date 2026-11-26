@@ -897,11 +897,22 @@ def _format_minimum_to_free(size: int) -> str:
 def _backup_space_needed(db_path: str) -> int:
     """Bytes the backup and the migrations after it need on the volume.
 
-    ``VACUUM INTO`` writes the live pages of the main file plus whatever the
-    WAL holds that has not been checkpointed, so their combined size bounds
-    the backup.
+    ``VACUUM INTO`` drops freelist pages, so a catalog that held many deleted
+    rows produces a backup much smaller than its raw file length. The live
+    page count from SQLite bounds the backup; estimating from
+    ``os.path.getsize`` would refuse upgrades that fit easily. SQLite failing
+    to answer falls back to the raw size — conservative but still safe. The
+    WAL file size stays in the total as an upper bound for scratch and for
+    uncheckpointed frames.
     """
-    size = os.path.getsize(db_path)
+    try:
+        with contextlib.closing(sqlite3.connect(db_path)) as conn:
+            page_size = conn.execute("PRAGMA page_size").fetchone()[0]
+            page_count = conn.execute("PRAGMA page_count").fetchone()[0]
+            freelist_count = conn.execute("PRAGMA freelist_count").fetchone()[0]
+        size = max(0, page_count - freelist_count) * page_size
+    except sqlite3.Error:
+        size = os.path.getsize(db_path)
     with contextlib.suppress(OSError):
         size += os.path.getsize(db_path + "-wal")
     headroom = max(int(size * _BACKUP_HEADROOM_FRACTION), _BACKUP_HEADROOM_MIN_BYTES)
