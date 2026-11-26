@@ -582,7 +582,11 @@ fn run_countdown(app: &AppHandle, generation: u64) -> CountdownOutcome {
         version.unwrap_or_default()
     };
     let started = Instant::now();
-    let page_can_show = !crate::tray::is_browser_mode(app);
+    // A hidden webview (the main window closed to the tray) still runs JS and
+    // would call `update_restart_countdown`, marking the countdown shown and
+    // bypassing the native fallback while the user sees nothing. The banner
+    // is only a path to a visible warning when a visible window can show it.
+    let page_can_show = !crate::tray::is_browser_mode(app) && main_window_visible(app);
     if page_can_show {
         refresh_countdown_banner(app);
     }
@@ -712,6 +716,14 @@ fn refresh_countdown_banner(app: &AppHandle) {
     }
 }
 
+/// Whether the main window is actually on screen. A webview closed to the
+/// tray is alive but hidden; its JS cannot show the banner to the user.
+fn main_window_visible(app: &AppHandle) -> bool {
+    app.get_webview_window("main")
+        .and_then(|window| window.is_visible().ok())
+        .unwrap_or(false)
+}
+
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct CountdownView {
     version: String,
@@ -720,11 +732,17 @@ pub struct CountdownView {
 
 /// The countdown the page should show, if one is running. Calling it marks
 /// the countdown as shown, which is what lets the restart happen on its own.
+/// A hidden webview (the main window closed to the tray) still runs JS, so
+/// a call from one leaves `shown` unchanged and the native fallback can take
+/// over — nothing restarts until a window the user can see said so.
 #[tauri::command]
-pub fn update_restart_countdown() -> Option<CountdownView> {
+pub fn update_restart_countdown(app: AppHandle) -> Option<CountdownView> {
+    let visible = main_window_visible(&app);
     let mut state = state();
     let countdown = state.countdown.as_mut()?;
-    countdown.shown = true;
+    if visible {
+        countdown.shown = true;
+    }
     Some(CountdownView {
         version: countdown.version.clone(),
         seconds_left: countdown

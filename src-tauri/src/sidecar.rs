@@ -553,16 +553,21 @@ pub fn start_sidecar(app: &AppHandle) -> Result<SidecarState, SidecarStartError>
 /// Send POST /api/shutdown to the sidecar for a clean exit.
 /// In dev mode (child is None), this is a no-op — we don't want to
 /// kill the developer's manually-started Flask server.
-pub fn stop_sidecar(state: &SidecarState) {
+///
+/// Returns true when no GUI client still holds the backend, i.e. the caller
+/// is free to replace on-disk application files (install a pending update).
+/// Returns false when another GUI client stays attached, because installing
+/// would swap the packaged application out from under its running backend.
+pub fn stop_sidecar(state: &SidecarState) -> bool {
     if !state.shutdown_on_exit {
-        return;
+        return true;
     }
 
     with_gui_clients_lock(|| {
         remove_gui_client(&state.client_marker);
         if live_gui_client_count() > 0 {
             log::info!("Leaving Vireo backend running for another GUI client");
-            return;
+            return false;
         }
 
         let has_child = state
@@ -584,7 +589,8 @@ pub fn stop_sidecar(state: &SidecarState) {
                 let _ = child.kill();
             }
         }
-    });
+        true
+    })
 }
 
 #[cfg(test)]
