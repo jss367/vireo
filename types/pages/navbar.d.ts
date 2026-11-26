@@ -76,7 +76,9 @@ interface NavProgress {
   phase_total?: number;
   phase_label?: string;
   current_file?: string;
+  /** Items finished per second, or per minute when rate_unit is "per_minute". */
   rate?: number;
+  rate_unit?: 'per_minute';
 }
 interface NavJob {
   id: string;
