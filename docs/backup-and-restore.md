@@ -45,8 +45,19 @@ The data folder holds more than `vireo.db`:
 | `ssh` | The keys Vireo uses to reach a storage server. |
 | `storage-layout-v1` | A marker in fresh installations that tells Vireo to use this folder. Keep it. |
 
+If you started Vireo with a custom `--thumb-dir`, the managed-media rows
+above (`staging`, `offline`, `local-folders`, `local-workspaces`,
+`external-edits`, `external-dng`, `edit-masks`) live next to that thumbnail
+folder, not inside the data folder. **Storage** lists every persistent
+location with its full path. When they are not all inside the data folder,
+back up each location **Storage** names, not just the data folder, or the
+backup can miss the only copy of a photo.
+
 The cache folder holds downloaded models, thumbnails, and saved computation
-results. Vireo downloads or rebuilds all of it, so it does not need a backup.
+results. Vireo downloads or rebuilds all of it, so it does not need a backup
+— except for custom model weights you registered under the models folder.
+Vireo cannot re-download those, so if you keep custom weights there, copy
+them with your other files.
 
 Back up the whole data folder. Backing up `vireo.db` alone leaves out your
 settings, the masks, and the workspace results.
@@ -149,9 +160,14 @@ have no better backup.
 3. Move `vireo.db-wal` and `vireo.db-shm` out of the folder if they are there.
    They belong to the catalog you just renamed and must not be combined with
    another one.
-4. Duplicate the `.bak` file and name the duplicate `vireo.db`. Keep the
+4. Move `pipeline_results_ws*.json` and `culling_results_ws*.json` out of the
+   folder if they are there. These workspace result files refer to photos by
+   catalog id, and the snapshot can hold a different photo under the same id,
+   so leaving them in place would show the old result for the wrong image.
+   Vireo makes them again the next time Process or Cull runs.
+5. Duplicate the `.bak` file and name the duplicate `vireo.db`. Keep the
    original `.bak` file.
-5. Start Vireo.
+6. Start Vireo.
 
 Before you do this, know what it costs:
 
@@ -163,8 +179,10 @@ Before you do this, know what it costs:
   starting the same version repeats it. Keep the snapshot,
   [report the problem](https://github.com/jss367/vireo/issues), and wait for a
   fix, or open the snapshot with the earlier version of Vireo.
-- Masks, workspace results, and settings are not in the snapshot. They stay as
-  they are now.
+- Masks and settings are not in the snapshot. They stay as they are now.
+  Workspace results are not in the snapshot either; step 4 moves them aside
+  because they refer to photos by catalog id, and Vireo rebuilds them on the
+  next Process or Cull run.
 
 ## Move Vireo to a new Mac
 
