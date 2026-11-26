@@ -68,6 +68,13 @@ SCHEMA = {
         "desc": "Daily maintenance removes generated files older than this age using their latest filesystem access, write or change timestamp. "
                 "0 disables age expiry; the byte limit still applies.",
     },
+    "catalog_backup_dir": {
+        "type": "path", "category": "Paths", "scope": "global",
+        "label": "Catalog backup folder",
+        "desc": "Before an update changes the catalog's structure, Vireo saves a copy of the catalog and keeps the copies from the last three such updates. "
+                "Empty keeps them next to the catalog. Choose a folder on an external drive or NAS to move them there after Vireo starts; "
+                "while that folder is disconnected, new copies wait next to the catalog and move when it is back.",
+    },
     "grouping_history_max_mb": {
         "type": "int", "min": 0, "max": 1048576, "category": "Behavior", "scope": "global",
         "label": "Grouping undo snapshots per workspace (MB)",

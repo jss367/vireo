@@ -44,6 +44,7 @@ UNPAUSABLE_JOBS = {
     "missing_originals_scan": INTERNAL_REASON,
     "thumb_path_backfill": "Thumbnail rechecks support cancellation, but not pausing.",
     "preview-cache-maintenance": INTERNAL_REASON,
+    "catalog-backups": "Pause is unavailable while a catalog backup is copied. Cancel it instead; it runs again at the next launch.",
     "label-list-species-ids": INTERNAL_REASON,
     "exif_search_backfill": INTERNAL_REASON,
     "working_copy_backfill": INTERNAL_REASON,

@@ -59,6 +59,10 @@ DEFAULTS = {
     "grouping_history_max_mb": 512,
     "retained_cache_max_mb": 10240,
     "retained_cache_max_age_days": 30,
+    # Folder (an external drive or NAS) that pre-upgrade catalog snapshots
+    # move to after launch; "" keeps them beside the catalog. See
+    # catalog_backups for why a missing folder is never created.
+    "catalog_backup_dir": "",
     "inat_token": "",
     "hf_token": "",
     "google_maps_api_key": "",

@@ -202,23 +202,27 @@ def test_ensure_schema_no_backup_for_fresh_or_current_db(tmp_path):
     assert glob.glob(f"{db_path}*.bak") == []
 
 
-def test_ensure_schema_prunes_older_backups(tmp_path):
-    """Only the most recent pre-migration snapshot is kept."""
+def test_ensure_schema_keeps_the_newest_three_backups(tmp_path):
+    """An upgrade keeps the snapshots from the last three schema upgrades,
+    so a migration bug noticed two releases later still has a backup from
+    before it; anything older is pruned."""
     import os
 
     db_path = str(tmp_path / "vireo.db")
     schema.ensure_schema(db_path)
     latest = schema._latest_version()
-    stale_backup = f"{db_path}.pre-v{latest - 1}.bak"
-    with open(stale_backup, "w") as f:
-        f.write("old snapshot")
+    for version in (latest - 1, latest - 2, latest - 3):
+        with open(f"{db_path}.pre-v{version}.bak", "w") as f:
+            f.write("old snapshot")
     with sqlite3.connect(db_path) as conn:
         conn.execute(f"PRAGMA user_version = {schema.OLDEST_UPGRADABLE_VERSION}")
 
     schema.ensure_schema(db_path)
 
     assert os.path.exists(f"{db_path}.pre-v{latest}.bak")
-    assert not os.path.exists(stale_backup)
+    assert os.path.exists(f"{db_path}.pre-v{latest - 1}.bak")
+    assert os.path.exists(f"{db_path}.pre-v{latest - 2}.bak")
+    assert not os.path.exists(f"{db_path}.pre-v{latest - 3}.bak")
 
 
 def test_ensure_schema_keeps_older_backups_when_snapshot_fails(tmp_path, monkeypatch):
@@ -237,9 +241,9 @@ def test_ensure_schema_keeps_older_backups_when_snapshot_fails(tmp_path, monkeyp
     with sqlite3.connect(db_path) as conn:
         conn.execute(f"PRAGMA user_version = {schema.OLDEST_UPGRADABLE_VERSION}")
 
-    # Simulate _snapshot_before_migrations failing silently (its except
-    # branch already swallows sqlite3.Error / OSError and logs a warning).
-    monkeypatch.setattr(schema, "_snapshot_before_migrations", lambda *a, **k: None)
+    # Simulate the snapshot failing silently (its except branch already
+    # swallows sqlite3.Error / OSError and logs a warning).
+    monkeypatch.setattr(schema.catalog_backups, "snapshot", lambda *a, **k: None)
 
     schema.ensure_schema(db_path)
 
@@ -314,13 +318,17 @@ def test_ensure_schema_keeps_later_version_snapshots(tmp_path):
     """Restoring an older live database while a later-version backup remains
     (e.g. `.pre-v9.bak` beside a v7 file, then launching this v8 build) must
     keep the newer snapshot — it may hold the user's only copy of edits made
-    under that later schema. Only strictly older snapshots may be pruned."""
+    under that later schema. It does not count toward the three kept, and
+    only strictly older snapshots may be pruned."""
     import os
 
     db_path = str(tmp_path / "vireo.db")
     schema.ensure_schema(db_path)
     latest = schema._latest_version()
-    older_backup = f"{db_path}.pre-v{latest - 1}.bak"
+    for version in (latest - 1, latest - 2):
+        with open(f"{db_path}.pre-v{version}.bak", "w") as f:
+            f.write("kept snapshot")
+    older_backup = f"{db_path}.pre-v{latest - 3}.bak"
     newer_backup = f"{db_path}.pre-v{latest + 1}.bak"
     with open(older_backup, "w") as f:
         f.write("older snapshot")
@@ -332,6 +340,7 @@ def test_ensure_schema_keeps_later_version_snapshots(tmp_path):
     schema.ensure_schema(db_path)
 
     assert os.path.exists(f"{db_path}.pre-v{latest}.bak")
+    assert os.path.exists(f"{db_path}.pre-v{latest - 2}.bak")
     assert not os.path.exists(older_backup)
     # The later-version backup must survive — it may be irreplaceable.
     assert os.path.exists(newer_backup)
