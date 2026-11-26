@@ -23,7 +23,7 @@ eligibility, refreshes when the tab regains focus, and is checked again on click
 | `sources.js` | Source folders, streamed scan counts, and stalled-scan progress |
 | `folder-browser.js` | Native folder pickers and shared folder-browser integration |
 | `after-import.js` | Process defaults, local processing, and archive transfer options |
-| `staging.js` | Staging verification, cleanup, and paused-job polling |
+| `staging.js` | Old staging folders: the byte-for-byte comparison with the archive, the cleanup job and its question, and paused-job polling |
 | `preview.js` | Preview scheduling, cancellation, signatures, and duplicate checks |
 | `preview-grid.js` | Cards, duplicate visibility, capture-day groups, and thumbnails |
 | `selection.js` | Individual, range, folder, and select-all file selection |
