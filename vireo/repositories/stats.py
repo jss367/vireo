@@ -1083,7 +1083,7 @@ class StatsRepository:
         # Share taxon/place identity with Keywords and Browse. Unresolved
         # same-name tags stay separate until their identity is established.
         top_keywords = self.conn.execute(
-            f"""WITH scoped_tags AS (
+            f"""WITH scoped_tags AS MATERIALIZED (
                  SELECT pk.keyword_id, pk.photo_id FROM photo_keywords pk
                  JOIN photos p ON p.id = pk.photo_id
                  JOIN photo_workspace_visibility wf ON wf.photo_id = p.id

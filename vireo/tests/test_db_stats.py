@@ -433,6 +433,19 @@ def test_dashboard_stats_whole_workspace(db, lib):
     }
 
 
+def test_dashboard_top_keywords_builds_the_scoped_tags_once(db, lib):
+    """The keyword chart reads its scoped tags twice. Left to the planner,
+    SQLite re-runs that subquery, and the workspace's whole visibility view
+    with it, once per keyword; computed once, the chart costs one pass."""
+    statements = _trace(db)
+    dashboard_stats.get_dashboard_stats(db)
+    db.conn.set_trace_callback(None)
+    chart = [s for s in statements if "scoped_tags" in s]
+    assert len(chart) == 1
+    plan = [step["detail"] for step in db.conn.execute("EXPLAIN QUERY PLAN " + chart[0])]
+    assert "MATERIALIZE scoped_tags" in plan
+
+
 def test_dashboard_stats_with_previews_disabled(db, lib):
     db.workspaces.update(lib["ws"], config_overrides={"preview_max_size": 0})
     db.commit()
