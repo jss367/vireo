@@ -43,7 +43,7 @@ def test_focus_evidence_is_visible_in_group_and_legacy_inspectors(live_server, p
         data["results"] = cache
         route.fulfill(response=response, json=data)
 
-    page.route("**/api/pipeline/page-init", evidence_response)
+    page.route("**/api/pipeline/page-init*", evidence_response)
     page.goto(f"{live_server['url']}/pipeline/review")
     expect(page.locator(".photo-card").first).to_be_visible()
     page.evaluate("id => openInspect(id)", ids[0])

@@ -179,7 +179,7 @@ async function refreshAnalysisRetryView() {
       body: JSON.stringify({photo_ids: snapshot.photos.map(function(photo) { return photo.id; })})});
     if (fresh.workspace_id !== reviewAnalysisRetry.workspaceId) throw new Error('The active workspace changed.');
   } else {
-    var data = await safeFetch('/api/pipeline/page-init', {}, {toast: false});
+    var data = await safeFetch('/api/pipeline/page-init?include=results', {}, {toast: false});
     if (data.workspace_id !== reviewAnalysisRetry.workspaceId) throw new Error('The active workspace changed.');
     fresh = data.results;
   }

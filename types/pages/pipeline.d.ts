@@ -26,7 +26,7 @@ declare function safeFetch<T = unknown>(url: string, init?: RequestInit, options
 declare function safeFetch(url: '/api/pipeline/plan', init?: RequestInit, options?: {toast?: boolean}): Promise<PipelinePlan>;
 declare function safeFetch(url: '/api/pipeline/legacy-detections', init?: RequestInit, options?: {toast?: boolean}): Promise<{folders: {id: number; path: string; photo_count: number}[]}>;
 declare function safeFetch(url: '/api/pipeline/config', init?: RequestInit, options?: {toast?: boolean}): Promise<{status?: string}>;
-declare function safeFetch(url: '/api/pipeline/page-init', init?: RequestInit, options?: {toast?: boolean}): Promise<PipelinePageInit>;
+declare function safeFetch(url: '/api/pipeline/page-init?include=masks', init?: RequestInit, options?: {toast?: boolean}): Promise<PipelinePageInit>;
 declare function safeFetch(url: '/api/models', init?: RequestInit, options?: {toast?: boolean}): Promise<{models: {id: string; name: string; downloaded?: boolean; supports_label_lists?: boolean; model_str: string; label_list_tag?: string}[]; active_id?: string}>;
 declare function safeFetch(url: '/api/collections', init?: RequestInit, options?: {toast?: boolean}): Promise<{id: number; name: string; count_error?: boolean; has_visual?: boolean}[]>;
 declare function safeFetch(url: '/api/workspaces/active', init?: RequestInit, options?: {toast?: boolean}): Promise<{id: number}>;

@@ -20,7 +20,7 @@ def _open_review(page, live_server):
         }],
         "summary": {"total_photos": 3, "encounter_count": 1, "burst_count": 1, "review_count": 3},
     }
-    page.route("**/api/pipeline/page-init", lambda route: route.fulfill(json={
+    page.route("**/api/pipeline/page-init*", lambda route: route.fulfill(json={
         "results": results, "workspace_overrides": {},
         "review_readiness": {"state": "ready", "total_photos": 3},
     }))

@@ -3369,6 +3369,88 @@ def test_pipeline_page_init_includes_review_readiness(setup):
         assert rr["with_masks"] >= 2
 
 
+def _write_empty_review_cache(db_path):
+    import json as _json
+
+    from db import Database
+    db = Database(db_path)
+    ws = db._active_workspace_id
+    db.close()
+    cache_path = os.path.join(
+        os.path.dirname(db_path), f"pipeline_results_ws{ws}.json"
+    )
+    with open(cache_path, "w") as f:
+        _json.dump({"encounters": [], "photos": [], "summary": {}}, f)
+
+
+PAGE_INIT_PART_KEYS = {
+    "results": {"results", "results_cache_info"},
+    "readiness": {"review_readiness"},
+    "masks": {"mask_variant_coverage", "sam_variant_warning"},
+}
+
+
+@pytest.mark.parametrize("part", sorted(PAGE_INIT_PART_KEYS))
+def test_pipeline_page_init_returns_only_the_requested_part(setup, part):
+    """Each page asks for the part it renders; the others are not computed."""
+    app, db_path = setup
+    _seed_workspace_with_masks(db_path)
+    _write_empty_review_cache(db_path)
+
+    with app.test_client() as c:
+        full = c.get("/api/pipeline/page-init").get_json()
+        resp = c.get(f"/api/pipeline/page-init?include={part}")
+        assert resp.status_code == 200
+        data = resp.get_json()
+
+    every_part_key = set().union(*PAGE_INIT_PART_KEYS.values())
+    assert every_part_key <= set(full)
+    assert set(data) == (set(full) - every_part_key) | PAGE_INIT_PART_KEYS[part]
+    assert data == {key: full[key] for key in data}
+
+
+def test_pipeline_page_init_runs_no_readiness_counts_for_results(setup, monkeypatch):
+    """Cull and the Process Review photos must not wait on workspace counts."""
+    import pipeline
+
+    app, db_path = setup
+    _seed_workspace_with_masks(db_path)
+    _write_empty_review_cache(db_path)
+
+    def fail(*_args, **_kwargs):
+        raise AssertionError("readiness was computed for a results-only request")
+
+    monkeypatch.setattr(pipeline, "compute_review_readiness", fail)
+    with app.test_client() as c:
+        resp = c.get("/api/pipeline/page-init?include=results")
+    assert resp.status_code == 200
+    assert resp.get_json()["results"] is not None
+
+
+@pytest.mark.parametrize("cached", [True, False])
+def test_pipeline_page_init_readiness_alone_knows_whether_a_review_is_saved(setup, cached):
+    """Readiness requested by itself still reports ready only with a saved review."""
+    app, db_path = setup
+    _seed_workspace_with_masks(db_path)
+    if cached:
+        _write_empty_review_cache(db_path)
+
+    with app.test_client() as c:
+        alone = c.get("/api/pipeline/page-init?include=readiness").get_json()
+        full = c.get("/api/pipeline/page-init").get_json()
+
+    assert alone["review_readiness"] == full["review_readiness"]
+    assert alone["review_readiness"]["state"] == ("ready" if cached else "computable")
+
+
+def test_pipeline_page_init_rejects_an_unknown_part(setup):
+    app, _ = setup
+    with app.test_client() as c:
+        resp = c.get("/api/pipeline/page-init?include=results,everything")
+    assert resp.status_code == 400
+    assert "everything" in resp.get_json()["error"]
+
+
 def test_pipeline_page_init_review_readiness_state_ready_when_cache_exists(setup, tmp_path):
     """When the grouping cache is already on disk, state should be 'ready'."""
     app, db_path = setup

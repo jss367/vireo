@@ -11,7 +11,7 @@
 window._pageInitPending = true;
 var _dashboardActionScopeError = '';
 function initPipelinePage() {
-  fetch('/api/pipeline/page-init')
+  fetch('/api/pipeline/page-init?include=masks')
     .then(function(r) { return r.json(); })
     .then(function(/** @type {PipelinePageInit} */ data) {
       var cfg = data.pipeline_config;

@@ -712,61 +712,24 @@ def create_pipeline_blueprint(
 
     @blueprint.route("/api/pipeline/page-init")
     def api_pipeline_page_init() -> ResponseReturnValue:
-        """Combined endpoint for pipeline page initial load."""
+        """Initial data for the Process, Process Review and Cull pages.
+
+        ``include`` names the parts the page uses, comma-separated (see
+        ``PAGE_INIT_PARTS``); without it the response carries every part. The
+        workspace id, photo count, taxonomy state, pipeline config and
+        workspace overrides are always returned.
+        """
+        wanted = _page_init_parts(request.args.get("include"))
+        if isinstance(wanted, str):
+            return json_error(wanted, 400)
         db = get_db()
         total_photos = db.photos.count()
 
         import config as cfg
-        from pipeline import (
-            compute_review_readiness,
-            load_results,
-            prune_missing_photos,
-        )
         cache_dir = os.path.dirname(db_path)
-        prune_missing_photos(cache_dir, db.active_workspace_id, db)
-        results = load_results(cache_dir, db.active_workspace_id, db=db)
-        if results and results.get("photos"):
-            _overlay_live_photo_state(db, results)
-
         effective_cfg = db.get_effective_config(cfg.load())
         pipeline_cfg = effective_cfg.get("pipeline", {})
-
-        results_cache_info = None
-        if results is not None:
-            results_cache_info = _results_cache_info(
-                db, results, total_photos, effective_cfg,
-            )
-
-        # Variant must match the active DINOv2 variant so embedding coverage
-        # reflects what /api/pipeline/regroup-live would actually consume —
-        # mismatched-variant embeddings are dropped at load time, so counting
-        # them here would lie about readiness.
-        dinov2_variant = pipeline_cfg.get("dinov2_variant")
         sam2_variant = pipeline_cfg.get("sam2_variant")
-        proxy_longest_edge = pipeline_cfg.get("proxy_longest_edge")
-        review_readiness = compute_review_readiness(
-            db, dinov2_variant=dinov2_variant,
-        )
-        if results is not None:
-            # Cache exists — even if features have changed underneath,
-            # the page can render. enhancing_missing still reflects the
-            # current gap so the degraded banner can surface accurately.
-            review_readiness["state"] = "ready"
-            # When the cache lets the page render, missing_required no
-            # longer represents a block — fold any blocking gaps into
-            # enhancing_missing so the degraded banner surfaces them.
-            for missing in review_readiness["missing_required"]:
-                if missing == "masks" and "masks_partial" not in review_readiness["enhancing_missing"]:
-                    review_readiness["enhancing_missing"].insert(0, "masks_partial")
-            review_readiness["missing_required"] = []
-
-        ws = db.workspaces.get(db.active_workspace_id)
-        ws_overrides = {}
-        if ws and ws["config_overrides"]:
-            try:
-                ws_overrides = json.loads(ws["config_overrides"]) if isinstance(ws["config_overrides"], str) else ws["config_overrides"]
-            except (TypeError, ValueError):
-                log.warning("Workspace %s has unreadable config overrides", ws["id"], exc_info=True)
 
         # "Available" must mean *usable*, not just *file exists*: a 0-byte
         # stub from a failed download passed os.path.exists and hid the
@@ -774,26 +737,38 @@ def create_pipeline_blueprint(
         # user no in-app path to recovery. get_taxonomy_info() owns the
         # actual integrity check.
         from models import get_taxonomy_info
-        taxonomy_available = get_taxonomy_info()["available"]
-
-        return jsonify({
+        payload: JsonDict = {
             "workspace_id": db.active_workspace_id,
             "total_photos": total_photos,
-            "taxonomy_available": taxonomy_available,
+            "taxonomy_available": get_taxonomy_info()["available"],
             "pipeline_config": {
                 "sam2_variant": sam2_variant,
-                "dinov2_variant": dinov2_variant,
-                "proxy_longest_edge": proxy_longest_edge,
+                "dinov2_variant": pipeline_cfg.get("dinov2_variant"),
+                "proxy_longest_edge": pipeline_cfg.get("proxy_longest_edge"),
                 "eye_detect_enabled": pipeline_cfg.get("eye_detect_enabled", False),
                 "preview_max_size": config_value(effective_cfg, "preview_max_size"),
             },
-            "mask_variant_coverage": db.masks_features.variant_coverage(),
-            "sam_variant_warning": subject_masks.sam_variant_rerun_warning(db, sam2_variant),
-            "results": results,
-            "results_cache_info": results_cache_info,
-            "review_readiness": review_readiness,
-            "workspace_overrides": ws_overrides,
-        })
+            "workspace_overrides": _workspace_overrides(db),
+        }
+        has_results = None
+        if "results" in wanted:
+            results = _page_init_results(db, cache_dir)
+            has_results = results is not None
+            payload["results"] = results
+            payload["results_cache_info"] = None if results is None else (
+                _results_cache_info(db, results, total_photos, effective_cfg)
+            )
+        if "readiness" in wanted:
+            if has_results is None:
+                from pipeline import load_results_raw
+                has_results = load_results_raw(cache_dir, db.active_workspace_id) is not None
+            payload["review_readiness"] = _page_init_readiness(
+                db, pipeline_cfg.get("dinov2_variant"), has_results,
+            )
+        if "masks" in wanted:
+            payload["mask_variant_coverage"] = db.masks_features.variant_coverage()
+            payload["sam_variant_warning"] = subject_masks.sam_variant_rerun_warning(db, sam2_variant)
+        return jsonify(payload)
 
     @blueprint.route("/api/pipeline/selection-results", methods=["POST"])
     def api_pipeline_selection_results() -> ResponseReturnValue:
@@ -1951,6 +1926,75 @@ def _overlay_live_photo_state(db: Database, results: JsonDict) -> None:
     # ensures p["flag"] reflects the live DB, not a stale cache.
     _attach_live_flag_confirmations(db, results)
     attach_species_representatives(db, results["photos"])
+
+
+# The parts of /api/pipeline/page-init a page can ask for. Each one costs
+# whole-workspace queries, so a page names only what it renders: Cull reads
+# the saved results, Process the mask coverage, and Process Review the results
+# and, in a second request that does not hold up the photos, the readiness.
+PAGE_INIT_PARTS = ("results", "readiness", "masks")
+
+
+def _page_init_parts(include: str | None) -> frozenset[str] | str:
+    """The requested page-init parts, or the error message for an unknown one."""
+    if include is None:
+        return frozenset(PAGE_INIT_PARTS)
+    wanted = frozenset(part.strip() for part in include.split(",") if part.strip())
+    unknown = sorted(wanted.difference(PAGE_INIT_PARTS))
+    if unknown:
+        return (
+            f"Unknown page-init part {unknown[0]!r}; "
+            f"expected any of {', '.join(PAGE_INIT_PARTS)}"
+        )
+    return wanted
+
+
+def _page_init_results(db: Database, cache_dir: str) -> JsonDict | None:
+    """The saved review with live photo state overlaid, or None without one."""
+    from pipeline import load_results, prune_missing_photos
+
+    prune_missing_photos(cache_dir, db.active_workspace_id, db)
+    results = load_results(cache_dir, db.active_workspace_id, db=db)
+    if results and results.get("photos"):
+        _overlay_live_photo_state(db, results)
+    return results
+
+
+def _page_init_readiness(db: Database, dinov2_variant: str | None, has_results: bool) -> JsonDict:
+    """Review readiness, reported as ready when a saved review can render."""
+    from pipeline import compute_review_readiness
+
+    # Variant must match the active DINOv2 variant so embedding coverage
+    # reflects what /api/pipeline/regroup-live would actually consume —
+    # mismatched-variant embeddings are dropped at load time, so counting
+    # them here would lie about readiness.
+    review_readiness = compute_review_readiness(db, dinov2_variant=dinov2_variant)
+    if has_results:
+        # Cache exists — even if features have changed underneath,
+        # the page can render. enhancing_missing still reflects the
+        # current gap so the degraded banner can surface accurately.
+        review_readiness["state"] = "ready"
+        # When the cache lets the page render, missing_required no
+        # longer represents a block — fold any blocking gaps into
+        # enhancing_missing so the degraded banner surfaces them.
+        for missing in review_readiness["missing_required"]:
+            if missing == "masks" and "masks_partial" not in review_readiness["enhancing_missing"]:
+                review_readiness["enhancing_missing"].insert(0, "masks_partial")
+        review_readiness["missing_required"] = []
+    return review_readiness
+
+
+def _workspace_overrides(db: Database) -> JsonDict:
+    """The active workspace's config overrides, empty when unreadable."""
+    ws = db.workspaces.get(db.active_workspace_id)
+    if not ws or not ws["config_overrides"]:
+        return {}
+    raw = ws["config_overrides"]
+    try:
+        return json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError):
+        log.warning("Workspace %s has unreadable config overrides", ws["id"], exc_info=True)
+        return {}
 
 
 def _results_cache_info(db: Database, results: JsonDict, total_photos: int, effective_cfg: JsonDict) -> JsonDict:

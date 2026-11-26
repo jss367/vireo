@@ -26,7 +26,7 @@ function harness() {
     loadReviewScopeResults() { throw new Error('unexpected scope change'); },
     safeFetch: async (url, options) => {
       requests.push([url, options]);
-      if (url === '/api/pipeline/page-init') {
+      if (url === '/api/pipeline/page-init?include=results') {
         if (state.refreshError) throw state.refreshError;
         return {results: {invented: true}, results_cache_info: {invented: true}};
       }
@@ -149,7 +149,7 @@ test('real history hook forwards HTTP entry IDs without dropping outstanding war
   assert.equal(h.banner.style.display, 'flex');
   assert.equal(await h.history('redo', response(2, false, 'redone')), true);
   assert.equal(h.banner.style.display, 'none');
-  assert.equal(h.requests.filter(([url]) => url === '/api/pipeline/page-init').length, 4);
+  assert.equal(h.requests.filter(([url]) => url === '/api/pipeline/page-init?include=results').length, 4);
   assert.equal(h.toasts.filter(([, type]) => type === 'warning').length, 2);
 });
 

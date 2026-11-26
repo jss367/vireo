@@ -61,7 +61,7 @@ async function cullAfterHistoryChange(result) {
         delete cullAppliedDecisions[pid];
       });
     } else {
-      var data = /** @type {{results?: CullSourceResults} | null} */ (await safeFetch('/api/pipeline/page-init', {}, {toast: false}));
+      var data = /** @type {{results?: CullSourceResults} | null} */ (await safeFetch('/api/pipeline/page-init?include=results', {}, {toast: false}));
       results = data && data.results;
     }
     // page-init may return no results; both callees treat that as empty.

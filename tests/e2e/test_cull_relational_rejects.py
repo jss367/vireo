@@ -33,7 +33,7 @@ def _results():
 
 
 def _open_cull(page, live_server, results, orphans=()):
-    page.route("**/api/pipeline/page-init", lambda route: route.fulfill(json={"results": results}))
+    page.route("**/api/pipeline/page-init*", lambda route: route.fulfill(json={"results": results}))
     page.route("**/api/culling/orphans",
                lambda route: route.fulfill(json={"orphans": list(orphans), "count": len(orphans)}))
     page.goto(f"{live_server['url']}/cull")

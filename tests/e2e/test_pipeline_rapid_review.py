@@ -697,7 +697,7 @@ def test_classic_pipeline_review_opens_requested_burst_from_url(live_server, pag
         },
     }
     page.route(
-        "**/api/pipeline/page-init",
+        "**/api/pipeline/page-init*",
         lambda route: route.fulfill(
             json={
                 "results": results,
@@ -775,7 +775,7 @@ def test_classic_pipeline_review_single_photo_opens_review_modal(live_server, pa
         },
     }
     page.route(
-        "**/api/pipeline/page-init",
+        "**/api/pipeline/page-init*",
         lambda route: route.fulfill(
             json={
                 "results": results,
@@ -862,7 +862,7 @@ def test_classic_pipeline_review_group_shortcuts_do_not_flag_prior_single_photo(
         route.fulfill(json={"ok": True})
 
     page.route(
-        "**/api/pipeline/page-init",
+        "**/api/pipeline/page-init*",
         lambda route: route.fulfill(
             json={
                 "results": results,
@@ -937,7 +937,7 @@ def test_classic_pipeline_review_group_reject_shortcut_applies_to_multiselection
     }
 
     page.route(
-        "**/api/pipeline/page-init",
+        "**/api/pipeline/page-init*",
         lambda route: route.fulfill(
             json={
                 "results": results,

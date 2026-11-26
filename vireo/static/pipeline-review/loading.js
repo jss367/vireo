@@ -122,20 +122,35 @@ function initPipelineReviewPage() {
 }
 
 function loadPipelinePageInit() {
-  safeFetch('/api/pipeline/page-init', {}, { toast: false })
+  // Readiness counts every photo in the workspace and takes longer than the
+  // saved review, so it loads beside the results and never holds up the
+  // photos. Captured so computeReviewNow() can re-render the degraded banner
+  // with the current missing-features set after compute completes.
+  /** @type {Promise<ReviewReadiness | null>} */
+  var readinessRequest = safeFetch('/api/pipeline/page-init?include=readiness', {}, { toast: false })
+    .then(function(data) {
+      reviewReadiness = (data && data.review_readiness) || null;
+      return reviewReadiness;
+    });
+  // Each branch below reports a failure where it reads the readiness.
+  readinessRequest.catch(function() {});
+  safeFetch('/api/pipeline/page-init?include=results', {}, { toast: false })
   .then(function(data) {
     pipelineReviewWorkspaceId = data.workspace_id ?? null;
     // Capture overrides regardless of state so computeReviewNow() can apply
     // the same review_min_confidence logic when the user clicks Compute.
     workspaceOverrides = (data && data.workspace_overrides) || null;
-    // Capture readiness so computeReviewNow() can re-render the degraded
-    // banner with the current missing-features set after compute completes.
-    reviewReadiness = (data && data.review_readiness) || null;
     if (!data || !data.results) {
-      renderEmptyState(data && data.review_readiness ? data.review_readiness
-                                                     : {state: 'empty', total_photos: 0, with_masks: 0, with_embeddings: 0, with_eye_keypoints: 0, with_predictions: 0});
-      return;
+      // The empty state is the readiness counts, so it waits for them.
+      return readinessRequest.then(function(readiness) {
+        renderEmptyState(readiness || {state: 'empty', total_photos: 0, with_masks: 0, with_embeddings: 0, with_eye_keypoints: 0, with_predictions: 0});
+      });
     }
+    readinessRequest.then(function(readiness) {
+      renderDegradedBanner(readiness && readiness.enhancing_missing);
+    }).catch(function(error) {
+      showToast('Could not check which analysis steps are missing: ' + (error.message || error), 'error');
+    });
     // Hide empty state, show results UI
     var empty = /** @type {HTMLElement} */ (document.getElementById('emptyState'));
     if (empty) empty.style.display = 'none';

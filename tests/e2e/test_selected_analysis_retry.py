@@ -1,5 +1,7 @@
 """Selected analysis stays bounded, observable, and separate from decisions."""
 
+import re
+
 import pytest
 from playwright.sync_api import expect
 
@@ -73,7 +75,9 @@ def _install_retry(live_server, page, ids, *, failed=False, held=False, workspac
     page.route("**/api/photos/analysis-retry", submit)
     page.route("**/api/jobs/selected-analysis-test", progress)
     page.route("**/api/jobs/selected-analysis-test/cancel", cancel)
-    page.route("**/api/pipeline/page-init", refresh)
+    # The retry refreshes the saved review; the readiness request a page
+    # load also makes carries no results and goes to the server untouched.
+    page.route(re.compile(r"/api/pipeline/page-init\?include=results$"), refresh)
     return state
 
 
