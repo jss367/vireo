@@ -77,6 +77,10 @@ export function removeDeletedLightboxPhoto(/** @type {number} */ photoId, /** @t
   if (index >= 0) {
     removedFromLightboxList = state.photos === lightboxPhotos;
     state.photos.splice(index, 1);
+    // The row this delete removed from the grid also leaves the whole-result
+    // total, so the counter the next photo renders reads the shrunk count
+    // instead of carrying the pre-delete total until the next page request.
+    pagination.removePhotos(1);
   }
   selection.removeFromBatch(photoId);
   if (selection.focusedPhotoId === photoId) selection.focus(null);

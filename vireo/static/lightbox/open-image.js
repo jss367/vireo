@@ -80,8 +80,12 @@ function listPosition(/** @type {number} */ photoId) {
 function renderCounter(/** @type {number} */ photoId, /** @type {string} */ filename) {
   var counter = document.getElementById('lightboxCounter');
   if (!counter) return false;
-  if (lbState.photoList.length > 1) {
-    var place = listPosition(photoId);
+  // Resolve the whole-result position before deciding visibility: a loaded
+  // window of one photo (the last page of a 101-photo result, or a Browse page
+  // of size one) is still part of a larger result, and the counter has to say
+  // so.
+  var place = listPosition(photoId);
+  if (place.total > 1) {
     counter.textContent = place.position.toLocaleString() + ' / ' + place.total.toLocaleString()
       + (filename ? ' · ' + filename : '');
     counter.title = filename;
@@ -98,12 +102,14 @@ function renderPhotoCounter(/** @type {LightboxOpenContext} */ open) {
 }
 
 // Redraw the counter for the photo on screen after the page's list changed
-// under the open lightbox (Browse loading another page).
+// under the open lightbox (Browse loading another page). The loaded window's
+// length is not a visibility gate: renderCounter decides from the resolved
+// whole-result total, so a one-photo window of a longer result still refreshes.
 export function refreshLightboxCounter() {
   var visibleId = vireoLightboxSession.displayedPhotoId();
   if (visibleId == null) visibleId = vireoLightboxSession.requestedPhotoId();
   var listed = lbState.photoList.find(function(p) { return p.id === visibleId; });
-  if (visibleId == null || !listed || lbState.photoList.length < 2) return;
+  if (visibleId == null || !listed) return;
   renderCounter(visibleId, listed.filename || '');
 }
 
