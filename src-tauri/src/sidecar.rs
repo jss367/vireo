@@ -364,30 +364,53 @@ fn remove_gui_client(marker: &Option<std::path::PathBuf>) {
     }
 }
 
-fn live_gui_client_count() -> usize {
+/// The process ids of the GUI clients registered on the shared backend that
+/// are still running. Markers of exited clients are removed on the way. A
+/// missing registry means no clients; one that cannot be read is an error.
+fn live_gui_client_pids() -> std::io::Result<Vec<u32>> {
     let Some(dir) = gui_clients_dir() else {
-        return 0;
+        return Ok(Vec::new());
     };
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return 0;
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
     };
 
-    entries
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            let pid = path
-                .file_stem()
-                .and_then(|name| name.to_str())
-                .and_then(|name| name.parse::<u32>().ok())?;
-            if process_is_alive(pid) {
-                Some(())
-            } else {
-                let _ = std::fs::remove_file(path);
-                None
-            }
-        })
-        .count()
+    let mut pids = Vec::new();
+    for entry in entries {
+        // An entry that fails to read leaves the scan incomplete; report it
+        // rather than count only the clients read before it.
+        let path = entry?.path();
+        let Some(pid) = path
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if process_is_alive(pid) {
+            pids.push(pid);
+        } else {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+    Ok(pids)
+}
+
+/// Whether a Vireo window in another process shares this backend. Installing
+/// an update replaces the application files that window is running, so a
+/// registry that cannot be read counts as shared: the update then waits for
+/// an answer, or for the next launch, rather than assuming no one else.
+pub fn other_gui_clients_attached() -> bool {
+    let own = std::process::id();
+    with_gui_clients_lock(|| match live_gui_client_pids() {
+        Ok(pids) => pids.into_iter().any(|pid| pid != own),
+        Err(error) => {
+            log::warn!("Could not read the Vireo GUI client registry: {error}");
+            true
+        }
+    })
 }
 
 #[cfg(unix)]
@@ -553,16 +576,34 @@ pub fn start_sidecar(app: &AppHandle) -> Result<SidecarState, SidecarStartError>
 /// Send POST /api/shutdown to the sidecar for a clean exit.
 /// In dev mode (child is None), this is a no-op — we don't want to
 /// kill the developer's manually-started Flask server.
-pub fn stop_sidecar(state: &SidecarState) {
+///
+/// Returns true when no GUI client still holds the backend, i.e. the caller
+/// is free to replace on-disk application files (install a pending update).
+/// Returns false when another GUI client stays attached, because installing
+/// would swap the packaged application out from under its running backend.
+pub fn stop_sidecar(state: &SidecarState) -> bool {
     if !state.shutdown_on_exit {
-        return;
+        return true;
     }
 
     with_gui_clients_lock(|| {
         remove_gui_client(&state.client_marker);
-        if live_gui_client_count() > 0 {
-            log::info!("Leaving Vireo backend running for another GUI client");
-            return;
+        // A registry we cannot read may still list another live GUI client,
+        // and shutting the shared backend down under its window would strand
+        // it. Treat the unreadable registry conservatively, the same way
+        // `other_gui_clients_attached()` does.
+        match live_gui_client_pids() {
+            Ok(pids) if !pids.is_empty() => {
+                log::info!("Leaving Vireo backend running for another GUI client");
+                return false;
+            }
+            Ok(_) => {}
+            Err(error) => {
+                log::warn!(
+                    "Could not read the Vireo GUI client registry; leaving backend running: {error}"
+                );
+                return false;
+            }
         }
 
         let has_child = state
@@ -584,7 +625,8 @@ pub fn stop_sidecar(state: &SidecarState) {
                 let _ = child.kill();
             }
         }
-    });
+        true
+    })
 }
 
 #[cfg(test)]

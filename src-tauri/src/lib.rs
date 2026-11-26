@@ -129,18 +129,23 @@ fn set_job_progress(
         .map_err(|e| e.to_string())
 }
 
-/// The version of a downloaded update waiting for a restart, for the web UI's
-/// "Needs attention" notice.
+/// A downloaded update waiting for a restart, for the web UI's "Needs
+/// attention" notice: its version, the jobs a restart is waiting for, and the
+/// countdown before an automatic restart.
 #[tauri::command]
-fn update_status() -> Option<String> {
-    updater::ready_version()
+fn update_status(app: tauri::AppHandle) -> Option<updater::UpdateStatus> {
+    updater::status(&app)
 }
 
-/// Install the downloaded update and restart, from the web UI's notice. Async
-/// so the install runs off the main thread; it returns only on failure.
+/// Restart for the downloaded update, from the web UI's notice. It may ask
+/// about running jobs in a native dialog and then installs, so it runs on a
+/// blocking thread. It returns only when nothing restarted: an install failure
+/// is the error, and Ok means the user chose to wait or to keep working.
 #[tauri::command]
 async fn restart_to_update(app: tauri::AppHandle) -> Result<(), String> {
-    updater::restart_to_update(&app)
+    tauri::async_runtime::spawn_blocking(move || updater::restart_to_update(&app))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -425,6 +430,7 @@ pub fn run() {
             open_external_url,
             update_status,
             restart_to_update,
+            updater::respond_update_restart,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -436,8 +442,17 @@ pub fn run() {
                         progress: None,
                     });
                 }
-                if let Some(state) = app_handle.try_state::<SidecarState>() {
-                    sidecar::stop_sidecar(&state);
+                // Only install the pending update once this process is the
+                // last GUI client holding the backend. Replacing the packaged
+                // application while another GUI and its sidecar are still
+                // attached would leave that instance running against files
+                // from a different version.
+                let backend_free = app_handle
+                    .try_state::<SidecarState>()
+                    .map(|state| sidecar::stop_sidecar(&state))
+                    .unwrap_or(true);
+                if backend_free && !sidecar::other_gui_clients_attached() {
+                    updater::install_pending_on_exit(app_handle);
                 }
             }
         });

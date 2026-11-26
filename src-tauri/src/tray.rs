@@ -188,7 +188,7 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
             }
             // Clean up sidecar before quitting
             if let Some(state) = app.try_state::<crate::sidecar::SidecarState>() {
-                crate::sidecar::stop_sidecar(&state);
+                let _ = crate::sidecar::stop_sidecar(&state);
             }
             app.exit(0);
         }

@@ -2,7 +2,8 @@
 
 The health and version probes are dependency-free so the desktop shell can
 poll them during startup. The rest are the app-wide admin and status routes:
-``/api/shutdown`` (and the token-gated ``/api/v1/shutdown``), first-launch
+``/api/shutdown`` (and the token-gated ``/api/v1/shutdown``), the desktop
+shell's ``/api/v1/update-readiness`` restart check, first-launch
 ``/api/setup/complete``, ``/api/system/*`` runtime info and the ExifTool
 install and status checks, ``/api/scan/status`` dashboard counts, the server
 log stream and issue reporting, mounted-volume listing, the recent
@@ -32,6 +33,7 @@ from flask import Blueprint, Response, jsonify, request
 from proc import no_window_kwargs
 from runtime_warnings import runtime_execution_info
 from services.same_shot_duplicates import is_duplicate_review_member
+from services.update_readiness import restart_readiness
 
 if TYPE_CHECKING:
     from db import Database
@@ -403,6 +405,12 @@ def create_system_blueprint(
             "version": _application_version(),
             "build_commit": _application_build_commit(),
         })
+
+    @blueprint.get("/api/v1/update-readiness")
+    def update_readiness() -> ResponseReturnValue:
+        # The desktop shell polls this, with the runtime token, while it
+        # waits to restart for an update.
+        return jsonify(restart_readiness(get_runner().list_jobs()))
 
     @blueprint.route("/api/v1/shutdown", methods=["POST"])
     def api_v1_shutdown() -> ResponseReturnValue:
