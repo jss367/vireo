@@ -365,20 +365,23 @@ fn remove_gui_client(marker: &Option<std::path::PathBuf>) {
 }
 
 fn live_gui_client_count() -> usize {
-    live_gui_client_pids().len()
+    live_gui_client_pids().map(|pids| pids.len()).unwrap_or(0)
 }
 
 /// The process ids of the GUI clients registered on the shared backend that
-/// are still running. Markers of exited clients are removed on the way.
-fn live_gui_client_pids() -> Vec<u32> {
+/// are still running. Markers of exited clients are removed on the way. A
+/// missing registry means no clients; one that cannot be read is an error.
+fn live_gui_client_pids() -> std::io::Result<Vec<u32>> {
     let Some(dir) = gui_clients_dir() else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Vec::new();
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
     };
 
-    entries
+    Ok(entries
         .flatten()
         .filter_map(|entry| {
             let path = entry.path();
@@ -393,14 +396,22 @@ fn live_gui_client_pids() -> Vec<u32> {
                 None
             }
         })
-        .collect()
+        .collect())
 }
 
 /// Whether a Vireo window in another process shares this backend. Installing
-/// an update replaces the application files that window is running.
+/// an update replaces the application files that window is running, so a
+/// registry that cannot be read counts as shared: the update then waits for
+/// an answer, or for the next launch, rather than assuming no one else.
 pub fn other_gui_clients_attached() -> bool {
     let own = std::process::id();
-    with_gui_clients_lock(|| live_gui_client_pids().into_iter().any(|pid| pid != own))
+    with_gui_clients_lock(|| match live_gui_client_pids() {
+        Ok(pids) => pids.into_iter().any(|pid| pid != own),
+        Err(error) => {
+            log::warn!("Could not read the Vireo GUI client registry: {error}");
+            true
+        }
+    })
 }
 
 #[cfg(unix)]

@@ -116,6 +116,8 @@ function respondToCountdown(action, banner) {
   // The shell restarts, or tells the page to read the status again.
   bridge.invoke('respond_update_restart', { action: action }).catch(error => {
     console.warn('respond_update_restart failed:', error);
+    // The countdown may still be running; let the user answer again.
+    banner.querySelectorAll('button').forEach(control => { control.disabled = false; });
     refreshUpdateNotice();
   });
 }

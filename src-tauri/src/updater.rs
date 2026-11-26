@@ -640,7 +640,9 @@ fn fetch_readiness(app: &AppHandle) -> Result<Readiness, String> {
     let url = format!("http://127.0.0.1:{}/api/v1/update-readiness", sidecar.port);
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_connect(Some(Duration::from_secs(2)))
-        .timeout_recv_response(Some(READINESS_TIMEOUT))
+        // Bounds the body read too, so a stalled response fails like any
+        // other check instead of holding the restart decision.
+        .timeout_global(Some(READINESS_TIMEOUT))
         .build()
         .into();
     let mut request = agent.get(&url);
@@ -679,15 +681,19 @@ fn wait_for_jobs(app: &AppHandle, mut generation: u64) {
             Ok(readiness) if !readiness.idle => {
                 failures = 0;
                 let text = waiting_for_text(&readiness.blocking);
-                let changed = {
+                let (current, changed) = {
                     let mut state = state();
-                    let changed = state.waiting_for.as_deref() != Some(text.as_str());
-                    if changed && state.is_waiter(generation) {
+                    let current = state.is_waiter(generation);
+                    let changed = current && state.waiting_for.as_deref() != Some(text.as_str());
+                    if changed {
                         state.waiting_for = Some(text);
                     }
-                    changed
+                    (current, changed)
                 };
-                set_update_menu_text(app, &waiting_menu_text(&readiness.blocking));
+                // A request that outlived its wait must not relabel the menu.
+                if current {
+                    set_update_menu_text(app, &waiting_menu_text(&readiness.blocking));
+                }
                 if changed {
                     notify_page(app);
                 }
@@ -698,7 +704,9 @@ fn wait_for_jobs(app: &AppHandle, mut generation: u64) {
                 failures += 1;
                 log::warn!("Update readiness check failed ({failures}): {error}");
                 if failures < MAX_READINESS_FAILURES {
-                    set_update_menu_text(app, "Restart to Update Now (can't check jobs)…");
+                    if state().is_waiter(generation) {
+                        set_update_menu_text(app, "Restart to Update Now (can't check jobs)…");
+                    }
                     false
                 } else {
                     log::warn!(
@@ -769,7 +777,7 @@ fn run_countdown(app: &AppHandle, generation: u64) -> CountdownOutcome {
             break CountdownEnd::AskNatively;
         }
         std::thread::sleep(COUNTDOWN_TICK);
-        let state = state();
+        let mut state = state();
         if !state.is_waiter(generation) {
             return CountdownOutcome::Stopped;
         }
@@ -779,15 +787,19 @@ fn run_countdown(app: &AppHandle, generation: u64) -> CountdownOutcome {
         let now = Instant::now();
         match countdown.response {
             Some(CountdownResponse::Cancel) => {
+                // Stopped under the lock that read the answer, so a newer
+                // wait started after it cannot be the one cleared.
+                state.stop_waiting();
                 drop(state);
-                stop_waiting_keep_download(app);
+                publish_stopped_waiting(app);
                 return CountdownOutcome::Stopped;
             }
             Some(CountdownResponse::Now) => break CountdownEnd::UserChoseNow,
-            None if now >= countdown.deadline => break CountdownEnd::Expired,
+            // Expiry restarts on its own only after a page showed the warning.
             None if !countdown.shown && now.duration_since(started) >= COUNTDOWN_SHOWN_TIMEOUT => {
                 break CountdownEnd::AskNatively;
             }
+            None if countdown.shown && now >= countdown.deadline => break CountdownEnd::Expired,
             None => {}
         }
         let seconds = countdown.deadline.saturating_duration_since(now).as_secs() + 1;
@@ -799,7 +811,10 @@ fn run_countdown(app: &AppHandle, generation: u64) -> CountdownOutcome {
     };
 
     // Take the check guard so a menu click during the last steps is folded
-    // into this decision instead of opening a second prompt.
+    // into this decision instead of opening a second prompt. Closing the
+    // countdown here, in the same lock that reads its last answer, means a
+    // Not Now that arrived after the loop let go still cancels, and a later
+    // one is refused.
     let pending = {
         let mut state = state();
         if !state.is_waiter(generation) {
@@ -813,8 +828,15 @@ fn run_countdown(app: &AppHandle, generation: u64) -> CountdownOutcome {
             notify_page(app);
             return CountdownOutcome::Busy(generation);
         }
-        state.begin(true);
+        let cancelled =
+            state.countdown.as_ref().and_then(|c| c.response) == Some(CountdownResponse::Cancel);
         state.stop_waiting();
+        if cancelled {
+            drop(state);
+            publish_stopped_waiting(app);
+            return CountdownOutcome::Stopped;
+        }
+        state.begin(true);
         state.pending.take()
     };
     notify_page(app);
@@ -823,57 +845,45 @@ fn run_countdown(app: &AppHandle, generation: u64) -> CountdownOutcome {
         return CountdownOutcome::Stopped;
     };
 
-    // The countdown ran out on its own: check again that nothing changed
-    // while it ran (the window was minimized or hidden, another Vireo window
-    // attached), since a restart nobody answered needs all of it to hold.
-    let check = unattended_restart_check(app);
-    let ask_natively = match end {
-        CountdownEnd::AskNatively => true,
-        CountdownEnd::Expired => !check.allowed(),
-        CountdownEnd::UserChoseNow => false,
-    };
-    if ask_natively {
-        set_update_menu_text(app, RESTART_TEXT);
-        let restart = app
-            .dialog()
-            .message(jobs_finished_message(&version, check.shared))
-            .title("Update Ready")
-            .kind(MessageDialogKind::Info)
-            .buttons(MessageDialogButtons::OkCancelCustom(
-                RESTART_BUTTON.into(),
-                LATER_BUTTON.into(),
-            ))
-            .blocking_show();
-        if !restart {
-            keep_ready(app, pending);
-            state().finish();
-            return CountdownOutcome::Stopped;
-        }
+    // Everything the last step depends on is read now, after the countdown:
+    // the jobs (a follow-up such as the Process run an import queues can
+    // start in the last moments), the window and the other GUI clients.
+    let readiness = fetch_readiness(app);
+    if let Err(error) = &readiness {
+        log::warn!("Final job check before updating failed: {error}");
     }
-
-    // A follow-up job (the Process run an import queues) can start in the
-    // moments after the last one ends. Check once more before stopping it.
-    match fetch_readiness(app) {
-        Ok(readiness) if !readiness.idle => {
+    let check = unattended_restart_check(app);
+    match final_step(&end, &readiness, &check) {
+        FinalStep::Restart => CountdownOutcome::Restart(Box::new(pending)),
+        FinalStep::KeepWaiting => {
+            let blocking = readiness.map(|r| r.blocking).unwrap_or_default();
             let next = {
                 let mut state = state();
                 state.finish();
-                state.wait_for_jobs(pending, waiting_for_text(&readiness.blocking))
+                state.wait_for_jobs(pending, waiting_for_text(&blocking))
             };
-            set_update_menu_text(app, &waiting_menu_text(&readiness.blocking));
+            set_update_menu_text(app, &waiting_menu_text(&blocking));
             notify_page(app);
-            return CountdownOutcome::Busy(next);
+            CountdownOutcome::Busy(next)
         }
-        Ok(_) => {}
-        // A failed check says nothing about a job that just started. Nobody
-        // has answered yet when the countdown ran out on its own, so ask;
-        // waiting instead could last forever when the backend has stopped.
-        Err(error) if !ask_natively && matches!(end, CountdownEnd::Expired) => {
-            log::warn!("Final job check before updating failed: {error}");
+        FinalStep::AskAboutNewJobs => {
+            // The user chose Restart Now, but new work appeared: ask again,
+            // naming it, rather than overriding or ignoring that choice.
+            if let Err(error) = decide_restart(app, pending, false, false) {
+                show_install_error(app, &error);
+            }
+            state().finish();
+            CountdownOutcome::Stopped
+        }
+        FinalStep::Ask => {
+            let message = match &readiness {
+                Ok(_) => jobs_finished_message(&version, check.shared),
+                Err(_) => ready_message(&version, None, check.shared),
+            };
             set_update_menu_text(app, RESTART_TEXT);
             let restart = app
                 .dialog()
-                .message(ready_message(&version, None, check.shared))
+                .message(message)
                 .title("Update Ready")
                 .kind(MessageDialogKind::Info)
                 .buttons(MessageDialogButtons::OkCancelCustom(
@@ -881,16 +891,46 @@ fn run_countdown(app: &AppHandle, generation: u64) -> CountdownOutcome {
                     LATER_BUTTON.into(),
                 ))
                 .blocking_show();
-            if !restart {
-                keep_ready(app, pending);
-                state().finish();
-                return CountdownOutcome::Stopped;
+            if restart {
+                return CountdownOutcome::Restart(Box::new(pending));
             }
+            keep_ready(app, pending);
+            state().finish();
+            CountdownOutcome::Stopped
         }
-        // The user just said Restart, in the banner or the dialog.
-        Err(error) => log::warn!("Final job check before updating failed: {error}"),
     }
-    CountdownOutcome::Restart(Box::new(pending))
+}
+
+/// What happens once the countdown is over.
+#[derive(Debug, PartialEq, Eq)]
+enum FinalStep {
+    Restart,
+    /// New jobs started and nobody has answered: wait for them too.
+    KeepWaiting,
+    /// New jobs started after the user chose Restart Now: ask again.
+    AskAboutNewJobs,
+    /// Ask Restart or Later in a native dialog.
+    Ask,
+}
+
+/// Decide the last step from how the countdown ended and what holds now. A
+/// restart nobody answered needs all of it: a page showed the warning, the
+/// job check answered with nothing running, the window is still on screen
+/// and no other Vireo window shares the backend. The user's own Restart Now
+/// is honored unless new jobs appeared.
+fn final_step(
+    end: &CountdownEnd,
+    readiness: &Result<Readiness, String>,
+    check: &UnattendedCheck,
+) -> FinalStep {
+    let busy = matches!(readiness, Ok(r) if !r.idle);
+    match end {
+        CountdownEnd::UserChoseNow if busy => FinalStep::AskAboutNewJobs,
+        CountdownEnd::UserChoseNow => FinalStep::Restart,
+        _ if busy => FinalStep::KeepWaiting,
+        CountdownEnd::Expired if readiness.is_ok() && check.allowed() => FinalStep::Restart,
+        CountdownEnd::Expired | CountdownEnd::AskNatively => FinalStep::Ask,
+    }
 }
 
 /// How the countdown loop ended.
@@ -925,12 +965,10 @@ fn unattended_restart_check(app: &AppHandle) -> UnattendedCheck {
     }
 }
 
-fn stop_waiting_keep_download(app: &AppHandle) {
-    let text = {
-        let mut state = state();
-        state.stop_waiting();
-        state.menu_text()
-    };
+/// Show that the wait was cancelled and the download kept, after the caller
+/// stopped waiting under the state lock.
+fn publish_stopped_waiting(app: &AppHandle) {
+    let text = state().menu_text();
     set_update_menu_text(app, text);
     crate::tray::refresh_tray_menu(app);
     notify_page(app);
@@ -1099,12 +1137,32 @@ fn package_path(dir: &Path, version: &str) -> PathBuf {
     dir.join(format!("vireo-{safe}.update"))
 }
 
+/// A write in progress is named for its process, so two Vireo processes that
+/// share the cache never write or rename each other's file.
+const PARTIAL_PREFIX: &str = "partial-";
+/// How old a partial write must be before pruning treats it as abandoned.
+const ABANDONED_PARTIAL_AGE: Duration = Duration::from_secs(60 * 60);
+
 fn save_package(dir: &Path, version: &str, bytes: &[u8]) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     let path = package_path(dir, version);
-    let partial = path.with_extension("partial");
+    let partial = path.with_extension(format!("{PARTIAL_PREFIX}{}", std::process::id()));
     std::fs::write(&partial, bytes)?;
     std::fs::rename(&partial, &path)
+}
+
+/// Whether `path` is another process's write that may still be in progress.
+fn is_recent_partial(path: &Path) -> bool {
+    let is_partial = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.starts_with(PARTIAL_PREFIX));
+    is_partial
+        && std::fs::metadata(path)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .map_or(true, |age| age < ABANDONED_PARTIAL_AGE)
 }
 
 fn load_package(dir: &Path, version: &str) -> Option<Vec<u8>> {
@@ -1115,7 +1173,8 @@ fn remove_package(dir: &Path, version: &str) {
     let _ = std::fs::remove_file(package_path(dir, version));
 }
 
-/// Remove every saved package except `keep`'s, including interrupted writes.
+/// Remove every saved package except `keep`'s, and writes abandoned over an
+/// hour ago. A recent write may be another Vireo process's download.
 fn prune_packages(dir: &Path, keep: Option<&str>) {
     let keep = keep.map(|version| package_path(dir, version));
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -1123,7 +1182,7 @@ fn prune_packages(dir: &Path, keep: Option<&str>) {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if Some(&path) == keep.as_ref() {
+        if Some(&path) == keep.as_ref() || is_recent_partial(&path) {
             continue;
         }
         if let Err(error) = std::fs::remove_file(&path) {
@@ -1364,6 +1423,75 @@ mod tests {
     }
 
     #[test]
+    fn final_step_restarts_unattended_only_when_everything_holds() {
+        let idle = || {
+            Ok(Readiness {
+                idle: true,
+                blocking: vec![],
+                paused: vec![],
+            })
+        };
+        let busy = || {
+            Ok(Readiness {
+                idle: false,
+                blocking: vec![job("Process run", "queued")],
+                paused: vec![],
+            })
+        };
+        let failed = || Err::<Readiness, String>("timed out".into());
+        let ok = UnattendedCheck {
+            shared: false,
+            page_on_screen: true,
+        };
+        let hidden = UnattendedCheck {
+            shared: false,
+            page_on_screen: false,
+        };
+        let shared = UnattendedCheck {
+            shared: true,
+            page_on_screen: true,
+        };
+
+        assert_eq!(
+            final_step(&CountdownEnd::Expired, &idle(), &ok),
+            FinalStep::Restart
+        );
+        assert_eq!(
+            final_step(&CountdownEnd::Expired, &busy(), &ok),
+            FinalStep::KeepWaiting
+        );
+        assert_eq!(
+            final_step(&CountdownEnd::Expired, &failed(), &ok),
+            FinalStep::Ask
+        );
+        assert_eq!(
+            final_step(&CountdownEnd::Expired, &idle(), &hidden),
+            FinalStep::Ask
+        );
+        assert_eq!(
+            final_step(&CountdownEnd::Expired, &idle(), &shared),
+            FinalStep::Ask
+        );
+        assert_eq!(
+            final_step(&CountdownEnd::AskNatively, &idle(), &ok),
+            FinalStep::Ask
+        );
+        assert_eq!(
+            final_step(&CountdownEnd::AskNatively, &busy(), &ok),
+            FinalStep::KeepWaiting
+        );
+        // The user's Restart Now stands, unless new work appeared.
+        assert_eq!(
+            final_step(&CountdownEnd::UserChoseNow, &failed(), &hidden),
+            FinalStep::Restart
+        );
+        assert_eq!(
+            final_step(&CountdownEnd::UserChoseNow, &busy(), &ok),
+            FinalStep::AskAboutNewJobs
+        );
+    }
+
+    #[test]
     fn jobs_finished_message_warns_about_a_shared_backend() {
         assert!(jobs_finished_message("1.2.3", true).contains("Another Vireo window"));
         assert!(!jobs_finished_message("1.2.3", false).contains("Another Vireo window"));
@@ -1397,7 +1525,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         save_package(&dir, "1.0.0", b"old").unwrap();
         save_package(&dir, "1.1.0", b"new").unwrap();
-        std::fs::write(dir.join("vireo-1.2.0.partial"), b"interrupted").unwrap();
+        // Another process's download in progress survives pruning.
+        std::fs::write(dir.join("vireo-1.2.0.partial-999"), b"writing").unwrap();
 
         prune_packages(&dir, Some("1.1.0"));
         assert_eq!(
@@ -1405,7 +1534,8 @@ mod tests {
             Some(b"new".as_slice())
         );
         assert!(load_package(&dir, "1.0.0").is_none());
-        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        assert!(dir.join("vireo-1.2.0.partial-999").exists());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
 
         prune_packages(&dir, None);
         assert!(load_package(&dir, "1.1.0").is_none());

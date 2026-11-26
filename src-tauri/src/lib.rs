@@ -451,7 +451,7 @@ pub fn run() {
                     .try_state::<SidecarState>()
                     .map(|state| sidecar::stop_sidecar(&state))
                     .unwrap_or(true);
-                if backend_free {
+                if backend_free && !sidecar::other_gui_clients_attached() {
                     updater::install_pending_on_exit(app_handle);
                 }
             }
