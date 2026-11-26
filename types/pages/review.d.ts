@@ -1,7 +1,7 @@
 // Review page payloads, edit state, and shared-script dependencies.
 interface ReviewRecipe {rotation?:number;crop?:{x?:number;y?:number;w?:number;h?:number}}
 interface ReviewPrediction {card_id?:string;consensus_species?:string;consensus_species_key?:string;species_key?:string}
-interface ReviewPrediction {detection_id?:number;evidence?:ReviewPredictionEvidence;flag?:string;id:number;photo_id:number;filename:string;species:string;confidence:number;status:string;model?:string;group_id?:string;labels_fingerprint?:string;timestamp?:string;category?:string;effective_category?:string|null;existing_species?:string[];total_votes:number;vote_count?:number;individual?:string|Record<string,number>;alternatives?:{id:number;species:string;confidence:number}[];box_x?:number;box_y?:number;box_w?:number;box_h?:number;is_species_representative?:boolean;life_list?:{species:string;is_current_photo?:boolean;is_species_representative?:boolean}[];edit_recipe?:ReviewRecipe;quality_score?:number;subject_sharpness?:number;sharpness?:number;box_sharpness?:number|null;width?:number;height?:number;eye_x?:number;eye_y?:number}
+interface ReviewPrediction {detection_id?:number;evidence?:ReviewPredictionEvidence;flag?:string;id:number;photo_id:number;filename:string;species:string;confidence:number;status:string;model?:string;group_id?:string;labels_fingerprint?:string;timestamp?:string;category?:string;effective_category?:string|null;existing_species?:string[];total_votes:number;vote_count?:number;individual?:string|Record<string,number>;alternatives?:{id:number;species:string;confidence:number}[];box_x?:number;box_y?:number;box_w?:number;box_h?:number;is_species_representative?:boolean;life_list?:{species:string;is_current_photo?:boolean;is_species_representative?:boolean}[];edit_recipe?:ReviewRecipe;render_key?:string;quality_score?:number;subject_sharpness?:number;sharpness?:number;box_sharpness?:number|null;width?:number;height?:number;eye_x?:number;eye_y?:number}
 interface ReviewGroupState {groupId:string|null;model:string|null;items:ReviewPrediction[];picks:Set<number>;rejects:Set<number>;removed:Set<number>;selected:number|string|null;selectedIds:Set<number|string>;selectionAnchor:number|string|null;upgraded:boolean}
 interface ReviewOffsetTarget {card:HTMLElement;photoId:string;origTx:number;origTy:number}
 interface ReviewDrag {card:HTMLElement;photoId:string;targets:ReviewOffsetTarget[];startX:number;startY:number;moved:boolean}
@@ -17,7 +17,7 @@ declare function showToast(message:string,kind?:string):void;
 declare function showRevealFeedback(response:unknown):void;
 declare function escapeHtml(value:unknown):string;
 declare function escapeAttr(value:unknown):string;
-declare function openLightbox(id:number|string,filename:string,photos:{id:number;filename:string}[]):void;
+declare function openLightbox(id:number|string,filename:string,photos:{id:number;filename:string;edit_recipe?:ReviewRecipe;render_key?:string}[]):void;
 declare function openContextMenu(event:MouseEvent,items:ReviewMenuItem[]):void;
 declare function isTauri():boolean;
 declare function vireoPreviewUrl(id:number|string,size:number):string;

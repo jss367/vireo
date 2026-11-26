@@ -96,6 +96,56 @@ test('the lightbox list covers every photo of the view, not only the cards built
   assert.equal(photos[149].id, 1150);
 });
 
+test('the lightbox list carries the edit recipe and render key of every listed photo', () => {
+  // Cards beyond the first batch never pass through renderPredictionCard(),
+  // which is what seeds the lightbox's edit-recipe and render-key caches.
+  // Preserving them on the navigation entry is what keeps the lightbox from
+  // loading an unedited rendition on arrow-key navigation to an unbuilt card.
+  const {ctx} = harness(150);
+  ctx.predictions[0].edit_recipe = {rotation: 90};
+  ctx.predictions[0].render_key = 'r-edited';
+  ctx.predictions[149].edit_recipe = null;
+  ctx.predictions[149].render_key = 'r-unedited';
+  ctx.renderGrid();
+  const photos = ctx.reviewGridPhotoList();
+  assert.deepEqual(photos[0].edit_recipe, {rotation: 90});
+  assert.equal(photos[0].render_key, 'r-edited');
+  // An unbuilt card (index 149 is well past the first batch of 60) still
+  // carries its render_key, so the lightbox will not fall back to a stale
+  // cache entry.
+  assert.equal(photos[149].edit_recipe, null);
+  assert.equal(photos[149].render_key, 'r-unedited');
+});
+
+test('a reload resets batching even when every scope-key component is unchanged', () => {
+  // The universal filter bar edits the request parameters but not any of the
+  // scope-key components (model / tab / sort / collection). Without the
+  // reload epoch in the view key, a replaced ``predictions`` array would
+  // carry the old ``reviewGridRendered`` count — potentially rebuilding
+  // thousands of cards eagerly for an unrelated result set.
+  const {ctx, elements} = harness(300);
+  ctx.renderGrid();
+  ctx.showMoreReviewCards();
+  ctx.showMoreReviewCards();
+  assert.equal(built(elements.grid), 180, 'three batches built');
+  ctx._loadPredictionsEpoch += 1;
+  ctx.predictions = Array.from({length: 300}, (_, i) => row(500 + i));
+  ctx.renderGrid();
+  assert.equal(built(elements.grid), 60, 'a reload starts at one batch');
+});
+
+test('an accept between reloads does not reset batching', () => {
+  const {ctx, elements} = harness(200);
+  ctx.renderGrid();
+  ctx.showMoreReviewCards();
+  assert.equal(built(elements.grid), 120);
+  // Accept and reject mutate ``predictions`` in place and call renderAll()
+  // without bumping the epoch, so batching is preserved.
+  ctx.predictions[0].status = 'accepted';
+  ctx.renderGrid();
+  assert.equal(built(elements.grid), 120, 'a local decision keeps the built cards');
+});
+
 test('an empty view clears the grid and the count line', () => {
   const {ctx, elements} = harness(150);
   ctx.renderGrid();

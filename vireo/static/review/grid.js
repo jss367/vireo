@@ -150,8 +150,12 @@ function renderGrid() {
   var grid = /** @type {HTMLElement} */ (document.getElementById('grid'));
   var empty = /** @type {HTMLElement} */ (document.getElementById('empty'));
   // A decision re-renders the same view: keep the cards already built so the
-  // page does not jump back to the top. A different view starts over.
-  var viewKey = JSON.stringify([reviewCardScopeKey(), currentSort, currentCollection, currentPhotoIdFilter]);
+  // page does not jump back to the top. A different view starts over. The
+  // reload epoch is a component so the universal filter (whose rules are
+  // not in the scope key) resets the batching when it replaces the list.
+  // Accept and reject never bump the epoch, so a decision still preserves
+  // the built cards.
+  var viewKey = JSON.stringify([reviewCardScopeKey(), currentSort, currentCollection, currentPhotoIdFilter, _loadPredictionsEpoch]);
   var keep = viewKey === reviewGridViewKey ? reviewGridRendered : 0;
   reviewGridViewKey = viewKey;
   reviewGridItems = items;
@@ -216,14 +220,22 @@ function bindReviewGridMore() {
   reviewGridMoreObserver.observe(more);
 }
 
-/** The photos of the current view in display order, one entry per photo, for the lightbox's arrow keys. */
+/** The photos of the current view in display order, one entry per photo, for the lightbox's arrow keys.
+ * ``edit_recipe`` and ``render_key`` come along so navigation to a photo whose
+ * card is not yet built still seeds the lightbox's edit-recipe and render-key
+ * caches — without them the lightbox would load the unedited rendition first
+ * and then reload after the per-photo detail response. */
 function reviewGridPhotoList() {
   /** @type {Set<number>} */ var seen = new Set();
-  /** @type {{id:number;filename:string}[]} */ var photoList = [];
+  /** @type {{id:number;filename:string;edit_recipe?:ReviewRecipe;render_key?:string}[]} */ var photoList = [];
   reviewGridItems.forEach(function(p) {
     if (seen.has(p.photo_id)) return;
     seen.add(p.photo_id);
-    photoList.push({id: p.photo_id, filename: p.filename || ''});
+    /** @type {{id:number;filename:string;edit_recipe?:ReviewRecipe;render_key?:string}} */
+    var entry = {id: p.photo_id, filename: p.filename || ''};
+    if (Object.prototype.hasOwnProperty.call(p, 'edit_recipe')) entry.edit_recipe = p.edit_recipe;
+    if (Object.prototype.hasOwnProperty.call(p, 'render_key')) entry.render_key = p.render_key;
+    photoList.push(entry);
   });
   return photoList;
 }
