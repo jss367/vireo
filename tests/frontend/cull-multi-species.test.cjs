@@ -184,7 +184,7 @@ test('the species filter keeps a two-species photo under the chosen species only
   assert.equal(both.total_photos, 2);
 });
 
-test('case variants share a dropdown count, filter and group across encounters', () => {
+function speciesPicker() {
   const {ctx, node} = page({renderSpecies: true});
   const options = [];
   Object.assign(node('cullSpeciesOptions'), {
@@ -197,6 +197,12 @@ test('case variants share a dropdown count, filter and group across encounters',
     addEventListener(event, callback) { this[event] = callback; },
   });
   ctx.document.createTextNode = text => text;
+  ctx.onCullScopeChange = () => {};
+  return {ctx, options};
+}
+
+test('case variants share a dropdown count, filter and group across encounters', () => {
+  const {ctx, options} = speciesPicker();
   const source = results([
     photo(1, {confirmed_species_list: ['Great blue heron', 'Great Blue Heron']}),
     photo(2, {species_top5: [['Great Blue Heron', 0.9]]}),
@@ -214,6 +220,23 @@ test('case variants share a dropdown count, filter and group across encounters',
   assert.deepEqual(plain(data.species_groups.map(g => [g.species, g.photo_count])), [['Great blue heron', 2]]);
   assert.equal(data.multi_species_photos, 0);
   assert.equal(ctx.pipelineToCullData(results([source.photos[1]])).total_photos, 1);
+});
+
+test('same-name taxa have distinguishable options and group headings after selection', () => {
+  const {ctx, options} = speciesPicker();
+  const source = results(['taxon:4956', 'taxon:999'].map((key, i) =>
+    photo(i + 1, {species_top5: [['Heron', 0.9, 'model', key]]})));
+  ctx.cullSourceResults = source;
+  ctx.renderCullSpeciesOptions();
+  const labels = ['Heron (taxon 4956)', 'Heron (taxon 999)'];
+  assert.deepEqual(options.map(o => o.text), labels.map(label => label + ' (1)'));
+  assert.deepEqual(plain(ctx.pipelineToCullData(source).species_groups.map(g => g.species)), labels);
+  options[0].checkbox.checked = true;
+  options[0].checkbox.change();
+  ctx.renderCullSpeciesOptions();
+  assert.deepEqual(options.map(o => o.text), labels.map(label => label + ' (1)'));
+  assert.deepEqual(plain(ctx.cullScopePhotoIds()), [1]);
+  assert.equal(ctx.pipelineToCullData(results([source.photos[0]])).species_groups[0].species, labels[0]);
 });
 
 test('Cull groups aliases by taxon and preserves distinct taxa sharing a subject label', () => {

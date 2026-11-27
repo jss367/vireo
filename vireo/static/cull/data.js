@@ -118,6 +118,17 @@ function cullEncounterBySpecies(enc, encIds, photoMap, speciesById, index, displ
   return bySpecies;
 }
 
+/** @param {CullSpeciesGroup} group @param {Map<string, string>} names @param {Record<number, string[]>} speciesById */
+function labelCullSpeciesGroup(group, names, speciesById) {
+  group.species = names.get(group.species_key) || group.species_key;
+  group.scene_groups.forEach(function(scene) {
+    scene.photos.forEach(function(photo) {
+      var others = (speciesById[photo.photo_id] || []).filter(function(key) { return key !== group.species_key; });
+      if (others.length) photo.also_species = others.map(function(key) { return names.get(key) || key; });
+    });
+  });
+}
+
 /** @param {CullSourceResults | null} results @returns {CullData | null} */
 function pipelineToCullData(results) {
   if (!results || !results.photos || !results.encounters) return null;
@@ -131,7 +142,7 @@ function pipelineToCullData(results) {
   var counted = new Set();
   /** @type {Record<number, string[]>} */
   var speciesById = {};
-  var displayNames = new Map(cullSelectedSpecies);
+  var displayNames = new Map();
 
   results.encounters.forEach(function(enc, ei) {
     var encIds = (enc.photo_ids || []).filter(function(pid) {
@@ -142,7 +153,7 @@ function pipelineToCullData(results) {
     var bySpecies = cullEncounterBySpecies(enc, encIds, photoMap, speciesById, results.species_identities || {}, displayNames);
     Object.keys(bySpecies).forEach(function(species) {
       var sg = speciesMap[species] || (speciesMap[species] = /** @type {CullSpeciesGroup} */ ({
-        species_key: species, species: displayNames.get(species) || species,
+        species_key: species, species: species,
         photo_count: 0,
         keepers: 0,
         reviews: 0,
@@ -159,16 +170,15 @@ function pipelineToCullData(results) {
           if (actionForFlag(p.flag)) counts.saved++;
           counts.total++;
         }
-        var shown = cullGroupPhoto(p, enc, ei, decision);
-        var others = (speciesById[pid] || []).filter(function(name) { return name !== species; });
-        if (others.length) shown.also_species = others.map(function(key) { return displayNames.get(key) || key; });
-        return shown;
+        return cullGroupPhoto(p, enc, ei, decision);
       });
       addCullSceneGroup(sg, enc, ei, groupPhotos);
     });
   });
 
   var speciesGroups = Object.keys(speciesMap).map(function(k) { return /** @type {CullSpeciesGroup} */ (speciesMap[k]); });
+  qualifyCullSpeciesNames(displayNames);
+  speciesGroups.forEach(function(group) { labelCullSpeciesGroup(group, displayNames, speciesById); });
   speciesGroups.forEach(assignCullFavorites);
   shareCullSuggestedFavorites(speciesGroups);
   var tally = cullPhotoTallies(speciesGroups);

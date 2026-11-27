@@ -84,16 +84,40 @@ function cullScopePhotoIds() {
   }).map(function(entry) { return entry.photo.id; });
 }
 
+/** Qualify homonyms after collecting every key, including those outside the date filter.
+ * @param {Map<string, string>} names */
+function qualifyCullSpeciesNames(names) {
+  var seen = new Set();
+  var shared = new Set();
+  names.forEach(function(name) {
+    var folded = name.toLowerCase();
+    if (seen.has(folded)) shared.add(folded);
+    seen.add(folded);
+  });
+  names.forEach(function(name, key) {
+    if (shared.has(name.toLowerCase())) {
+      names.set(key, name + ' (' + key.replace(':', ' ') + ')');
+    } else if (cullSelectedSpecies.has(key)) {
+      names.set(key, cullSelectedSpecies.get(key) || name);
+    }
+  });
+}
+
 function renderCullSpeciesOptions() {
   /** @type {Record<string, number>} */
   var counts = Object.create(null);
-  var displayNames = new Map(cullSelectedSpecies);
+  var displayNames = new Map();
   cullSourcePhotos(displayNames).forEach(function(entry) {
     // A photo of two species counts toward each one's chip.
     if (!cullPhotoMatchesDate(entry.photo)) return;
     entry.species.forEach(function(key) { counts[key] = (counts[key] || 0) + 1; });
   });
-  cullSelectedSpecies.forEach(function(name, key) { if (!counts[key]) counts[key] = 0; });
+  cullSelectedSpecies.forEach(function(name, key) {
+    if (!counts[key]) counts[key] = 0;
+    if (!displayNames.has(key)) displayNames.set(key, name);
+  });
+  qualifyCullSpeciesNames(displayNames);
+  cullSelectedSpecies.forEach(function(name, key) { cullSelectedSpecies.set(key, displayNames.get(key) || name); });
   var search = /** @type {HTMLInputElement} */ (document.getElementById('cullSpeciesSearch')).value.toLocaleLowerCase();
   var list = /** @type {HTMLElement} */ (document.getElementById('cullSpeciesOptions'));
   list.replaceChildren();
