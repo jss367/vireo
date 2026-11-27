@@ -948,14 +948,14 @@ class JobRunner:
                 jobs.append(synthesize_queued_view(job_id, ctx))
             return jobs
 
-    def get_history(self, db, limit=10, origin=None, *, job_id=None):
+    def get_history(self, db, limit=10, origin=None, *, job_id=None, hide_routine=False):
         """Recent terminal job history rows; see ``JobHistory.get_history``.
 
         Args:
             db: Database instance (must be from the calling thread)
             limit: max number of rows
         """
-        return self._history.get_history(db, limit, origin, job_id=job_id)
+        return self._history.get_history(db, limit, origin, job_id=job_id, hide_routine=hide_routine)
 
     def push_event(self, job_id, event_type, data):
         """Push an event to the job's event stream."""

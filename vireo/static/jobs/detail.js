@@ -114,8 +114,7 @@ export function renderHistoryOverview() {
   var filtered = filteredHistory();
 
   if (filtered.length === 0) {
-    pane.innerHTML = '<div class="jobs-overview-empty">No job history' +
-      (filtered.length < state.historyJobs.length ? ' matching filters' : '') + '.</div>';
+    pane.innerHTML = '<div class="jobs-overview-empty">No job history matches the current filters.</div>';
     return;
   }
 

@@ -143,6 +143,10 @@ function renderProvenance(job) {
   }
   var visibleProgress = activeProgress(job.progress);
   if (visibleProgress) {
+    if (visibleProgress.phase && job.progress && (job.progress.total || 0) > 0) {
+      html += '<span>Overall: ' + (job.progress.current || 0).toLocaleString() + ' / ' + (job.progress.total || 0).toLocaleString() +
+        (job.type === 'pipeline' ? ' weighted points' : '') + '</span>';
+    }
     html += '<span>' + escapeHtml(visibleProgress.label) + ': ' + progressPct(visibleProgress) + '%</span>';
   }
   html += '</div>';
@@ -271,7 +275,8 @@ function renderProvenance(job) {
     if (fallbackProgress) {
       var pct = progressPct(fallbackProgress);
       html += '<div class="tree-step-bar" style="width:200px;margin-bottom:4px;"><div class="tree-step-bar-fill" style="width:' + pct + '%"></div></div>';
-      html += '<div>' + escapeHtml(fallbackProgress.label) + ': ' + fallbackProgress.current.toLocaleString() + ' / ' + fallbackProgress.total.toLocaleString() + '</div>';
+      html += '<div>' + escapeHtml(fallbackProgress.label) + ': ' + fallbackProgress.current.toLocaleString() + ' / ' + fallbackProgress.total.toLocaleString() +
+        (!fallbackProgress.phase && job.type === 'pipeline' ? ' weighted points' : '') + '</div>';
     }
     if (job.progress.current_file) html += '<div style="margin-top:4px;">' + escapeHtml(job.progress.current_file) + '</div>';
     html += '</div></div>';

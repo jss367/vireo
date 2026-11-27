@@ -4,7 +4,7 @@ import { state } from './state.js';
 import { renderActiveOverview, renderDetail, renderHistoryDetail, renderHistoryOverview } from './detail.js';
 import { jobConfig } from './format.js';
 import { importChainProcessJobIds } from './import-retry.js';
-import { populateTypeFilter, selectedOriginFilter, updateList, updateRunningBadge } from './list.js';
+import { includeRoutineHistory, populateTypeFilter, selectedOriginFilter, updateList, updateRunningBadge } from './list.js';
 import { selectJob } from './selection.js';
 import { canRetryImportDirectToNas, showToast } from './shared.js';
 
@@ -252,6 +252,7 @@ export async function jobsServerError(response) {
   // of every origin would let newer jobs of one origin hide the other's.
   var origin = selectedOriginFilter();
   var url = '/api/jobs/history?limit=100' + (origin ? '&origin=' + encodeURIComponent(origin) : '');
+  if (!includeRoutineHistory()) url += '&hide_routine=1';
   return fetchJobsSnapshot('history', url, validateJobRows, function(data) {
     state.historyJobs = data || [];
     state.historyJobs.forEach(function(j) {
