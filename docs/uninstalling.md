@@ -145,7 +145,8 @@ applications to download its files again.
 
 ## Before removing all Vireo data
 
-Back up the catalog and settings with Vireo stopped. Saved photo metadata lives
+Back up the catalog and settings with Vireo stopped; the
+[backup and restore guide](backup-and-restore.md) lists what to copy. Saved photo metadata lives
 in your photos and XMP sidecars, but a fresh scan is not a backup of every
 setting, workspace, pending operation, or editing state in the catalog.
 
