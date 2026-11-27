@@ -17401,6 +17401,11 @@ def test_workspace_prediction_pages_match_full_queue(app_and_db):
         cursor = after
     assert sorted(ids) == sorted(row["id"] for row in complete)
     assert client.get("/api/predictions?after_photo=1&workspace_id=-1").status_code == 409
+    for invalid_size in ("bad", "", "0", "513"):
+        assert client.get("/api/predictions", query_string={
+            "after_photo": 0, "page_size": invalid_size,
+        }).status_code == 400
+    assert client.get("/api/predictions?after_photo=0").status_code == 200
 
 
 def test_predictions_api_photo_ids_rejects_foreign_photo(app_and_db):

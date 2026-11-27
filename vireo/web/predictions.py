@@ -360,9 +360,9 @@ def create_predictions_blueprint(
         page_ids = explicit_photo_ids
         if "after_photo" in request.args:
             after = request.args.get("after_photo", type=int)
-            size = request.args.get("page_size", 64, type=int)
+            size = request.args.get("page_size", type=int) if "page_size" in request.args else 64
             workspace = db.require_workspace_id()
-            if (after is None or after < 0 or after >= 2**63 or not 1 <= size <= 512
+            if (after is None or after < 0 or after >= 2**63 or size is None or not 1 <= size <= 512
                     or collection_id or explicit_photo_ids is not None or rules or visual or status):
                 return json_error("Invalid workspace prediction page", 400)
             if after and request.args.get("workspace_id", type=int) != workspace:
