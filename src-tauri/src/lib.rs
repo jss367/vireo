@@ -394,10 +394,16 @@ pub fn run() {
                 return;
             }
 
-            // "Report an Issue" — open GitHub issues in the default browser
-            if id == menu::ids::REPORT_ISSUE {
+            let support_url = match id {
+                menu::ids::ASK_QUESTION => {
+                    Some("https://github.com/jss367/vireo/discussions/categories/q-a")
+                }
+                menu::ids::REPORT_ISSUE => Some("https://github.com/jss367/vireo/issues"),
+                _ => None,
+            };
+            if let Some(url) = support_url {
                 use tauri_plugin_opener::OpenerExt;
-                let _ = app.opener().open_url("https://github.com/jss367/vireo/issues", None::<&str>);
+                let _ = app.opener().open_url(url, None::<&str>);
                 return;
             }
 
