@@ -1,10 +1,13 @@
 type CullAction = 'keep' | 'review' | 'reject';
 /** One detected animal; ``predictions`` are [species, confidence, model, identity key]. */
-interface CullSubject {detection_id?: number; is_primary?: boolean; predictions?: [string, number, ...unknown[]][];}
+type CullPrediction = [string, number, ...unknown[]];
+interface CullSpecies {key: string; name: string;}
+type CullIdentityIndex = Record<string, {key: string; display_name: string}>;
+interface CullSubject {detection_id?: number; is_primary?: boolean; predictions?: CullPrediction[];}
 interface CullSourcePhoto {
   id: number; filename: string; timestamp?: string | null;
   confirmed_species?: string | string[]; confirmed_species_list?: string[];
-  species_top5?: [string, number][]; subjects?: CullSubject[];
+  confirmed_species_identities?: CullSpecies[]; species_top5?: CullPrediction[]; subjects?: CullSubject[];
   automatic_keep_eligible?: boolean;
   flag_confirmation_status?: 'confirmed' | 'unverified';
   flag?: string; rating?: number; width?: number; height?: number;
@@ -41,10 +44,10 @@ type CullBurst = number[] | {photo_ids: number[]};
 interface CullEncounter {
   photo_ids: number[]; photo_count?: number; bursts?: CullBurst[]; burst_count?: number;
   confirmed_species?: string | string[]; confirmed_species_list?: string[]; species?: string | string[];
-  species_predictions?: {species: string | string[]}[];
+  species_predictions?: {species: string | string[]; species_key?: string}[];
   time_range?: [string | null, string | null];
 }
-interface CullSourceResults {photos: CullSourcePhoto[]; encounters: CullEncounter[]; summary?: Record<string, unknown>;}
+interface CullSourceResults {species_identities?: CullIdentityIndex; photos: CullSourcePhoto[]; encounters: CullEncounter[]; summary?: Record<string, unknown>;}
 interface CullDisplayPhoto {
   photo_id: number; filename: string; quality: number; day: string; burst_id: string;
   action: CullAction; decision_source: string; suggested_action: CullAction;
@@ -59,7 +62,7 @@ interface CullDisplayPhoto {
 }
 interface CullSceneGroup {photos: CullDisplayPhoto[]; scene_id?: number; label?: string;}
 interface CullSpeciesGroup {
-  species: string; scene_groups: CullSceneGroup[]; pose_groups?: CullSceneGroup[];
+  species_key: string; species: string; scene_groups: CullSceneGroup[]; pose_groups?: CullSceneGroup[];
   keepers: number; reviews: number; rejects: number; photo_count: number;
 }
 interface CullData {

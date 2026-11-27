@@ -68,7 +68,7 @@ for (const eligibility of [false, null, undefined, true]) {
     source.photos = source.photos.slice(0, 2);
     source.photos.forEach(p => Object.assign(p, {label: 'KEEP', automatic_keep_eligible: true}));
     ctx.setPipelineResults(source);
-    ctx.cullSelectedSpecies.add('Black Phoebe');
+    ctx.cullSelectedSpecies.set('name:black phoebe', 'Black Phoebe');
     const refreshed = results();
     refreshed.photos = [photo(1, {label: 'KEEP'})];
     if (eligibility !== undefined) refreshed.photos[0].automatic_keep_eligible = eligibility;
@@ -179,9 +179,9 @@ test('rejecting in Compare records the reference on screen, until the decision c
   ctx.setPipelineResults(results());
   ctx.setCullAction(1, 'keep');
   ctx.setCullAction(3, 'keep');
-  ctx.cullFavoriteReferences['Black Phoebe'] = 3;
+  ctx.cullFavoriteReferences['name:black phoebe'] = 3;
   ctx.browseCompare = {close() {}, isOpen: () => true, controller: {open: async () => {}}};
-  ctx.cullCompareState = {species: 'Black Phoebe', photoId: 2};
+  ctx.cullCompareState = {species: 'name:black phoebe', photoId: 2};
   ctx.renderCullComparison = async () => {};
   ctx.decideCullComparison('reject');
   assert.equal(ctx.cullRejectKeepers[2], 3);

@@ -10,7 +10,7 @@ const vm = require('node:vm');
 const CULL = path.join(__dirname, '../../vireo/static/cull');
 const FILES = ['state', 'decisions', 'keepers', 'data', 'focus', 'actions', 'favorites'];
 
-function page() {
+function page({renderSpecies = false} = {}) {
   const nodes = new Map();
   const node = id => {
     if (!nodes.has(id)) nodes.set(id, {id, value: '', textContent: '', innerHTML: '', style: {}, disabled: false});
@@ -32,7 +32,8 @@ function page() {
     vm.runInContext(readFileSync(path.join(CULL, file + '.js'), 'utf8'), ctx, {filename: file + '.js'});
   }
   // Rendering is covered by the browser tests; these cover the data.
-  vm.runInContext('renderCulling = function() {}; renderCullSpeciesOptions = function() {};', ctx);
+  vm.runInContext('renderCulling = function() {};', ctx);
+  if (!renderSpecies) ctx.renderCullSpeciesOptions = () => {};
   return {ctx, node, posted};
 }
 
@@ -48,12 +49,17 @@ function results(photos) {
 
 test('a photo lists every confirmed species, then each subject top, then the photo top', () => {
   const {ctx} = page();
-  assert.deepEqual(plain(ctx.speciesListForPhoto(photo(1, {
+  function namesForPhoto(p, encounter = {}) {
+    const names = new Map();
+    const keys = ctx.cullPhotoSpecies(p, encounter, {}, {}, names);
+    return keys.map(key => names.get(key));
+  }
+  assert.deepEqual(plain(namesForPhoto(photo(1, {
     confirmed_species: 'Mallard', confirmed_species_list: ['Mallard', 'Wood Duck'],
   }))), ['Mallard', 'Wood Duck']);
-  assert.deepEqual(plain(ctx.speciesListForPhoto(photo(1, {confirmed_species: ['Mallard', 'Wood Duck', 'Mallard']}))),
+  assert.deepEqual(plain(namesForPhoto(photo(1, {confirmed_species: ['Mallard', 'Wood Duck', 'Mallard']}))),
     ['Mallard', 'Wood Duck']);
-  assert.deepEqual(plain(ctx.speciesListForPhoto(photo(1, {
+  assert.deepEqual(plain(namesForPhoto(photo(1, {
     species_top5: [['Wood Duck', 0.9], ['Mallard', 0.7]],
     subjects: [
       {predictions: [['Mallard', 0.7, 'm'], ['Gadwall', 0.2, 'm']]},
@@ -62,18 +68,18 @@ test('a photo lists every confirmed species, then each subject top, then the pho
     ],
   }))), ['Wood Duck', 'Mallard']);
   // Two boxes on one animal that agree are still one species.
-  assert.deepEqual(plain(ctx.speciesListForPhoto(photo(1, {
+  assert.deepEqual(plain(namesForPhoto(photo(1, {
     species_top5: [['Mallard', 0.9]],
     subjects: [{predictions: [['Mallard', 0.9]]}, {predictions: [['Mallard', 0.6]]}],
   }))), ['Mallard']);
   // No per-subject evidence: today's single top species.
-  assert.deepEqual(plain(ctx.speciesListForPhoto(photo(1, {species_top5: [['Mallard', 0.9], ['Gadwall', 0.4]]}))),
+  assert.deepEqual(plain(namesForPhoto(photo(1, {species_top5: [['Mallard', 0.9], ['Gadwall', 0.4]]}))),
     ['Mallard']);
   assert.deepEqual(plain(ctx.speciesListForPhoto(photo(1, {}))), []);
   // A photo without species falls back to its encounter's confirmed set.
-  assert.deepEqual(plain(ctx.cullPhotoSpecies(photo(1, {}), {photo_ids: [1], confirmed_species: 'Mallard',
+  assert.deepEqual(plain(namesForPhoto(photo(1, {}), {photo_ids: [1], confirmed_species: 'Mallard',
     confirmed_species_list: ['Mallard', 'Wood Duck']}, {})), ['Mallard', 'Wood Duck']);
-  assert.deepEqual(plain(ctx.cullPhotoSpecies(photo(1, {}), {photo_ids: [1], species: ['Mallard', 0.8]}, {})),
+  assert.deepEqual(plain(namesForPhoto(photo(1, {}), {photo_ids: [1], species: ['Mallard', 0.8]}, {})),
     ['Mallard']);
 });
 
@@ -167,15 +173,92 @@ test('the species filter keeps a two-species photo under the chosen species only
     photo(2, {confirmed_species_list: ['Wood Duck']}),
     photo(3, {confirmed_species_list: ['Gadwall']}),
   ]);
-  ctx.cullSelectedSpecies.add('Mallard');
+  ctx.cullSelectedSpecies.set('name:mallard', 'Mallard');
   assert.deepEqual(plain(ctx.cullScopePhotoIds()), [1]);
   const data = ctx.pipelineToCullData(ctx.cullSourceResults);
   assert.deepEqual(plain(data.species_groups.map(sg => [sg.species, sg.photo_count])), [['Mallard', 1]]);
-  ctx.cullSelectedSpecies.add('Wood Duck');
+  ctx.cullSelectedSpecies.set('name:wood duck', 'Wood Duck');
   assert.deepEqual(plain(ctx.cullScopePhotoIds()), [1, 2]);
   const both = ctx.pipelineToCullData(ctx.cullSourceResults);
   assert.deepEqual(plain(both.species_groups.map(sg => [sg.species, sg.photo_count])), [['Wood Duck', 2], ['Mallard', 1]]);
   assert.equal(both.total_photos, 2);
+});
+
+function speciesPicker() {
+  const {ctx, node} = page({renderSpecies: true});
+  const options = [];
+  Object.assign(node('cullSpeciesOptions'), {
+    childNodes: options,
+    replaceChildren() { options.length = 0; },
+    appendChild(label) { options.push(label); },
+  });
+  ctx.document.createElement = () => ({
+    append(checkbox, text) { Object.assign(this, {checkbox, text}); },
+    addEventListener(event, callback) { this[event] = callback; },
+  });
+  ctx.document.createTextNode = text => text;
+  ctx.onCullScopeChange = () => {};
+  return {ctx, options};
+}
+
+test('case variants share a dropdown count, filter and group across encounters', () => {
+  const {ctx, options} = speciesPicker();
+  const source = results([
+    photo(1, {confirmed_species_list: ['Great blue heron', 'Great Blue Heron']}),
+    photo(2, {species_top5: [['Great Blue Heron', 0.9]]}),
+    photo(3, {confirmed_species: 'Mallard'}),
+  ]);
+  source.encounters = [{photo_ids: [1]}, {photo_ids: [2, 3]}];
+  ctx.cullSourceResults = source;
+  ctx.renderCullSpeciesOptions();
+  assert.deepEqual(options.map(o => o.text), ['Great blue heron (2)', 'Mallard (1)']);
+  ctx.onCullScopeChange = () => {};
+  options[0].checkbox.checked = true;
+  options[0].checkbox.change();
+  assert.deepEqual(plain(ctx.cullScopePhotoIds()), [1, 2]);
+  const data = ctx.pipelineToCullData(source);
+  assert.deepEqual(plain(data.species_groups.map(g => [g.species, g.photo_count])), [['Great blue heron', 2]]);
+  assert.equal(data.multi_species_photos, 0);
+  assert.equal(ctx.pipelineToCullData(results([source.photos[1]])).total_photos, 1);
+});
+
+test('same-name taxa have distinguishable options and group headings after selection', () => {
+  const {ctx, options} = speciesPicker();
+  const source = results(['taxon:4956', 'taxon:999'].map((key, i) =>
+    photo(i + 1, {species_top5: [['Heron', 0.9, 'model', key]]})));
+  ctx.cullSourceResults = source;
+  ctx.renderCullSpeciesOptions();
+  const labels = ['Heron (taxon 4956)', 'Heron (taxon 999)'];
+  assert.deepEqual(options.map(o => o.text), labels.map(label => label + ' (1)'));
+  assert.deepEqual(plain(ctx.pipelineToCullData(source).species_groups.map(g => g.species)), labels);
+  options[0].checkbox.checked = true;
+  options[0].checkbox.change();
+  ctx.renderCullSpeciesOptions();
+  assert.deepEqual(options.map(o => o.text), labels.map(label => label + ' (1)'));
+  assert.deepEqual(plain(ctx.cullScopePhotoIds()), [1]);
+  assert.equal(ctx.pipelineToCullData(results([source.photos[0]])).species_groups[0].species, labels[0]);
+});
+
+test('Cull groups aliases by taxon and preserves distinct taxa sharing a subject label', () => {
+  const {ctx} = page();
+  const key = 'taxon:4956';
+  const source = results([
+    photo(1, {confirmed_species: 'Great blue heron', confirmed_species_identities: [{name: 'Great blue heron', key}]}),
+    photo(2, {species_top5: [['Ardea herodias', 0.9, 'model', key]]}),
+    photo(3, {subjects: [
+      {predictions: [['Heron', 0.8, 'model', key]]},
+      {predictions: [['Heron', 0.9, 'model', 'taxon:999']]},
+    ]}),
+  ]);
+  ctx.cullSourceResults = source;
+  const data = ctx.pipelineToCullData(source);
+  assert.deepEqual(plain(data.species_groups.map(g => [g.species_key, g.photo_count])), [[key, 3], ['taxon:999', 1]]);
+  assert.equal(data.multi_species_photos, 1);
+  ctx.cullSelectedSpecies.set(key, 'Great blue heron');
+  assert.deepEqual(plain(ctx.cullScopePhotoIds()), [1, 2, 3]);
+  ctx.cullSelectedSpecies.clear();
+  ctx.cullSelectedSpecies.set('taxon:999', 'Heron');
+  assert.deepEqual(plain(ctx.cullScopePhotoIds()), [3]);
 });
 
 test('Apply sends a two-species photo once', async () => {

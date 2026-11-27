@@ -3,87 +3,72 @@
 // decision (your pin, then the applied flag), and encounter labels.
 // Classic page script.
 
-/** @param {CullSourcePhoto | null | undefined} photo */
-function topSpeciesForPhoto(photo) {
-  var top5 = photo && photo.species_top5;
-  if (top5 && top5.length && top5[0] && top5[0][0]) return top5[0][0];
-  return 'Unclassified';
+/** @param {string} name @param {CullIdentityIndex} index @param {unknown} [sourceKey] @returns {CullSpecies} */
+function cullSpeciesIdentity(name, index, sourceKey) {
+  var known = Object.hasOwn(index, name) ? index[name] : undefined;
+  var key = typeof sourceKey === 'string' && sourceKey || known?.key;
+  // Legacy labels use the same whitespace and ASCII folding as keyword_match_key.
+  return {
+    key: key || 'name:' + name.trim().replace(/\s+/g, ' ').replace(/[A-Z]/g, function(ch) { return ch.toLowerCase(); }),
+    name: known && known.key === key ? known.display_name : name,
+  };
 }
 
-/** @param {string | string[] | null | undefined} value */
-function speciesName(value) {
-  if (Array.isArray(value)) return value[0] || 'Unclassified';
-  return value || 'Unclassified';
-}
-
-/**
- * The distinct non-empty names in a confirmed-species value, which the
- * cache stores as a list (``confirmed_species_list``) or, in older caches,
- * as one name or an array in ``confirmed_species``.
- *
- * @param {string | string[] | null | undefined} value @returns {string[]}
- */
-function speciesNameList(value) {
-  /** @type {string[]} */
-  var names = [];
-  (Array.isArray(value) ? value : [value]).forEach(function(name) {
-    if (typeof name === 'string' && name && names.indexOf(name) < 0) names.push(name);
+/** @param {Partial<CullSourcePhoto> | Partial<CullEncounter>} item @param {CullIdentityIndex} index */
+function cullConfirmedSpecies(item, index) {
+  var names = item.confirmed_species_list?.length ? item.confirmed_species_list : item.confirmed_species;
+  var identities = 'confirmed_species_identities' in item ? item.confirmed_species_identities || [] : [];
+  return (Array.isArray(names) ? names : names ? [names] : []).filter(Boolean).flatMap(function(name) {
+    var matches = identities.filter(function(entry) { return entry.name === name; });
+    return matches.length ? matches.map(function(entry) { return cullSpeciesIdentity(name, index, entry.key); })
+      : [cullSpeciesIdentity(name, index)];
   });
-  return names;
 }
 
-/** @param {CullSubject} subject @returns {string} */
-function subjectTopSpecies(subject) {
-  /** @type {[string, number, ...unknown[]] | null} */
-  var best = null;
-  (subject && subject.predictions || []).forEach(function(prediction) {
-    if (prediction && prediction[0] && (!best || Number(prediction[1] || 0) > Number(best[1] || 0))) best = prediction;
+/** @param {CullPrediction} prediction @param {CullIdentityIndex} index */
+function cullPredictionSpecies(prediction, index) {
+  return cullSpeciesIdentity(prediction[0], index, prediction[3]);
+}
+
+/** @param {CullSubject} subject */
+function subjectTopPrediction(subject) {
+  /** @type {CullPrediction | undefined} */
+  var best;
+  (subject.predictions || []).forEach(function(prediction) {
+    if (prediction && prediction[0] && (!best || prediction[1] > best[1])) best = prediction;
   });
-  return best ? best[0] : '';
+  return best;
 }
 
-/**
- * Every species a photo shows, from what the results carry: its confirmed
- * species (all of them), else each detected subject's top prediction, else
- * the photo's single top prediction. Empty when the photo has none of
- * these (the encounter then decides). A photo with two animals therefore
- * counts under both species.
- *
- * @param {CullSourcePhoto} photo @returns {string[]}
- */
-function speciesListForPhoto(photo) {
-  var confirmed = speciesNameList(photo.confirmed_species_list);
-  if (!confirmed.length) confirmed = speciesNameList(photo.confirmed_species);
+/** @param {CullSourcePhoto} photo @param {CullIdentityIndex} index @returns {CullSpecies[]} */
+function speciesListForPhoto(photo, index = {}) {
+  var confirmed = cullConfirmedSpecies(photo, index);
   if (confirmed.length) return confirmed;
-  var top = photo.species_top5 && photo.species_top5.length ? topSpeciesForPhoto(photo) : '';
-  var subjects = speciesNameList((photo.subjects || []).map(subjectTopSpecies));
-  if (subjects.length) {
-    // The photo's overall best guess leads, as it did before subjects.
-    if (top && subjects.indexOf(top) > 0) subjects = [top].concat(subjects.filter(function(n) { return n !== top; }));
-    return subjects;
-  }
-  return top ? [top] : [];
+  var subjects = (photo.subjects || []).flatMap(function(subject) {
+    var best = subjectTopPrediction(subject);
+    return best ? [cullPredictionSpecies(best, index)] : [];
+  });
+  var prediction = photo.species_top5?.[0];
+  if (!prediction?.[0]) return subjects;
+  var top = cullPredictionSpecies(prediction, index);
+  return !subjects.length || subjects.some(function(entry) { return entry.key === top.key; })
+    ? [top, ...subjects] : subjects;
 }
 
-/**
- * The species an encounter stands for when one of its photos carries no
- * species of its own: every confirmed species, else its predicted label.
- *
- * @param {Partial<CullEncounter>} enc @param {Record<number, CullSourcePhoto>} photoMap @returns {string[]}
- */
-function speciesListForEncounter(enc, photoMap) {
-  var confirmed = speciesNameList(enc.confirmed_species_list);
-  if (!confirmed.length) confirmed = speciesNameList(enc.confirmed_species);
+/** @param {Partial<CullEncounter>} enc @param {Record<number, CullSourcePhoto>} photoMap @param {CullIdentityIndex} index */
+function speciesListForEncounter(enc, photoMap, index) {
+  var confirmed = cullConfirmedSpecies(enc, index);
   if (confirmed.length) return confirmed;
-  if (enc.species) return [speciesName(enc.species)];
-  var votes = enc.species_predictions || [];
-  if (votes.length && votes[0] && votes[0].species) return [speciesName(votes[0].species)];
-  var ids = enc.photo_ids || [];
-  for (var i = 0; i < ids.length; i++) {
-    var photo = photoMap[/** @type {number} */ (ids[i])];
-    if (photo) return [topSpeciesForPhoto(photo)];
+  var vote = enc.species_predictions?.[0];
+  var label = enc.species || vote?.species;
+  var name = Array.isArray(label) ? label[0] : label;
+  if (name) {
+    var match = enc.species_predictions?.find(function(v) { return v.species === name; });
+    return [cullSpeciesIdentity(name, index, match?.species_key)];
   }
-  return ['Unclassified'];
+  var first = enc.photo_ids?.find(function(id) { return !!photoMap[id]; });
+  var prediction = first === undefined ? undefined : photoMap[first]?.species_top5?.[0];
+  return [prediction ? cullPredictionSpecies(prediction, index) : cullSpeciesIdentity('Unclassified', index)];
 }
 
 /** @param {string | undefined} label @returns {CullAction} */

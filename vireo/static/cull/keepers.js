@@ -36,7 +36,7 @@ function resolveCullKeeper(photo, group, sg) {
     .sort(function(a, b) { return b.quality - a.quality || a.photo_id - b.photo_id; })[0];
   if (best) return {keeper: best, scope: 'encounter'};
   var favorites = cullFavoritesForSpecies(sg);
-  var favorite = favorites.find(function(p) { return p.photo_id === cullFavoriteReferences[sg.species]; }) || favorites[0];
+  var favorite = favorites.find(function(p) { return p.photo_id === cullFavoriteReferences[sg.species_key]; }) || favorites[0];
   if (favorite && favorite.photo_id !== photo.photo_id) return {keeper: favorite, scope: 'species'};
   return null;
 }

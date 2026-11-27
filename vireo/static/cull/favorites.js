@@ -4,8 +4,8 @@
 var cullSourceResults = null;
 /** @type {number | null} */
 var cullSourceCollectionId = null;
-/** @type {Set<string>} */
-var cullSelectedSpecies = new Set();
+/** @type {Map<string, string>} */
+var cullSelectedSpecies = new Map();
 var cullScopeFailed = false;
 /** @type {Record<string, number | null>} */
 var cullFavoriteReferences = Object.create(null);
@@ -21,16 +21,18 @@ function hasCullFilters() {
     !!/** @type {HTMLInputElement} */ (document.getElementById('cullDateTo')).value;
 }
 
-/**
- * Every species a photo is listed under: its own (confirmed, else each
- * subject's top prediction), else its encounter's.
- *
- * @param {CullSourcePhoto} photo @param {CullEncounter | null} [encounter] @param {Record<number, CullSourcePhoto>} [photoMap]
- * @returns {string[]}
- */
-function cullPhotoSpecies(photo, encounter, photoMap) {
-  var names = speciesListForPhoto(photo);
-  return names.length ? names : speciesListForEncounter(encounter || {}, photoMap || {});
+/** @param {CullSourcePhoto} photo @param {Partial<CullEncounter>} encounter
+ * @param {Record<number, CullSourcePhoto>} photoMap @param {CullIdentityIndex} index
+ * @param {Map<string, string>} displayNames @returns {string[]} */
+function cullPhotoSpecies(photo, encounter, photoMap, index, displayNames) {
+  var entries = speciesListForPhoto(photo, index);
+  if (!entries.length) entries = speciesListForEncounter(encounter, photoMap, index);
+  var keys = new Set();
+  entries.forEach(function(entry) {
+    if (!displayNames.has(entry.key)) displayNames.set(entry.key, entry.name);
+    keys.add(entry.key);
+  });
+  return Array.from(keys);
 }
 
 /** @param {CullSourcePhoto} photo */
@@ -42,7 +44,7 @@ function cullPhotoDay(photo) {
 
 /** A photo matches when any of its species is selected. @param {CullSourcePhoto} photo @param {string[]} species */
 function cullPhotoMatches(photo, species) {
-  if (cullSelectedSpecies.size && !species.some(function(name) { return cullSelectedSpecies.has(name); })) return false;
+  if (cullSelectedSpecies.size && !species.some(function(key) { return cullSelectedSpecies.has(key); })) return false;
   return cullPhotoMatchesDate(photo);
 }
 
@@ -55,8 +57,9 @@ function cullPhotoMatchesDate(photo) {
   return (!from || day >= from) && (!to || day <= to);
 }
 
-function cullSourcePhotos() {
-  var results = cullSourceResults;
+/** @param {Map<string, string>} [displayNames] */
+function cullSourcePhotos(displayNames = new Map(cullSelectedSpecies)) {
+  const results = cullSourceResults;
   if (!results) return [];
   /** @type {Record<number, CullSourcePhoto>} */
   var map = {};
@@ -69,7 +72,7 @@ function cullSourcePhotos() {
       var photo = map[id];
       if (!photo || seen.has(id)) return;
       seen.add(id);
-      photos.push({photo: photo, species: cullPhotoSpecies(photo, enc, map)});
+      photos.push({photo: photo, species: cullPhotoSpecies(photo, enc, map, results.species_identities || {}, displayNames)});
     });
   });
   return photos;
@@ -81,32 +84,58 @@ function cullScopePhotoIds() {
   }).map(function(entry) { return entry.photo.id; });
 }
 
+/** Qualify homonyms after collecting every key, including those outside the date filter.
+ * @param {Map<string, string>} names */
+function qualifyCullSpeciesNames(names) {
+  var seen = new Set();
+  var shared = new Set();
+  names.forEach(function(name) {
+    var folded = name.toLowerCase();
+    if (seen.has(folded)) shared.add(folded);
+    seen.add(folded);
+  });
+  names.forEach(function(name, key) {
+    if (shared.has(name.toLowerCase())) {
+      names.set(key, name + ' (' + key.replace(':', ' ') + ')');
+    } else if (cullSelectedSpecies.has(key)) {
+      names.set(key, cullSelectedSpecies.get(key) || name);
+    }
+  });
+}
+
 function renderCullSpeciesOptions() {
   /** @type {Record<string, number>} */
   var counts = Object.create(null);
-  cullSourcePhotos().forEach(function(entry) {
+  var displayNames = new Map();
+  cullSourcePhotos(displayNames).forEach(function(entry) {
     // A photo of two species counts toward each one's chip.
     if (!cullPhotoMatchesDate(entry.photo)) return;
-    entry.species.forEach(function(name) { counts[name] = (counts[name] || 0) + 1; });
+    entry.species.forEach(function(key) { counts[key] = (counts[key] || 0) + 1; });
   });
-  cullSelectedSpecies.forEach(function(name) { if (!counts[name]) counts[name] = 0; });
+  cullSelectedSpecies.forEach(function(name, key) {
+    if (!counts[key]) counts[key] = 0;
+    if (!displayNames.has(key)) displayNames.set(key, name);
+  });
+  qualifyCullSpeciesNames(displayNames);
+  cullSelectedSpecies.forEach(function(name, key) { cullSelectedSpecies.set(key, displayNames.get(key) || name); });
   var search = /** @type {HTMLInputElement} */ (document.getElementById('cullSpeciesSearch')).value.toLocaleLowerCase();
   var list = /** @type {HTMLElement} */ (document.getElementById('cullSpeciesOptions'));
   list.replaceChildren();
   var sort = /** @type {HTMLSelectElement} */ (document.getElementById('cullSpeciesSort')).value;
   Object.entries(counts).sort(function(a, b) {
     if (sort !== 'name' && a[1] !== b[1]) return sort === 'fewest' ? a[1] - b[1] : b[1] - a[1];
-    return a[0].localeCompare(b[0]);
+    return (displayNames.get(a[0]) || a[0]).localeCompare(displayNames.get(b[0]) || b[0]);
   }).forEach(function(entry) {
-    var name = entry[0];
+    var key = entry[0];
+    var name = displayNames.get(key) || key;
     if (search && name.toLocaleLowerCase().indexOf(search) === -1) return;
     var label = document.createElement('label');
     var checkbox = document.createElement('input');
     checkbox.type = 'checkbox';
-    checkbox.checked = cullSelectedSpecies.has(name);
+    checkbox.checked = cullSelectedSpecies.has(key);
     checkbox.addEventListener('change', function() {
-      if (checkbox.checked) cullSelectedSpecies.add(name);
-      else cullSelectedSpecies.delete(name);
+      if (checkbox.checked) cullSelectedSpecies.set(key, name);
+      else cullSelectedSpecies.delete(key);
       onCullScopeChange();
     });
     label.append(checkbox, document.createTextNode(name + ' (' + entry[1] + ')'));
@@ -114,11 +143,11 @@ function renderCullSpeciesOptions() {
   });
   if (!list.childNodes.length) list.textContent = cullSourceResults ? 'No matching species.' : 'Analyze photos to load species.';
   /** @type {HTMLElement} */ (document.getElementById('cullSpeciesSummary')).textContent = cullSelectedSpecies.size
-    ? Array.from(cullSelectedSpecies).join(', ') : 'All species';
+    ? Array.from(cullSelectedSpecies.values()).join(', ') : 'All species';
 }
 
 function renderCullScope() {
-  var names = cullSelectedSpecies.size ? Array.from(cullSelectedSpecies).join(', ') : 'All species';
+  var names = cullSelectedSpecies.size ? Array.from(cullSelectedSpecies.values()).join(', ') : 'All species';
   var from = /** @type {HTMLInputElement} */ (document.getElementById('cullDateFrom')).value;
   var to = /** @type {HTMLInputElement} */ (document.getElementById('cullDateTo')).value;
   var dates = from && to ? from + ' through ' + to : from ? 'From ' + from : to ? 'Through ' + to : 'All dates';
@@ -260,10 +289,10 @@ function cullFavoritesForSpecies(sg) {
 /** @param {CullSpeciesGroup} sg @param {number} si */
 function cullFavoritesHtml(sg, si) {
   var favorites = cullFavoritesForSpecies(sg);
-  var ref = cullFavoriteReferences[sg.species];
+  var ref = cullFavoriteReferences[sg.species_key];
   if (!favorites.some(function(p) { return p.photo_id === ref; })) {
     var pick = favorites.find(function(p) { return p.decision_source !== 'auto'; }) || favorites[0];
-    cullFavoriteReferences[sg.species] = pick ? pick.photo_id : null;
+    cullFavoriteReferences[sg.species_key] = pick ? pick.photo_id : null;
   }
   // With no favorites the block is one line, so the photos below start higher.
   if (!favorites.length) {
@@ -292,7 +321,7 @@ function cullCardHtml(photo, si, pi, poseKey, favorite) {
   var sg = cullData && cullData.species_groups[si];
   if (!sg) return '';
   var id = photo.photo_id;
-  var reference = favorite && cullFavoriteReferences[sg.species] === id;
+  var reference = favorite && cullFavoriteReferences[sg.species_key] === id;
   var cardClass = 'cull-card ' + photo.action + (favorite ? ' cull-favorite-card' : '') + (reference ? ' reference' : '');
   var icon = photo.action === 'keep' ? '&#10003;' : photo.action === 'reject' ? '&#10005;' : '?';
   var badge = '<button class="cull-card-action ' + photo.action + '-badge" aria-label="Change decision" title="Cycle favorite, undecided, rejected" onclick="event.stopPropagation(); toggleCullAction(' + si + ',' + pi + ',' + id + ')">' + icon + '</button>';
@@ -338,7 +367,7 @@ function cullCardHtml(photo, si, pi, poseKey, favorite) {
 function selectCullReference(si, id) {
   var sg = cullData && cullData.species_groups[si];
   if (!sg) return;
-  cullFavoriteReferences[sg.species] = id;
+  cullFavoriteReferences[sg.species_key] = id;
   renderCulling();
 }
 
@@ -355,14 +384,14 @@ function openCullComparison(si, id) {
     }));
     return;
   }
-  cullCompareState = {species: sg.species, photoId: id};
+  cullCompareState = {species: sg.species_key, photoId: id};
   renderCullComparison();
 }
 
 function cullComparePhotos() {
   const state = cullCompareState;
   if (!state || !cullData) return [];
-  var sg = cullData.species_groups.find(function(g) { return g.species === state.species; });
+  var sg = cullData.species_groups.find(function(g) { return g.species_key === state.species; });
   return sg ? cullGroupsForSpecies(sg).flatMap(function(g) { return g.photos; }).filter(function(p) { return !p.favorite; }) : [];
 }
 
@@ -371,16 +400,16 @@ async function renderCullComparison() {
   const state = cullCompareState;
   const compare = browseCompare;
   if (!state || !compare) return;
-  const sg = cullData && cullData.species_groups.find(function(g) { return state && g.species === state.species; });
+  const sg = cullData && cullData.species_groups.find(function(g) { return state && g.species_key === state.species; });
   if (!sg) return compare.close();
   var favorites = cullFavoritesForSpecies(sg);
   var candidates = cullComparePhotos();
   var index = candidates.findIndex(function(p) { return p.photo_id === state.photoId; });
   if (!favorites.length || index < 0) return compare.close();
-  var favorite = favorites.find(function(p) { return p.photo_id === cullFavoriteReferences[sg.species]; }) || favorites[0];
+  var favorite = favorites.find(function(p) { return p.photo_id === cullFavoriteReferences[sg.species_key]; }) || favorites[0];
   if (!favorite) return compare.close();
   var ref = favorite.photo_id;
-  cullFavoriteReferences[sg.species] = ref;
+  cullFavoriteReferences[sg.species_key] = ref;
   var select = /** @type {HTMLSelectElement} */ (document.getElementById('cullCompareReference'));
   select.replaceChildren();
   favorites.forEach(function(p) {
