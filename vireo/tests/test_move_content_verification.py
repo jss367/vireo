@@ -312,6 +312,63 @@ def test_a_copy_is_kept_when_a_file_cannot_be_read_to_compare(tmp_path, monkeypa
         "SELECT path FROM folders WHERE id = ?", (fid,)).fetchone()["path"] == str(src)
 
 
+def test_fresh_copy_mismatch_propagates_source_stat_failure(tmp_path, monkeypatch):
+    """``_fresh_copy_mismatch`` must propagate an ``OSError`` from the source
+    stat instead of returning a mismatch string. Returning one would let
+    ``_refuse(copy_disproven=True)`` delete the fresh destination, which may
+    hold the only readable bytes of the failing source file."""
+    import move.verify as verify
+
+    src = tmp_path / "shoot"
+    src.mkdir()
+    (src / "a.jpg").write_bytes(JPEG + b"\x01" * 64)
+    (src / "b.jpg").write_bytes(JPEG + b"\x02" * 64)
+    dst = tmp_path / "copy"
+    _copy_tree(str(src), str(dst))
+
+    real_stat = os.stat
+
+    def failing_source_stat(path, *args, **kwargs):
+        if str(path).startswith(str(src) + os.sep) and str(path).endswith("a.jpg"):
+            raise OSError(5, "Input/output error", str(path))
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(verify.os, "stat", failing_source_stat)
+
+    with pytest.raises(OSError):
+        verify._fresh_copy_mismatch(str(src), str(dst))
+
+
+def test_fresh_move_keeps_destination_when_source_stat_fails_mid_verify(tmp_path, monkeypatch):
+    """A source stat failure after the copy was made is inconclusive: the
+    fresh destination may hold the only readable bytes. Neither side is
+    removed, and the job reports the comparison could not be completed."""
+    import move as move_mod
+
+    db, src, dst, fid, _ids = _folder(tmp_path)
+
+    def stat_fail_during_verify(src_path, transfer_dest, progress=None):
+        raise OSError(5, "Input/output error", str(src_path))
+
+    monkeypatch.setattr(
+        move_mod.folder_transfer, "_fresh_copy_mismatch", stat_fail_during_verify)
+
+    result = move_mod.move_folder(db=db, folder_id=fid, destination=str(dst))
+
+    assert result["moved"] == 0
+    assert any("Verification could not be completed" in error
+               and "Originals preserved" in error for error in result["errors"])
+    # The fresh destination the move just made is kept — it may hold the
+    # only readable bytes of the file whose source stat failed.
+    assert (dst / "shoot" / "a.jpg").exists()
+    assert (dst / "shoot" / "b.jpg").exists()
+    # The source is not removed either.
+    assert (src / "a.jpg").exists()
+    assert (src / "b.jpg").exists()
+    assert db.conn.execute(
+        "SELECT path FROM folders WHERE id = ?", (fid,)).fetchone()["path"] == str(src)
+
+
 def test_a_file_added_after_verification_is_kept_and_reported(tmp_path, monkeypatch):
     import move as move_mod
 

@@ -583,11 +583,14 @@ def _fresh_copy_mismatch(src_path, transfer_dest, progress=None):
                     return (
                         f"'{rel_name}' symlink target mismatch or source alias at destination")
                 continue
-            try:
-                src_stat = os.stat(src_file, follow_symlinks=False)
-                dst_stat = os.stat(dst_file, follow_symlinks=False)
-            except OSError:
-                return f"'{rel_name}' unreadable at destination"
+            # OSError here propagates (matching the docstring and
+            # ``files_match`` below): a source that cannot be stat'd may
+            # have just dropped out, and a destination that cannot be
+            # stat'd on a filesystem we just wrote to is equally
+            # inconclusive. Either way the copy is not disproven, so the
+            # caller must preserve the destination the move just made.
+            src_stat = os.stat(src_file, follow_symlinks=False)
+            dst_stat = os.stat(dst_file, follow_symlinks=False)
             if src_stat.st_size != dst_stat.st_size:
                 return (
                     f"'{rel_name}' size mismatch at destination "
