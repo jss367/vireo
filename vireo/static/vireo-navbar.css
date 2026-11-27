@@ -2274,7 +2274,7 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 .vireo-loading-status[data-state="error"] .vireo-loading-status-message { color: var(--danger); }
 .vireo-loading-status-retry { margin-left: 12px; padding: 4px 12px; border: 1px solid var(--border-primary); border-radius: 4px; background: var(--bg-secondary); color: var(--text-primary); font: inherit; font-size: 13px; cursor: pointer; }
 .vireo-loading-status-retry:hover { border-color: var(--accent); }
-.vireo-loading-status[data-over-results] { position: fixed; bottom: 44px; left: 50%; transform: translateX(-50%); z-index: 9000; max-width: min(680px, calc(100vw - 32px)); padding: 8px 16px; font-size: 13px; background: var(--bg-tertiary); border: 1px solid var(--border-primary); border-radius: 8px; box-shadow: 0 2px 8px #0005; }
+.vireo-loading-status[data-over-results] { position: fixed; bottom: calc(var(--bottom-offset, 28px) + 16px); left: 50%; transform: translateX(-50%); z-index: 9000; max-width: min(680px, calc(100vw - 32px)); padding: 8px 16px; font-size: 13px; background: var(--bg-tertiary); border: 1px solid var(--border-primary); border-radius: 8px; box-shadow: 0 2px 8px #0005; }
 .vireo-loading-status[data-over-results] .vireo-loading-status-hint { margin-top: 4px; font-size: 12px; }
 [data-vireo-stale] { opacity: 0.45; transition: opacity 0.15s; }
 #toastContainer { position: fixed; top: 56px; right: 16px; z-index: 100000; display: flex; flex-direction: column; gap: 8px; pointer-events: none; max-height: calc(100vh - 72px); overflow-y: auto; }

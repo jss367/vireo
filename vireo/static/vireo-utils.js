@@ -459,19 +459,13 @@ var VireoLoadingStatus = (function() {
 
   // Floating over results, which are dimmed; or in their place when there are
   // none. The floating box sits at the bottom of the window so it never covers
-  // the page's controls, above the navbar's bottom panel: that panel is fixed
-  // over the status bar, so its top edge is where the page's own area ends.
+  // the page's controls, above the navbar's bottom panel: the panel keeps its
+  // own top edge in body's --bottom-offset as it opens, closes and drags, so
+  // the CSS tracks the panel live without this function running again.
   /** @param {VireoLoadingStatusView} view @param {boolean} floating */
   function place(view, floating) {
-    if (floating) {
-      var panel = document.getElementById('bottomPanel');
-      var reserved = panel ? window.innerHeight - panel.getBoundingClientRect().top : 0;
-      view.el.dataset.overResults = 'true';
-      view.el.style.bottom = (reserved + 16) + 'px';
-    } else {
-      delete view.el.dataset.overResults;
-      view.el.style.bottom = '';
-    }
+    if (floating) view.el.dataset.overResults = 'true';
+    else delete view.el.dataset.overResults;
     if (!view.content) return;
     if (floating) view.content.dataset.vireoStale = 'true';
     else delete view.content.dataset.vireoStale;
