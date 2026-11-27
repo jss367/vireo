@@ -28,7 +28,7 @@ def catalog(photo_source=None):
     cls = selected_class(
         photo_source or (ROOT / "repositories/photos.py").read_text(encoding="utf-8"),
         "PhotoRepository",
-        {"_browse_summary_scope", "get_browse_summary", "_browse_summary_aggregates", "_browse_analysis_coverage"},
+        {"count", "_browse_summary_scope", "get_browse_summary", "_browse_summary_aggregates", "_browse_analysis_coverage"},
         ns,
     )
     c = sqlite3.connect(":memory:")

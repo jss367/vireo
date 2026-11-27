@@ -14,7 +14,7 @@ import { _refreshBatchInspectorIfActive, loadInatStatus } from './batch-actions.
 import { updateBatchBar } from './batch-bar.js';
 import { loadCalendarData } from './calendar.js';
 import {
-  abandonDetailFocusForBatch, closeDetail, hideDetailPanel, loadDetail, loadSummary,
+  abandonDetailFocusForBatch, closeDetail, hideDetailPanel, loadDetail, loadSummary, showGridSummaryCount,
 } from './detail.js';
 import { fetchColorLabels } from './edit-actions.js';
 import {
@@ -1035,6 +1035,7 @@ function applyLoadedPage(
   // response that feeds ``totalUnderlyingPhotos`` — never from the
   // stack-collapsed ``data.total``.
   updateOfflineCollectionState(data);
+  showGridSummaryCount(data);
   if (VireoFilter && VireoFilter.setResultTotal) VireoFilter.setResultTotal(pagination.underlyingTotal);
   if (VireoFilter && VireoFilter.setVisualInfo) {
     VireoFilter.setVisualInfo(data.visual || null);

@@ -23,7 +23,7 @@ import { _cfgPromise, applyBrowseConfig } from './config.js';
 import {
   copyPhotoPaths, revealPhoto, setColorLabelFor, setFlagFor, setRatingFor,
 } from './context-menus.js';
-import { closeDetail, loadSummary } from './detail.js';
+import { closeDetail, loadSummary, showGridSummaryCount } from './detail.js';
 import { refreshPendingSyncBanner, setWildlifeExcludedFor } from './edit-actions.js';
 import {
   applyExportPreset, buildExportPreflightRequest, markExportCustom, openExportModal,
@@ -301,6 +301,7 @@ function paintBootstrapGrid(/** @type {any} */ data, /** @type {() => boolean} *
   state.photos = data.photos || [];
   pagination.setTotals(data);
   pagination.place(1, 2, state.photos.length);
+  if (!VireoFilter?.hasFilters() && !state.activeCollectionId) showGridSummaryCount(data);
 
   renderGrid();
   updatePreviousPhotosButton();

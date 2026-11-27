@@ -1,0 +1,71 @@
+"""Reuse a Browse summary while its catalog and detector threshold are unchanged."""
+
+from __future__ import annotations
+
+import sqlite3
+import threading
+from collections import OrderedDict
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from services.service_types import JsonDict
+
+
+class BrowseSummaryCache:
+    """Per-app cache for folder and workspace scopes, independent of filters."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._observer: sqlite3.Connection | None = None
+        self._file: tuple[int, int] | None = None
+        self._entries: OrderedDict[tuple[int, int | None, float], JsonDict] = OrderedDict()
+        self._version = -1
+
+    def __del__(self) -> None:
+        if self._observer is not None:
+            self._observer.close()
+
+    def _revision(self, path: Path) -> tuple[int, int, int]:
+        # data_version is comparable only on the same connection. This
+        # read-only observer never holds a transaction across requests.
+        stat = path.stat()
+        identity = (stat.st_dev, stat.st_ino)
+        if self._observer is None or identity != self._file:
+            observer = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, check_same_thread=False)
+            if self._observer is not None:
+                self._observer.close()
+            self._observer = observer
+            self._file = identity
+            self._entries.clear()
+        version = self._observer.execute("PRAGMA data_version").fetchone()[0]
+        if self._version != version:
+            self._entries.clear()
+            self._version = version
+        return (*identity, version)
+
+    def _available_revision(self, path: Path) -> tuple[int, int, int] | None:
+        try:
+            return self._revision(path)
+        except (OSError, sqlite3.Error):
+            # The ordinary read still owns error handling if the extra
+            # read-only connection cannot be opened during catalog recovery.
+            return None
+
+    def read(self, path: Path, key: tuple[int, int | None, float], compute: Callable[[], JsonDict]) -> JsonDict:
+        with self._lock:
+            revision = self._available_revision(path)
+            if revision is not None and key in self._entries:
+                self._entries.move_to_end(key)
+                return self._entries[key]
+        # Other scopes and superseding requests can proceed while this
+        # request computes its aggregates on its own SQLite snapshot.
+        result = compute()
+        with self._lock:
+            if revision is not None and revision == self._available_revision(path):
+                self._entries[key] = result
+                if len(self._entries) > 8:
+                    self._entries.popitem(last=False)
+        return result
