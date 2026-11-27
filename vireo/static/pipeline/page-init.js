@@ -14,6 +14,7 @@ function initPipelinePage() {
   fetch('/api/pipeline/page-init?include=masks')
     .then(function(r) { return r.json(); })
     .then(function(/** @type {PipelinePageInit} */ data) {
+      restoreProcessRun(data.workspace_id);
       var cfg = data.pipeline_config;
 
       // Hide taxonomy checkbox if already downloaded

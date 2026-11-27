@@ -166,7 +166,7 @@ async function startPipeline() {
       return;
     }
     _currentPipelineJobId = data.job_id;
-    rememberProcessRun(String(data.job_id));
+    rememberProcessRun(String(data.job_id), data.workspace_id);
     if (_pipelineCancelling) {
       _pipelineCancelling = false;
       stopPipeline();

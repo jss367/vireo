@@ -542,7 +542,7 @@ def create_pipeline_blueprint(
                 workspace_id=active_ws,
                 runtime_warning=runtime_warning,
             )
-        result = {"job_id": job_id}
+        result: JsonDict = {"job_id": job_id, "workspace_id": active_ws}
         if model_warning:
             result["model_warning"] = model_warning
         return jsonify(result)

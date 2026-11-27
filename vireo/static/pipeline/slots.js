@@ -37,23 +37,38 @@ function _applySlotInfo(info) {
 
 // Track the job started in this tab across navigation, including completion.
 var _lastProcessRun = '';
-try { _lastProcessRun = sessionStorage.getItem('vireo.lastProcessRun') || ''; } catch (e) {}
+/** @type {number | null} */ var _processWorkspace = null;
+
+/** @param {number} workspaceId */
+function restoreProcessRun(workspaceId) {
+  _processWorkspace = workspaceId;
+  try {
+    _lastProcessRun = sessionStorage.getItem('vireo.lastProcessRun.' + workspaceId) || '';
+  } catch (e) {}
+  if (_lastProcessRun) refreshSlotInfo();
+}
 
 /** @param {PipelineSlotInfo['job']} [job] */
 function showProcessRun(job) {
   var link = /** @type {HTMLAnchorElement | null} */ (document.getElementById('pipelineLastRun'));
-  if (!link || !_lastProcessRun) return;
+  if (!link) return;
+  if (!_lastProcessRun || !job) {
+    link.hidden = true;
+    link.removeAttribute('href');
+    return;
+  }
   link.href = '/jobs?job=' + encodeURIComponent(_lastProcessRun);
   link.hidden = false;
-  var status = job?.status === 'running' ? (job.phase || job.status) : job?.status;
+  var status = job.status === 'running' ? (job.phase || job.status) : job.status;
   link.textContent = 'View your last Process run' + (status ? ' · ' + status : '');
 }
 
-/** @param {string} id */
-function rememberProcessRun(id) {
+/** @param {string} id @param {number} workspaceId */
+function rememberProcessRun(id, workspaceId) {
+  try { sessionStorage.setItem('vireo.lastProcessRun.' + workspaceId, id); } catch (e) {}
+  if (_processWorkspace !== workspaceId) return;
   _lastProcessRun = id;
-  try { sessionStorage.setItem('vireo.lastProcessRun', id); } catch (e) {}
-  showProcessRun();
+  refreshSlotInfo();
 }
 
 async function refreshSlotInfo() {
@@ -61,7 +76,7 @@ async function refreshSlotInfo() {
     var tracked = _lastProcessRun;
     var url = '/api/pipeline/slots' + (tracked ? '?job=' + encodeURIComponent(tracked) : '');
     /** @type {PipelineSlotInfo} */ var data = await safeFetch(url, {}, { toast: false });
-    if (tracked === _lastProcessRun) showProcessRun(data?.job);
+    if (data && tracked === _lastProcessRun) showProcessRun(data.job);
     if (data) _applySlotInfo(data);
   } catch(e) {
     // Network blip — keep last known state; don't toast.

@@ -1180,8 +1180,12 @@ def test_pipeline_common_names_note_is_not_a_skip(live_server, page):
 
 def test_return_to_process_shows_launched_job_and_stage(live_server, page):
     url = live_server["url"]
+    db = live_server["db"]
+    workspace = db.active_workspace_id
+    other = db.create_workspace("Another Process workspace")
+    db.commit()
     job_id = "pipeline-test-return"
-    page.route("**/api/jobs/pipeline", lambda route: route.fulfill(json={"job_id": job_id}))
+    page.route("**/api/jobs/pipeline", lambda route: route.fulfill(json={"job_id": job_id, "workspace_id": workspace}))
     page.route("**/api/pipeline/slots?job=*", lambda route: route.fulfill(json={
         "active": 1, "queued": 0, "slot_cap": 1,
         "job": {"id": job_id, "status": "running", "phase": "Extract features"},
@@ -1197,3 +1201,10 @@ def test_return_to_process_shows_launched_job_and_stage(live_server, page):
     page.goto(f"{url}/pipeline")
     expect(link).to_have_text("View your last Process run · Extract features")
     expect(link).to_have_attribute("href", f"/jobs?job={job_id}")
+    assert page.request.post(f"{url}/api/workspaces/{other}/activate").ok
+    page.reload()
+    page.wait_for_function("!window._pageInitPending")
+    expect(link).to_be_hidden()
+    assert page.request.post(f"{url}/api/workspaces/{workspace}/activate").ok
+    page.reload()
+    expect(link).to_have_text("View your last Process run · Extract features")

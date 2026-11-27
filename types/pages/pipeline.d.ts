@@ -16,7 +16,7 @@ interface PipelineCoverage {variant: string; count?: number; active_count?: numb
 interface PipelineModelReadiness {variant: string; ready?: boolean; size_hint?: string;}
 interface PipelineExtractReadiness {sam2?: PipelineModelReadiness; sam2_known?: boolean; dinov2?: PipelineModelReadiness; dinov2_known?: boolean; sam_variant_warning?: PipelineWarning | null;}
 interface PipelineConfig {sam2_variant: string; dinov2_variant: string; proxy_longest_edge: number; preview_max_size?: number; eye_detect_enabled?: boolean;}
-interface PipelinePageInit {pipeline_config: PipelineConfig; taxonomy_available?: boolean; mask_variant_coverage?: PipelineCoverage[]; sam_variant_warning?: PipelineWarning | null;}
+interface PipelinePageInit {workspace_id: number; pipeline_config: PipelineConfig; taxonomy_available?: boolean; mask_variant_coverage?: PipelineCoverage[]; sam_variant_warning?: PipelineWarning | null;}
 interface PipelineFolder {id: number; parent_id?: number | null; path: string; workspace_photo_count?: number; photo_count?: number;}
 interface PipelineReadiness {model_ready?: boolean; needs_download?: boolean; model_name?: string; model_size_mb: number; use_tol?: boolean; labels_blocked?: boolean; labels_name: string; labels_skipped?: number; labels_count: number; embeddings_cached?: boolean; exiftool?: {installed?: boolean; brew_available?: boolean};}
 interface PipelineSlotInfo {job?: {id: string; status: string; phase?: string | null}; active: number; queued: number; slot_cap: number;}
@@ -36,7 +36,7 @@ declare function safeFetch(url: '/api/jobs/precompute-embeddings', init?: Reques
 declare function safeFetch(url: '/api/jobs/fetch-labels', init?: RequestInit, options?: {toast?: boolean}): Promise<{job_id: number; error?: string; model_warning?: string}>;
 declare function safeFetch(url: '/api/jobs/classify', init?: RequestInit, options?: {toast?: boolean}): Promise<{job_id: number; error?: string; model_warning?: string}>;
 declare function safeFetch(url: '/api/jobs/extract-masks', init?: RequestInit, options?: {toast?: boolean}): Promise<{job_id: number; error?: string; model_warning?: string}>;
-declare function safeFetch(url: '/api/jobs/pipeline', init?: RequestInit, options?: {toast?: boolean}): Promise<{job_id: number; error?: string; model_warning?: string}>;
+declare function safeFetch(url: '/api/jobs/pipeline', init?: RequestInit, options?: {toast?: boolean}): Promise<{workspace_id: number; job_id: number; error?: string; model_warning?: string}>;
 declare function safeFetch(url: '/api/labels', init?: RequestInit, options?: {toast?: boolean}): Promise<{labels?: PipelineLabelFile[]; active?: {labels_file: string}[]}>;
 declare function safeFetch(url: '/api/system/install-exiftool', init?: RequestInit, options?: {toast?: boolean}): Promise<{success?: boolean; error?: string}>;
 declare function safeEventSource(url: string, callbacks: {onProgress?(progress: PipelineProgress): void; onComplete?(result: PipelineCompletion): void; onError?(): void;}): EventSource;
