@@ -25,31 +25,31 @@ for (const entry of helpData) {
   <!-- Getting Started -->
   <section class="section" id="getting-started">
     <div class="container docs-section">
-      <h2>Getting Started</h2>
+      <h2>Getting started with Vireo</h2>
+      <p>Choose a small folder of wildlife photos already on your computer. Include a few frames of the same animal taken seconds apart so you can compare them and choose a keeper.</p>
 
-      <div class="docs-step">
+      <div class="docs-step" id="install">
         <h3>1. Install Vireo</h3>
-        <p>Download the installer for your platform from the <a href={`${base}download/`}>download page</a> and run it. On macOS, drag Vireo to your Applications folder. On Windows 11, run the setup wizard. On Linux, install the .deb package.</p>
+        <p>Get the installer for your computer from the <a href={`${base}download/`}>download page</a>. On macOS, open the disk image and drag Vireo to Applications. On Windows 11, run the setup wizard. On Linux, install the .deb package.</p>
+        <p>Open Vireo. On the welcome screen, choose <strong>Get Started</strong> to download the identification model. If prompted, choose your region and wildlife groups and click <strong>Download species list</strong>. Setup finishes in <strong>Browse</strong>, where your photos will appear.</p>
       </div>
 
-      <div class="docs-step">
-        <h3>2. Import your photos</h3>
-        <p>Open <strong>Import</strong>, leave <strong>Add in place</strong> selected, and click <strong>Browse</strong> to choose one or more folders. Vireo indexes the photos where they already live — nothing is moved or copied. Choose <strong>Copy to archive</strong> instead only when you want Vireo to copy photos from a card or source folder into your archive.</p>
+      <div class="docs-step" id="first-import">
+        <h3>2. Import your first folder</h3>
+        <p>Open <strong>Import</strong>, leave <strong>Add in place</strong> selected, and click <strong>Browse…</strong> to choose your folder. Vireo catalogs the photos where they are.</p>
+        <p>Under <strong>After import</strong>, choose <strong>None — import only</strong> so you can start the analysis yourself. Click <strong>Start import</strong>. When it finishes, choose <strong>Open Browse</strong> and check that you recognize the photos from your folder.</p>
       </div>
 
-      <div class="docs-step">
-        <h3>3. Choose what happens after import</h3>
-        <p>Under <strong>After import</strong>, choose a processing option such as <strong>Identify birds</strong>, then click <strong>Start import</strong>. Vireo adds the photos to the active workspace and starts processing as a background job. First runs may download AI models — anywhere from a few hundred megabytes to a few gigabytes — so give them a few minutes. Use <strong>Jobs</strong> only to monitor progress.</p>
+      <div class="docs-step" id="first-process">
+        <h3>3. Run Process on that folder</h3>
+        <p>Open <strong>Process</strong>. Under <strong>Workspace Folders</strong>, select just the folder you imported. Under <strong>AI processing</strong>, choose <strong>Cull-ready</strong> to identify wildlife and group related frames for review.</p>
+        <p>Click <strong>Start Pipeline</strong>. The first run may download additional models before analyzing the photos on your computer. You can follow progress in <strong>Jobs</strong>. A successful run opens <strong>Process Review</strong> automatically. If Process shows completion notes, read them and follow the link to review.</p>
       </div>
 
-      <div class="docs-step">
-        <h3>4. Review results</h3>
-        <p>Open <strong>Process Review</strong> to inspect classifications and any available quality recommendations. When culling analysis is available, open <strong>Cull</strong> to rapidly mark photos keep, review, or reject with keyboard shortcuts. Use <strong>Process</strong> later when you want to rerun processing for photos already in the workspace.</p>
-      </div>
-
-      <div class="docs-step">
-        <h3>5. Sync to XMP</h3>
-        <p>When you're happy with your decisions, sync changes to XMP sidecars. This writes standard metadata that Lightroom, Darktable, and other tools can read. Your decisions travel with your files.</p>
+      <div class="docs-step" id="first-review">
+        <h3>4. Review the results and pick a keeper</h3>
+        <p>Find a burst of the same animal in <strong>Process Review</strong>. If a frame is labeled <strong>KEEP</strong>, start there. Click its thumbnail to inspect the eye and pose, then look at a neighboring frame. If the second photo catches the bird looking toward you and its eye is sharp, you might prefer it.</p>
+        <p>Back in the grid, right-click your favorite thumbnail and choose the flag icon labeled <strong>Flag as pick</strong>. This works on any frame, including Vireo’s suggested keeper or a single photo. A <strong>P</strong> badge on the thumbnail confirms your pick.</p>
       </div>
     </div>
   </section>

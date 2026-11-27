@@ -49,7 +49,7 @@ See [CORE_PHILOSOPHY.md](CORE_PHILOSOPHY.md) for more.
 
 ## Getting started
 
-For downloads, system requirements, and user documentation, visit [vireo.photo](https://vireo.photo).
+Follow [Getting started with Vireo](https://vireo.photo/docs/#getting-started) to install the app, import a folder, run Process, and pick your first keeper. See the [download page](https://vireo.photo/download/) for installers and system requirements.
 
 AI models are downloaded automatically on first use.
 
