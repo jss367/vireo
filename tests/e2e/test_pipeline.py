@@ -1176,3 +1176,24 @@ def test_pipeline_common_names_note_is_not_a_skip(live_server, page):
     )
     expect(page.locator("#pillClassify")).not_to_have_text("Skipped")
     expect(page.get_by_test_id("pipeline-error-banner")).to_be_hidden()
+
+
+def test_return_to_process_shows_launched_job_and_stage(live_server, page):
+    url = live_server["url"]
+    job_id = "pipeline-test-return"
+    page.route("**/api/jobs/pipeline", lambda route: route.fulfill(json={"job_id": job_id}))
+    page.route("**/api/pipeline/slots?job=*", lambda route: route.fulfill(json={
+        "active": 1, "queued": 0, "slot_cap": 1,
+        "job": {"id": job_id, "status": "running", "phase": "Extract features"},
+    }))
+    page.goto(f"{url}/pipeline")
+    page.wait_for_function("!window._pageInitPending")
+    page.locator("#folderScopeList input[type=checkbox]").first.check()
+    expect(page.locator("#pipelineTimeHint")).not_to_be_empty()
+    page.locator("#btnStartPipeline").click()
+    link = page.locator("#pipelineLastRun")
+    expect(link).to_have_attribute("href", f"/jobs?job={job_id}")
+    page.goto(f"{url}/jobs")
+    page.goto(f"{url}/pipeline")
+    expect(link).to_have_text("View your last Process run · Extract features")
+    expect(link).to_have_attribute("href", f"/jobs?job={job_id}")

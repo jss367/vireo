@@ -108,10 +108,15 @@ def create_pipeline_blueprint(
         runner = get_runner()
         active = 0
         queued = 0
+        tracked_id = request.args.get("job")
+        tracked = {}
         for j in runner.list_jobs():
             if j.get("type") != "pipeline":
                 continue
             status = j.get("status")
+            if tracked_id and j.get("id") == tracked_id:
+                tracked["job"] = {"id": tracked_id, "status": status,
+                                  "phase": (j.get("progress") or {}).get("phase")}
             if status in {"running", "pausing", "paused"}:
                 active += 1
             elif status == "queued":
@@ -120,6 +125,7 @@ def create_pipeline_blueprint(
             "active": active,
             "queued": queued,
             "slot_cap": SLOT_CAP,
+            **tracked,
         })
 
     def _plan_path_list(body: JsonDict, key: str) -> tuple[list[str] | None, ErrorResponse | None]:

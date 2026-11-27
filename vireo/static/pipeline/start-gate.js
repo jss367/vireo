@@ -3,6 +3,11 @@
 
 function updateStartButton() {
   var btn = /** @type {HTMLButtonElement} */ (document.getElementById('btnStartPipeline'));
+  var timeHint = document.getElementById('pipelineTimeHint');
+  if (timeHint) {
+    timeHint.textContent = !_pipelineRunning && !_planRefreshPending && hasPipelineSource()
+      ? (_pipelinePlan?.time_hint || '') : '';
+  }
   var actionStatus = /** @type {HTMLElement} */ (document.getElementById('pipelineActionStatus'));
   // While *this tab* owns a live pipeline run, the same button has
   // been repurposed as "Stop Pipeline" (see startPipeline). Don't

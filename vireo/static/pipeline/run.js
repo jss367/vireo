@@ -9,6 +9,30 @@ var _pipelineCancelling = false;
 /** @type {(() => void) | null} */ var _pipelineResolve = null;
 /** @type {number | null} */ var _currentPipelineJobId = null;
 
+function preparePipelineRun() {
+  _pipelineRunning = true;
+  _pipelineAbort = false;
+  _pipelineCancelling = false;
+  _currentPipelineJobId = null;
+  /** @type {HTMLElement} */ (document.getElementById('modelWarningBanner')).style.display = 'none';
+  var _prevErrBanner = /** @type {HTMLElement} */ (document.getElementById('pipelineErrorBanner'));
+  if (_prevErrBanner) _prevErrBanner.style.display = 'none';
+  var _prevNoteBanner = /** @type {HTMLElement} */ (document.getElementById('pipelineNoteBanner'));
+  if (_prevNoteBanner) _prevNoteBanner.style.display = 'none';
+
+  var btn = /** @type {HTMLButtonElement} */ (document.getElementById('btnStartPipeline'));
+  btn.textContent = 'Stop Pipeline';
+  btn.onclick = stopPipeline;
+  updateStartButton();
+
+  // Reset live pill state so "Done" / "Failed" from a previous run don't bleed
+  // into this one. Pills will recompute from toggles + prior data.
+  _runningStages = {};
+  _stageOutcomes = {};
+  refreshPipelineUI();
+  return btn;
+}
+
 async function startPipeline() {
   if (_pipelineRunning) return;
   if (_dashboardActionScopeError) {
@@ -48,26 +72,7 @@ async function startPipeline() {
     }
   }
 
-  _pipelineRunning = true;
-  _pipelineAbort = false;
-  _pipelineCancelling = false;
-  _currentPipelineJobId = null;
-  /** @type {HTMLElement} */ (document.getElementById('modelWarningBanner')).style.display = 'none';
-  var _prevErrBanner = /** @type {HTMLElement} */ (document.getElementById('pipelineErrorBanner'));
-  if (_prevErrBanner) _prevErrBanner.style.display = 'none';
-  var _prevNoteBanner = /** @type {HTMLElement} */ (document.getElementById('pipelineNoteBanner'));
-  if (_prevNoteBanner) _prevNoteBanner.style.display = 'none';
-
-  var btn = /** @type {HTMLButtonElement} */ (document.getElementById('btnStartPipeline'));
-  btn.textContent = 'Stop Pipeline';
-  btn.onclick = stopPipeline;
-  btn.disabled = false;
-
-  // Reset live pill state so "Done" / "Failed" from a previous run don't bleed
-  // into this one. Pills will recompute from toggles + prior data.
-  _runningStages = {};
-  _stageOutcomes = {};
-  refreshPipelineUI();
+  var btn = preparePipelineRun();
 
   // Gather config from the UI
   /** @type {PipelineRequest} */ var body = {};
@@ -161,6 +166,7 @@ async function startPipeline() {
       return;
     }
     _currentPipelineJobId = data.job_id;
+    rememberProcessRun(String(data.job_id));
     if (_pipelineCancelling) {
       _pipelineCancelling = false;
       stopPipeline();

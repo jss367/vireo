@@ -12,8 +12,12 @@ stages use, never from coarser proxies like "any prior data exists".
 """
 
 import logging
+import math
 import os
+import platform
+import subprocess
 from dataclasses import dataclass, field
+from functools import cache
 
 from config import config_value
 from services import detection_store, stage_counts, subject_masks, workspace_config, workspace_folders
@@ -1783,6 +1787,57 @@ def _stage_plans(db, params, db_path, ws_id, photo_ids, new_count,
     }
 
 
+@cache
+def _has_process_timing_baseline():
+    if platform.system() != "Darwin":
+        return False
+    try:
+        brand = subprocess.check_output(
+            ["/usr/sbin/sysctl", "-n", "machdep.cpu.brand_string"],
+            text=True, timeout=1,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return brand.strip() == "Apple M3 Max"
+
+
+def _process_time_hint(stages, photo_count, params):
+    """Approximate active processing time, excluding queue and download waits."""
+    if not photo_count or not any(s["state"] == "will-run" for s in stages.values()):
+        return None
+
+    # Per-item seconds from docs/investigations/subject-feature-extraction-throughput.md.
+    # On a first run, downstream counts are unknown until detection finishes.
+    def pending(stage):
+        entry = stages[stage]
+        return entry["detail"].get("pending", 0) if entry["state"] == "will-run" else 0
+
+    classify = stages["Classify"]
+    cold = classify["state"] == "will-run" and classify["detail"].get("total_dets") == 0
+    models = max(1, len(params.model_ids))
+    classify_units = photo_count * models if cold else pending("Classify")
+    seconds = pending("Previews") * 0.23 + classify_units * 0.65
+    if cold:
+        seconds += photo_count * 0.40
+    for stage, rate in (("Extract", 4.53), ("EyeKeypoints", 0.11)):
+        if stages[stage]["state"] == "will-run":
+            seconds += (photo_count if cold else pending(stage)) * rate
+    if seconds <= 0:
+        return None
+
+    if params.raw_subject_analysis or not _has_process_timing_baseline():
+        return ("Processing this selection may take several hours." if seconds >= 3600
+                else "Processing time depends on this computer and the selected stages.")
+    # Round outward. These are planning ranges, not statistical error bars.
+    low = max(1, math.floor(seconds * 0.7 / 60))
+    high = max(low + 1, math.ceil(seconds * 1.7 / 60))
+    if low >= 60:
+        return f"Estimated processing time on this Mac: {low // 60}–{math.ceil(high / 60)} hours."
+    if high <= 2:
+        return "Estimated processing time on this Mac: a few minutes."
+    return f"Estimated processing time on this Mac: {low}–{high} minutes."
+
+
 def compute_plan(db, params, db_path):
     """Compute the full per-stage plan for the active workspace.
 
@@ -1865,6 +1920,8 @@ def compute_plan(db, params, db_path):
 
     return {
         "stages": stages,
+        "time_hint": _process_time_hint(stages, len(photo_ids), params)
+        if photo_ids is not None and params.source_paths is None else None,
         "scope": {
             "collection_id": params.collection_id,
             "photo_count": (

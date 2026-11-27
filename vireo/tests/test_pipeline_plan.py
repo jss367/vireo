@@ -4578,3 +4578,21 @@ def test_extract_plan_counts_detail_measurements_as_work(tmp_path):
     extract = compute_plan(db, _params(), str(tmp_path / "test.db"))["stages"]["Extract"]
     assert extract["state"] == "done-prior"
     assert extract["detail"]["detail_pending"] == 0
+
+
+def test_first_process_time_hint_accounts_for_future_detections(monkeypatch):
+    import pipeline_plan as planner
+
+    params = planner.PipelinePlanParams()
+    stages = {name: {"state": "will-run", "detail": {"pending": 0}}
+              for name in ("Previews", "Classify", "Extract", "EyeKeypoints")}
+    stages["Classify"]["detail"]["total_dets"] = 0
+    stages["Previews"]["detail"]["pending"] = 2500
+    monkeypatch.setattr(planner, "_has_process_timing_baseline", lambda: True)
+    assert "hours" in planner._process_time_hint(stages, 2500, params)
+    monkeypatch.setattr(planner, "_has_process_timing_baseline", lambda: False)
+    assert "may take several hours" in planner._process_time_hint(stages, 2500, params)
+    stages["Extract"]["state"] = "will-skip"
+    monkeypatch.setattr(planner, "_has_process_timing_baseline", lambda: True)
+    assert "minutes" in planner._process_time_hint(stages, 2500, params)
+    assert planner._process_time_hint(stages, 0, params) is None

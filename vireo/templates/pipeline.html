@@ -431,7 +431,10 @@ body { padding-bottom: 36px; }
   margin-top: 8px;
   padding: 20px 0;
   display: flex;
-  justify-content: center;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  text-align: center;
 }
 .btn-large {
   padding: 12px 48px;
@@ -943,9 +946,12 @@ body { padding-bottom: 36px; }
 
   <!-- Pipeline action bar -->
   <div class="pipeline-action-bar">
-    <button class="btn btn-primary btn-large" id="btnStartPipeline" onclick="startPipeline()" disabled data-testid="start-pipeline-btn">
+    <div class="status-msg" id="pipelineTimeHint" role="status"></div>
+    <button class="btn btn-primary btn-large" id="btnStartPipeline" onclick="startPipeline()" disabled data-testid="start-pipeline-btn" aria-describedby="pipelineTimeHint pipelineLeaveHint">
       Start Pipeline
     </button>
+    <span class="status-msg" id="pipelineLeaveHint">Keep Vireo open while processing. You can leave this screen and return to Process to check progress.</span>
+    <a id="pipelineLastRun" hidden>View your last Process run</a>
   </div>
   <details id="subjectCounts"><summary>Workspace subject evidence</summary>
     <p id="subjectCountsResult" role="status"></p><a href="/audit#subjects">Review subject evidence in Audit</a>

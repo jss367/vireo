@@ -35,9 +35,33 @@ function _applySlotInfo(info) {
   line.style.display = '';
 }
 
+// Track the job started in this tab across navigation, including completion.
+var _lastProcessRun = '';
+try { _lastProcessRun = sessionStorage.getItem('vireo.lastProcessRun') || ''; } catch (e) {}
+
+/** @param {PipelineSlotInfo['job']} [job] */
+function showProcessRun(job) {
+  var link = /** @type {HTMLAnchorElement | null} */ (document.getElementById('pipelineLastRun'));
+  if (!link || !_lastProcessRun) return;
+  link.href = '/jobs?job=' + encodeURIComponent(_lastProcessRun);
+  link.hidden = false;
+  var status = job?.status === 'running' ? (job.phase || job.status) : job?.status;
+  link.textContent = 'View your last Process run' + (status ? ' · ' + status : '');
+}
+
+/** @param {string} id */
+function rememberProcessRun(id) {
+  _lastProcessRun = id;
+  try { sessionStorage.setItem('vireo.lastProcessRun', id); } catch (e) {}
+  showProcessRun();
+}
+
 async function refreshSlotInfo() {
   try {
-    var data = await safeFetch('/api/pipeline/slots', {}, { toast: false });
+    var tracked = _lastProcessRun;
+    var url = '/api/pipeline/slots' + (tracked ? '?job=' + encodeURIComponent(tracked) : '');
+    /** @type {PipelineSlotInfo} */ var data = await safeFetch(url, {}, { toast: false });
+    if (tracked === _lastProcessRun) showProcessRun(data?.job);
     if (data) _applySlotInfo(data);
   } catch(e) {
     // Network blip — keep last known state; don't toast.
@@ -59,6 +83,7 @@ function _stopSlotPolling() {
 
 // Slot polling follows tab visibility.
 function bindSlotPolling() {
+  showProcessRun();
   document.addEventListener('visibilitychange', function() {
     if (document.hidden) {
       _stopSlotPolling();
