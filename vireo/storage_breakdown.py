@@ -12,7 +12,7 @@ def describe_auxiliary_storage(path, db_path):
         name.startswith(db_name + ".bak")
         or re.fullmatch(re.escape(db_name) + r"\.pre-v\d+\.bak", name)
     ):
-        return "Catalog backups", "Saved catalog snapshots from upgrades or repairs."
+        return "Catalog backups", "Daily catalog backups, and snapshots from upgrades and restores. Restore one from Settings."
     if path in (f"{db_path}-wal", f"{db_path}-shm", f"{db_path}-journal"):
         return "Database support files", "Live database transaction and coordination files. Keep these with the catalog."
     descriptions = {

@@ -57,6 +57,21 @@ AI models are downloaded automatically on first use.
 [the Windows support guide](docs/WINDOWS_SUPPORT.md) for optional integrations,
 storage coverage, and troubleshooting.
 
+## Backing up and moving to a new Mac
+
+Vireo's catalog and settings live in a data folder apart from your photos, and
+Vireo does not back them up for you. The [backup and restore guide](docs/backup-and-restore.md)
+explains where the catalog lives, what the `vireo.db.pre-v<N>.bak` files are,
+how to restore, and how to move Vireo to a new Mac.
+
+## Catalog compatibility
+
+Catalog schema version **11** is the oldest this release can upgrade directly.
+This is the version stored in the catalog, not the Vireo app version. If the
+catalog is older, Vireo shows its path and schema version and leaves it unchanged.
+Keep the original if you need its edits or organization. If the catalog was
+created by a newer Vireo release, update Vireo rather than starting fresh.
+
 ## Uninstalling
 
 Removing the Vireo application leaves its catalog, settings, downloaded models,

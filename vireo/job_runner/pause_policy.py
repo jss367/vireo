@@ -11,7 +11,8 @@ PAUSABLE_JOBS = frozenset({
     "ingest", "move-photos", "offline-cache", "release-local-originals",
     "prepare-full-resolution", "classify", "develop", "extract-masks",
     "inat-export", "export", "publish-site", "export-site", "import",
-    "import-full", "import-in-place", "staging-verify", "card-cleanup-scan",
+    "import-full", "import-in-place", "staging-verify", "staging-delete",
+    "card-cleanup-scan",
     "card-cleanup-verify", "card-cleanup-delete", "send-to-nas", "move-folder",
 })
 
@@ -49,6 +50,8 @@ UNPAUSABLE_JOBS = {
     "working_copy_backfill": INTERNAL_REASON,
     "retained-cache-maintenance": "Pause is unavailable while cache files and their records are reconciled.",
     "retained-cache-cleanup": "Pause is unavailable while cache files and their records are reconciled.",
+    "catalog-backup": "Pause is unavailable while the catalog is copied; cancel it instead.",
+    "catalog-restore-prepare": "Pause is unavailable while the backup is copied; cancel it instead.",
     "panorama": "Pause is unavailable while the panorama tool is running.",
     "analyze-subjects": "Pause is unavailable during this subject analysis request.",
     "analysis-retry": "Pause is unavailable during this analysis retry.",

@@ -15,6 +15,8 @@ import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from frame_identity import LegacyFrame, frame_matches
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -30,6 +32,7 @@ class DecodedFrame:
     frame_id: str | None = None
     native_size: tuple[int, int] | None = None
     rendition: str = "image"
+    legacy: LegacyFrame | None = None
 
     @classmethod
     def of(cls, image: Image.Image) -> DecodedFrame:
@@ -37,7 +40,7 @@ class DecodedFrame:
         size = info.get("vireo_native_size")
         return cls(
             info.get("vireo_subject_frame_id"), tuple(size) if size else None,
-            info.get("vireo_aligned_rendition", "image"),
+            info.get("vireo_aligned_rendition", "image"), info.get("vireo_legacy_frame"),
         )
 
     @property
@@ -53,7 +56,7 @@ class DecodedFrame:
         from the preview's to round to another size.
         """
         if mask_id is not None:
-            return mask_id == self.frame_id
+            return frame_matches(mask_id, {"vireo_subject_frame_id": self.frame_id, "vireo_legacy_frame": self.legacy})
         return (
             self.every_decode_agrees and self.native_size is not None
             and tuple(mask_size) == _scaled_size(self.native_size, max(mask_size))

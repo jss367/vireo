@@ -19,6 +19,7 @@ state for its responsibility alongside the functions that use it.
 | `models.js` | Model downloads, verification, selection, and removal |
 | `labels.js` | Species lists, taxonomy, place search, and embedding precomputation |
 | `maintenance.js` | Cache management, scan roots, and keyword cleanup |
+| `catalog-backups.js` | Catalog backup list, Back up now, and preparing or cancelling a restore |
 | `desktop.js` | Version, native file pickers, and updater controls |
 | `all-settings.js` | Schema-driven settings, scope selection, resets, and settings import |
 | `boot.js` | Initial requests, event setup, and the storage-wizard deep link |

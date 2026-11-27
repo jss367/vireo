@@ -117,7 +117,7 @@ def analyze_photo(db, photo_id, image_path, *, min_conf=None, force=False, check
         source_state = aligned_source_state(image_path)
     except OSError as error:
         raise ValueError("Original subject frame unavailable; reconnect the original and retry") from error
-    source_key = hashlib.sha256(json.dumps([source_state, ANALYSIS_VERSION]).encode()).hexdigest()
+    source_key = hashlib.sha256(json.dumps([source_state.stable(), ANALYSIS_VERSION]).encode()).hexdigest()
     cached = db.subjects.cached_detection_ids(photo_id, source_key)
     pending = [d for d in detections if force or d["id"] not in cached]
     if not pending and detection_id is None:
