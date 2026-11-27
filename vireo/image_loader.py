@@ -32,9 +32,7 @@ RAW strategy:
 """
 
 import contextlib
-import hashlib
 import io
-import json
 import logging
 import os
 import sys
@@ -45,6 +43,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final, Literal, overload
 
 from file_replace import replace_file
+from frame_identity import LegacyFrame, SourceState, frame_identity, source_generation
 from PIL import Image, ImageOps
 
 if TYPE_CHECKING:
@@ -753,6 +752,9 @@ def load_image(file_path, max_size: int | None = 1024, raw_decode=RAW_DECODE_JPE
             img.info["vireo_source_generation"] = source_generation(aligned_state)
             img.info["vireo_native_size"] = img.size
             img.info["vireo_subject_frame_id"] = aligned_frame_identity(path, img, aligned_state)
+            img.info["vireo_legacy_frame"] = LegacyFrame(
+                aligned_state, RAW_DECODE_ALIGNED, img.info.get("vireo_aligned_rendition", "image"), img.size,
+            )
         if max_size and max_size > 0 and max(img.size) > max_size:
             img.thumbnail((max_size, max_size), Image.LANCZOS)
 
@@ -765,12 +767,9 @@ def load_image(file_path, max_size: int | None = 1024, raw_decode=RAW_DECODE_JPE
 def aligned_source_state(path):
     """Bind a frame to the original file generation, without exposing its path."""
     stat = os.stat(path)
-    return (os.path.realpath(path), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
-
-
-def source_generation(state):
-    """Portable representation of the local original-file generation for API responses."""
-    return hashlib.sha256(json.dumps(state).encode()).hexdigest()
+    return SourceState(
+        os.path.realpath(path), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns,
+    )
 
 
 def aligned_frame_identity(path, image, before):
@@ -778,7 +777,7 @@ def aligned_frame_identity(path, image, before):
     if aligned_source_state(path) != before:
         raise OSError("Original changed while its subject frame was decoded")
     basis = image.info.get("vireo_aligned_rendition", "image")
-    return hashlib.sha256(json.dumps([1, RAW_DECODE_ALIGNED, before, basis, image.size]).encode()).hexdigest()
+    return frame_identity(before, RAW_DECODE_ALIGNED, basis, image.size)
 
 
 def _load_raw_with_retry(path, max_size, raw_decode=RAW_DECODE_JPEG_FIRST):

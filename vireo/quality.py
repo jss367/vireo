@@ -13,6 +13,7 @@ Features:
 import logging
 
 import numpy as np
+from frame_identity import frame_matches
 from PIL import Image
 from scoring import DETAIL_SCALE_PX
 
@@ -480,7 +481,7 @@ def measure_subject_detail(mask, *, source_path, frame_size=None, expected_frame
     if image is None:
         return {}
     try:
-        if expected_frame_id is not None and image.info.get("vireo_subject_frame_id") != expected_frame_id:
+        if expected_frame_id is not None and not frame_matches(expected_frame_id, image.info):
             return {}
         return compute_subject_detail(image, mask, frame_size=frame_size)
     finally:
@@ -494,7 +495,7 @@ def saved_mask_matches_frame(mask_size, mask_frame, image, *, prompt_frame=None,
     if mask_frame_id is None and DecodedFrame.of(image).holds_mask(None, mask_size):
         return True
     needs_identity = mask_frame_id is not None or image.info.get("vireo_aligned_rendition")
-    if needs_identity and (not mask_frame_id or mask_frame_id != image.info.get("vireo_subject_frame_id")):
+    if needs_identity and not frame_matches(mask_frame_id, image.info):
         return False
     w, h = mask_size
     iw, ih = image.size
@@ -540,7 +541,7 @@ def measure_cached_subject_detail(mask_path, source_path, frame_size=None, *, ex
     if image is None:
         return None
     with image:
-        if expected_frame_id is not None and image.info.get("vireo_subject_frame_id") != expected_frame_id:
+        if expected_frame_id is not None and not frame_matches(expected_frame_id, image.info):
             return None
         if not saved_mask_matches_frame(mask.shape[::-1], mask_frame, image, prompt_frame=prompt_frame, mask_frame_id=mask_frame_id):
             return MASK_CACHE_INVALID
