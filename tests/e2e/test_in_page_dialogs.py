@@ -207,6 +207,39 @@ def test_alert_is_shown_until_closed_and_waits_for_an_open_dialog(live_server, p
     assert page.evaluate("window.__keys") == []
 
 
+def test_a_photo_of_two_species_asks_which_one_to_highlight(live_server, page):
+    """The chooser is a prompt; a native one returns null in the desktop app,
+    which left "Make Top Highlight…" doing nothing."""
+    page.add_init_script(DESKTOP_NATIVE_DIALOGS)
+    page.goto(f"{live_server['url']}/browse")
+    card = page.locator(".grid-card").first
+    card.wait_for(state="visible")
+    photo_id = int(card.get_attribute("data-id"))
+    saved = []
+    page.route(f"**/api/photos/{photo_id}", lambda route: route.fulfill(json={
+        "id": photo_id, "life_list": [{"species": "Mallard"}, {"species": "Wood Duck"}],
+    }))
+
+    def save(route):
+        saved.append(route.request.post_data_json)
+        route.fulfill(json={"ok": True})
+
+    page.route("**/api/photo-preferences", save)
+    record_toasts(page)
+
+    page.evaluate(
+        "id => buildSpeciesRepresentativeMenuItems([id], {showFetchFallback: true})[0].onClick()", photo_id
+    )
+    expect(page.locator(f"{DIALOG} h3")).to_have_text("Make this the top highlight of which species?")
+    expect(page.locator(f"{INPUT} option")).to_have_text(["Mallard", "Wood Duck"])
+    assert saved == []
+    page.locator(INPUT).select_option("Wood Duck")
+    page.locator(ACCEPT).click()
+
+    page.wait_for_function("window.__toasts.length > 0")
+    assert saved == [{"purpose": "species_representative", "species": "Wood Duck", "photo_id": photo_id}]
+
+
 class TrashFailure:
     """A delete job whose Trash step failed for one photo, and the
     permanent-delete requests the page sends afterwards."""
