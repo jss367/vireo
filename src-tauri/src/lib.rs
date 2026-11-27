@@ -180,6 +180,20 @@ fn build_log_plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
         .build()
 }
 
+fn show_startup_error(window: &tauri::WebviewWindow, title: &str, message: String, exit_code: i32) {
+    if let Err(error) = window.show() {
+        log::warn!("Could not show the startup window: {error}");
+    }
+    window
+        .app_handle()
+        .dialog()
+        .message(message)
+        .parent(window)
+        .title(title)
+        .kind(MessageDialogKind::Error)
+        .show(move |_| std::process::exit(exit_code));
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -207,7 +221,7 @@ pub fn run() {
             let navigation_app = app.handle().clone();
             let popup_app = app.handle().clone();
             let download_app = app.handle().clone();
-            tauri::WebviewWindowBuilder::from_config(app.handle(), &main_config)?
+            let main_window = tauri::WebviewWindowBuilder::from_config(app.handle(), &main_config)?
                 .on_navigation(move |url| {
                     navigation::handle_navigation(&navigation_app, url)
                 })
@@ -276,17 +290,12 @@ pub fn run() {
                             )
                         } else {
                             format!(
-                                "Vireo can't open the database at:\n\n{}\n\nIt's from an incompatible older version of Vireo. To start fresh, move this file aside (for example, rename it with a `.bak` suffix) and relaunch.\n\nDetails: {}\n\nLogs: {}",
+                                "Vireo can't upgrade the catalog at:\n\n{}\n\nKeep the original catalog if you need its edits or organization. To start fresh instead, back up the catalog and move it aside before relaunching Vireo.\n\nDetails: {}\n\nLogs: {}",
                                 db_path, reason, log_dir
                             )
                         };
-                        app.handle()
-                            .dialog()
-                            .message(message)
-                            .title("Incompatible Vireo Database")
-                            .kind(MessageDialogKind::Error)
-                            .blocking_show();
-                        std::process::exit(3);
+                        show_startup_error(&main_window, "Incompatible Vireo Database", message, 3);
+                        return Ok(());
                     }
                     Err(e) => {
                         // Any other startup failure (corrupt DB, locked file,
@@ -302,16 +311,16 @@ pub fn run() {
                             .unwrap_or_else(|_| "the Vireo application log directory".into());
                         log::error!("Failed to start sidecar: {}", reason);
                         eprintln!("Vireo: Failed to start Python backend: {}", reason);
-                        app.handle()
-                            .dialog()
-                            .message(format!(
+                        show_startup_error(
+                            &main_window,
+                            "Vireo Couldn't Start",
+                            format!(
                                 "Vireo couldn't start its backend.\n\nDetails: {}\n\nTry relaunching. If the problem persists, check the logs at:\n{}",
                                 reason, log_dir
-                            ))
-                            .title("Vireo Couldn't Start")
-                            .kind(MessageDialogKind::Error)
-                            .blocking_show();
-                        std::process::exit(1);
+                            ),
+                            1,
+                        );
+                        return Ok(());
                     }
                 }
             }

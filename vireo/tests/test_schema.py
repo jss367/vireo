@@ -44,6 +44,33 @@ def test_ensure_schema_refuses_catalog_older_than_retired_migrations(tmp_path):
         assert conn.execute("PRAGMA user_version").fetchone()[0] == old_version
 
 
+def test_desktop_startup_reports_catalog_below_upgrade_floor(tmp_path, capsys):
+    import json
+    from types import SimpleNamespace
+
+    import app as vireo_app
+
+    catalog = tmp_path / "vireo.db"
+    minimum = schema.OLDEST_UPGRADABLE_VERSION
+    with sqlite3.connect(catalog) as conn:
+        conn.execute("CREATE TABLE photos (id INTEGER PRIMARY KEY)")
+        conn.execute(f"PRAGMA user_version = {minimum - 1}")
+    original = catalog.read_bytes()
+
+    args = SimpleNamespace(db=str(catalog), thumb_dir=str(tmp_path / "thumbs"))
+    with pytest.raises(SystemExit) as excinfo:
+        vireo_app._create_app_or_exit(args, api_token=None)
+
+    assert excinfo.value.code == 3
+    payload = json.loads(capsys.readouterr().err.strip().splitlines()[-1])
+    assert payload["error"] == "incompatible_database"
+    assert payload["db_path"] == str(catalog)
+    assert payload["newer"] is False
+    assert f"schema version {minimum - 1}" in payload["reason"]
+    assert f"oldest version this build can upgrade ({minimum})" in payload["reason"]
+    assert catalog.read_bytes() == original
+
+
 def test_ensure_schema_refuses_catalog_with_unconverted_legacy_folder_grants(tmp_path):
     """A populated catalog carrying rows in the retired
     ``workspace_sync_only_folders`` table is refused: those grants were only
