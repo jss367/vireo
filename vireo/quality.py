@@ -298,6 +298,20 @@ def compute_noise_estimate(image, mask):
     return round(float(np.var(ring_values)), 2)
 
 
+def eye_measurement_window(image_size, eye_xy, bbox, k):
+    """Pixel bounds of the eye measurement on the analysis raster."""
+    x, y = eye_xy
+    x0, y0, x1, y1 = bbox
+    side = max(8, int(round(k * min(x1 - x0, y1 - y0))))
+    half = side // 2
+    img_w, img_h = image_size
+    wx0 = max(0, int(x - half))
+    wy0 = max(0, int(y - half))
+    wx1 = min(img_w, int(x + half))
+    wy1 = min(img_h, int(y + half))
+    return wx0, wy0, wx1, wy1
+
+
 def compute_eye_tenengrad(image, eye_xy, bbox, k=0.08):
     """Multi-scale Tenengrad in a small window around an eye keypoint.
 
@@ -318,15 +332,7 @@ def compute_eye_tenengrad(image, eye_xy, bbox, k=0.08):
         float — raw multi-scale Tenengrad in the window, 0.0 if the window
         is empty after clamping to image bounds.
     """
-    x, y = eye_xy
-    x0, y0, x1, y1 = bbox
-    side = max(8, int(round(k * min(x1 - x0, y1 - y0))))
-    half = side // 2
-    img_w, img_h = image.size
-    wx0 = max(0, int(x - half))
-    wy0 = max(0, int(y - half))
-    wx1 = min(img_w, int(x + half))
-    wy1 = min(img_h, int(y + half))
+    wx0, wy0, wx1, wy1 = eye_measurement_window(image.size, eye_xy, bbox, k)
     if wx1 <= wx0 or wy1 <= wy0:
         return 0.0
     window = image.crop((wx0, wy0, wx1, wy1))

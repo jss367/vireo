@@ -13,6 +13,7 @@ from subject_readiness import usable_selected_analysis
 def measure_eye(db, photo_id, detection, image, mask, effective_cfg):
     import keypoints as kp
     from pipeline import _best_eye_by_tenengrad, _eye_candidates_in_mask, _keypoints_in_mask, _resolve_keypoint_model
+    from quality import eye_measurement_window
 
     settings = effective_cfg.get("pipeline", {})
     result = dict.fromkeys(("eye_x", "eye_y", "eye_conf", "eye_tenengrad"))
@@ -43,7 +44,10 @@ def measure_eye(db, photo_id, detection, image, mask, effective_cfg):
 
     result["eye_status"] = "not_located"
     if eyes:
-        eye, score = _best_eye_by_tenengrad(image, eyes, bbox, config_value(settings, "eye_window_k", section="pipeline"))
+        fraction = config_value(settings, "eye_window_k", section="pipeline")
+        eye, score = _best_eye_by_tenengrad(image, eyes, bbox, fraction)
+        left, top, right, bottom = eye_measurement_window(image.size, (eye["x"], eye["y"]), bbox, fraction)
+        result["eye_measurement_box"] = [left / iw, top / ih, (right - left) / iw, (bottom - top) / ih]
         result.update(eye_x=eye["x"] / iw, eye_y=eye["y"] / ih, eye_conf=eye["conf"],
                       eye_tenengrad=score, eye_status="measured")
     return result

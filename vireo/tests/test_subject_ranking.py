@@ -302,6 +302,9 @@ def test_eye_measurements_are_selected_and_mask_gated(comparison_library, monkey
     result = measure_eye(db, pids[0], detection, image, mask, {"pipeline": {"eye_detect_enabled": True}})
     assert result["head_landmarks"] == {"bill": [45 / 320, 85 / 160]}
     assert result["eye_x"] == 70 / 320 and result["eye_conf"] == .9
+    left, top, width, height = result["eye_measurement_box"]
+    assert width * 320 == height * 160 >= 8
+    assert (left + width / 2, top + height / 2) == (70 / 320, 80 / 160)
 
 
 def test_analysis_cancellation_and_deleted_detection_publish_nothing(comparison_library):
@@ -859,7 +862,7 @@ def test_head_inspection_uses_only_current_selected_subject_and_rendition(compar
     pid = pids[0]
     monkeypatch.setattr('subject_analysis.measure_eye', lambda *args: {
         'eye_x': .2, 'eye_y': .5, 'eye_status': 'measured', 'eye_tenengrad': 22,
-        'head_landmarks': {'bill': [.1, .5]},
+        'head_landmarks': {'bill': [.1, .5]}, 'eye_measurement_box': [.18, .48, .04, .04],
     })
     _analyze(db, [pid], SubjectComparison(TARGET), cfg.load())
     client = app.test_client()
@@ -868,6 +871,10 @@ def test_head_inspection_uses_only_current_selected_subject_and_rendition(compar
     assert result.status_code == 200, result.get_json()
     assert result.headers['X-Vireo-Focus-Basis'] == 'head'
     assert result.headers['X-Vireo-Focus-Center'] == '0.1500,0.5000'
+    eye = client.get(url + '&anchor=eye')
+    assert eye.headers['X-Vireo-Focus-Center'] == '0.2000,0.5000'
+    assert eye.headers['X-Vireo-Focus-Eye-Detail'] == '22'
+    assert eye.headers['X-Vireo-Focus-Eye-Box'] == '0.18,0.48,0.04,0.04'
     assert result.headers['X-Vireo-Detection-Id'] == str(ids[pid][0])
     assert Image.open(io.BytesIO(result.data)).size == (128, 128)
     pinned = url.replace('basis=head&', '') + '&analysis_key=' + result.headers['X-Vireo-Analysis-Key']

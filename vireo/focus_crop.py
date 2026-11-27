@@ -223,7 +223,7 @@ def focus_evidence_headers(photo, boxes, *, bound=False):
     return headers
 
 
-def head_focus_point(features, box, raster, size):
+def head_focus_point(features, box, raster, size, *, prefer_eye=False):
     """Fit the measured head landmarks when possible, retaining the eye as anchor."""
     def location(pair):
         if (isinstance(pair, (list, tuple)) and len(pair) == 2
@@ -233,6 +233,8 @@ def head_focus_point(features, box, raster, size):
         return None
 
     eye = location((features.get("eye_x"), features.get("eye_y"))) if features.get("eye_status") == "measured" else None
+    if prefer_eye and eye is not None:
+        return eye, "eye"
     verified = {}
     landmarks = features.get("head_landmarks")
     if isinstance(landmarks, dict):

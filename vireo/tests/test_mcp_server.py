@@ -750,6 +750,15 @@ def test_burst_carries_the_evidence_behind_the_ranking(mcp):
     assert not any(key.endswith("_url") for key in frame)
 
 
+def test_sequence_pages_follow_camera_order(mcp):
+    from test_burst_evidence import _folder_id, _seed_burst
+
+    server, db, _ = mcp
+    pids = _seed_burst(db, _folder_id(db), 3069, [10, 80, 30])
+    result = call(server, "burst", photo_id=pids[0], order="sequence", offset=1, limit=2)
+    assert [card["id"] for card in result["frames"]] == pids[1:]
+
+
 def test_burst_reaches_every_frame_of_a_long_burst(mcp):
     from test_burst_evidence import _folder_id, _seed_burst
 

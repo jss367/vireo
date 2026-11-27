@@ -530,6 +530,19 @@ body { padding-bottom: 36px; }
   </div>
 </dialog>
 {% include '_photo_compare.html' %}
+<dialog id="cullInspection" aria-labelledby="cullInspectionTitle">
+  <header><h2 id="cullInspectionTitle">Inspect focus and framing</h2>
+    <form method="dialog"><button autofocus>Close</button></form></header>
+  <p>Click an eye or wingtip in either full frame to inspect that location.</p>
+  <label><input id="cullShowMeasures" type="checkbox"> Show sharpness measurements</label>
+  <p id="cullDetailComparison"></p>
+  <div id="cullInspectPair"></div>
+  <button id="cullBlink" type="button" disabled>Flip crops (F)</button>
+  <div id="cullBlinkView" hidden></div>
+  <h3>Burst sequence</h3>
+  <p>Choose a frame to compare it with its neighbor for changes in pose or behavior.</p>
+  <div id="cullFilm"></div>
+</dialog>
 <script defer src="/static/vireo-browse-compare.js"></script>
 <script defer src="/static/cull/state.js"></script>
 <script defer src="/static/cull/collections.js"></script>
@@ -542,6 +555,7 @@ body { padding-bottom: 36px; }
 <script defer src="/static/cull/render.js"></script>
 <script defer src="/static/cull/focus.js"></script>
 <script defer src="/static/cull/actions.js"></script>
+<script defer src="/static/cull/inspection.js"></script>
 <script defer src="/static/cull/favorites.js"></script>
 <script defer src="/static/cull/boot.js"></script>
 

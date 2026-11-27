@@ -349,6 +349,7 @@ def test_head_window_contains_visible_landmarks_at_native_scale(eye, bill, crown
     box = _box(0, .2, .8, .6)
     center, basis = head_focus_point(features, box, raster, 512)
     assert basis == "head"
+    assert head_focus_point(features, box, raster, 512, prefer_eye=True) == (eye, "eye")
     window, _ = focus_window(raster, center, 512)
     l, t, r, b = window
     assert r - l == b - t == 512

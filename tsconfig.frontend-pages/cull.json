@@ -2,6 +2,7 @@
   "extends": "../tsconfig.frontend.base.json",
   "files": [
     "../types/in-page-dialogs.d.ts",
+    "../types/dialogs.d.ts",
     "../types/pages/cull.d.ts",
     "../types/page-hooks.d.ts",
     "../vireo/static/cull/state.js",
@@ -15,6 +16,7 @@
     "../vireo/static/cull/render.js",
     "../vireo/static/cull/focus.js",
     "../vireo/static/cull/actions.js",
+    "../vireo/static/cull/inspection.js",
     "../vireo/static/cull/favorites.js",
     "../vireo/static/cull/boot.js"
   ]
