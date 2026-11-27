@@ -33,22 +33,21 @@ function appendJobLink(element, jobId) {
 }
 
 // Standing notices showing in the panel (navbar-standing-notices.js reports
-// them). They count toward the badge until their condition clears, so
-// marking history read never hides one.
+// them). They keep the bell marked until their condition clears.
+// Only persisted unread warnings and errors contribute to its number.
 let standing = {count: 0, urgent: false, summary: ''};
 
 function updateBadge() {
   const unread = store.read().filter(entry => !entry.read && ['warning', 'error'].includes(entry.type)).length;
-  const count = unread + standing.count;
   const badge = document.getElementById('notificationBadge');
   if (badge) {
-    badge.textContent = String(count);
-    badge.hidden = !count;
+    badge.textContent = unread ? String(unread) : '';
+    badge.hidden = !unread && !standing.count;
     badge.dataset.level = unread || standing.urgent ? 'warning' : 'notice';
   }
   const parts = [];
   if (standing.count) parts.push(standing.count + (standing.count === 1 ? ' needs attention' : ' need attention'));
-  if (unread) parts.push(unread + ' unread warnings or errors');
+  if (unread) parts.push(unread + (unread === 1 ? ' unread warning or error' : ' unread warnings or errors'));
   button?.setAttribute('aria-label', ['Notifications'].concat(parts).join(', '));
   if (button) button.title = standing.summary || 'Notifications';
 }

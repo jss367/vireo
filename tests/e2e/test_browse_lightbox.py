@@ -67,7 +67,7 @@ def test_browse_lightbox_arrows_navigate(live_server, page):
     counter = page.locator("#lightboxCounter")
     expect(counter).to_be_visible()
     expect(counter).to_contain_text("1 /")
-    expect(counter).to_contain_text(first_filename)
+    expect(counter).not_to_contain_text(first_filename)
 
     keywords = page.locator("#lightboxKeywords")
     expect(keywords).to_be_visible()
@@ -78,14 +78,14 @@ def test_browse_lightbox_arrows_navigate(live_server, page):
 
     expect(filename_display).not_to_have_text(first_filename)
     expect(counter).to_contain_text("2 /")
-    expect(counter).to_contain_text(filename_display.text_content())
+    expect(counter).not_to_contain_text(filename_display.text_content())
     expect(keywords).to_contain_text("None")
     expect(keywords.locator(".lightbox-keyword")).to_have_count(0)
 
     page.locator("[title='Previous (←)']").click()
     expect(filename_display).to_have_text(first_filename)
     expect(counter).to_contain_text("1 /")
-    expect(counter).to_contain_text(first_filename)
+    expect(counter).not_to_contain_text(first_filename)
     expect(keywords.locator(".lightbox-keyword")).to_have_text("Red-tailed Hawk")
 
 
@@ -142,7 +142,7 @@ def test_browse_lightbox_counter_counts_the_whole_result(live_server, page):
     }
 
     cards.first.dblclick()
-    expect(page.locator("#lightboxCounter")).to_contain_text("1 / 5 ")
+    expect(page.locator("#lightboxCounter")).to_have_text("1 / 5")
 
 
 def test_browse_lightbox_shows_exposure_and_keeps_labels_apart(live_server, page):
@@ -291,7 +291,7 @@ def test_browse_lightbox_autoloads_next_page_at_navigation_boundary(
     page.wait_for_function("browseState.photos.length > 2", timeout=5000)
     # The counter counts the whole result, not the pages loaded so far.
     total = page.evaluate("pageModules.pagination.pagination.total")
-    expect(page.locator("#lightboxCounter")).to_contain_text(f"2 / {total} ")
+    expect(page.locator("#lightboxCounter")).to_have_text(f"2 / {total}")
     page.evaluate("lightboxNav(1)")
 
     page.wait_for_function(

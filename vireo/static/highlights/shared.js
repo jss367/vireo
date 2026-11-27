@@ -7,14 +7,15 @@
 // a shared function that is absent keeps its guard here and one replaced at
 // runtime (tests stub showToast and safeFetch) is still the one called. Live
 // lightbox state (the open photo, its navigation list) is read through
-// getters for the same reason. The escape helper, VireoTextSearch and
-// VireoViewPreferences come from vireo-utils.js, which _navbar.html loads
+// getters for the same reason. The escape helper, VireoTextSearch,
+// VireoViewPreferences and VireoLoadingStatus come from vireo-utils.js, which _navbar.html loads
 // first and nobody replaces, so they are bound once.
 
 export const escapeAttr = window.escapeAttr;
 export const photoThumbnailUrl = window.photoThumbnailUrl;
 export const VireoTextSearch = window.VireoTextSearch;
 export const VireoViewPreferences = window.VireoViewPreferences;
+export const VireoLoadingStatus = window.VireoLoadingStatus;
 
 /**
  * @template T

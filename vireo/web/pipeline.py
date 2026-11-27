@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from config import config_value, read_raw_config_file, settings_write_lock
 from flask import Blueprint, jsonify, request
+from job_runner.history import TERMINAL_STATUSES
 from jobs import SLOT_CAP
 from photo_payload import (
     attach_edit_recipes,
@@ -108,18 +109,29 @@ def create_pipeline_blueprint(
         runner = get_runner()
         active = 0
         queued = 0
+        tracked_id = request.args.get("job")
+        tracked = {}
         for j in runner.list_jobs():
             if j.get("type") != "pipeline":
                 continue
             status = j.get("status")
+            if tracked_id and j.get("id") == tracked_id:
+                tracked["job"] = {"id": tracked_id, "status": status,
+                                  "phase": (j.get("progress") or {}).get("phase")}
             if status in {"running", "pausing", "paused"}:
                 active += 1
             elif status == "queued":
                 queued += 1
+        if tracked_id and not tracked:
+            db = get_db()
+            saved_status = db.job_history.pipeline_status(tracked_id, db.active_workspace_id)
+            if saved_status in TERMINAL_STATUSES:
+                tracked["job"] = {"id": tracked_id, "status": saved_status, "phase": None}
         return jsonify({
             "active": active,
             "queued": queued,
             "slot_cap": SLOT_CAP,
+            **tracked,
         })
 
     def _plan_path_list(body: JsonDict, key: str) -> tuple[list[str] | None, ErrorResponse | None]:
@@ -530,7 +542,7 @@ def create_pipeline_blueprint(
                 workspace_id=active_ws,
                 runtime_warning=runtime_warning,
             )
-        result = {"job_id": job_id}
+        result: JsonDict = {"job_id": job_id, "workspace_id": active_ws}
         if model_warning:
             result["model_warning"] = model_warning
         return jsonify(result)

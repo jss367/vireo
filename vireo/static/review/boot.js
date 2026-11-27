@@ -32,6 +32,9 @@ document.addEventListener('DOMContentLoaded', _syncReviewDetectionBoxesBtn);
 
 /* ---------- Bootstrap ---------- */
 async function initializeReviewPage() {
+  // The queue, the collection list and the saved filters load before the
+  // predictions do; the line covers that wait too.
+  reviewLoadStatus().start('Loading photos…');
   VireoViewPreferences.restoreAll(/** @type {HTMLElement} */ (document.getElementById('reviewBar')));
   currentSort = /** @type {HTMLSelectElement} */ (document.getElementById('sortSelect')).value;
   updateThumbSize(/** @type {HTMLInputElement} */ (document.getElementById('thumbSizeSlider')).value);
@@ -71,7 +74,12 @@ async function initializeReviewPage() {
   bindReviewToolReorder();
 }
 initializeReviewPage().catch(function(error) {
-  showToast('Could not initialize Review: ' + reviewErrorMessage(error, 'Reload to retry.'), 'error');
+  var message = 'Could not initialize Review: ' + reviewErrorMessage(error, 'Reload to retry.');
+  showToast(message, 'error');
+  reviewLoadStatus().fail(message, {
+    retry: function() { window.location.reload(); },
+    retryLabel: 'Reload',
+  });
 });
 
 // Undo/redo lives in the shared navbar. The database changes there, but this

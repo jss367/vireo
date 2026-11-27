@@ -7,10 +7,8 @@ function setPipelineSidebarCollapsed(collapsed, persist) {
   var toggle = /** @type {HTMLButtonElement} */ (document.getElementById('pipelineSidebarToggle'));
   if (!layout || !toggle) return;
   layout.classList.toggle('sidebar-collapsed', !!collapsed);
-  toggle.textContent = collapsed ? '\u203a' : '\u2039';
+  toggle.textContent = collapsed ? 'Adjust thresholds' : 'Hide thresholds';
   toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
-  toggle.setAttribute('aria-label', collapsed ? 'Expand sidebar' : 'Collapse sidebar');
-  toggle.title = collapsed ? 'Expand sidebar' : 'Collapse sidebar';
   if (persist !== false) {
     try {
       window.localStorage.setItem(PIPELINE_SIDEBAR_STORAGE_KEY, collapsed ? '1' : '0');
@@ -20,13 +18,15 @@ function setPipelineSidebarCollapsed(collapsed, persist) {
 
 function togglePipelineSidebar() {
   var layout = /** @type {HTMLElement} */ (document.getElementById('pipelineLayout'));
-  setPipelineSidebarCollapsed(!(layout && layout.classList.contains('sidebar-collapsed')));
+  var opening = layout && layout.classList.contains('sidebar-collapsed');
+  setPipelineSidebarCollapsed(!opening);
+  if (opening) document.getElementById('pipelineSidebarContent')?.focus();
 }
 
 function initPipelineSidebarState() {
-  var collapsed = false;
+  var collapsed = true;
   try {
-    collapsed = window.localStorage.getItem(PIPELINE_SIDEBAR_STORAGE_KEY) === '1';
+    collapsed = window.localStorage.getItem(PIPELINE_SIDEBAR_STORAGE_KEY) !== '0';
   } catch (e) {}
   setPipelineSidebarCollapsed(collapsed, false);
 }
@@ -51,7 +51,9 @@ function persistPipelineReviewViewState() {
 
 function applyPipelineReviewToolbarState() {
   /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('.filter-btn[data-filter]')).forEach(function(btn) {
-    btn.classList.toggle('active', btn.getAttribute('data-filter') === activeFilter);
+    var selected = btn.getAttribute('data-filter') === activeFilter;
+    btn.classList.toggle('active', selected);
+    btn.setAttribute('aria-pressed', String(selected));
   });
 
   var hideBtn = /** @type {HTMLButtonElement} */ (document.getElementById('hideConfirmedBtn'));

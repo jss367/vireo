@@ -23,8 +23,8 @@ import { clearSelection } from './selection.js';
   var n = (state.missesData[cat] || []).length;
   if (n === 0) return;
   if (!(await confirmInPage({
-    title: 'Set flag=rejected on all ' + n + ' photos in "' + label + '"?',
-    message: 'Photos are not deleted — use the existing purge flow to remove them.',
+    title: 'Reject all ' + n + ' photos in "' + label + '"?',
+    message: 'The files will stay on disk.',
     confirmLabel: 'Reject ' + n + ' photos',
     danger: true,
   }))) return;

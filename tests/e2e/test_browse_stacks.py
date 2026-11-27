@@ -1323,7 +1323,7 @@ def test_deleting_a_stacks_cover_in_the_lightbox_keeps_the_stack_in_the_total(
 
     cover.dblclick()
     expect(page.locator("#lightboxFilename")).to_have_text("hawk2.jpg")
-    expect(page.locator("#lightboxCounter")).to_contain_text("/ 3 ")
+    expect(page.locator("#lightboxCounter")).to_have_text(re.compile(r"^\d+ / 3$"))
     page.locator("#lightboxDeleteBtn").click()
     page.locator("#deleteConfirmBtn").click()
     expect(page.locator("#lightboxFilename")).to_have_text("robin1.jpg")
@@ -1335,7 +1335,7 @@ def test_deleting_a_stacks_cover_in_the_lightbox_keeps_the_stack_in_the_total(
     assert len(totals_requests) == 1
     page.wait_for_load_state("networkidle")
     assert page.evaluate("pageModules.pagination.pagination.total") == 3
-    expect(page.locator("#lightboxCounter")).to_contain_text("/ 3 ")
+    expect(page.locator("#lightboxCounter")).to_have_text(re.compile(r"^\d+ / 3$"))
 
 
 def test_lightbox_navigation_follows_a_double_clicked_stack(live_server, page):

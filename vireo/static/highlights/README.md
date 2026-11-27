@@ -19,7 +19,7 @@ has no Jinja values to hand over, and its controls name their handlers in
 | `state.js` | Page state: the `state` object (the last `/api/highlights` response, expanded rows, the folder name, the debounce timer, collections, the species modal, the lightbox photo, the reject undo and the load and refetch sequences) and `WORKSPACE_SCOPE` |
 | `shared.js` | The boundary with shared code: every navbar, lightbox and `vireo-utils.js` global the page uses, and `registerPageHooks()` |
 | `scope.js` | Score formatting, the scope and filter request parameters, the selected folder or collection, and what a highlight write claimed (`topHighlightToast`, `addedHighlightToast`) |
-| `loading.js` | `loadHighlights()` with its reject-prune guard, bucket sorting, the advanced-mode sort options, `debounceLoad`, and the undo/redo hook |
+| `loading.js` | `loadHighlights()` with its reject-prune guard and the loading line (`#highlightsStatus`: the wait, its seconds, a failure with a retry), bucket sorting, the advanced-mode sort options, `debounceLoad`, and the undo/redo hook |
 | `render.js` | `render()`, each species row with the line saying why its first photo leads (`bucketDecision`), the unidentified row, the expand and row action buttons, and `loadMoreBucket` |
 | `cards.js` | Photo cards, their thumbnails, and their click and highlight-order buttons |
 | `species.js` | Confirming a row, the species modal, and adding, removing, reordering and promoting highlights, each scoped to the selected folder or collection |

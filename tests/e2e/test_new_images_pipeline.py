@@ -144,8 +144,8 @@ def test_new_images_banner_drives_import(fresh_server, page):
 
     # --- Step 2: visit any Vireo page; banner should appear. ---
     page.goto(f"{url}/browse")
-    # The bell counts the notice before the panel is opened.
-    expect(page.locator("#notificationBadge")).to_have_text("1", timeout=5000)
+    # The bell signals the notice before the panel is opened.
+    expect(page.locator("#notificationBadge")).to_be_visible(timeout=5000)
     open_notices(page)
     banner = page.locator("#newImagesBanner")
     expect(banner).to_be_visible(timeout=5000)

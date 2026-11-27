@@ -69,6 +69,7 @@ interface Window {
     read(key: string): string | null;
     write(key: string, value: string): void;
   };
+  VireoLoadingStatus: VireoLoadingStatusApi;
   safeFetch<T>(url: string, init?: RequestInit, options?: {toast?: boolean}): Promise<T>;
   showToast?(message: string, kind?: string): void;
   openLightbox(id: number, filename: string, photos: HighlightsLightboxPhoto[]): void;

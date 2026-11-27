@@ -286,7 +286,7 @@ def test_pipeline_slots_counts_only_pipeline_jobs(app_and_db):
         "status": "running",
         "started_at": "2026-05-27T10:00:00",
         "finished_at": None,
-        "progress": {"current": 1, "total": 10},
+        "progress": {"current": 1, "total": 10, "phase": "Detect subjects"},
         "errors": [],
         "config": {},
         "result": None,
@@ -334,10 +334,25 @@ def test_pipeline_slots_counts_only_pipeline_jobs(app_and_db):
     resp = client.get('/api/pipeline/slots')
     assert resp.status_code == 200
     data = resp.get_json()
+    tracked = client.get('/api/pipeline/slots?job=pipe-running-1').get_json()
+    assert tracked["job"] == {"id": "pipe-running-1", "status": "running",
+                              "phase": "Detect subjects"}
     assert data["active"] == 2, \
         "running and paused pipelines both occupy active slots"
     assert data["queued"] == 0
     assert data["slot_cap"] == SLOT_CAP
+
+
+def test_pipeline_slots_restore_retained_terminal_status(app_and_db):
+    app, db = app_and_db
+    db.conn.execute(
+        "INSERT INTO job_history (id, type, status, workspace_id) VALUES (?, ?, ?, ?)",
+        ("past-run", "pipeline", "failed", db.active_workspace_id),
+    )
+    db.commit()
+    data = app.test_client().get("/api/pipeline/slots?job=past-run").get_json()
+    assert data["job"] == {"id": "past-run", "status": "failed", "phase": None}
+    assert data["active"] == data["queued"] == 0
 
 
 def test_pipeline_slots_counts_queued(app_and_db):

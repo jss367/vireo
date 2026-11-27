@@ -65,6 +65,7 @@ def test_review_photos_appear_before_readiness_and_the_banner_follows(live_serve
 
     asked["readiness"][0].fulfill(json={"workspace_id": 1, "review_readiness": {**READINESS, "state": "ready"}})
 
+    page.get_by_text("Review details", exact=True).click()
     expect(page.locator("#degradedBanner")).to_be_visible()
     expect(page.locator("#degradedBannerText")).to_contain_text("computed without embeddings")
     expect(page.locator("#encountersContainer .photo-card")).to_have_count(4)

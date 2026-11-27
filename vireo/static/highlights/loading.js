@@ -2,7 +2,7 @@
 // and the advanced-mode sort options.
 // ES module.
 
-import { VireoViewPreferences, isAdvancedMode, safeFetch } from './shared.js';
+import { VireoLoadingStatus, VireoViewPreferences, isAdvancedMode, safeFetch, showToast } from './shared.js';
 import { hideHighlightUndo, updateHighlightsLightboxControls } from './lightbox.js';
 import { removeRejectedPhotoFromModel } from './rejects.js';
 import { render } from './render.js';
@@ -36,10 +36,45 @@ function populateScopePicker(folderSelect, folderRows, collectionRows) {
   }
 }
 
+// Every species in the workspace is ranked for this request, which takes
+// seconds on a large catalog; one folder or collection is a fraction of it.
+var WORKSPACE_LOAD_HINT = 'Vireo is ranking the photos of every species in this workspace. '
+  + 'A folder or collection loads faster.';
+
+/** @type {VireoLoadingStatusHandle | null} */
+var loadStatus = null;
+
+/** The line under the controls that says a load is running or has failed. */
+function highlightsLoadStatus() {
+  if (!loadStatus) {
+    loadStatus = VireoLoadingStatus.create(
+      /** @type {HTMLElement} */ (document.getElementById('highlightsStatus')),
+      { content: document.getElementById('content') }
+    );
+  }
+  return loadStatus;
+}
+
+/** @param {unknown} error */
+function failureReason(error) {
+  return error instanceof Error && error.message ? ': ' + error.message : '';
+}
+
+/** @param {unknown} error @param {boolean} refreshCollections */
+function showLoadFailure(error, refreshCollections) {
+  highlightsLoadStatus().fail('Could not load highlights' + failureReason(error), {
+    // The failure is on screen; a retry that fails again shows the line again.
+    retry: function() { loadHighlights(refreshCollections).catch(function() {}); },
+  });
+}
+
 /** @param {boolean} [refreshCollections] */
 export async function loadHighlights(refreshCollections = false) {
   var params = highlightsScopeParams();
   var scope = params.toString();
+  highlightsLoadStatus().start('Loading highlights…', {
+    hint: params.get('scope') === 'workspace' ? WORKSPACE_LOAD_HINT : '',
+  });
   var folderSelect = /** @type {HTMLSelectElement} */ (document.getElementById('folderSelect'));
   if (!folderSelect.options.length || refreshCollections) params.set('include_collections', '1');
   params.set('limit_per_bucket', String(Math.max(20, parseInt(/** @type {HTMLInputElement} */ (document.getElementById('perRowSlider')).value))));
@@ -53,14 +88,17 @@ export async function loadHighlights(refreshCollections = false) {
   /** @type {HighlightsData} */
   var data;
   try {
-    data = await safeFetch('/api/highlights?' + params);
+    // The page reports the failure itself, so safeFetch does not also toast it.
+    data = await safeFetch('/api/highlights?' + params, undefined, { toast: false });
   } catch (error) {
     if (loadSeq === state.highlightsLoadSeq && params.has('collection_id')) {
-      // safeFetch has shown the failure. Return the selector and grid to a usable scope.
+      // Say why the selection changes, then return the selector and grid to a usable scope.
+      showToast('Could not load that collection' + failureReason(error) + '. Showing all folders.', 'error');
       folderSelect.value = WORKSPACE_SCOPE;
       VireoViewPreferences.write('vireo.highlights.folder', WORKSPACE_SCOPE);
       return loadHighlights(true);
     }
+    if (loadSeq === state.highlightsLoadSeq) showLoadFailure(error, refreshCollections);
     throw error;
   }
   if (loadSeq !== state.highlightsLoadSeq) return;
@@ -106,6 +144,7 @@ export async function loadHighlights(refreshCollections = false) {
     ? (selectedOption.dataset?.name || selectedOption.textContent || '')
     : '';
 
+  highlightsLoadStatus().done();
   render();
 }
 

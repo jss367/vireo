@@ -1867,7 +1867,7 @@ def test_pipeline_review_explains_partial_cache(live_server, page):
     expect(banner).to_contain_text(
         f"Showing {len(photo_ids)} of {len(live_server['data']['photos'])}"
     )
-    expect(banner).to_contain_text("selected folders")
+    expect(banner).to_contain_text("Run Process on additional photos")
 
 
 def test_pipeline_review_folder_and_collection_scopes_filter_saved_review(live_server, page):
@@ -2068,33 +2068,28 @@ def test_pipeline_review_sidebar_collapses_and_persists(live_server, page):
 
     page.goto(f"{live_server['url']}/pipeline/review")
 
-    layout = page.locator("#pipelineLayout")
-    sidebar = page.locator("#pipelineSidebar")
     content = page.locator("#pipelineSidebarContent")
-    toggle = page.locator("[data-testid='pipeline-sidebar-toggle']")
-
-    expect(content).to_be_visible()
-    expanded_width = sidebar.bounding_box()["width"]
-
-    toggle.click()
-
-    expect(layout).to_have_class(re.compile(r"\bsidebar-collapsed\b"))
+    toggle = page.get_by_role("button", name="Adjust thresholds")
     expect(content).to_be_hidden()
     expect(toggle).to_have_attribute("aria-expanded", "false")
-    page.wait_for_timeout(250)
-    collapsed_width = sidebar.bounding_box()["width"]
-    assert collapsed_width < expanded_width
-    assert collapsed_width <= 60
+    expect(page.locator("#statTotalPhotos")).to_be_hidden()
+    expect(page.locator('#filterBar [data-filter="REVIEW"]')).to_contain_text("(2)")
 
+    photo = page.locator(".photo-card img").first
+    for width in (1440, 1024):
+        page.set_viewport_size({"width": width, "height": 900})
+        expect(photo).to_be_in_viewport()
+        assert photo.bounding_box()["y"] < 400
+
+    toggle.click()
+    expect(content).to_be_visible()
     page.reload()
-    expect(layout).to_have_class(re.compile(r"\bsidebar-collapsed\b"))
+    close = page.get_by_role("button", name="Hide thresholds")
+    expect(close).to_have_attribute("aria-expanded", "true")
+    close.click()
     expect(content).to_be_hidden()
+    page.reload()
     expect(toggle).to_have_attribute("aria-expanded", "false")
-
-    toggle.click()
-    expect(layout).not_to_have_class(re.compile(r"\bsidebar-collapsed\b"))
-    expect(content).to_be_visible()
-    expect(toggle).to_have_attribute("aria-expanded", "true")
 
 
 def test_pipeline_review_view_settings_persist(live_server, page):
@@ -2115,6 +2110,7 @@ def test_pipeline_review_view_settings_persist(live_server, page):
     expect(page.locator(".photo-card.keep")).to_have_count(1)
     expect(page.locator(".photo-card.review")).to_have_count(0)
 
+    page.get_by_role("button", name="Adjust thresholds").click()
     show_labels = page.locator("#showPhotoLabelsChk")
     expect(show_labels).not_to_be_checked()
     show_labels.check()

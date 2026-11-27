@@ -811,9 +811,8 @@ def test_failed_edit_reload_commits_identity_before_freeing_controls(live_server
     # filename, counter and committed id naming 115 while the action bar acts
     # on 116 -- the user flags a photo the lightbox is not showing.
     assert page.evaluate("vireoLightboxSession.displayedPhotoId()") == 116
-    assert page.evaluate(
-        "document.getElementById('lightboxCounter').textContent"
-    ).endswith("photo-16.jpg")
+    expect(page.locator("#lightboxFilename")).to_have_text("photo-16.jpg")
+    expect(page.locator("#lightboxCounter")).to_have_text("17 / 30")
     assert page.evaluate(
         "document.getElementById('lightboxActions').getAttribute('aria-busy')"
     ) == "false"
