@@ -6,6 +6,7 @@ boxes"): a pill that says "Already done" must mean the next run would be a
 no-op, and a pill that says "Will run" must mean there is genuinely new
 work — independent of whether *any* prior output exists in the workspace.
 """
+import json
 import os
 import sys
 
@@ -1160,6 +1161,108 @@ def test_classify_plan_done_prior_when_all_pairs_recorded(tmp_path, monkeypatch)
     classify = plan["stages"]["Classify"]
     assert classify["state"] == "done-prior"
     assert "Already classified" in classify["summary"]
+
+
+_AF_AREA = json.dumps({"MakerNotes": {
+    "AFCoordinatesAvailable": 1, "AFImageWidth": 1000, "AFImageHeight": 1000,
+    "AFAreaXPosition": 300, "AFAreaYPosition": 300, "AFAreaWidth": 60, "AFAreaHeight": 60,
+}})
+
+
+def _classified_photo_detected_without_focus_area(db, folder_id, tmp_path, monkeypatch, filename="a.jpg"):
+    """A classified, masked photo whose detector run predates its camera focus area."""
+    import pipeline_plan
+    from cache_identity import detector_input
+    from labels_fingerprint import TOL_SENTINEL
+
+    _stub_models(monkeypatch, tmp_path)
+    monkeypatch.setattr(pipeline_plan, "_detector_runtime", lambda: "rt")
+    source = "a" * 64
+    pid, did = _add_photo_with_detection(db, folder_id, filename)
+    db.conn.execute("UPDATE photos SET file_hash=?, exif_data=? WHERE id=?", (source, _AF_AREA, pid))
+    db.model_runs.record_detector_run(pid, "megadetector-v6", 1, "rt", detector_input(source, None)[1])
+    db.model_runs.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=3)
+    db.commit()
+    _mark_sam_done(db, pid, str(tmp_path / "mask.png"))
+    return pid, did
+
+
+def _redetection_params(**kwargs):
+    return _params(model_ids=["m1"], skip_eye_keypoints=True, skip_regroup=True, **kwargs)
+
+
+def test_plan_names_photos_classify_will_detect_again(tmp_path, monkeypatch):
+    """A run that detects a photo again must not read "Already classified" and "Masks present"."""
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    _classified_photo_detected_without_focus_area(db, folder_id, tmp_path, monkeypatch)
+
+    stages = compute_plan(db, _redetection_params(), str(tmp_path / "test.db"))["stages"]
+
+    classify, extract = stages["Classify"], stages["Extract"]
+    assert classify["state"] == "will-run"
+    assert classify["summary"].startswith("Will detect 1 photo again and classify what it finds")
+    assert "it was detected" in classify["summary"]
+    assert classify["detail"]["redetect"] == 1
+    assert classify["detail"]["pending"] == 1
+    assert extract["state"] == "will-run"
+    assert extract["summary"].startswith("Will remake masks for up to 1 photo that Classify detects again")
+    assert extract["detail"]["redetect"] == 1
+    assert extract["detail"]["pending"] == 1
+
+
+def test_plan_adds_redetection_to_pending_classify_and_extract_work(tmp_path, monkeypatch):
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    _classified_photo_detected_without_focus_area(db, folder_id, tmp_path, monkeypatch)
+    _add_photo_with_detection(db, folder_id, "unclassified.jpg")
+
+    stages = compute_plan(db, _redetection_params(), str(tmp_path / "test.db"))["stages"]
+
+    assert stages["Classify"]["summary"].startswith("Will classify 1 new pair")
+    assert " + 1 photo to detect again, because " in stages["Classify"]["summary"]
+    assert stages["Classify"]["detail"]["pending"] == 2
+    assert stages["Extract"]["summary"].startswith("Will extract masks for 1 photo")
+    assert stages["Extract"]["summary"].endswith(" + up to 1 photo that Classify detects again")
+    assert stages["Extract"]["detail"]["pending"] == 2
+
+
+def test_plan_does_not_name_redetection_for_a_current_or_reviewed_run(tmp_path, monkeypatch):
+    from cache_identity import catalog_detector_input
+    from pipeline_plan import compute_plan
+    from services import review_decisions
+    db, folder_id = _make_db(tmp_path)
+    current, _ = _classified_photo_detected_without_focus_area(db, folder_id, tmp_path, monkeypatch)
+    db.model_runs.record_detector_run(
+        current, "megadetector-v6", 1, "rt",
+        catalog_detector_input("a" * 64, "megadetector-v6", db.conn.execute(
+            "SELECT vireo_focus_area(exif_data) FROM photos WHERE id=?", (current,)).fetchone()[0])[1])
+    reviewed, did = _classified_photo_detected_without_focus_area(
+        db, folder_id, tmp_path, monkeypatch, filename="reviewed.jpg")
+    db.predictions.add(did, species="Black Phoebe", confidence=.9, model="BioCLIP-2", labels_fingerprint="f")
+    db.commit()
+    prediction_id = db.conn.execute("SELECT id FROM predictions WHERE detection_id=?", (did,)).fetchone()["id"]
+    review_decisions.set_review_status(db, prediction_id, db._ws_id(), "accepted")
+    db.commit()
+
+    stages = compute_plan(db, _redetection_params(), str(tmp_path / "test.db"))["stages"]
+
+    assert stages["Classify"]["state"] == "done-prior"
+    assert stages["Classify"]["detail"]["redetect"] == 0
+    assert stages["Extract"]["state"] == "done-prior"
+    assert "redetect" not in stages["Extract"]["detail"]
+
+
+def test_reclassify_plan_does_not_count_redetection_twice(tmp_path, monkeypatch):
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    _classified_photo_detected_without_focus_area(db, folder_id, tmp_path, monkeypatch)
+
+    stages = compute_plan(db, _redetection_params(reclassify=True), str(tmp_path / "test.db"))["stages"]
+
+    assert stages["Classify"]["summary"].startswith("Re-classify")
+    assert "detect again" not in stages["Classify"]["summary"]
+    assert stages["Classify"]["detail"]["redetect"] == 0
 
 
 def test_classify_plan_timm_intrinsic_uses_runtime_fingerprint(

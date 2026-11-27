@@ -319,6 +319,22 @@ class ModelRunsRepository:
                 ids.difference_update(self.stale_detector_input_ids(candidates))
         return ids
 
+    def detector_run_exists_photo_ids(self, detector_model: str, photo_ids: Collection[int]) -> set[int]:
+        """The photos in ``photo_ids`` that ``detector_model`` has a run row for, current or not.
+
+        Less ``get_detector_run_photo_ids``, these are the photos detection
+        runs on again.
+        """
+        ran: set[int] = set()
+        for chunk in chunked(sorted(set(photo_ids))):
+            ran.update(row["photo_id"] for row in self.conn.execute(
+                f"""SELECT photo_id FROM detector_runs
+                    WHERE detector_model = ?
+                      AND photo_id IN ({','.join('?' * len(chunk))})""",
+                [detector_model, *chunk],
+            ))
+        return ran
+
     def record_classifier_run(
         self,
         detection_id: int,

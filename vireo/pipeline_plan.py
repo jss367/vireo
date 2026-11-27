@@ -343,7 +343,7 @@ def _classify_plan(
     plan.count_stale()
 
     if plan.classifiable_units == 0:
-        return plan.name_label_read_error(plan.no_targets_result())
+        return plan.name_redetection(plan.name_label_read_error(plan.no_targets_result()))
 
     plan.count_pending()
 
@@ -351,9 +351,9 @@ def _classify_plan(
         return plan.name_label_read_error(plan.some_models_blocked_result())
 
     if plan.pending_total == 0:
-        return plan.nothing_pending_result()
+        return plan.name_redetection(plan.nothing_pending_result())
 
-    return plan.will_classify_result()
+    return plan.name_redetection(plan.will_classify_result())
 
 
 def _classify_skip_result(summary):
@@ -366,6 +366,24 @@ def _classify_skip_result(summary):
             "stale": 0, "fingerprint_outdated": False,
         },
     }
+
+
+def _detector_runtime():
+    """The installed MegaDetector runtime the detect stage compares runs to, or None."""
+    try:
+        from computation_cache import megadetector_runtime_fingerprint
+
+        return megadetector_runtime_fingerprint()
+    except (OSError, ValueError):
+        return None
+
+
+def _redetect_reason(count):
+    """Why detection runs again on ``count`` photos that were already detected."""
+    return (
+        f"the camera focus point, the file or the detector changed since "
+        f"{'it was' if count == 1 else 'they were'} detected"
+    )
 
 
 class _ClassifyPlan:
@@ -394,16 +412,18 @@ class _ClassifyPlan:
             list(db.photos.get_ids())
             if self.photo_ids is None else list(self.photo_ids)
         )
-        try:
-            from computation_cache import megadetector_runtime_fingerprint
-
-            detector_runtime = megadetector_runtime_fingerprint()
-        except (OSError, ValueError):
-            detector_runtime = None
         self.current_detector_photo_ids = db.model_runs.get_detector_run_photo_ids(
             "megadetector-v6",
-            runtime_fingerprint=detector_runtime,
+            runtime_fingerprint=_detector_runtime(),
         )
+        # Photos with a detector run the detect stage will not reuse. A
+        # Re-classify detects everything again and says so itself.
+        self.redetect_count = 0
+        if not (self.params.reclassify or self.params.raw_subject_analysis):
+            self.redetect_count = len(
+                db.model_runs.detector_run_exists_photo_ids("megadetector-v6", self.scope_ids)
+                - self.current_detector_photo_ids
+            )
         self.contextual_weak_ids = set()
         self.weak_detection_confidence = config_value(pipeline_cfg, "weak_detection_confidence", section="pipeline")
         if (
@@ -575,6 +595,30 @@ class _ClassifyPlan:
                 self.pending_total += pending
 
     # -- results -----------------------------------------------------
+
+    def name_redetection(self, result):
+        """Say that detection runs again on photos that were already detected.
+
+        Their classifications and masks are remade from the new detection, so
+        a plan that counted them as done would describe a run that does more.
+        """
+        count = self.redetect_count
+        result["detail"]["redetect"] = count
+        if not count:
+            return result
+        photos = f"{count} photo{_plural(count)}"
+        if result["state"] == "done-prior":
+            result["state"] = "will-run"
+            result["summary"] = (
+                f"Will detect {photos} again and classify what it finds, because "
+                f"{_redetect_reason(count)} ({result['summary']})"
+            )
+        else:
+            result["summary"] += (
+                f" + {photos} to detect again, because {_redetect_reason(count)}"
+            )
+        result["detail"]["pending"] = result["detail"].get("pending", 0) + count
+        return result
 
     def name_label_read_error(self, result):
         """Say a blocked Classify could not read its species list.
@@ -927,6 +971,28 @@ def _extract_summary(work, detail_pending, new_count, eligible, set_aside=0):
         f"Will extract masks for {work} "
         f"photo{_plural(work)}{measure} ({eligible} eligible){note}"
     )
+
+
+def _name_redetected_masks(extract, classify):
+    """Add to the Extract plan the masks a re-detection in this run replaces.
+
+    A mask belongs to the detection it was prompted with, so a photo Classify
+    detects again gets a new mask even when its old one is counted as present.
+    """
+    count = classify.get("detail", {}).get("redetect", 0)
+    if not count or classify["state"] != "will-run" or extract["state"] not in ("will-run", "done-prior"):
+        return extract
+    photos = f"up to {count} photo{_plural(count)} that Classify detects again"
+    if extract["state"] == "done-prior":
+        extract["state"] = "will-run"
+        extract["summary"] = f"Will remake masks for {photos} ({extract['summary']})"
+    else:
+        extract["summary"] += f" + {photos}"
+    detail = extract.setdefault("detail", {})
+    detail["redetect"] = count
+    if "pending" in detail:
+        detail["pending"] += count
+    return extract
 
 
 def _extract_plan(db, params, photo_ids, effective_cfg, new_count=0):
@@ -1755,7 +1821,9 @@ def _stage_plans(db, params, db_path, ws_id, photo_ids, new_count,
         detector_confidence=config_value(effective_cfg, "detector_confidence"),
         pipeline_cfg=pipeline_cfg,
     )
-    extract = _extract_plan(db, params, photo_ids, effective_cfg, new_count)
+    extract = _name_redetected_masks(
+        _extract_plan(db, params, photo_ids, effective_cfg, new_count), classify,
+    )
     eye = _eye_keypoints_plan(db, params, photo_ids, pipeline_cfg, new_count)
     previews = _previews_plan(db, params, photo_ids, new_count, effective_cfg)
     # An all-duplicates import leaves every upstream stage "will-run" over
