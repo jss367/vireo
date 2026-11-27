@@ -412,22 +412,12 @@ class _ClassifyPlan:
             list(db.photos.get_ids())
             if self.photo_ids is None else list(self.photo_ids)
         )
+        self.detector_runtime = _detector_runtime()
         self.current_detector_photo_ids = db.model_runs.get_detector_run_photo_ids(
             "megadetector-v6",
-            runtime_fingerprint=_detector_runtime(),
+            runtime_fingerprint=self.detector_runtime,
         )
-        # Photos with a detector run the detect stage will not reuse. A
-        # Re-classify detects everything again and says so itself. The
-        # detect stage filters out wildlife-excluded photos before it
-        # seeds its batches, so they never trigger redetection and the
-        # plan must not count them either.
-        self.redetect_count = 0
-        if not (self.params.reclassify or self.params.raw_subject_analysis):
-            detectable_ids = db.photos.filter_out_wildlife_excluded(self.scope_ids)
-            self.redetect_count = len(
-                db.model_runs.detector_run_exists_photo_ids("megadetector-v6", detectable_ids)
-                - self.current_detector_photo_ids
-            )
+        self._count_redetection()
         self.contextual_weak_ids = set()
         self.weak_detection_confidence = config_value(pipeline_cfg, "weak_detection_confidence", section="pipeline")
         if (
@@ -600,28 +590,64 @@ class _ClassifyPlan:
 
     # -- results -----------------------------------------------------
 
+    def _count_redetection(self):
+        """Count the detected photos the detect stage will run on again.
+
+        ``redetect_count`` photos have a run the stage does not reuse.
+        ``redetect_unconfirmed`` more have one it reuses only if the detector
+        that made it is the one this run installs: with no detector installed
+        the stage downloads one as soon as any photo needs detecting, and
+        then keeps only the runs of that detector, legacy runs and reviewed
+        runs. A Re-classify detects everything again and says so itself, and
+        the stage never detects a photo marked not wildlife.
+        """
+        self.redetect_count = 0
+        self.redetect_unconfirmed = 0
+        if self.params.reclassify or self.params.raw_subject_analysis:
+            return
+        model_runs = self.db.model_runs
+        scope = set(self.db.photos.filter_out_wildlife_excluded(self.scope_ids))
+        runtimes = model_runs.detector_run_runtimes("megadetector-v6", scope)
+        reused = runtimes.keys() & self.current_detector_photo_ids
+        self.redetect_count = len(runtimes) - len(reused)
+        needs_detector = self.new_count > 0 or bool(scope - self.current_detector_photo_ids)
+        if self.detector_runtime is not None or not needs_detector:
+            return
+        bound_to_detector = {pid for pid in reused if runtimes[pid] != "legacy"}
+        self.redetect_unconfirmed = len(
+            bound_to_detector
+            - model_runs.pinned_detector_photo_ids(bound_to_detector, "megadetector-v6")
+        )
+
     def name_redetection(self, result):
         """Say that detection runs again on photos that were already detected.
 
         Their classifications and masks are remade from the new detection, so
         a plan that counted them as done would describe a run that does more.
+        ``detail.redetect`` is the photos known to be detected again and
+        ``detail.redetect_max`` the most there can be.
         """
-        count = self.redetect_count
-        result["detail"]["redetect"] = count
-        if not count:
+        most = self.redetect_count + self.redetect_unconfirmed
+        result["detail"]["redetect"] = self.redetect_count
+        result["detail"]["redetect_max"] = most
+        if not most:
             return result
-        photos = f"{count} photo{_plural(count)}"
+        photos = f"{'up to ' if self.redetect_unconfirmed else ''}{most} photo{_plural(most)}"
+        reason = _redetect_reason(most)
+        if self.redetect_unconfirmed:
+            reason += (
+                ". MegaDetector is not installed, and the version this run "
+                "downloads decides how many earlier detections it reuses"
+            )
         if result["state"] == "done-prior":
             result["state"] = "will-run"
             result["summary"] = (
                 f"Will detect {photos} again and classify what it finds, because "
-                f"{_redetect_reason(count)} ({result['summary']})"
+                f"{reason} ({result['summary']})"
             )
         else:
-            result["summary"] += (
-                f" + {photos} to detect again, because {_redetect_reason(count)}"
-            )
-        result["detail"]["pending"] = result["detail"].get("pending", 0) + count
+            result["summary"] += f" + {photos} to detect again, because {reason}"
+        result["detail"]["pending"] = result["detail"].get("pending", 0) + most
         return result
 
     def name_label_read_error(self, result):
@@ -983,7 +1009,7 @@ def _name_redetected_masks(extract, classify):
     A mask belongs to the detection it was prompted with, so a photo Classify
     detects again gets a new mask even when its old one is counted as present.
     """
-    count = classify.get("detail", {}).get("redetect", 0)
+    count = classify.get("detail", {}).get("redetect_max", 0)
     if not count or classify["state"] != "will-run" or extract["state"] not in ("will-run", "done-prior"):
         return extract
     photos = f"up to {count} photo{_plural(count)} that Classify detects again"

@@ -1253,6 +1253,51 @@ def test_plan_does_not_name_redetection_for_a_current_or_reviewed_run(tmp_path, 
     assert "redetect" not in stages["Extract"]["detail"]
 
 
+def _photo_detected_by(db, folder_id, filename, runtime):
+    pid, did = _add_photo_with_detection(db, folder_id, filename)
+    from labels_fingerprint import TOL_SENTINEL
+
+    db.model_runs.record_detector_run(pid, "megadetector-v6", 1, runtime)
+    db.model_runs.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=3)
+    db.commit()
+    return pid, did
+
+
+def test_plan_bounds_redetection_when_the_detector_must_be_downloaded(tmp_path, monkeypatch):
+    """With no detector installed, the one the run downloads decides which runs it reuses."""
+    import pipeline_plan
+    from pipeline_plan import compute_plan
+    from services import review_decisions
+    db, folder_id = _make_db(tmp_path)
+    _stub_models(monkeypatch, tmp_path)
+    monkeypatch.setattr(pipeline_plan, "_detector_runtime", lambda: None)
+    _photo_detected_by(db, folder_id, "earlier.jpg", "rt-earlier")
+    _photo_detected_by(db, folder_id, "legacy.jpg", "legacy")
+    _, reviewed = _photo_detected_by(db, folder_id, "reviewed.jpg", "rt-earlier")
+    db.predictions.add(reviewed, species="Black Phoebe", confidence=.9, model="BioCLIP-2", labels_fingerprint="f")
+    db.commit()
+    review_decisions.set_review_status(db, db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id=?", (reviewed,)).fetchone()["id"], db._ws_id(), "accepted")
+    db.commit()
+
+    params = _redetection_params()
+    settled = compute_plan(db, params, str(tmp_path / "test.db"))["stages"]["Classify"]
+    assert settled["state"] == "done-prior"
+    assert settled["detail"]["redetect_max"] == 0
+
+    photo_ingest.add_photo(
+        db, folder_id=folder_id, filename="never-detected.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
+    db.commit()
+    stages = compute_plan(db, params, str(tmp_path / "test.db"))["stages"]
+
+    classify = stages["Classify"]
+    assert classify["state"] == "will-run"
+    assert classify["detail"]["redetect"] == 0
+    assert classify["detail"]["redetect_max"] == 1
+    assert "up to 1 photo" in classify["summary"]
+    assert "MegaDetector is not installed" in classify["summary"]
+
+
 def test_reclassify_plan_does_not_count_redetection_twice(tmp_path, monkeypatch):
     from pipeline_plan import compute_plan
     db, folder_id = _make_db(tmp_path)
@@ -1263,6 +1308,7 @@ def test_reclassify_plan_does_not_count_redetection_twice(tmp_path, monkeypatch)
     assert stages["Classify"]["summary"].startswith("Re-classify")
     assert "detect again" not in stages["Classify"]["summary"]
     assert stages["Classify"]["detail"]["redetect"] == 0
+    assert stages["Classify"]["detail"]["redetect_max"] == 0
 
 
 def test_plan_does_not_count_wildlife_excluded_photos_for_redetection(
@@ -1278,6 +1324,7 @@ def test_plan_does_not_count_wildlife_excluded_photos_for_redetection(
     stages = compute_plan(db, _redetection_params(), str(tmp_path / "test.db"))["stages"]
 
     assert stages["Classify"]["detail"]["redetect"] == 0
+    assert stages["Classify"]["detail"]["redetect_max"] == 0
     assert "detect again" not in stages["Classify"]["summary"]
     assert stages["Extract"]["detail"].get("redetect", 0) == 0
     assert "detects again" not in stages["Extract"]["summary"]
