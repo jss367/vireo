@@ -2,69 +2,123 @@ import { showToast } from './navbar-shared-helpers.js';
 
 /** @type {number | null} */ var _reportEscToken = null;
 
-export function openReportModal() {
-  if (_reportEscToken) Keymap.popEsc(_reportEscToken ?? -1);
-  _reportEscToken = Keymap.pushEsc(function() { closeReportModal(); });
+/** @type {string | null} */
+let previewId = null;
+let reportRevision = 0;
 
-  /** @type {HTMLElement} */ (document.getElementById('reportModal')).classList.add('active');
-  /** @type {HTMLTextAreaElement} */ (document.getElementById('reportDescription')).value = '';
-  /** @type {HTMLElement} */ (document.getElementById('reportStatus')).className = 'report-status';
-  /** @type {HTMLElement} */ (document.getElementById('reportStatus')).textContent = '';
-  /** @type {HTMLButtonElement} */ (document.getElementById('reportSendBtn')).disabled = false;
-  /** @type {HTMLTextAreaElement} */ (document.getElementById('reportDescription')).focus();
+function reportControls() {
+  return {
+    description: /** @type {HTMLTextAreaElement} */ (document.getElementById('reportDescription')),
+    diagnostics: /** @type {HTMLInputElement} */ (document.getElementById('reportDiagnostics')),
+    button: /** @type {HTMLButtonElement} */ (document.getElementById('reportSendBtn')),
+    preview: /** @type {HTMLElement} */ (document.getElementById('reportPreview')),
+    json: /** @type {HTMLElement} */ (document.getElementById('reportJson')),
+    destination: /** @type {HTMLElement} */ (document.getElementById('reportDestination')),
+    status: /** @type {HTMLElement} */ (document.getElementById('reportStatus')),
+  };
 }
+
+export function resetReportPreview() {
+  reportRevision++;
+  previewId = null;
+  const c = reportControls();
+  c.preview.hidden = true;
+  c.json.textContent = '';
+  c.destination.textContent = '';
+  c.status.className = 'report-status';
+  c.status.textContent = '';
+  c.button.disabled = false;
+  c.button.textContent = 'Review report';
+  c.description.disabled = c.diagnostics.disabled = false;
+}
+
+export function openReportModal() {
+  if (_reportEscToken) Keymap.popEsc(_reportEscToken);
+  _reportEscToken = Keymap.pushEsc(closeReportModal);
+  resetReportPreview();
+  const c = reportControls();
+  c.description.value = '';
+  c.diagnostics.checked = false;
+  document.getElementById('reportModal')?.classList.add('active');
+  c.description.focus();
+}
+
 export function closeReportModal() {
-  if (_reportEscToken) { Keymap.popEsc(_reportEscToken ?? -1); _reportEscToken = null; }
-  /** @type {HTMLElement} */ (document.getElementById('reportModal')).classList.remove('active');
+  if (_reportEscToken) { Keymap.popEsc(_reportEscToken); _reportEscToken = null; }
+  document.getElementById('reportModal')?.classList.remove('active');
+  resetReportPreview();
 }
-export function sendReport() {
-  var desc = /** @type {HTMLTextAreaElement} */ (document.getElementById('reportDescription')).value.trim();
-  if (!desc) {
-    /** @type {HTMLTextAreaElement} */ (document.getElementById('reportDescription')).style.borderColor = 'var(--danger)';
-    /** @type {HTMLTextAreaElement} */ (document.getElementById('reportDescription')).focus();
+
+export async function sendReport() {
+  const c = reportControls();
+  const description = c.description.value.trim();
+  if (c.button.disabled) return;
+  if (!description) {
+    c.status.className = 'report-status error';
+    c.status.textContent = 'Enter a description to review your report.';
+    c.description.focus();
     return;
   }
-  var btn = /** @type {HTMLButtonElement} */ (document.getElementById('reportSendBtn'));
-  var status = /** @type {HTMLElement} */ (document.getElementById('reportStatus'));
-  btn.disabled = true;
-  btn.textContent = 'Sending...';
-  status.className = 'report-status';
-  status.textContent = '';
-
-  fetch('/api/report-issue', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({description: desc})
-  })
-  .then(function(r) { return r.json(); })
-  .then(function(/** @type {{status?: string; diagnostics?: unknown; error?: string}} */ data) {
-    if (data.status === 'sent') {
-      status.className = 'report-status success';
-      status.textContent = 'Report sent — thanks!';
-      setTimeout(closeReportModal, 2000);
+  const revision = reportRevision;
+  const sending = previewId !== null;
+  c.button.disabled = true;
+  c.description.disabled = c.diagnostics.disabled = sending;
+  c.button.textContent = sending ? 'Sending…' : 'Preparing…';
+  c.status.textContent = '';
+  c.status.className = 'report-status';
+  try {
+    const response = await fetch('/api/report-issue', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(sending ? {action: 'send', preview_id: previewId} :
+        {action: 'preview', description, include_diagnostics: c.diagnostics.checked}),
+    });
+    const data = await response.json();
+    if (revision !== reportRevision) return;
+    if (!response.ok || data.error) throw new Error(data.error || response.statusText);
+    if (data.status === 'preview') {
+      previewId = data.preview_id;
+      c.destination.textContent = data.destination ? 'Send to ' + data.destination : 'Save to this device';
+      c.json.textContent = JSON.stringify(data.diagnostics, null, 2);
+      c.preview.hidden = false;
+      c.button.dataset.delivery = data.destination ? 'send' : 'download';
+      c.button.textContent = data.destination ? 'Send report' : 'Download report';
+      c.button.disabled = false;
+      c.json.focus();
+    } else if (data.status === 'sent') {
+      c.status.className = 'report-status success';
+      c.status.textContent = 'Report sent — thanks!';
+      c.button.textContent = 'Sent';
+      setTimeout(() => { if (revision === reportRevision) closeReportModal(); }, 2000);
     } else if (data.status === 'download') {
-      var blob = new Blob([JSON.stringify(data.diagnostics, null, 2)], {type: 'application/json'});
-      var url = URL.createObjectURL(blob);
-      var a = document.createElement('a');
+      const automaticSendFailed = c.button.dataset.delivery === 'send';
+      const blob = new Blob([JSON.stringify(data.diagnostics, null, 2)], {type: 'application/json'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
       a.href = url;
       a.download = 'vireo-issue-report.json';
       a.click();
       URL.revokeObjectURL(url);
-      status.className = 'report-status error';
-      status.textContent = 'Could not send automatically. Please email the downloaded file.';
-    } else if (data.error) {
-      status.className = 'report-status error';
-      status.textContent = data.error;
+      resetReportPreview();
+      c.status.className = 'report-status success';
+      c.status.textContent = automaticSendFailed
+        ? 'Could not send automatically. Report downloaded. You can report the issue on '
+        : 'Report downloaded. You can report the issue on ';
+      const support = document.createElement('a');
+      support.href = 'https://github.com/jss367/vireo/issues';
+      support.target = '_blank';
+      support.rel = 'noopener';
+      support.textContent = 'Vireo’s public issue tracker';
+      c.status.append(support, '.');
+    } else {
+      throw new Error('Unexpected response from Vireo');
     }
-    btn.disabled = false;
-    btn.textContent = 'Send Report';
-  })
-  .catch(function(err) {
-    status.className = 'report-status error';
-    status.textContent = 'Failed to send report: ' + err.message;
-    btn.disabled = false;
-    btn.textContent = 'Send Report';
-  });
+  } catch (err) {
+    if (revision !== reportRevision) return;
+    resetReportPreview();
+    c.status.className = 'report-status error';
+    c.status.textContent = err instanceof Error ? err.message : 'Could not prepare or send the report.';
+  }
 }
 
 /* Shared right-click context menu component. */

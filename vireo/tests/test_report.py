@@ -192,3 +192,29 @@ class TestReportIssue:
         data = resp.get_json()
         assert data["status"] == "download"
         assert data["diagnostics"]["description"] == "db broken"
+
+    @pytest.mark.parametrize("include_diagnostics", [False, True])
+    def test_send_uses_reviewed_snapshot(self, client, monkeypatch, include_diagnostics):
+        from unittest.mock import patch
+
+        with patch("urllib.request.urlopen") as post:
+            post.return_value.status = 200
+            if not include_diagnostics:
+                import web.system as system
+                monkeypatch.setattr(system, "_issue_report_app_state",
+                                    lambda *_: pytest.fail("unexpected diagnostics collection"))
+            preview = client.post("/api/report-issue", json={
+                "action": "preview", "description": "Reviewed", "include_diagnostics": include_diagnostics,
+            }).get_json()
+            post.assert_not_called()
+            if include_diagnostics:
+                assert "timestamp" in preview["diagnostics"]
+            else:
+                assert preview["diagnostics"] == {"description": "Reviewed"}
+            send = {"action": "send", "preview_id": preview["preview_id"]}
+            assert client.post("/api/report-issue", json=send).get_json()["status"] == "sent"
+            req = post.call_args.args[0]
+            assert req.full_url == preview["destination"]
+            assert json.loads(req.data) == preview["diagnostics"]
+            assert client.post("/api/report-issue", json=send).status_code == 400
+            post.assert_called_once()
