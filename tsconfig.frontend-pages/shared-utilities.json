@@ -6,7 +6,7 @@
     "../types/frontend.d.ts",
     "../types/page-hooks.d.ts",
     "../types/dialogs.d.ts",
-    "../types/confirm.d.ts",
+    "../types/in-page-dialogs.d.ts",
     "../types/panel-loaders.d.ts",
     "../types/navbar.d.ts",
     "../types/shared-controllers.d.ts",

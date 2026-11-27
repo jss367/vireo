@@ -81,7 +81,13 @@ function discardPhotoChanges(changeIds) {
 
 async function discardAllChanges() {
   if (!_syncPreviewComplete || !_syncPreviewData) return;
-  if (!confirm('Discard ALL pending changes? Nothing will be written to XMP.')) return;
+  if (!(await Vireo.confirm({
+    title: 'Discard all pending changes?',
+    message: 'Nothing will be written to XMP.',
+    confirmLabel: 'Discard changes',
+    danger: true,
+  }))) return;
+  if (!_syncPreviewComplete || !_syncPreviewData) return;
   try {
     await safeFetch('/api/sync/discard', {
       method: 'POST',

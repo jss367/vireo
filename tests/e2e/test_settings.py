@@ -5,6 +5,8 @@ from pathlib import Path
 import pytest
 from playwright.sync_api import expect
 
+from e2e.in_page_dialogs import answer_dialogs, dialogs
+
 
 def test_corrupt_config_warns_once_after_settings_are_saved(live_server, page):
     import config as cfg
@@ -462,7 +464,7 @@ def test_settings_import_drops_queued_autosave(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/settings", timeout=5000)
     status = _wait_for_settings_idle(page)
-    page.on("dialog", lambda d: d.accept())
+    answer_dialogs(page)
 
     held = []
     config_posts = []
@@ -525,7 +527,7 @@ def test_settings_failed_import_requeues_dropped_autosave(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/settings", timeout=5000)
     status = _wait_for_settings_idle(page)
-    page.on("dialog", lambda d: d.accept())
+    answer_dialogs(page)
 
     held = []
     config_posts = []
@@ -583,7 +585,7 @@ def test_settings_import_preserves_queued_workspace_override_save(live_server, p
     url = live_server["url"]
     page.goto(f"{url}/settings", timeout=5000)
     _wait_for_settings_idle(page)
-    page.on("dialog", lambda d: d.accept())
+    answer_dialogs(page)
 
     checkbox = page.locator("#wsOverride_grouping_window_seconds")
     value_input = page.locator("#wsVal_grouping_window_seconds")
@@ -618,9 +620,11 @@ def test_settings_import_preserves_queued_workspace_override_save(live_server, p
     assert held_ws, "first workspace override POST was never requested"
 
     # Second override edit is queued behind the stalled POST via the
-    # workspace save chain.
+    # workspace save chain. Leaving the field commits it, as it does for a
+    # user who goes on to click Import; an edit still focused would commit
+    # again when the import's confirmation dialog takes the focus.
     value_input.fill("55")
-    value_input.dispatch_event("change")
+    value_input.blur()
     page.wait_for_timeout(700)  # past the 500 ms debounce
     assert len(ws_posts) == 1, (
         f"second POST fired before the first settled: {len(ws_posts)}"
@@ -667,7 +671,7 @@ def test_settings_edit_during_import_suspension_is_saved_on_failure(live_server,
     url = live_server["url"]
     page.goto(f"{url}/settings", timeout=5000)
     status = _wait_for_settings_idle(page)
-    page.on("dialog", lambda d: d.accept())
+    answer_dialogs(page)
 
     import_routes = []
     config_posts = []
@@ -724,7 +728,7 @@ def test_settings_successful_import_clears_prior_save_error(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/settings", timeout=5000)
     status = _wait_for_settings_idle(page)
-    page.on("dialog", lambda d: d.accept())
+    answer_dialogs(page)
 
     def _fail_post(route, request):
         if request.method == "POST":
@@ -833,8 +837,7 @@ def test_settings_import_reloads_page_when_config_refetch_fails(live_server, pag
     url = live_server["url"]
     page.goto(f"{url}/settings", timeout=5000)
     _wait_for_settings_idle(page)
-    dialogs = []
-    page.on("dialog", lambda d: (dialogs.append(d.message), d.accept()))
+    answer_dialogs(page)
 
     # Set the pre-import form to a value that must not be persisted after
     # the import (proves autosave stays off / the page truly reloads from
@@ -883,10 +886,11 @@ def test_settings_import_reloads_page_when_config_refetch_fails(live_server, pag
             },
         )
 
-    # The refresh-failure dialog fired before the page reload.
-    assert any("could not refresh" in m for m in dialogs), (
-        "expected the refresh-failure alert before location.reload(); "
-        f"saw {dialogs!r}"
+    # The refresh-failure notice was shown before the page reload.
+    said = dialogs(page)
+    assert any("could not refresh" in m for m in said), (
+        "expected the refresh-failure notice before location.reload(); "
+        f"saw {said!r}"
     )
 
     # After the reload, the form is rebuilt from disk (the import

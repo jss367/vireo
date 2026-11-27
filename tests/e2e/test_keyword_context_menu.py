@@ -15,6 +15,7 @@ only "Show Photos with this Keyword"):
 import pytest
 from playwright.sync_api import expect
 
+from e2e.in_page_dialogs import answer_dialogs
 from e2e.module_pages import install_page_module_exposure
 
 
@@ -107,7 +108,7 @@ def test_keyword_right_click_rename_fires_put(live_server, page):
     row.wait_for(state="visible")
 
     # Auto-accept the prompt BEFORE clicking the menu item.
-    page.on("dialog", lambda d: d.accept("Renamed Keyword"))
+    answer_dialogs(page, text="Renamed Keyword")
 
     row.click(button="right")
     menu = page.locator(".vireo-ctx-menu")
@@ -131,7 +132,7 @@ def test_keyword_right_click_delete_fires_delete(live_server, page):
     kw_id = int(row.get_attribute("data-id"))
 
     # Auto-accept the confirm dialog BEFORE clicking.
-    page.on("dialog", lambda d: d.accept())
+    answer_dialogs(page)
 
     row.click(button="right")
     menu = page.locator(".vireo-ctx-menu")

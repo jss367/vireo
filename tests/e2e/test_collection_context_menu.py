@@ -11,6 +11,8 @@ Menu items:
 
 from playwright.sync_api import expect
 
+from e2e.in_page_dialogs import answer_dialogs
+
 
 def _seed_collection(live_server, name="Test Pick"):
     """Create a collection via the Flask test client directly (avoids racy
@@ -210,7 +212,7 @@ def test_collection_rename_fires_put(live_server, page):
 
     # Accept the rename prompt with a new name. Register BEFORE clicking the
     # menu item (the dialog may fire synchronously).
-    page.on("dialog", lambda d: d.accept("Picks C Renamed"))
+    answer_dialogs(page, text="Picks C Renamed")
 
     item.click(button="right")
     menu = page.locator(".vireo-ctx-menu")
@@ -243,7 +245,7 @@ def test_collection_delete_fires_endpoint(live_server, page):
     item.wait_for(state="visible")
 
     # Auto-accept the confirm dialog BEFORE clicking.
-    page.on("dialog", lambda d: d.accept())
+    answer_dialogs(page)
 
     item.click(button="right")
     menu = page.locator(".vireo-ctx-menu")

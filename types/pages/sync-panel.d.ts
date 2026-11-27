@@ -30,7 +30,7 @@ interface SyncJobEvent {
 }
 interface SyncRequestError extends Error {code?: string}
 
-declare var Vireo: VireoPageHookRegistry;
+declare var Vireo: VireoPageHookRegistry & VireoInPageDialogs;
 declare var Keymap: {pushEsc(handler: () => void): number; popEsc(token: number | null | undefined): boolean; lockBodyScroll(): void; unlockBodyScroll(): void};
 declare var VireoViewPreferences: {restore(input: HTMLInputElement): void; save?(input: HTMLInputElement): void};
 declare var vireoLightboxSession: {requestedPhotoId(): number | null};

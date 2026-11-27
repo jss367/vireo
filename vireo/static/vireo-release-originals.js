@@ -16,13 +16,17 @@ window.VireoReleaseOriginals = (function() {
   /** @param {ReleaseScope} scope @param {string} description */
   async function release(scope, description) {
     if (running) return;
-    if (!window.confirm(
-      'Release local originals for ' + description + '?\n\n' +
-      'Vireo will remove cached originals and their cached sidecars only when the source files are available. ' +
-      'Changed source images will be kept for review.\n\n' +
-      'Your source photos, edits, ratings, thumbnails, and processing results will stay intact. ' +
-      'Local copies are shared across workspaces; full-resolution access will use source storage again.'
-    )) return;
+    if (!(await Vireo.confirm({
+      title: 'Release local originals for ' + description + '?',
+      message:
+        'Vireo will remove cached originals and their cached sidecars only when the source files are available. ' +
+        'Changed source images will be kept for review.\n\n' +
+        'Your source photos, edits, ratings, thumbnails, and processing results will stay intact. ' +
+        'Local copies are shared across workspaces; full-resolution access will use source storage again.',
+      confirmLabel: 'Release local originals',
+      danger: true,
+    }))) return;
+    if (running) return;
     setRunning(true);
     try {
       /** @type {{job_id: string}} */

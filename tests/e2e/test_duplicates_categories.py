@@ -5,6 +5,7 @@ import json
 import pytest
 from playwright.sync_api import expect
 
+from e2e.in_page_dialogs import answer_dialogs, dialogs
 from e2e.module_pages import install_page_module_exposure
 
 
@@ -134,7 +135,7 @@ def test_category_limits_bulk_folder_decisions(live_server, page):
         }))
 
     page.route("**/api/duplicates/bulk-resolve", resolve)
-    page.on("dialog", lambda dialog: dialog.accept())
+    answer_dialogs(page)
     _category(page, "same-name-across-folders").click()
     page.locator(".bucket-card .keep-btn:not(.reveal-btn)").first.click()
     expect(page.locator(".bucket-card")).to_have_count(0)
@@ -156,7 +157,7 @@ def test_category_limits_reject_and_trash_actions(live_server, page):
         requests.append(route.request.post_data_json),
         route.fulfill(content_type="application/json", body='{"trashed": 1, "skipped": [], "failed": []}'),
     ))
-    page.on("dialog", lambda dialog: dialog.accept())
+    answer_dialogs(page)
     _category(page, "numbered-same-folder").click()
     page.locator("#trashAllBtn").click()
     expect(page.locator("#trashAllProgress")).to_contain_text("Cleanup complete")
@@ -294,7 +295,7 @@ def test_inflight_batch_cleanup_keeps_progress_and_retry_after_category_switch(l
     }""")
     pending = []
     page.route("**/api/duplicates/delete-loser-files", lambda route: pending.append(route))
-    page.on("dialog", lambda dialog: dialog.accept())
+    answer_dialogs(page)
     _category(page, "numbered-across-folders").click()
     with page.expect_request("**/api/duplicates/delete-loser-files"):
         page.locator("#trashAllBtn").click()
@@ -336,7 +337,7 @@ def test_pending_cleanup_reconciles_newly_matching_cards_and_bulk_retry(live_ser
     }""")
     _category(page, "same-name-across-folders").click()
     page.locator(".group-check").uncheck()
-    requests, pending, confirmations = [], [], []
+    requests, pending = [], []
 
     def trash(route):
         requests.append(route.request.post_data_json)
@@ -349,7 +350,7 @@ def test_pending_cleanup_reconciles_newly_matching_cards_and_bulk_retry(live_ser
             route.fulfill(content_type="application/json", body=json.dumps(response))
 
     page.route("**/api/duplicates/delete-loser-files", trash)
-    page.on("dialog", lambda dialog: (confirmations.append(dialog.message), dialog.accept()))
+    answer_dialogs(page)
     _category(page, "numbered-across-folders").click()
     page.locator(".dup-card[data-photo-id='3'] .trash-btn").click()
     assert requests == [{"photo_ids": [3]}]
@@ -373,6 +374,7 @@ def test_pending_cleanup_reconciles_newly_matching_cards_and_bulk_retry(live_ser
     page.locator("#trashAllBtn").click()
     expect(page.locator("#trashAllBtn")).to_have_count(0)
     assert requests == [{"photo_ids": [3]}, {"photo_ids": [2, 12]}, {"photo_ids": [2]}]
+    confirmations = dialogs(page)
     assert confirmations[0].startswith("Move 2 files to Trash")
     assert confirmations[1].startswith("Move 1 file to Trash")
     _category(page, "all").click()
@@ -394,7 +396,7 @@ def test_category_switch_preserves_bulk_folder_trash_retry(live_server, page):
 
     page.route("**/api/duplicates/bulk-resolve", resolve)
     page.route("**/api/duplicates/delete-loser-files", lambda route: pending.append(route))
-    page.on("dialog", lambda dialog: dialog.accept())
+    answer_dialogs(page)
     _category(page, "same-name-across-folders").click()
     page.locator(".bucket-card input[data-delete-toggle]").check()
     with page.expect_request("**/api/duplicates/delete-loser-files"):
@@ -463,7 +465,7 @@ def test_bulk_trash_owns_per_file_controls_across_category_renders(live_server, 
     _show_patterns(live_server, page)
     pending = []
     page.route("**/api/duplicates/delete-loser-files", lambda route: pending.append(route))
-    page.on("dialog", lambda dialog: dialog.accept())
+    answer_dialogs(page)
     _category(page, "numbered-same-folder").click()
     with page.expect_request("**/api/duplicates/delete-loser-files"):
         page.locator("#trashAllBtn").click()
@@ -489,7 +491,7 @@ def test_bulk_outcome_replaces_previous_single_file_failure(live_server, page, o
     _show_patterns(live_server, page)
     pending = []
     page.route("**/api/duplicates/delete-loser-files", lambda route: pending.append(route))
-    page.on("dialog", lambda dialog: dialog.accept())
+    answer_dialogs(page)
     _category(page, "numbered-same-folder").click()
     with page.expect_request("**/api/duplicates/delete-loser-files"):
         page.locator(".dup-card[data-photo-id='2'] .trash-btn").click()
@@ -534,7 +536,7 @@ def test_finishing_batch_does_not_release_a_newer_single_file_retry(live_server,
     }""")
     pending = []
     page.route("**/api/duplicates/delete-loser-files", lambda route: pending.append(route))
-    page.on("dialog", lambda dialog: dialog.accept())
+    answer_dialogs(page)
     _category(page, "numbered-same-folder").click()
     with page.expect_request("**/api/duplicates/delete-loser-files"):
         page.locator("#trashAllBtn").click()
@@ -561,7 +563,7 @@ def test_bulk_owned_files_block_single_requests_across_category_renders(live_ser
     _show_patterns(live_server, page)
     pending = []
     page.route("**/api/duplicates/delete-loser-files", lambda route: pending.append(route))
-    page.on("dialog", lambda dialog: dialog.accept())
+    answer_dialogs(page)
     _category(page, "numbered-same-folder").click()
     with page.expect_request("**/api/duplicates/delete-loser-files"):
         page.locator("#trashAllBtn").click()
@@ -597,7 +599,7 @@ def test_latest_bulk_outcome_survives_category_render(live_server, page, outcome
     _show_patterns(live_server, page)
     pending = []
     page.route("**/api/duplicates/delete-loser-files", lambda route: pending.append(route))
-    page.on("dialog", lambda dialog: dialog.accept())
+    answer_dialogs(page)
     _category(page, "numbered-same-folder").click()
     button = page.locator(".dup-card[data-photo-id='2'] .trash-btn")
     status = page.locator(".dup-card[data-photo-id='2'] [data-trash-status]")
@@ -656,7 +658,7 @@ def test_pinned_folder_reveal_uses_original_paths_after_new_scan(live_server, pa
         }))
 
     page.route("**/api/folders/reveal", reveal)
-    page.on("dialog", lambda dialog: dialog.accept())
+    answer_dialogs(page)
     _category(page, "same-name-across-folders").click()
     page.locator(".bucket-card [data-delete-toggle]").check()
     page.locator(".bucket-card .keep-btn:not(.reveal-btn)").first.click()
@@ -684,7 +686,7 @@ def test_bulk_finalizer_preserves_newer_single_retry_claim(live_server, page):
     }""")
     pending = []
     page.route("**/api/duplicates/delete-loser-files", lambda route: pending.append(route))
-    page.on("dialog", lambda dialog: dialog.accept())
+    answer_dialogs(page)
     _category(page, "numbered-same-folder").click()
     with page.expect_request("**/api/duplicates/delete-loser-files"):
         page.locator("#trashAllBtn").click()
@@ -765,7 +767,7 @@ def test_reveal_and_pinned_cleanup_use_only_rendered_bucket_folders(live_server,
                         {"id": 206, "reason": "file already missing"}],
         }),
     ))
-    page.on("dialog", lambda dialog: dialog.accept())
+    answer_dialogs(page)
     _category(page, "same-name-across-folders").click()
     bucket = page.locator(".bucket-card")
     expect(bucket).to_contain_text("/a")

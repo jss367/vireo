@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from playwright.sync_api import expect
 
+from e2e.in_page_dialogs import answer_dialogs
 from e2e.module_pages import install_page_module_exposure
 
 
@@ -60,10 +61,10 @@ def test_existing_model_cache_cleanup_confirms_and_keeps_weights(live_server, pa
     page.locator('[data-storage-manage="hf-cache"]').click()
     button = page.locator("#hfCacheRemoveInstalled")
     expect(button).to_be_enabled()
-    page.once("dialog", lambda dialog: dialog.dismiss())
+    answer_dialogs(page, accept=False, times=1)
     button.click()
     assert blob.exists()
-    page.once("dialog", lambda dialog: dialog.accept())
+    answer_dialogs(page, times=1)
     button.click()
     expect(page.locator("#hfCacheRows")).to_contain_text("No Vireo models")
     assert not blob.exists()

@@ -35,5 +35,5 @@ interface Window {
   VIREO_REVEAL_LABEL:string;
   VIREO_FILE_MANAGER_NAME?:string;
   VireoFilter:DuplicateFilterController;
-  Vireo:VireoPageHookRegistry;
+  Vireo:VireoPageHookRegistry&VireoInPageDialogs;
 }

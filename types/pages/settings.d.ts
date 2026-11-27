@@ -104,4 +104,4 @@ interface SettingsDarktableAsset {platform?:string;version?:string;name?:string;
 
 interface ModelRemovalResponse {ok?:boolean;kept_path?:string|null;cache_cleanup?:{freed:number;failed:Array<{error:string}>};}
 // The page-hook registry from vireo-page-hooks.js (types/page-hooks.d.ts).
-declare var Vireo: VireoPageHookRegistry;
+declare var Vireo: VireoPageHookRegistry & VireoInPageDialogs;

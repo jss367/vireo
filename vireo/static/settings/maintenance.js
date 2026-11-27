@@ -98,7 +98,12 @@ async function loadPreviewCacheStatus() {
 }
 
 async function clearPreviewCache() {
-  if (!confirm('Clear all cached preview images? They will regenerate on demand from the originals.')) return;
+  if (!(await Vireo.confirm({
+    title: 'Clear all cached preview images?',
+    message: 'They will regenerate on demand from the originals.',
+    confirmLabel: 'Clear previews',
+    danger: true,
+  }))) return;
   var btn = /** @type {HTMLElement} */ (document.getElementById('clearPreviewCacheBtn'));
   if (btn) if (btn instanceof HTMLButtonElement) btn.disabled = true;
   try {
@@ -150,7 +155,7 @@ function selectedComputationCacheTypes() {
 function exportComputationCache() {
   var types = selectedComputationCacheTypes();
   if (!types.length) {
-    alert('Select at least one result type to export.');
+    showToast('Select at least one result type to export.', 'warning');
     return;
   }
   var action = /** @type {HTMLElement} */ (document.getElementById('computationCacheAction'));
@@ -224,7 +229,12 @@ async function loadEmbeddingCache() {
 }
 
 async function clearEmbeddingCache() {
-  if (!confirm('Clear all cached label embeddings? The next classification run will recompute them (slow on CPU).')) return;
+  if (!(await Vireo.confirm({
+    title: 'Clear all cached label embeddings?',
+    message: 'The next classification run will recompute them (slow on CPU).',
+    confirmLabel: 'Clear embeddings',
+    danger: true,
+  }))) return;
   try {
     await safeFetch('/api/embedding-cache', { method: 'DELETE' });
   } catch(e) {}
@@ -279,17 +289,20 @@ async function cleanKeywords() {
       return;
     }
 
-    // Build confirmation message
-    var msg = dupes.length + ' duplicate group(s) found:\n\n';
-    dupes.forEach(function(d) {
+    // One row per group: its spellings and the one that is kept.
+    var groups = dupes.map(function(d) {
       var variants = d.variants.map(function(v) {
         return '"' + v.name + '" (' + v.photo_count + ' photos)';
       });
-      msg += '  ' + variants.join(' + ') + '  \u2192  keep "' + d.keep + '"\n';
+      return variants.join(' + ') + '  \u2192  keep "' + d.keep + '"';
     });
-    msg += '\nMerge all duplicates?';
-
-    if (!confirm(msg)) {
+    if (!(await Vireo.confirm({
+      title: 'Merge all duplicate keywords?',
+      message: dupes.length + ' duplicate group(s) found:',
+      details: groups,
+      confirmLabel: 'Merge duplicates',
+      danger: true,
+    }))) {
       status.textContent = String('Cancelled');
       status.style.color = 'var(--text-dim)';
       return;

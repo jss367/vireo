@@ -14,7 +14,7 @@ and the browser loads every other file through `boot.js`'s imports.
 | File | Responsibility |
 | --- | --- |
 | `state.js` | Page state: `TYPE_ICONS` / `TYPES`, and the `state` object (`allKeywords` and `identityGroups`, `showRecords`, sort and filter state, `selectedIds`, `parentMap`, the open type dropdown, the merge dialog's state, and the link-to-place flow's Maps key, language preference, loader promise and active autocomplete) |
-| `shared.js` | The boundary with shared code: the escape and text-search helpers, `showToast`, `openExternalLink`, `openContextMenu`, `coerceSelectionOnContext`, `openLinkPlaceFromUrl` (`keywords-link-place-url.js`), the loaded Leaflet and Google Maps objects, and `setGoogleMapsCallback` |
+| `shared.js` | The boundary with shared code: the escape and text-search helpers, `showToast`, `confirmInPage` and `promptInPage` (`Vireo.confirm` / `Vireo.prompt`), `openExternalLink`, `openContextMenu`, `coerceSelectionOnContext`, `openLinkPlaceFromUrl` (`keywords-link-place-url.js`), the loaded Leaflet and Google Maps objects, and `setGoogleMapsCallback` |
 | `loading.js` | `loadKeywords()`: the `/api/keywords/identities` fetch that every edit refetches through, pruning the selection to editable rows |
 | `filtering.js` | `getFiltered`, the unlinked-location chip count, `isActionableUnlinkedLocation`, and `sortList` |
 | `render.js` | `render()`: the table rows, the empty state, the stats line and the unlinked count |

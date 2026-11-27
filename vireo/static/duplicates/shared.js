@@ -84,3 +84,8 @@ export function formatDateTime(date) {
 export function registerPageHooks(hooks) {
   window.Vireo.registerPageHooks(hooks);
 }
+
+/** Ask a yes/no question in the page (Vireo.confirm, vireo-utils.js). @param {VireoConfirmOptions} options */
+export function confirmInPage(options) {
+  return window.Vireo.confirm(options);
+}

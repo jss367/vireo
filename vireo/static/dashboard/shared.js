@@ -23,3 +23,8 @@ export function safeFetch(url, init, options) {
 export function showToast(message, kind) {
   if (typeof window.showToast === 'function') window.showToast(message, kind);
 }
+
+/** Ask a yes/no question in the page (Vireo.confirm, vireo-utils.js). @param {VireoConfirmOptions} options */
+export function confirmInPage(options) {
+  return window.Vireo.confirm(options);
+}

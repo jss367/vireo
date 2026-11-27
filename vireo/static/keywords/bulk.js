@@ -3,7 +3,7 @@
 import { state } from './state.js';
 import { loadKeywords } from './loading.js';
 import { keywordErrorMessage } from './merge-helpers.js';
-import { showToast } from './shared.js';
+import { confirmInPage, showToast } from './shared.js';
 
 // -- Bulk apply type --
 export function bindKeywordBulkApply() {
@@ -51,7 +51,12 @@ export function bindKeywordBulkApply() {
 export async function deleteSelectedKeywords() {
   const ids = Array.from(state.selectedIds);
   if (!ids.length) return;
-  if (!confirm('Delete ' + ids.length + ' keyword(s)? This will also remove them from all photos.')) return;
+  if (!(await confirmInPage({
+    title: 'Delete ' + ids.length + ' keyword(s)?',
+    message: 'This will also remove them from all photos.',
+    confirmLabel: ids.length === 1 ? 'Delete keyword' : 'Delete keywords',
+    danger: true,
+  }))) return;
 
   let failed = 0;
   let firstError = '';

@@ -3,6 +3,8 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 from playwright.sync_api import expect
 
+from e2e.in_page_dialogs import answer_dialogs
+
 
 def open_editor(live_server, page):
     pid = live_server["data"]["photos"][0]
@@ -32,7 +34,7 @@ def create_copy(page, name):
     page.locator(".vireo-ctx-menu").get_by_text("Create Virtual Copy", exact=True).click()
     page.wait_for_function("() => typeof editorState !== 'undefined' && !editorState.loading && !!editorState.versionId")
     expect(page.locator("#editorVersionSelect option")).to_have_count(2)
-    page.once("dialog", lambda dialog: dialog.accept(name))
+    answer_dialogs(page, text=name, times=1)
     page.locator("#editorVersions").get_by_role("button", name="Rename", exact=True).click()
     expect(page.locator("#editorVersionSelect option:checked")).to_have_text(name)
     page.wait_for_function("() => !editorState.loading")
@@ -73,12 +75,12 @@ def test_snapshot_restore_does_not_change_original(live_server, page):
     pid = open_editor(live_server, page)
     create_copy(page, "Warm")
     page.evaluate("() => rotateRecipe(90)")
-    page.once("dialog", lambda dialog: dialog.accept("Quarter turn"))
+    answer_dialogs(page, text="Quarter turn", times=1)
     page.get_by_role("button", name="Save Snapshot", exact=True).click()
     expect(page.get_by_label("Snapshots", exact=True).locator("option")).to_have_count(2)
     page.wait_for_function("() => !editorState.loading")
     page.evaluate("() => resetAllEdits()")
-    page.once("dialog", lambda dialog: dialog.accept())
+    answer_dialogs(page, times=1)
     page.get_by_label("Snapshots", exact=True).select_option(label="Quarter turn")
     page.get_by_role("button", name="Restore", exact=True).click()
     page.wait_for_function("() => !isEditorDirty() && editorState.recipe.rotation === 90")
@@ -124,11 +126,11 @@ def test_rename_delete_and_undo_preserve_copy(live_server, page):
     open_editor(live_server, page)
     create_copy(page, "Color")
     current = page.locator("#editorVersions")
-    page.once("dialog", lambda dialog: dialog.accept("Monochrome"))
+    answer_dialogs(page, text="Monochrome", times=1)
     current.get_by_role("button", name="Rename", exact=True).click()
     expect(page.locator("#editorVersionSelect option:checked")).to_have_text("Monochrome")
     expect(page.locator("#editorSubhead")).to_contain_text("Monochrome")
-    page.once("dialog", lambda dialog: dialog.accept())
+    answer_dialogs(page, times=1)
     current.get_by_role("button", name="Delete", exact=True).click()
     page.wait_for_function("() => !editorState.loading && editorState.versionId === null")
     expect(page.locator("#editorVersionSelect option")).to_have_count(1)
@@ -145,12 +147,12 @@ def test_copy_selector_keeps_current_version_when_discard_is_canceled(live_serve
     create_copy(page, "Color")
     version_id = page.evaluate("() => editorState.versionId")
     page.evaluate("() => rotateRecipe(90)")
-    page.once("dialog", lambda dialog: dialog.dismiss())
+    answer_dialogs(page, accept=False, times=1)
     page.get_by_label("Editing", exact=True).select_option("")
     expect(page.get_by_label("Editing", exact=True)).to_have_value(version_id)
     assert page.evaluate("() => editorState.versionId") == version_id
     assert page.evaluate("isEditorDirty()")
-    page.once("dialog", lambda dialog: dialog.accept())
+    answer_dialogs(page, times=1)
     page.get_by_label("Editing", exact=True).select_option("")
     page.wait_for_function("() => !editorState.loading && editorState.versionId === null")
     expect(page.get_by_label("Editing", exact=True)).to_have_value("")
@@ -160,7 +162,7 @@ def test_copy_selector_keeps_current_version_when_discard_is_canceled(live_serve
 def test_snapshot_picker_supports_restore_rename_and_delete(live_server, page):
     pid = open_editor(live_server, page)
     page.evaluate("() => rotateRecipe(90)")
-    page.once("dialog", lambda dialog: dialog.accept("Quarter turn"))
+    answer_dialogs(page, text="Quarter turn", times=1)
     page.get_by_role("button", name="Save Snapshot", exact=True).click()
     snapshots = page.get_by_label("Snapshots", exact=True)
     expect(snapshots.locator("option")).to_have_count(2)
@@ -170,16 +172,16 @@ def test_snapshot_picker_supports_restore_rename_and_delete(live_server, page):
     page.evaluate("() => rotateRecipe(90)")
     snapshots.select_option(label="Quarter turn")
     picker = snapshots.locator("..")
-    page.once("dialog", lambda dialog: dialog.dismiss())
+    answer_dialogs(page, accept=False, times=1)
     picker.get_by_role("button", name="Restore", exact=True).click()
     assert page.evaluate("() => editorState.recipe.rotation") == 180
-    page.once("dialog", lambda dialog: dialog.accept())
+    answer_dialogs(page, times=1)
     picker.get_by_role("button", name="Restore", exact=True).click()
     page.wait_for_function("() => !isEditorDirty() && !Object.keys(editorState.savingPhotoIds).length")
     assert live_server["db"].get_photo_edit_recipe(pid)["rotation"] == 90
     assert page.evaluate("() => editorState.versionId") is None
     snapshots.select_option(label="Quarter turn")
-    page.once("dialog", lambda dialog: dialog.accept("Portrait"))
+    answer_dialogs(page, text="Portrait", times=1)
     picker.get_by_role("button", name="Rename", exact=True).click()
     expect(snapshots.locator("option").filter(has_text="Portrait")).to_have_count(1)
     page.wait_for_function("() => !editorState.loading")
@@ -187,7 +189,7 @@ def test_snapshot_picker_supports_restore_rename_and_delete(live_server, page):
     page.locator("#editorVersions").locator("..").screenshot(
         path=str(Path(__file__).resolve().parents[2] / ".context" / "editor-versions.png")
     )
-    page.once("dialog", lambda dialog: dialog.accept())
+    answer_dialogs(page, times=1)
     picker.get_by_role("button", name="Delete", exact=True).click()
     expect(snapshots).to_have_count(0)
     assert live_server["db"].get_photo_edit_recipe(pid)["rotation"] == 90

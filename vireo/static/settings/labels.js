@@ -83,7 +83,9 @@ async function updateActiveLabels() {
 }
 
 /** @param {string} labelsFile @param {string} name */ async function deleteLabelSet(labelsFile, name) {
-  if (!confirm('Delete label set "' + name + '"?')) return;
+  if (!(await Vireo.confirm({
+    title: 'Delete label set "' + name + '"?', confirmLabel: 'Delete label set', danger: true,
+  }))) return;
   try {
     await safeFetch('/api/labels', {
       method: 'DELETE',
@@ -177,7 +179,7 @@ async function fetchLabels() {
   document.querySelectorAll(/** @type {'input'} */ ('.taxon-cb:checked')).forEach(function(cb) {
     groups.push(cb.value);
   });
-  if (groups.length === 0) { alert('Select at least one taxon group'); return; }
+  if (groups.length === 0) { showToast('Select at least one taxon group', 'warning'); return; }
 
   var btn = /** @type {HTMLButtonElement} */ (document.getElementById('fetchLabelsBtn'));
   var status = /** @type {HTMLElement} */ (document.getElementById('fetchLabelsStatus'));

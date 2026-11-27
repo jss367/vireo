@@ -17,10 +17,15 @@ async function copyEditSettings() {
   else setStatus('Settings copied');
 }
 
-function revertUnsavedEdits() {
-  if (editorState.loading || editorState.savingPhotoIds[String(editorState.photoId)] ||
-      !isEditorDirty()) return;
-  if (!window.confirm('Discard unsaved edits and return to the last saved version?')) return;
+function revertBlocked() {
+  return editorState.loading || !!editorState.savingPhotoIds[String(editorState.photoId)] || !isEditorDirty();
+}
+
+async function revertUnsavedEdits() {
+  if (revertBlocked()) return;
+  var photoId = editorState.photoId;
+  if (!(await confirmDiscardEdits('Discard unsaved edits and return to the last saved version?'))) return;
+  if (revertBlocked() || editorState.photoId !== photoId) return;
   // A mask update may still be awaiting its snapshot POST. Its result belongs
   // to the discarded working state and must not make the restored recipe dirty.
   editorState.localMaskUpdateSeq++;

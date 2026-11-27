@@ -6,18 +6,33 @@ function editorRecipeUrl(photoId, versionId) {
   return '/api/photos/' + photoId + (versionId ? '/versions/' + versionId : '/edit-recipe');
 }
 
+// A load or a save in flight owns the editor: no version may be switched,
+// renamed, deleted or restored until it finishes.
+function editorVersionChangeBlocked() {
+  return editorState.loading || Object.keys(editorState.savingPhotoIds).length > 0;
+}
+
 /** @param {string|null} versionId */
 async function switchEditorVersion(versionId) {
-  if (editorState.loading || Object.keys(editorState.savingPhotoIds).length || versionId === editorState.versionId) return;
-  if (isEditorDirty() && !window.confirm('Discard unsaved edits before switching versions?')) return;
-  if (editorState.photoId) await loadPhoto(editorState.photoId, {versionId: versionId});
+  if (editorVersionChangeBlocked() || versionId === editorState.versionId) return;
+  var photoId = editorState.photoId;
+  if (!(await confirmDiscardEdits('Discard unsaved edits before switching versions?'))) return;
+  if (editorVersionChangeBlocked() || editorState.photoId !== photoId) return;
+  if (photoId) await loadPhoto(photoId, {versionId: versionId});
+}
+
+function editorSnapshotBlocked() {
+  return !editorState.photoId || maskBrush.busy || !!maskBrush.stroke || editorVersionChangeBlocked();
 }
 
 async function saveEditorSnapshot() {
-  if (!editorState.photoId || editorState.loading || maskBrush.busy || maskBrush.stroke || Object.keys(editorState.savingPhotoIds).length) return;
-  var name = window.prompt('Name this snapshot', '');
-  if (name === null) return;
+  if (editorSnapshotBlocked()) return;
   var photoId = editorState.photoId, seq = editorState.loadSeq;
+  var name = await Vireo.prompt({
+    title: 'Save a snapshot', label: 'Snapshot name', placeholder: 'Optional', confirmLabel: 'Save snapshot',
+  });
+  if (name === null) return;
+  if (editorSnapshotBlocked() || editorState.photoId !== photoId || editorState.loadSeq !== seq) return;
   finishEditorHistoryGesture();
   setEditorLoading(true);
   try {
@@ -35,11 +50,23 @@ async function saveEditorSnapshot() {
 
 /** @param {EditorVersion} version @param {boolean} remove */
 async function changeEditorVersion(version, remove) {
-  if (!editorState.photoId || editorState.loading || Object.keys(editorState.savingPhotoIds).length) return;
-  if (remove && !window.confirm('Delete “' + version.name + '”? The original file is kept. You can undo this in Edit History.')) return;
-  var name = remove ? null : window.prompt('Version name', version.name);
-  if (!remove && name === null) return;
+  if (!editorState.photoId || editorVersionChangeBlocked()) return;
   var photoId = editorState.photoId, seq = editorState.loadSeq;
+  var name = null;
+  if (remove) {
+    if (!(await Vireo.confirm({
+      title: 'Delete “' + version.name + '”?',
+      message: 'The original file is kept. You can undo this in Edit History.',
+      confirmLabel: 'Delete version',
+      danger: true,
+    }))) return;
+  } else {
+    name = await Vireo.prompt({
+      title: 'Rename version', label: 'Version name', value: version.name, confirmLabel: 'Rename',
+    });
+    if (name === null) return;
+  }
+  if (editorVersionChangeBlocked() || editorState.photoId !== photoId || editorState.loadSeq !== seq) return;
   setEditorLoading(true);
   try {
     /** @type {{version:EditorVersion}} */ var result = await safeFetch(editorRecipeUrl(photoId, version.id), {
@@ -110,9 +137,11 @@ function editorSnapshotPicker(versions) {
     actions.replaceChildren();
     const version = versions.find(function(item) { return item.id === picker.select.value; });
     if (!version) return;
-    actions.appendChild(versionButton('Restore', function() {
-      if (editorState.loading || Object.keys(editorState.savingPhotoIds).length) return;
-      if (isEditorDirty() && !window.confirm('Replace unsaved edits with this snapshot?')) return;
+    actions.appendChild(versionButton('Restore', async function() {
+      if (editorVersionChangeBlocked()) return;
+      var photoId = editorState.photoId, seq = editorState.loadSeq;
+      if (!(await confirmDiscardEdits('Replace unsaved edits with this snapshot?', 'Replace edits'))) return;
+      if (editorVersionChangeBlocked() || editorState.photoId !== photoId || editorState.loadSeq !== seq) return;
       restoreRecipe(version.recipe);
     }));
     appendEditorVersionActions(actions, version);

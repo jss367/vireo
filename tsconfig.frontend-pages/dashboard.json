@@ -1,6 +1,7 @@
 {
   "extends": "../tsconfig.frontend.base.json",
   "files": [
+    "../types/in-page-dialogs.d.ts",
     "../types/pages/dashboard.d.ts",
     "../vireo/static/dashboard/boot.js",
     "../vireo/static/dashboard/charts.js",

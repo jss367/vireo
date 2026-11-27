@@ -4,6 +4,8 @@ import re
 import pytest
 from playwright.sync_api import expect
 
+from e2e.in_page_dialogs import accept_dialog, answer_dialogs
+
 # The preview endpoint streams SSE frames and ends with a `done` frame that
 # carries the old synchronous folder-preview payload. These helpers let
 # stubs speak that protocol: __previewDoneResponse wraps a payload in a
@@ -2712,17 +2714,13 @@ def test_pending_archive_missing_transfer_requires_confirmation(live_server, pag
     panel.get_by_role("button", name="Show details").click()
     expect(panel.get_by_role("link", name="Review photos")).to_have_count(0)
     button = panel.get_by_role("button", name="Remove missing transfer")
-    page.once("dialog", lambda dialog: dialog.dismiss())
+    answer_dialogs(page, accept=False, times=1)
     button.click()
     assert not state["discarded"]
     expect(panel).to_be_visible()
 
-    def confirm(dialog):
-        assert "No files or catalog entries will be deleted" in dialog.message
-        dialog.accept()
-
-    page.once("dialog", confirm)
     button.click()
+    assert "No files or catalog entries will be deleted" in accept_dialog(page)
     expect(panel).to_be_hidden()
     assert state["discarded"]
 

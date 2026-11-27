@@ -6,7 +6,7 @@ import { openMergeDialog } from './merge-dialog.js';
 import { renameKeyword } from './rename.js';
 import { render } from './render.js';
 import { updateType } from './type-dropdown.js';
-import { coerceSelectionOnContext, openContextMenu } from './shared.js';
+import { coerceSelectionOnContext, openContextMenu, promptInPage } from './shared.js';
 
 // -- Right-click context menu on keyword rows --
 
@@ -27,9 +27,11 @@ import { coerceSelectionOnContext, openContextMenu } from './shared.js';
 
   return [
     { label: 'Rename', disabled: !one, disabledHint: hint,
-      onClick: function() {
+      onClick: async function() {
         if (!singleKw) return;
-        const newName = prompt('Rename keyword:', singleKw.name);
+        const newName = await promptInPage({
+          title: 'Rename keyword', label: 'Keyword name', value: singleKw.name, confirmLabel: 'Rename',
+        });
         if (newName && newName.trim() && newName.trim() !== singleKw.name) {
           renameKeyword(singleKw.id, newName.trim());
         }

@@ -1281,7 +1281,14 @@ export function confirmCascade() { closeCascadeConfirm(); }
 /** @param {number} folderId @param {string} path @param {number} photoCount */
 async function startRemoveFolder(folderId, path, photoCount) {
   if (_missingFoldersRemoving) return;
-  if (!confirm(`This will remove ${photoCount} photo${photoCount !== 1 ? 's' : ''} from Vireo.\n\nThe files on disk (if they still exist) won't be touched.\n\nRemove "${path}"?`)) return;
+  if (!(await Vireo.confirm({
+    title: 'Remove this folder from Vireo?',
+    message: `This will remove ${photoCount} photo${photoCount !== 1 ? 's' : ''} from Vireo.\n\nThe files on disk (if they still exist) won't be touched.`,
+    details: [path],
+    confirmLabel: 'Remove folder',
+    danger: true,
+  }))) return;
+  if (_missingFoldersRemoving) return;
   await safeFetch(`/api/folders/${folderId}`, {method: 'DELETE'});
   loadMissingFolders();
 }
@@ -1291,7 +1298,13 @@ export async function removeAllMissingFolders() {
   // Remove children first: deleting a parent also removes its descendants.
   const folders = [..._missingFoldersRows].sort((a, b) => b.path.length - a.path.length);
   const photoCount = folders.reduce((total, folder) => total + (folder.photo_count || 0), 0);
-  if (!confirm(`Remove all ${folders.length} missing folder${folders.length !== 1 ? 's' : ''} from Vireo?\n\nThese folders contain ${photoCount} photo${photoCount !== 1 ? 's' : ''}. Their subfolders will also be removed from Vireo.\n\nThe files on disk (if they still exist) won't be touched.`)) return;
+  if (!(await Vireo.confirm({
+    title: `Remove all ${folders.length} missing folder${folders.length !== 1 ? 's' : ''} from Vireo?`,
+    message: `These folders contain ${photoCount} photo${photoCount !== 1 ? 's' : ''}. Their subfolders will also be removed from Vireo.\n\nThe files on disk (if they still exist) won't be touched.`,
+    confirmLabel: folders.length === 1 ? 'Remove folder' : 'Remove folders',
+    danger: true,
+  }))) return;
+  if (_missingFoldersRemoving) return;
 
   _missingFoldersRemoving = true;
   const button = /** @type {HTMLButtonElement} */ (document.getElementById('missingFoldersRemoveAllBtn'));
@@ -1763,7 +1776,12 @@ async function removeOneMissingPhoto(id) {
   const sidecarMsg = deleteSidecars
     ? '\n\nLeftover XMP sidecars will also be moved to the Trash.'
     : '\n\nThe XMP sidecar on disk will not be touched.';
-  if (!confirm(`Remove this photo from Vireo?\n\nCached thumbnail/preview/working copy (if any) will also be deleted.${sidecarMsg}`)) return;
+  if (!(await Vireo.confirm({
+    title: 'Remove this photo from Vireo?',
+    message: `Cached thumbnail/preview/working copy (if any) will also be deleted.${sidecarMsg}`,
+    confirmLabel: 'Remove photo',
+    danger: true,
+  }))) return;
   await _runMissingPhotosRemoval([id], deleteSidecars);
 }
 
@@ -1773,7 +1791,12 @@ export async function removeSelectedMissingPhotos() {
   if (ids.length === 0) return;
   const deleteSidecars = /** @type {HTMLInputElement} */ (document.getElementById('missingPhotosDeleteSidecars')).checked;
   const sidecarMsg = deleteSidecars ? '\n\nLeftover XMP sidecars will also be moved to the Trash.' : '';
-  if (!confirm(`Remove ${ids.length} photo${ids.length !== 1 ? 's' : ''} from Vireo?\n\nCached thumbnails/previews/working copies will be deleted.${sidecarMsg}`)) return;
+  if (!(await Vireo.confirm({
+    title: `Remove ${ids.length} photo${ids.length !== 1 ? 's' : ''} from Vireo?`,
+    message: `Cached thumbnails/previews/working copies will be deleted.${sidecarMsg}`,
+    confirmLabel: ids.length === 1 ? 'Remove photo' : 'Remove photos',
+    danger: true,
+  }))) return;
   await _runMissingPhotosRemoval(ids, deleteSidecars);
 }
 

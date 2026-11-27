@@ -140,10 +140,14 @@
       /** @type {{error?: string, mount_confirmation?: Record<string, unknown[]>}} */
       let result = await response.json();
       if (response.status === 409 && result.mount_confirmation) {
-        const mounts = Object.keys(result.mount_confirmation).join('\n');
-        if (!window.confirm('Vireo did not record the original NAS identity. Verify that this is the intended destination:\n\n'
-          + item.destination + '\nMounted at: ' + mounts
-          + '\n\nTrust this mounted destination and send the photos? Local originals are removed only after a verified transfer.')) return;
+        const mounts = Object.keys(result.mount_confirmation).map(mount => 'Mounted at: ' + mount);
+        if (!(await Vireo.confirm({
+          title: 'Trust this mounted destination and send the photos?',
+          message: 'Vireo did not record the original NAS identity. Verify that this is the intended destination.\n\n'
+            + 'Local originals are removed only after a verified transfer.',
+          details: [item.destination].concat(mounts),
+          confirmLabel: 'Trust and send',
+        }))) return;
         response = await send({sync_first: syncFirst, confirmed_mount_identities: result.mount_confirmation});
         result = await response.json();
       }
@@ -171,7 +175,15 @@
     discard.textContent = 'Remove missing transfer';
     discard.disabled = item.state !== 'ready';
     discard.addEventListener('click', async () => {
-      if (sending || !window.confirm('Remove this missing transfer record? Vireo will stop tracking its NAS transfer. No files or catalog entries will be deleted. If the storage is only disconnected, cancel and reconnect it instead.')) return;
+      if (sending) return;
+      if (!(await Vireo.confirm({
+        title: 'Remove this missing transfer record?',
+        message: 'Vireo will stop tracking its NAS transfer. No files or catalog entries will be deleted. '
+          + 'If the storage is only disconnected, cancel and reconnect it instead.',
+        confirmLabel: 'Remove transfer record',
+        danger: true,
+      }))) return;
+      if (sending) return;
       sending = true;
       discard.disabled = true;
       actionError = '';

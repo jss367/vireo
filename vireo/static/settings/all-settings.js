@@ -350,10 +350,12 @@ async function refreshAllSettingsValues() {
     ? 'This will remove approximately ' + formatBytes(removalBytes) +
       ' of the oldest generated working copies.'
     : 'If current usage exceeds the new limit, Vireo will remove the oldest generated working copies.';
-  return confirm(
-    'Lower the working-copy storage limit to ' + formatBytes(quotaBytes) + '?\n\n' +
-    detail + '\n\nYour original photos will not be deleted.'
-  );
+  return Vireo.confirm({
+    title: 'Lower the working-copy storage limit to ' + formatBytes(quotaBytes) + '?',
+    message: detail + '\n\nYour original photos will not be deleted.',
+    confirmLabel: 'Lower limit',
+    danger: true,
+  });
 }
 
 /** @param {string} key @param {SettingsValue} value @param {string=} scope @param {boolean=} confirmedEviction */ async function saveSchemaSetting(key, value, scope, confirmedEviction) {
@@ -378,9 +380,9 @@ async function refreshAllSettingsValues() {
         resp.status === 409 && !confirmedEviction &&
         err.code === 'working_copy_eviction_confirmation_required'
       ) {
-        if (confirmWorkingCopyQuotaReduction(err)) {
-          return saveSchemaSetting(key, value, scope, true);
-        }
+        var agreed = await confirmWorkingCopyQuotaReduction(err);
+        if (!isCurrentSave()) return;
+        if (agreed) return saveSchemaSetting(key, value, scope, true);
         await refreshAllSettingsValues();
         if (!isCurrentSave()) return;
         rerenderSettingRow(key);
@@ -448,9 +450,9 @@ async function refreshAllSettingsValues() {
         resp.status === 409 && !confirmedEviction &&
         err.code === 'working_copy_eviction_confirmation_required'
       ) {
-        if (confirmWorkingCopyQuotaReduction(err)) {
-          return resetSchemaSetting(key, true);
-        }
+        var agreed = await confirmWorkingCopyQuotaReduction(err);
+        if (!isCurrentSave()) return;
+        if (agreed) return resetSchemaSetting(key, true);
         await refreshAllSettingsValues();
         if (!isCurrentSave()) return;
         rerenderSettingRow(key);
@@ -584,34 +586,47 @@ async function refreshAllSettingsValues() {
 }
 
 /**
- * The confirmation an import ends with. A warning the import came back with
- * (a location-keyword cleanup it could not queue) is part of it, and also
- * gets a toast, since the desktop app's webview shows no native alerts.
- * @param {{warning?: string}} data @returns {string}
- */ function settingsImportedMessage(data) {
-  var message = 'Settings imported. Workspace overrides preserved.';
-  if (!data || !data.warning) return message;
-  if (typeof showToast === 'function') showToast(data.warning, 'warning');
-  return message + '\n\n' + data.warning;
-}
-
-/** @param {{warning?: string}} data @param {ReturnType<typeof claimSettingSave>} isCurrentWarning */ function reportSettingsImported(data, isCurrentWarning) {
+ * Report a finished import. A warning the import came back with (a
+ * location-keyword cleanup it could not queue) is shown in a notice the user
+ * closes; an import without one gets a toast.
+ * @param {{warning?: string}} data @param {ReturnType<typeof claimSettingSave>} isCurrentWarning
+ */ function reportSettingsImported(data, isCurrentWarning) {
   var ownsWarning = isCurrentWarning.commit();
   if (ownsWarning) rememberSettingSaveWarning('write_location_keywords_to_xmp', data,
     settingWarningToken('write_location_keywords_to_xmp', 'global'));
-  alert(settingsImportedMessage(ownsWarning ? data : {}));
+  var warning = ownsWarning && data ? data.warning : '';
+  if (warning) {
+    Vireo.alert({title: 'Settings imported with a warning', message: 'Workspace overrides preserved.\n\n' + warning});
+  } else {
+    showToast('Settings imported. Workspace overrides preserved.', 'success');
+  }
+}
+
+/**
+ * Report an import the server refused, naming each key it rejected.
+ * @param {{error?: string; errors?: Record<string, string>}} data @param {string} statusText
+ */ function reportSettingsImportRefused(data, statusText) {
+  var errors = data.errors || {};
+  Vireo.alert({
+    title: 'Settings were not imported',
+    message: (data.error || statusText || 'Import failed') + (data.errors ? '\n\nFailed keys:' : ''),
+    details: Object.keys(errors).map(function(k) { return k + ': ' + errors[k]; }),
+  });
 }
 
 /** @param {File} file */ async function importSettingsFile(file) {
   if (!file) return;
-  if (!confirm('Replace your global Vireo config with "' + file.name + '"?\n\nWorkspace overrides are not affected.')) {
-    return;
-  }
+  if (!(await Vireo.confirm({
+    title: 'Replace your global Vireo config?',
+    message: '"' + file.name + '" will replace your global Vireo config.\n\nWorkspace overrides are not affected.',
+    confirmLabel: 'Replace config',
+    danger: true,
+  }))) return;
   var text;
   try {
     text = await file.text();
   } catch (err) {
-    alert('Could not read file: ' + (err && settingsErrorMessage(err) || err));
+    showToast('Could not read file: ' + (err && settingsErrorMessage(err) || err), 'error');
     return;
   }
   // Cancel any queued debounced autosaves first — a PATCH or a curated
@@ -662,18 +677,12 @@ async function refreshAllSettingsValues() {
         resp.status === 409 && !confirmedEviction &&
         data.code === 'working_copy_eviction_confirmation_required'
       ) {
-        if (!confirmWorkingCopyQuotaReduction(data)) return;
+        if (!(await confirmWorkingCopyQuotaReduction(data))) return;
         confirmedEviction = true;
         continue;
       }
       if (!resp.ok) {
-        var msg = data.error || resp.statusText || 'Import failed';
-        if (data.errors) {
-          msg += '\n\nFailed keys:\n' + Object.keys(data.errors).map(function(k) {
-            return '  ' + k + ': ' + data.errors[k];
-          }).join('\n');
-        }
-        alert(msg);
+        reportSettingsImportRefused(data, resp.statusText);
         return;
       }
       break;
@@ -694,15 +703,17 @@ async function refreshAllSettingsValues() {
     // check its result rather than assume the form now matches disk.
     formReloaded = await loadConfig();
   } catch (err) {
-    alert((imported ? 'Settings imported, but the page could not refresh: ' : 'Network error: ') + (err && settingsErrorMessage(err) || err));
+    showToast((imported ? 'Settings imported, but the page could not refresh: ' : 'Network error: ') + (err && settingsErrorMessage(err) || err), 'error');
   } finally {
     if (imported && !formReloaded) {
       // The config on disk is the imported one but the form could not be
       // refreshed from it. Re-enabling autosave here would let the next
       // ordinary edit post the stale form over the import, so keep it off
       // and reload the page, which rebuilds the form from disk.
-      alert('Settings imported, but the page could not refresh. Reloading.');
-      location.reload();
+      Vireo.alert({
+        title: 'Settings imported', message: 'The page could not refresh, so Vireo will reload it.',
+        confirmLabel: 'Reload',
+      }).then(function() { location.reload(); });
     } else {
       _autosaveSuspended = false;
       // The import did not replace the config, so the edit we dropped (or

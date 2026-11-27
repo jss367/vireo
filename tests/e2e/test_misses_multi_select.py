@@ -12,6 +12,7 @@ from urllib.parse import quote
 import pytest
 from playwright.sync_api import expect
 
+from e2e.in_page_dialogs import answer_dialogs
 from e2e.module_pages import import_page_modules
 
 
@@ -483,7 +484,7 @@ def test_bulk_reject_uses_filters_that_rendered_visible_cards(live_server, page)
     page.evaluate("VireoFilter.removeField('rating')")
     page.wait_for_function("window.releaseHeldFilterLoad != null")
 
-    page.once("dialog", lambda dialog: dialog.accept())
+    answer_dialogs(page, times=1)
     page.locator("[data-testid='miss-reject-no_subject']").click()
     assert _wait_for_flag(db, pids[0], "rejected") == "rejected"
     assert all(db.photos.get(pid)["flag"] != "rejected" for pid in pids[1:])
@@ -844,8 +845,8 @@ def test_bulk_reject_category_prunes_selected_ids_synchronously(live_server, pag
     _ctrl_click(page, page.locator(f"[data-testid='miss-card-clipped-{c}']"))
     assert page.evaluate("missState.selection.size") == 3
 
-    # Auto-confirm the window.confirm dialog the bulk-reject button raises.
-    page.once("dialog", lambda d: d.accept())
+    # Confirm the question the bulk-reject button asks.
+    answer_dialogs(page, times=1)
     page.locator("[data-testid='miss-reject-no_subject']").click()
 
     # The two no_subject ids must drop out synchronously — the third (clipped)
@@ -1089,7 +1090,7 @@ def test_toolbar_history_restores_rejected_miss_membership(live_server, page):
     _expose_miss_modules(page)
     cards = page.locator("[data-testid^='miss-card-no_subject-']")
     expect(cards).to_have_count(2)
-    page.on('dialog', lambda dialog: dialog.accept())
+    answer_dialogs(page)
     page.evaluate("pageModules.flagging.bulkReject('no_subject')")
     expect(cards).to_have_count(0)
     expect(page.locator('#historyUndoBtn')).to_be_enabled()

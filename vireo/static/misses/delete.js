@@ -2,7 +2,7 @@
 // ES module.
 
 import { state, CATEGORY_ORDER } from './state.js';
-import { hasDeleteDialog, showDeleteDialog, showToast } from './shared.js';
+import { confirmInPage, hasDeleteDialog, showDeleteDialog, showToast } from './shared.js';
 import { loadMisses } from './loading.js';
 import { render } from './render.js';
 import { pruneSelectionToVisible } from './photo-open.js';
@@ -56,7 +56,11 @@ export async function deleteSelectedMisses() {
     return;
   }
 
-  if (!confirm('Delete ' + ids.length + ' selected photo' + (ids.length === 1 ? '' : 's') + '?')) return;
+  if (!(await confirmInPage({
+    title: 'Delete ' + ids.length + ' selected photo' + (ids.length === 1 ? '' : 's') + '?',
+    confirmLabel: ids.length === 1 ? 'Delete photo' : 'Delete photos',
+    danger: true,
+  }))) return;
   try {
     var r = await fetch('/api/batch/delete', {
       method: 'POST',

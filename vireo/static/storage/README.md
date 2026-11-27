@@ -18,7 +18,7 @@ estimates are separate from measured storage totals and safe-cache cleanup.
 | File | Responsibility |
 | --- | --- |
 | `state.js` | Page state: the `state` object (the autosave timer, the committed and pending working-copy quota and measured usage, and the last masks, files, overview, retained-storage and Hugging Face cache data) |
-| `shared.js` | The boundary with shared code: `safeFetch`, `safeEventSource`, `showToast`, `VireoReleaseOriginals.storageButton`, the `VireoTime` formatters, and `registerPageHooks()` |
+| `shared.js` | The boundary with shared code: `safeFetch`, `safeEventSource`, `showToast`, `confirmInPage` (`Vireo.confirm`), `VireoReleaseOriginals.storageButton`, the `VireoTime` formatters, and `registerPageHooks()` |
 | `format.js` | `storageEscapeHtml`, `storageEscapeAttr`, `storageFormatBytes` |
 | `config.js` | Loading the cache settings and their debounced autosave (everything except the working-copy quota) |
 | `working-copy-limit.js` | The quota's explicit Apply flow: measuring usage, the reduction confirmation dialog, and committing (a server-side 409 reroutes into the dialog) |

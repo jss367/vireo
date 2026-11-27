@@ -31,7 +31,7 @@ interface StorageEmbeddingMatrix {
 // The shared globals the page's shared.js reads.
 interface Window {
   VireoReleaseOriginals:{storageButton():string};
-  Vireo:VireoPageHookRegistry;
+  Vireo:VireoPageHookRegistry&VireoInPageDialogs;
   safeFetch<T = unknown>(url:string,options?:RequestInit,settings?:{toast?:boolean}):Promise<T>;
   safeEventSource(url:string,callbacks:{onComplete?():void}):EventSource;
   showToast?(message:string,kind?:string):void;

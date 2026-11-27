@@ -19,6 +19,8 @@ subtrees are intentionally deferred — workspace roots are the removable unit.
 from playwright.sync_api import expect
 from services import workspace_folders
 
+from e2e.in_page_dialogs import answer_dialogs
+
 
 def test_folder_tree_right_click_opens_menu(live_server, page):
     """Right-clicking a folder tree item shows the folder context menu."""
@@ -60,7 +62,7 @@ def test_folder_tree_removes_workspace_root_without_deleting_folder(
     expect(item).to_have_attribute("data-workspace-root", "1")
     item.click(button="right")
 
-    page.once("dialog", lambda dialog: dialog.accept())
+    answer_dialogs(page, times=1)
     with page.expect_response(
         lambda response: response.request.method == "DELETE"
         and response.url.endswith(
@@ -99,7 +101,7 @@ def test_folder_tree_remove_strips_folder_id_from_url(live_server, page):
     expect(item).to_have_attribute("data-workspace-root", "1")
     item.click(button="right")
 
-    page.once("dialog", lambda dialog: dialog.accept())
+    answer_dialogs(page, times=1)
     with page.expect_response(
         lambda response: response.request.method == "DELETE"
         and response.url.endswith(
@@ -149,7 +151,7 @@ def test_folder_tree_remove_strips_descendant_folder_id_from_url(
     expect(root).to_have_attribute("data-workspace-root", "1")
     root.click(button="right")
 
-    page.once("dialog", lambda dialog: dialog.accept())
+    answer_dialogs(page, times=1)
     with page.expect_response(
         lambda response: response.request.method == "DELETE"
         and response.url.endswith(
@@ -211,7 +213,7 @@ def test_folder_tree_remove_strips_missing_descendant_folder_id_from_url(
     ).to_have_count(0)
     root.click(button="right")
 
-    page.once("dialog", lambda dialog: dialog.accept())
+    answer_dialogs(page, times=1)
     with page.expect_response(
         lambda response: response.request.method == "DELETE"
         and response.url.endswith(

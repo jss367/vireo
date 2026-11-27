@@ -50,6 +50,7 @@ interface DashboardPendingPreview {
 }
 
 interface Window {
+  Vireo: VireoInPageDialogs;
   escapeHtml(value: unknown): string;
   escapeAttr(value: unknown): string;
   safeFetch<T>(url: string, init?: RequestInit, options?: {toast?: boolean}): Promise<T>;

@@ -58,14 +58,16 @@ function harness() {
     loadConfig: async () => { if (control.loadError) throw control.loadError; return control.loadResult; },
     loadWsOverrides: async () => { if (control.loadError) throw control.loadError; return control.loadResult; },
     showToast: (...args) => toasts.push(args), setTimeout: fn => { timers.push(fn); return timers.length; }, clearTimeout() {},
-    confirm: () => true, alert: text => alerts.push(text), location: {reload() {}},
+    Vireo: {confirm: async () => true,
+      alert: async options => { alerts.push([options.title, options.message].join('\n')); }},
+    location: {reload() {}},
     _saveStatus: {pending: {}}, _saveTimer: null, _autosaveSuspended: false, _editedWhileSuspended: false,
     _cancelQueuedSaves: async () => {}, _saveStatusMark() {}, _nextSaveGen: () => 1,
     settingsErrorMessage: error => error.message, saveConfig() {},
   });
   const functions = new Set(['setSettingsScope', 'refreshAllSettingsValues', 'renderAllSettings', 'renderSettingRow', 'renderSettingWidget',
     '_settingControlSelector', 'rerenderSettingRow', 'cssEscape', 'scheduleSchemaSave', '_settingsScopeBaseFor', 'saveSchemaSetting', 'resetSchemaSetting',
-    'showSettingSaveWarning', 'setRowStatus', 'formatSettingValue', 'settingsImportedMessage', 'importSettingsFile',
+    'showSettingSaveWarning', 'setRowStatus', 'formatSettingValue', 'reportSettingsImportRefused', 'importSettingsFile',
     'settingWarningToken', 'settingWarningOwnsStatus', 'settingRowStatus', 'claimSettingSave', 'reportSettingsImported', 'rememberSettingSaveWarning', 'restoreSettingSaveWarning', 'settingSaveRefreshFailed']);
   const variables = new Set(['ALL_SETTINGS_CACHE', 'ALL_SETTINGS_DEBOUNCE', 'ALL_SETTINGS_SCOPE', 'ALL_SETTINGS_WARNINGS', 'ALL_SETTINGS_SAVE_GENERATIONS', 'ALL_SETTINGS_SAVE_COMMITS', 'ALL_SETTINGS_ROW_STATUSES']);
   const nodes = parse(source, {ecmaVersion: 'latest'}).body.filter(node =>
@@ -124,8 +126,9 @@ for (const failure of ['transport', 'values-json', 'curated', 'not-reloaded']) {
     if (failure === 'curated') h.control.loadError = new Error('invented curated refresh');
     if (failure === 'not-reloaded') h.control.loadResult = false;
     await h.ctx.importSettingsFile({name: 'invented.json', text: async () => '{}'});
-    assert(h.toasts.some(args => args[0] === warning && args[1] === 'warning'));
+    // The warning is a notice the user closes, not a toast that fades.
     assert(h.alerts.some(text => text.includes(warning)));
+    assert(!h.toasts.some(args => args[0] === 'Settings imported. Workspace overrides preserved.'));
     assert.equal(h.rows.get(key).notice.textContent, warning);
     assert.equal(h.ctx._autosaveSuspended, true);
   });
@@ -180,7 +183,8 @@ test('an unreadable successful import response never re-posts stale form values'
   await h.ctx.importSettingsFile({name: 'invented.json', text: async () => '{}'});
   assert.equal(posted, 0);
   assert.equal(h.ctx._autosaveSuspended, true);
-  assert(h.alerts.some(text => text.startsWith('Settings imported, but')));
+  assert(h.toasts.some(args => args[0].startsWith('Settings imported, but') && args[1] === 'error'));
+  assert(h.alerts.some(text => text.includes('Vireo will reload it')));
 });
 
 test('a later failed save keeps the old warning while reporting the new transport failure', async () => {
@@ -335,7 +339,8 @@ test('an older import response cannot overwrite a later schema warning', async (
   const count = h.toasts.length;
   finishWrite(pending, 0, {ok: true, warning: 'old import warning'}); await imported;
   assert.equal(h.rows.get(key).notice.textContent, 'new warning');
-  assert.equal(h.toasts.length, count);
+  // The import reports that it finished, without the warning it no longer owns.
+  assert.deepEqual(h.toasts.slice(count), [['Settings imported. Workspace overrides preserved.', 'success']]);
   assert(!h.alerts.some(text => text.includes('old import warning')));
 });
 
@@ -365,7 +370,10 @@ for (const olderMethod of ['save', 'reset', 'import']) {
         finishWrite(pending, 0, {ok: true, warning: 'committed cleanup warning'}); await older.result;
         assert.equal(h.rows.get(key).notice.textContent, 'committed cleanup warning');
         assert.equal(h.rows.get(key).notice.hidden, false);
-        assert(h.toasts.some(args => args[0] === 'committed cleanup warning'));
+        // A save or reset toasts its warning; an import shows it in a notice.
+        assert(olderMethod === 'import'
+          ? h.alerts.some(text => text.includes('committed cleanup warning'))
+          : h.toasts.some(args => args[0] === 'committed cleanup warning'));
         h.ctx.setSettingsScope('workspace');
         assert.equal(h.rows.get(key).notice.hidden, true);
         h.ctx.setSettingsScope('global');
@@ -386,7 +394,9 @@ for (const newerPayload of [{ok: true}, {ok: true, warning: 'new committed warni
       finishWrite(pending, 0, {ok: true, warning: 'old cleanup warning'}); await older.result;
       assert.equal(h.rows.get(key).notice.textContent, newerPayload.warning || '');
       assert.equal(h.rows.get(key).notice.hidden, !newerPayload.warning);
-      assert.equal(h.toasts.length, count);
+      // An older import still reports that it finished; nothing repeats the stale warning.
+      assert(h.toasts.slice(count).every(args => args[1] === 'success'));
+      assert(!h.alerts.some(text => text.includes('old cleanup warning')));
     });
   }
 }

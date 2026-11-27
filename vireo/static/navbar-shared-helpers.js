@@ -785,7 +785,10 @@ export async function developPhotos(photoIds) {
     showToast('Could not check darktable availability.', 'error');
     return;
   }
-  if (!confirm('Develop ' + photoIds.length + ' photo(s) with darktable?')) return;
+  if (!(await Vireo.confirm({
+    title: 'Develop ' + photoIds.length + ' photo(s) with darktable?',
+    confirmLabel: 'Develop',
+  }))) return;
   try {
     /** @type {{job_id: string}} */ var data = await safeFetch('/api/jobs/develop', {
       method: 'POST',

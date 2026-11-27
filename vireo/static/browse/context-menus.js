@@ -5,7 +5,8 @@ import { _noteColorLabelEdits, state } from './state.js';
 import {
   VireoColorLabels, VireoFilter, VireoReleaseOriginals, buildOpenInEditorMenuItems,
   buildSpeciesHighlightMenuItems, buildSpeciesRepresentativeMenuItems, closeContextMenu, coerceSelectionOnContext,
-  editNav, findSimilar, localFolders, openContextMenu, openPanoramaModal, pendingArchives, revealLabel,
+  confirmInPage, editNav, findSimilar, localFolders, openContextMenu, openPanoramaModal, pendingArchives, promptInPage,
+  revealLabel,
   safeFetch, showPendingArchiveForFolder, showRevealFeedback, showToast,
 } from './shared.js';
 import {
@@ -703,11 +704,15 @@ async function removeWorkspaceRootFromBrowse(/** @type {number} */ fid) {
   }
 
   var path = folder.path || folder.name || 'this folder';
-  var msg = 'Remove "' + path + '" from this workspace?\n\n' +
-    'Photos in this folder and its subfolders will no longer appear in this workspace, ' +
-    'and predictions, collections, and pending changes referencing them will be hidden here too.\n\n' +
-    'Photos and folders are not deleted. You can re-add the folder later to restore visibility.';
-  if (!confirm(msg)) return;
+  if (!(await confirmInPage({
+    title: 'Remove this folder from this workspace?',
+    message: 'Photos in this folder and its subfolders will no longer appear in this workspace, ' +
+      'and predictions, collections, and pending changes referencing them will be hidden here too.\n\n' +
+      'Photos and folders are not deleted. You can re-add the folder later to restore visibility.',
+    details: [path],
+    confirmLabel: 'Remove folder',
+    danger: true,
+  }))) return;
 
   // Snapshot every folder ID within the removed root's subtree BEFORE the
   // DELETE mutates state. The URL cleanup below needs this so that a
@@ -887,7 +892,9 @@ document.addEventListener('contextmenu', function(e) {
 
 /* ---------- Collection sidebar context menu ---------- */
 async function renameCollection(/** @type {number} */ cid, /** @type {string} */ currentName) {
-  var next = window.prompt('Rename collection', currentName || '');
+  var next = await promptInPage({
+    title: 'Rename collection', label: 'Collection name', value: currentName || '', confirmLabel: 'Rename',
+  });
   if (next === null) return;             // user cancelled
   next = next.trim();
   if (!next || next === currentName) return;
@@ -921,7 +928,9 @@ async function duplicateCollection(/** @type {number} */ cid) {
 }
 
 async function deleteCollectionById(/** @type {number} */ cid, /** @type {string} */ name) {
-  if (!window.confirm('Delete collection "' + (name || '') + '"?')) return;
+  if (!(await confirmInPage({
+    title: 'Delete collection "' + (name || '') + '"?', confirmLabel: 'Delete collection', danger: true,
+  }))) return;
   try {
     await safeFetch('/api/collections/' + cid, { method: 'DELETE' });
   } catch (err) {

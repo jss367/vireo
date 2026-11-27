@@ -149,15 +149,10 @@ def test_lightbox_export_resolves_photo_when_action_is_invoked(live_server, page
     assert export_photo["id"] != current_id
     assert page.evaluate("pageModules.export._exportPhotoIds") == [export_photo["id"]]
 
-    dialog_messages = []
-
-    def accept_preflight_error(dialog):
-        dialog_messages.append(dialog.message)
-        dialog.accept()
-
-    page.once("dialog", accept_preflight_error)
     page.locator("#exportSubmitBtn").click()
-    assert dialog_messages == ["Export check failed: probe denied"]
+    expect(page.locator("#toastContainer .notification-toast[data-type=error]")).to_contain_text(
+        "Export check failed: probe denied"
+    )
     expect(page.locator("#exportOverlay")).to_have_class("modal-overlay open")
     expect(page.get_by_role("button", name="Cancel", exact=True)).to_be_enabled()
     expect(page.locator("#exportSubmitBtn")).to_be_enabled()

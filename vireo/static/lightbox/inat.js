@@ -214,7 +214,7 @@ export async function submitToInat(photoId, comparison) {
   if (_lbGuardReadOnly()) return false;
   try {
     var data = await /** @type {Promise<InatPreparedPhoto>} */ (safeFetch('/api/inat/prepare/' + photoId, {}, { toast: false }));
-    if (data.error) { alert(data.error); return; }
+    if (data.error) { showToast(data.error, 'error'); return; }
 
     const item = _inatQueueItem(photoId, data);
     if (comparison) {
@@ -230,7 +230,7 @@ export async function submitToInat(photoId, comparison) {
     inatQueue = [item];
     openInatModal([]);
   } catch(e) { const failure = /** @type {Error & {body?: {partial?: boolean, observation_url?: string}}} */ (e instanceof Error ? e : new Error(String(e)));
-    alert('Error: ' + failure.message);
+    showToast('iNaturalist error: ' + failure.message, 'error');
   }
 }
 
@@ -263,7 +263,7 @@ export async function submitToInatBatch(/** @type {number[]} */ photoIds) {
     var msg = failures.length
       ? 'No photos could be prepared for iNaturalist.'
       : 'No photos to submit.';
-    alert(msg);
+    showToast(msg, failures.length ? 'error' : 'warning');
     return;
   }
   openInatModal(failures);
@@ -482,7 +482,9 @@ async function _inatPickExportFolder() {
   if (typeof pickDirectory === 'function' && typeof isTauri === 'function' && isTauri()) {
     return await pickDirectory('Export for iNaturalist');
   }
-  return window.prompt('Export folder path:');
+  return await Vireo.prompt({
+    title: 'Export for iNaturalist', label: 'Export folder path', confirmLabel: 'Export',
+  });
 }
 
 function _inatReportExportResult(/** @type {InatExportRun} */ run, /** @type {InatExportCompletion} */ done) {

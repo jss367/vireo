@@ -69,7 +69,9 @@ async function loadPipelineModels() {
 }
 
 /** @param {string} modelId @param {string} modelName */ async function deletePipelineModel(modelId, modelName) {
-  if (!confirm('Delete ' + modelName + ' weights?')) return;
+  if (!(await Vireo.confirm({
+    title: 'Delete ' + modelName + ' weights?', confirmLabel: 'Delete weights', danger: true,
+  }))) return;
   try {
     /** @type {ModelRemovalResponse} */ var result = await safeFetch('/api/models/pipeline/delete', {
       method: 'POST',
@@ -302,7 +304,12 @@ async function verifyAllModels() {
 }
 
 /** @param {string} modelId */ async function removeModel(modelId) {
-  if (!confirm('Remove this model? Weights Vireo downloaded are deleted from disk, including its copy in the Hugging Face cache; weights in your own folders are left in place.')) return;
+  if (!(await Vireo.confirm({
+    title: 'Remove this model?',
+    message: 'Weights Vireo downloaded are deleted from disk, including its copy in the Hugging Face cache; weights in your own folders are left in place.',
+    confirmLabel: 'Remove model',
+    danger: true,
+  }))) return;
   try {
     /** @type {ModelRemovalResponse} */ var result = await safeFetch('/api/models/' + encodeURIComponent(modelId), {
       method: 'DELETE',

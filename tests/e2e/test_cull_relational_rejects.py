@@ -10,6 +10,8 @@ import json
 
 from playwright.sync_api import expect
 
+from e2e.in_page_dialogs import answer_dialogs
+
 
 def _results():
     return {
@@ -46,7 +48,7 @@ def _card(page, photo_id):
 
 def test_reject_is_recorded_in_favor_of_the_kept_photo(live_server, page):
     _open_cull(page, live_server, _results())
-    page.on("dialog", lambda dialog: dialog.accept())
+    answer_dialogs(page)
     applied = []
     page.route("**/api/culling/apply", lambda route: (
         applied.append(json.loads(route.request.post_data)),

@@ -13,7 +13,7 @@ entry module:
 | File | Responsibility |
 | --- | --- |
 | `state.js` | The `state` object (the folder rows by id), `byId`, and the active-workspace and workspace-list requests |
-| `shared.js` | The boundary with shared code: `safeFetch`, `showToast`, `formatDuration`, the escape helpers, `window.vireoLocalFolders` (from `vireo-work-locally.js`), the navbar's workspace switcher and edit-navigation cursors, and `registerPageHooks` |
+| `shared.js` | The boundary with shared code: `safeFetch`, `showToast`, `confirmInPage` (`Vireo.confirm`), `formatDuration`, the escape helpers, `window.vireoLocalFolders` (from `vireo-work-locally.js`), the navbar's workspace switcher and edit-navigation cursors, and `registerPageHooks` |
 | `folders.js` | The Folders section: each folder's row with its Work Locally state and actions, removing a folder, the delegated row listeners, and in-place job progress |
 | `move-folders.js` | The Move Selected bar and the Move Folders modal |
 | `subject-types.js` | "What counts as identified?" |

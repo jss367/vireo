@@ -3,6 +3,8 @@ import re
 import pytest
 from playwright.sync_api import expect
 
+from e2e.in_page_dialogs import dismiss_dialog
+
 
 def test_photo_editor_search_opens_matching_species(live_server, page):
     """Typing a species name on /edit opens a matching photo for editing."""
@@ -138,24 +140,11 @@ def test_photo_editor_search_confirms_dirty_edits_from_in_flight_search(live_ser
     exposure = page.locator("#exposureRange")
     exposure.evaluate("(el) => { el.value = '1.2'; el.dispatchEvent(new Event('input')); }")
 
-    dialogs = []
-
-    def on_dialog(dialog):
-        dialogs.append(dialog.message)
-        dialog.dismiss()
-
-    page.once("dialog", on_dialog)
-
     held_routes[0].continue_()
 
-    # The confirm must be shown, and dismissing it keeps us on the current
+    # The question must be shown, and declining it keeps us on the current
     # (dirty) photo instead of navigating to a search match.
-    for _ in range(20):
-        if dialogs:
-            break
-        page.wait_for_timeout(100)
-    assert dialogs, "expected a discard confirmation for dirty in-flight edits"
-    assert "Discard" in dialogs[0]
+    assert "Discard" in dismiss_dialog(page)
     expect(page).to_have_url(f"{url}/edit/{hawk_id}")
     expect(page.locator("#editorFilename")).to_have_text("hawk1.jpg")
     # Dismissing the discard prompt must leave the editor visibly untouched:

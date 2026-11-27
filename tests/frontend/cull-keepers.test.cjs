@@ -23,7 +23,7 @@ function page() {
     VireoBrowseCompare: {bindControls() {}},
     escapeHtml: value => String(value),
     escapeAttr: value => String(value),
-    confirm: () => true,
+    Vireo: {confirm: async () => true},
     safeFetch: async (url, options) => {
       if (options && options.body) posted.push([url, JSON.parse(options.body)]);
       return {ok: true, orphans: []};
