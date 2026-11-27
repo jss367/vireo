@@ -4615,3 +4615,19 @@ def test_first_process_time_hint_accounts_for_future_detections(monkeypatch):
     monkeypatch.setattr(planner, "_has_process_timing_baseline", lambda: True)
     assert "minutes" in planner._process_time_hint(stages, 2500, params)
     assert planner._process_time_hint(stages, 0, params) is None
+
+
+def test_group_only_run_shows_qualitative_time_hint():
+    from pipeline_plan import PipelinePlanParams, _process_time_hint
+
+    stages = {
+        "Previews": {"state": "done-prior"},
+        "Classify": {"state": "will-skip"},
+        "Extract": {"state": "will-skip"},
+        "EyeKeypoints": {"state": "will-skip"},
+        "Group": {"state": "will-run"},
+    }
+    params = PipelinePlanParams()
+    assert "Processing time depends" in _process_time_hint(stages, 100, params)
+    stages["Group"]["state"] = "done-prior"
+    assert _process_time_hint(stages, 100, params) is None

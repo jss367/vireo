@@ -1822,11 +1822,9 @@ def _process_time_hint(stages, photo_count, params):
     for stage, rate in (("Extract", 4.53), ("EyeKeypoints", 0.11)):
         if stages[stage]["state"] == "will-run":
             seconds += (photo_count if cold else pending(stage, photo_count)) * rate
-    if seconds <= 0:
-        return None
 
     quality_recompute = stages["Extract"]["state"] == "will-run" and "detail" not in stages["Extract"]
-    if quality_recompute or params.raw_subject_analysis or not _has_process_timing_baseline():
+    if seconds <= 0 or quality_recompute or params.raw_subject_analysis or not _has_process_timing_baseline():
         return ("Processing this selection may take several hours." if seconds >= 3600
                 else "Processing time depends on this computer and the selected stages.")
     # Round outward. These are planning ranges, not statistical error bars.
