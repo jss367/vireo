@@ -146,6 +146,49 @@ def test_explicit_summary_wins():
     assert out["details"] == ["2 errors:", "DSC_1.NEF: stem exists", "DSC_2.NEF: stem exists"]
 
 
+def test_work_locally_sync_says_where_deleted_source_files_went():
+    synced = {
+        "ok": True, "created_or_modified": 3, "deleted": 2, "trashed": 2,
+        "deleted_permanently": 0, "links_removed": 0, "root_folder_id": 8, "files_examined": 9,
+    }
+    out = describe_result("work-locally-folder-sync", {"folders": [synced]})
+    assert out["summary"] == "3 files published, 2 moved to Trash"
+    assert out["details"] == []
+
+    out = describe_result("work-locally-sync", {**synced, "trashed": 0, "deleted_permanently": 2})
+    assert out["summary"] == "3 files published, 2 deleted permanently"
+
+
+def test_work_locally_sync_lists_the_files_the_trash_refused():
+    kept = [
+        {"path": f"/Volumes/NAS/09/culled-{n}.jpg", "error": "Network volume Trash operation failed"}
+        for n in range(12)
+    ]
+    refused = {
+        "ok": False, "root_folder_id": 7, "trash_failed": kept, "trash_failed_total": 12,
+        "errors": [f"{item['path']}: {item['error']}" for item in kept], "errors_total": 12,
+    }
+    synced = {
+        "ok": True, "created_or_modified": 3, "deleted": 2, "trashed": 2,
+        "deleted_permanently": 0, "links_removed": 0, "root_folder_id": 8,
+    }
+    out = describe_result("work-locally-folder-sync", {
+        "ok": False, "folders": [refused, synced], "trash_failed": kept,
+        "trash_failed_total": 12, "errors": refused["errors"], "errors_total": 12,
+    })
+    # The refused folder published nothing; only the finished one is counted.
+    assert out["summary"] == (
+        "3 files published, 2 moved to Trash, 12 source files kept because the Trash refused them"
+    )
+    assert out["details"][0] == "12 source files could not be moved to Trash:"
+    assert out["details"][1] == "/Volumes/NAS/09/culled-0.jpg: Network volume Trash operation failed"
+    assert out["details"][-1] == "and 2 more"
+    assert len(out["details"]) == 12
+
+    out = describe_result("work-locally-sync", {**refused, "trash_failed": kept[:1], "trash_failed_total": 1})
+    assert out["summary"] == "0 files published, 1 source file kept because the Trash refused it"
+
+
 def test_move_summary_counts_photos_already_in_the_destination():
     out = describe_result("move-photos", {"moved": 0, "already_in_place": 3, "errors": []})
     assert out["summary"] == "3 photos already in the destination"

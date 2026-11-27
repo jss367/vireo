@@ -31,13 +31,24 @@ from services.local_folder import (
     workspace_local_root_ids,
     workspace_status,
 )
-from services.local_workspace import destination_case_insensitive, stage_boundary_lock
+from services.local_workspace import (
+    TRASH_FAILED_LISTED,
+    LocalWorkspaceTrashRefused,
+    SourceDeletion,
+    destination_case_insensitive,
+    permanent_deletion_limit,
+    stage_boundary_lock,
+    sync_summary,
+    trash_refused_result,
+    trash_refused_summary,
+)
 from services.local_workspace import local_state as legacy_local_state
 
 if TYPE_CHECKING:
     from flask.typing import ResponseReturnValue
     from jobs import JobRunner
     from services.service_types import ErrorResponse, JobDict, JsonDict, JsonError
+    from services.trash import TrashService
     from web.web_types import GetDb, GetRunner, InvalidateMissingOriginals
 
 
@@ -169,9 +180,40 @@ def _folder_sync_reporters(
     return scan_report, begin_publish, report
 
 
+def _folder_sync_job_result(results: list[JsonDict]) -> JsonDict:
+    """The sync job's result: every folder's outcome, failed if the Trash kept a file.
+
+    A folder whose deletions the Trash refused is listed with its kept
+    files; the job-level ``trash_failed`` names the first of them across all
+    folders and ``trash_failed_total`` counts them all.
+    """
+    result: JsonDict = {"folders": results}
+    kept = [item for folder in results for item in folder.get("trash_failed", [])]
+    total = sum(int(folder.get("trash_failed_total", 0)) for folder in results)
+    if total:
+        listed = kept[:TRASH_FAILED_LISTED]
+        result.update(
+            {
+                "ok": False,
+                "trash_failed": listed,
+                "trash_failed_total": total,
+                "errors": [f"{item['path']}: {item['error']}" for item in listed],
+                "errors_total": total,
+            }
+        )
+    return result
+
+
 def create_local_folder_blueprint(
-    get_db: GetDb, json_error: JsonError, get_runner: GetRunner, db_path: str, vireo_dir: str, invalidate_missing_originals: InvalidateMissingOriginals | None = None
+    get_db: GetDb, json_error: JsonError, get_runner: GetRunner, db_path: str, vireo_dir: str, invalidate_missing_originals: InvalidateMissingOriginals | None = None,
+    *,
+    trash: TrashService,
 ) -> Blueprint:
+    """Build the folder-scoped Work Locally blueprint.
+
+    ``trash`` is the app's one ``TrashService``: a sync moves the source files
+    a local copy no longer has to the Trash through it.
+    """
     blueprint = Blueprint("local_folder", __name__)
     transition_lock = threading.RLock()
     preflight_lock = threading.Lock()
@@ -1000,11 +1042,34 @@ def create_local_folder_blueprint(
             confirmed[root_id] = raw
         return confirmed, None
 
+    def _permanent_limits(
+        # ``body`` is the request's JSON; the counts map root ids to the
+        # number of files the "delete permanently?" question listed.
+        root_ids: list[int], body: dict[str, Any],
+    ) -> tuple[dict[int, int | None], ErrorResponse | None]:
+        """Each root's permanent-delete limit (``None``: Trash only), or ``{}`` and an error."""
+        counts = body.get("permanent_deletion_counts") or {}
+        if not isinstance(counts, dict):
+            return {}, json_error("permanent_deletion_counts must be an object", 400)
+        limits: dict[int, int | None] = {}
+        for root_id in root_ids:
+            try:
+                limits[root_id] = permanent_deletion_limit(
+                    body.get("delete_permanently"), counts.get(str(root_id), counts.get(root_id))
+                )
+            except LocalWorkspaceError as exc:
+                return {}, json_error(str(exc), 400)
+        return limits, None
+
     def _sync_one_root(
         runner: JobRunner, job: JobDict, thread_db: Database, root_id: int, name: str, count: int | None,
-        scan_totals: dict[int, int],
+        scan_totals: dict[int, int], permanent_limit: int | None,
     ) -> JsonDict:
-        """Check one local root against source, then publish it, tracking the running step."""
+        """Check one local root against source, then publish it, tracking the running step.
+
+        A root whose deletions the Trash refused returns its kept files
+        instead of raising, so the job goes on to the other roots.
+        """
         check_id = f"check-{root_id}"
         # The step to mark if sync stops: begin_publish moves it from the
         # checking step to the publishing one.
@@ -1024,7 +1089,7 @@ def create_local_folder_blueprint(
             runner, job, root_id, name, scan_totals, active_step
         )
         try:
-            return sync_folder(
+            result = sync_folder(
                 thread_db,
                 root_id,
                 vireo_dir,
@@ -1034,7 +1099,20 @@ def create_local_folder_blueprint(
                 scan_progress=scan_report,
                 cancel_check=lambda: runner.is_cancelled(job["id"]),
                 begin_commit=begin_publish,
+                source_deletion=SourceDeletion(trash, permanent_limit),
             )
+            runner.update_step(
+                job["id"], f"folder-{root_id}", status="completed", summary=sync_summary(result)
+            )
+            return result
+        except LocalWorkspaceTrashRefused as refused:
+            runner.update_step(
+                job["id"],
+                f"folder-{root_id}",
+                status="failed",
+                summary=trash_refused_summary(len(refused.failures)),
+            )
+            return {**trash_refused_result(refused), "root_folder_id": root_id}
         except LocalWorkspaceCancelled:
             runner.update_step(job["id"], active_step["id"], status="cancelled")
             raise
@@ -1066,6 +1144,9 @@ def create_local_folder_blueprint(
         confirmed, confirm_error = _sync_deletion_confirmations(db, root_ids, counts)
         if confirm_error is not None:
             return confirm_error
+        permanent_limits, permanent_error = _permanent_limits(root_ids, body)
+        if permanent_error is not None:
+            return permanent_error
         runner = get_runner()
 
         def work(job: JobDict) -> JsonDict:
@@ -1076,21 +1157,15 @@ def create_local_folder_blueprint(
                 runner.set_steps(job["id"], _folder_sync_steps(root_ids, root_names))
                 scan_totals: dict[int, int] = {}
                 for root_id in root_ids:
-                    step_id = f"folder-{root_id}"
-                    result = _sync_one_root(
-                        runner, job, thread_db, root_id, root_names[root_id],
-                        confirmed[root_id], scan_totals,
-                    )
-                    results.append(result)
-                    runner.update_step(
-                        job["id"],
-                        step_id,
-                        status="completed",
-                        summary=f"{result['created_or_modified']} published, {result['deleted']} deleted",
+                    results.append(
+                        _sync_one_root(
+                            runner, job, thread_db, root_id, root_names[root_id],
+                            confirmed[root_id], scan_totals, permanent_limits[root_id],
+                        )
                     )
                 if invalidate_missing_originals:
                     invalidate_missing_originals()
-                return {"folders": results}
+                return _folder_sync_job_result(results)
             finally:
                 thread_db.close()
 

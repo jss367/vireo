@@ -409,6 +409,26 @@ test('_offlineRootsPhrase factors out the shared parent and caps the list', () =
   assert.equal(eight[0], '/v/r/f8');
 });
 
+test('keptSidecarMessage names a sidecar the Trash refused and says where it is listed', () => {
+  const ctx = load([fn(banners, 'keptSidecarMessage')]);
+  const kept = {path: '/photos/ghost.xmp', error: 'Trash unavailable'};
+  assert.equal(ctx.keptSidecarMessage({sidecars_failed: [], sidecars_failed_total: 0}), '');
+  assert.equal(ctx.keptSidecarMessage({}), '');
+  assert.equal(ctx.keptSidecarMessage(null), '');
+  assert.equal(
+    ctx.keptSidecarMessage({sidecars_failed: [kept], sidecars_failed_total: 1}),
+    '1 XMP sidecar could not be moved to the Trash and was left on disk. ' +
+      '/photos/ghost.xmp: Trash unavailable. The Audit page lists it under stray sidecars.',
+  );
+  // The response lists the first of many; the total is the real count.
+  assert.equal(
+    ctx.keptSidecarMessage({sidecars_failed: [kept], sidecars_failed_total: 3}),
+    '3 XMP sidecars could not be moved to the Trash and were left on disk. ' +
+      '/photos/ghost.xmp: Trash unavailable. 2 more were kept the same way. ' +
+      'The Audit page lists them under stray sidecars.',
+  );
+});
+
 test('_offlineRootsKey is order-independent and does not mutate its input', () => {
   const ctx = load([fn(banners, '_offlineRootsKey')]);
   const roots = ['/b', '/a'];

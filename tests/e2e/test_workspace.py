@@ -1,7 +1,18 @@
+import json
 from pathlib import Path
 
 from playwright.sync_api import expect
 from services import workspace_folders
+
+from e2e.browser_doubles import fulfill_sse, record_toasts, toasts
+
+CONFIRM_DIALOG = "#vireoConfirmDialog"
+
+
+def _answer_in_page(page, answer="accept"):
+    """Answer the in-page question Work Locally asks before a sync or discard."""
+    page.locator(f"{CONFIRM_DIALOG} [data-vireo-confirm={answer}]").click()
+    expect(page.locator(CONFIRM_DIALOG)).to_have_count(0)
 
 
 def test_work_locally_full_cycle(live_server, page, tmp_path):
@@ -43,6 +54,7 @@ def test_work_locally_full_cycle(live_server, page, tmp_path):
     Path(local_path, "bird.jpg").write_bytes(b"edited-locally")
 
     page.get_by_role("button", name="Sync Back", exact=True).click()
+    _answer_in_page(page)
     expect(page.get_by_role("button", name="Work Locally", exact=True)).to_be_visible(timeout=15000)
 
     assert (source / "bird.jpg").read_bytes() == b"edited-locally"
@@ -98,6 +110,7 @@ def test_sync_back_replaces_folder_actions_with_live_progress(
 
     try:
         page.get_by_role("button", name="Sync Back", exact=True).click()
+        _answer_in_page(page)
 
         row = page.locator(".workspace-folder-row-stacked")
         status = row.locator(".workspace-folder-job").first
@@ -402,5 +415,101 @@ def test_shared_folder_local_status_follows_workspace_switch(live_server, page, 
     page.reload(timeout=5000)
     expect(page.get_by_text("Local · 2 workspaces", exact=True)).to_be_visible(timeout=5000)
     page.get_by_role("button", name="Discard", exact=True).click()
+    _answer_in_page(page)
     expect(page.get_by_role("button", name="Work Locally", exact=True)).to_be_visible(timeout=15000)
     assert (source / "bird.jpg").read_bytes() == b"original"
+
+
+def test_sync_asks_before_deleting_a_file_the_trash_refused(live_server, page, tmp_path):
+    """A sync whose Trash step kept a file ends by asking. Declining sends
+    nothing; accepting finishes the sync with the count the question listed."""
+    db = live_server["db"]
+    source = tmp_path / "trash-refused-source"
+    source.mkdir()
+    (source / "bird.jpg").write_bytes(b"original")
+    (source / "culled.jpg").write_bytes(b"culled")
+    workspace_id = db.create_workspace("Trash Refused")
+    db.commit()
+    db.set_active_workspace(workspace_id)
+    folder_id = workspace_folders.add_folder(db, str(source), name="trash-refused-source")
+    assert page.request.post(f"{live_server['url']}/api/workspaces/{workspace_id}/activate").ok
+
+    page.goto(f"{live_server['url']}/workspace", timeout=5000)
+    page.get_by_role("button", name="Work Locally", exact=True).click()
+    modal = page.locator("#stageLocalFoldersModal")
+    modal.locator("[data-local-destination-base]").fill(str(tmp_path / "trash-refused-local"))
+    modal.get_by_role("button", name="Copy Locally", exact=True).click()
+    expect(page.get_by_text("Local", exact=True)).to_be_visible(timeout=15000)
+    local_path = db.conn.execute(
+        "SELECT path FROM folders WHERE id=?", (folder_id,)
+    ).fetchone()["path"]
+    Path(local_path, "culled.jpg").unlink()
+
+    # The server's side of a sync whose Trash step kept culled.jpg.
+    kept = {"path": str(source / "culled.jpg"), "error": "Network volume Trash operation failed"}
+    sync_requests = []
+
+    def start_sync(route):
+        sync_requests.append(json.loads(route.request.post_data))
+        route.fulfill(status=202, content_type="application/json", body=json.dumps(
+            {"job_id": f"sync-ui-test-{len(sync_requests)}", "folder_ids": [folder_id]}
+        ))
+
+    def refused_sync(route):
+        fulfill_sse(route, "complete", {
+            "status": "failed", "errors": [f"{kept['path']}: {kept['error']}"],
+            "result": {
+                "ok": False, "trash_failed": [kept], "trash_failed_total": 1,
+                "folders": [{"root_folder_id": folder_id, "trash_failed": [kept], "trash_failed_total": 1}],
+            },
+        })
+
+    page.route("**/api/workspaces/active/local-folders/sync", start_sync)
+    page.route("**/api/jobs/sync-ui-test-1/stream", refused_sync)
+    page.route("**/api/jobs/sync-ui-test-2/stream", refused_sync)
+    page.route("**/api/jobs/sync-ui-test-3/stream", lambda route: route.abort())
+    record_toasts(page)
+
+    page.get_by_role("button", name="Sync Back", exact=True).click()
+    expect(page.locator(f"{CONFIRM_DIALOG} .vireo-confirm-text").last).to_contain_text(
+        "1 file that is no longer in the local copy will be moved to the Trash on source storage."
+    )
+    expect(page.locator(f"{CONFIRM_DIALOG} [data-vireo-confirm=accept]")).to_have_text(
+        "Sync and move 1 source file to the Trash"
+    )
+    _answer_in_page(page)
+
+    # The job ends, and the page asks before anything is deleted permanently.
+    expect(page.locator(f"{CONFIRM_DIALOG} h3")).to_have_text("Delete permanently instead?")
+    expect(page.locator(f"{CONFIRM_DIALOG} .vireo-confirm-text").first).to_contain_text(
+        "1 source file could not be moved to the Trash and was kept."
+    )
+    expect(page.locator(f"{CONFIRM_DIALOG} .vireo-confirm-details li")).to_have_text(
+        [f"{kept['path']} — {kept['error']}"]
+    )
+    assert sync_requests == [
+        {"folder_ids": [folder_id], "confirmed_deletion_counts": {str(folder_id): 1}}
+    ]
+    _answer_in_page(page, "cancel")
+    page.wait_for_function("window.__toasts.some(toast => toast.type === 'warning')")
+    assert len(sync_requests) == 1
+    [kept_toast] = [toast for toast in toasts(page) if toast["type"] == "warning"]
+    assert kept_toast["message"] == (
+        "1 source file could not be moved to the Trash and was kept. "
+        "The sync is not finished. Sync back again to retry the Trash."
+    )
+
+    # Asked again on the next sync, a yes sends the permanent delete with the
+    # number of files the question listed.
+    page.get_by_role("button", name="Sync Back", exact=True).click()
+    _answer_in_page(page)
+    expect(page.locator(f"{CONFIRM_DIALOG} h3")).to_have_text("Delete permanently instead?")
+    assert len(sync_requests) == 2
+    with page.expect_request("**/api/workspaces/active/local-folders/sync") as permanent:
+        _answer_in_page(page)
+    assert permanent.value.post_data_json == {
+        "folder_ids": [folder_id],
+        "confirmed_deletion_counts": {str(folder_id): 1},
+        "delete_permanently": True,
+        "permanent_deletion_counts": {str(folder_id): 1},
+    }

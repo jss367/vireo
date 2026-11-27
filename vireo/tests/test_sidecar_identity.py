@@ -235,8 +235,9 @@ def test_photo_sidecars_keep_case_variants_apart_in_case_sensitive_directory(tmp
     assert os.path.basename(stem_sidecar(str(tmp_path / 'IMG_1.jpg'))) == 'IMG_1.xmp'
 
 
-def test_delete_orphaned_sidecars_keeps_sidecar_another_file_owns(tmp_path):
-    from sidecar_identity import delete_orphaned_sidecars
+def test_trash_orphaned_sidecars_keeps_sidecar_another_file_owns(tmp_path):
+    from fake_trash import FakeTrash
+    from sidecar_identity import trash_orphaned_sidecars
 
     # The RAW is gone; its JPEG twin survives and shares IMG_1.xmp.
     (tmp_path / 'IMG_1.JPG').write_bytes(b'jpeg')
@@ -244,41 +245,82 @@ def test_delete_orphaned_sidecars_keeps_sidecar_another_file_owns(tmp_path):
     own = _write(tmp_path / 'IMG_1.CR3.xmp')
     # A second missing photo whose sidecar nothing else owns.
     lone = _write(tmp_path / 'IMG_2.XMP')
+    trash = FakeTrash()
 
-    cleaned, skipped = delete_orphaned_sidecars([
+    cleanup = trash_orphaned_sidecars([
         str(tmp_path / 'IMG_1.CR3'),
         str(tmp_path / 'IMG_2.CR3'),
         str(tmp_path / 'IMG_3.CR3'),  # no sidecar at all
-    ])
+    ], trash.trash_paths)
 
-    assert (cleaned, skipped) == (2, 1)
+    assert (cleanup.cleaned, cleanup.skipped, cleanup.failures) == (2, 1, [])
     assert shared.exists()
     assert not own.exists()
     assert not lone.exists()
+    # Both sidecars went to the Trash in one call, not through an unlink. A
+    # case-folding directory answers the ``.xmp`` probe for ``IMG_2.XMP``.
+    [call] = trash.trashed_paths
+    assert [os.path.basename(path).lower() for path in call] == ['img_1.cr3.xmp', 'img_2.xmp']
 
 
-def test_delete_orphaned_sidecars_treats_restored_original_as_owner(tmp_path):
-    from sidecar_identity import delete_orphaned_sidecars
+def test_trash_orphaned_sidecars_keeps_and_reports_a_sidecar_the_trash_refuses(tmp_path):
+    from fake_trash import FakeTrash
+    from sidecar_identity import trash_orphaned_sidecars
+
+    refused = _write(tmp_path / 'IMG_1.xmp')
+    moved = _write(tmp_path / 'IMG_2.xmp')
+    trash = FakeTrash()
+
+    def refuse_the_first(paths):
+        os.remove(paths[1])
+        return 1, {paths[1]}, [{"path": paths[0], "error": "Trash unavailable"}]
+
+    trash.handle_trash(refuse_the_first)
+
+    cleanup = trash_orphaned_sidecars(
+        [str(tmp_path / 'IMG_1.NEF'), str(tmp_path / 'IMG_2.NEF')], trash.trash_paths,
+    )
+
+    assert (cleanup.cleaned, cleanup.skipped) == (1, 1)
+    assert cleanup.failures == [{"path": str(refused), "error": "Trash unavailable"}]
+    assert refused.exists()
+    assert not moved.exists()
+
+
+def test_trash_orphaned_sidecars_treats_restored_original_as_owner(tmp_path):
+    from fake_trash import FakeTrash
+    from sidecar_identity import trash_orphaned_sidecars
 
     (tmp_path / 'bird.jpg').write_bytes(b'jpeg')
     sidecar = _write(tmp_path / 'bird.xmp')
+    trash = FakeTrash()
 
-    assert delete_orphaned_sidecars([str(tmp_path / 'bird.jpg')]) == (0, 1)
+    cleanup = trash_orphaned_sidecars([str(tmp_path / 'bird.jpg')], trash.trash_paths)
+
+    assert (cleanup.cleaned, cleanup.skipped) == (0, 1)
     assert sidecar.exists()
+    assert trash.trash_calls == []
 
 
-def test_delete_orphaned_sidecars_deletes_nothing_in_unlistable_directory(tmp_path, monkeypatch):
+def test_trash_orphaned_sidecars_moves_nothing_in_unlistable_directory(tmp_path, monkeypatch):
     import sidecar_identity
+    from fake_trash import FakeTrash
 
     sidecar = _write(tmp_path / 'ghost.xmp')
+    trash = FakeTrash()
 
     def fail(_path):
         raise PermissionError('denied')
 
     monkeypatch.setattr(sidecar_identity.os, 'scandir', fail)
 
-    assert sidecar_identity.delete_orphaned_sidecars([str(tmp_path / 'ghost.NEF')]) == (0, 1)
+    cleanup = sidecar_identity.trash_orphaned_sidecars(
+        [str(tmp_path / 'ghost.NEF')], trash.trash_paths,
+    )
+
+    assert (cleanup.cleaned, cleanup.skipped) == (0, 1)
     assert sidecar.exists()
+    assert trash.trash_calls == []
 
 
 def test_directory_named_like_the_owner_does_not_own_sidecar(tmp_path):

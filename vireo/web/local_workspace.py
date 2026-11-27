@@ -12,16 +12,23 @@ from services.local_folder import workspace_local_root_ids
 from services.local_workspace import (
     LOCAL_WORKSPACE_JOB_TYPES,
     LocalWorkspaceError,
+    LocalWorkspaceTrashRefused,
+    SourceDeletion,
     discard_local,
+    permanent_deletion_limit,
     stage_workspace,
     status,
     sync_back,
+    sync_summary,
+    trash_refused_result,
+    trash_refused_summary,
 )
 
 if TYPE_CHECKING:
     from flask.typing import ResponseReturnValue
     from jobs import JobRunner
     from services.service_types import ErrorResponse, JobDict, JobWork, JsonDict, JsonError
+    from services.trash import TrashService
     from web.web_types import GetDb, GetRunner
 
 
@@ -103,7 +110,14 @@ def _sync_callbacks(runner: JobRunner, job: JobDict) -> tuple[Callable[[], bool]
 def create_local_workspace_blueprint(
     get_db: GetDb, json_error: JsonError, get_runner: GetRunner, db_path: str, vireo_dir: str,
     invalidate_missing_originals: Callable[[int], None] | None = None,
+    *,
+    trash: TrashService,
 ) -> Blueprint:
+    """Build the workspace-scoped Work Locally blueprint.
+
+    ``trash`` is the app's one ``TrashService``: a sync moves the source files
+    the local copy no longer has to the Trash through it.
+    """
     blueprint = Blueprint("local_workspace", __name__)
     transition_lock = threading.RLock()
 
@@ -316,6 +330,14 @@ def create_local_workspace_blueprint(
                 "confirmed_deletion_count is required when confirming deletions",
                 400,
             )
+        # Files the Trash refused are deleted permanently only when the
+        # request says so and carries how many the question listed.
+        try:
+            permanent_limit = permanent_deletion_limit(
+                body.get("delete_permanently"), body.get("permanent_deletion_count")
+            )
+        except LocalWorkspaceError as exc:
+            return json_error(str(exc), 400)
 
         runner = get_runner()
 
@@ -333,21 +355,33 @@ def create_local_workspace_blueprint(
                 )
                 runner.update_step(job["id"], "verify", status="running")
                 begin_commit, report = _sync_callbacks(runner, job)
-                result = sync_back(
-                    thread_db,
-                    workspace_id,
-                    vireo_dir,
-                    allow_deletions=allow_deletions,
-                    confirmed_deletions=confirmed_deletions,
-                    progress=report,
-                    cancel_check=lambda: runner.is_cancelled(job["id"]),
-                    begin_commit=begin_commit,
-                )
+                try:
+                    result = sync_back(
+                        thread_db,
+                        workspace_id,
+                        vireo_dir,
+                        allow_deletions=allow_deletions,
+                        confirmed_deletions=confirmed_deletions,
+                        progress=report,
+                        cancel_check=lambda: runner.is_cancelled(job["id"]),
+                        begin_commit=begin_commit,
+                        source_deletion=SourceDeletion(trash, permanent_limit),
+                    )
+                except LocalWorkspaceTrashRefused as refused:
+                    # The kept files are the job's result, so the page can
+                    # list them and ask whether to delete them permanently.
+                    runner.update_step(
+                        job["id"],
+                        "publish",
+                        status="failed",
+                        summary=trash_refused_summary(len(refused.failures)),
+                    )
+                    return trash_refused_result(refused)
                 runner.update_step(
                     job["id"],
                     "publish",
                     status="completed",
-                    summary=f"{result['created_or_modified']} files published, {result['deleted']} deleted",
+                    summary=sync_summary(result),
                 )
                 runner.update_step(
                     job["id"],

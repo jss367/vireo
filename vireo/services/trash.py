@@ -1,8 +1,9 @@
 """Moving originals to the Trash without hanging on an unhealthy share.
 
 ``trash_paths`` is the one Trash implementation behind batch delete,
-duplicate-loser cleanup, the stray-sidecar delete and post-move source
-cleanup. It classifies every path against the kernel mount table first
+duplicate-loser cleanup, the stray-sidecar delete, the Missing Originals
+sidecar cleanup, post-move source cleanup and the source deletions of a
+Work Locally sync. It classifies every path against the kernel mount table first
 (``services.volumes``), so a path on a network share never reaches an
 in-process filesystem call: those go straight to one time-bounded Finder
 subprocess per batch. Local paths on a mounted volume take a direct
@@ -18,8 +19,9 @@ their parent's device. Anything else stays a failure, so callers keep the
 catalog row of a photo that would reappear when the share comes back.
 
 ``TrashService`` is the object the delete paths hold: ``create_app`` builds
-one and passes it to ``PhotoDeletion`` and to the audit, duplicates and
-move-cleanup blueprints, and route tests inject a fake through
+one and passes it to ``PhotoDeletion`` and to the audit, duplicates,
+move-cleanup, photos and Work Locally blueprints, and route tests inject a
+fake through
 ``create_app(trash=...)`` (``vireo/tests/fake_trash.py``).
 
 Inside the run, collaborators are reached through their modules
