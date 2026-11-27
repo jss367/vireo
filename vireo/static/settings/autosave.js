@@ -9,6 +9,7 @@
 var _settingsInitialLoads = { config: false, ws: false };
 /** @param {'config'|'ws'} kind */ function _markSettingsInitialLoad(kind) {
   _settingsInitialLoads[kind] = true;
+  renderSettingsIssues();
   if (_settingsInitialLoads.config && _settingsInitialLoads.ws) {
     document.body.setAttribute('data-settings-ready', 'true');
   }
@@ -83,8 +84,7 @@ var _editedWhileSuspended = false;
     // superseded pending gen would linger forever.
     _saveStatus.pending[path] = gen;
   } else if (phase === 'inflight') {
-    // Every POST sends the full current form snapshot, so a request at
-    // least as new as the queued write already carries its edits. This
+    // A request reads all pending edits when its turn starts. This
     // matters for direct _saveConfigNow() callers (the NAS wizard clears
     // the debounce timer and flushes with a freshly minted gen): without
     // the <= the superseded pending gen would never clear and the pill
@@ -134,7 +134,7 @@ function _renderSaveStatus() {
   } else if (failed) {
     el.setAttribute('data-state', 'error');
     el.textContent = String('Save failed \u2014 changes not saved');
-    el.title = 'The last save was rejected. Edit the field again to retry.';
+    el.title = 'Use Retry for the affected settings.';
   } else if (_saveStatus.lastSavedAt) {
     var t = window.VireoTime.time(_saveStatus.lastSavedAt, {
       hour: '2-digit', minute: '2-digit', second: '2-digit'
@@ -152,3 +152,138 @@ function _renderSaveStatus() {
 }
 
 /** @type {ReturnType<typeof setTimeout>|null} */ var _saveTimer = null;
+
+/** @typedef {Record<string,unknown>} SettingsSnapshot */
+/** @type {Record<string,SettingsSnapshot|null>} */
+var settingsBaseline = {config:null, workspace:null};
+var settingsWorkspaceName = 'Workspace';
+/** @type {Record<string,string[]>} */
+var settingsFailures = {};
+/** @type {Record<string,string[]>} */
+var settingsDiscarded = {};
+
+/** @param {SettingsSnapshot} values */
+function flattenSettings(values) {
+  const {pipeline,...flat} = values;
+  for (const [key,value] of Object.entries(pipeline || {})) flat['pipeline.'+key] = value;
+  return flat;
+}
+
+/** @param {SettingsSnapshot} flat */
+function settingsPayload(flat) {
+  /** @type {SettingsSnapshot} */ const payload = {};
+  /** @type {SettingsSnapshot} */ const pipeline = {};
+  for (const [key,value] of Object.entries(flat)) {
+    if (key.startsWith('pipeline.')) pipeline[key.slice(9)] = value;
+    else payload[key] = value;
+  }
+  if (Object.keys(pipeline).length) payload.pipeline = pipeline;
+  return payload;
+}
+
+/** @param {string} scope @param {SettingsSnapshot} values */
+function settingsChanges(scope,values) {
+  const baseline = settingsBaseline[scope];
+  if (!baseline) throw new Error('Settings have not loaded.');
+  return Object.fromEntries(Object.entries(values).filter(([key,value]) =>
+    JSON.stringify(value) !== JSON.stringify(baseline[key])));
+}
+
+/** @param {string} scope @param {SettingsSnapshot} values */
+function recordSettingsFailure(scope,values) {
+  settingsFailures[scope] = Object.keys(values);
+  delete settingsDiscarded[scope];
+  renderSettingsIssues();
+}
+
+/** @param {string} scope @param {SettingsSnapshot} values */
+function commitSettingsChanges(scope,values) {
+  Object.assign(settingsBaseline[scope] || {},values);
+  delete settingsFailures[scope];
+  delete settingsDiscarded[scope];
+  const layers = ALL_SETTINGS_CACHE.values;
+  if (layers) {
+    const layer = scope === 'workspace' ? layers.workspace : layers.global;
+    for (const [key,value] of Object.entries(values)) {
+      if (!ALL_SETTINGS_CACHE.schema?.[key]) continue;
+      if (scope === 'workspace' && value === null) delete layer[key];
+      else layer[key] = /** @type {SettingsValue} */ (value);
+      rerenderSettingRow(key);
+    }
+    renderOverrideLinks();
+  }
+  renderSettingsIssues();
+}
+
+/** @param {string} scope @param {SettingsSnapshot|null} baseline @param {SettingsSnapshot} prior */
+function setSettingsBaseline(scope,baseline,prior = {}) {
+  settingsBaseline[scope] = baseline;
+  if (baseline && settingsFailures[scope]?.length) {
+    const loaded = scope === 'config' ? {...baseline,..._readSecretFields()} : baseline;
+    const replaced = (settingsFailures[scope] || []).filter(key =>
+      JSON.stringify(prior[key]) !== JSON.stringify(loaded[key]));
+    if (replaced.length) settingsDiscarded[scope] = replaced;
+    else delete settingsDiscarded[scope];
+    delete settingsFailures[scope];
+    delete _saveStatus.lastResult[scope];
+    _renderSaveStatus();
+  }
+  const selector = scope === 'workspace' ? '[id^=wsOverride_],[id^=wsVal_]' : '[data-setting-keys]';
+  for (const el of Array.from(document.querySelectorAll(/** @type {'div'} */ (selector)))) {
+    const row = el.closest('.setting-row') || el.closest('.section');
+    if (row instanceof HTMLElement) row.inert = !baseline;
+  }
+  renderSettingsIssues();
+}
+
+/** @param {string} scope */
+function settingsReloadButton(scope) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'btn-sm';
+  button.textContent = scope === 'config' ? 'Reload global settings' : 'Reload workspace settings';
+  button.onclick = async () => {
+    button.disabled = true;
+    const ok = await (scope === 'config' ? loadConfig() : loadWsOverrides());
+    if (ok) button.remove();
+    else button.disabled = false;
+  };
+  return button;
+}
+
+function renderSettingsIssues() {
+  const container = document.getElementById('settingsSaveIssues');
+  if (!container) return;
+  container.replaceChildren();
+  for (const scope of ['config','workspace']) {
+    const name = scope === 'config' ? 'Global' : settingsWorkspaceName;
+    const group = document.createElement('div');
+    if (!settingsBaseline[scope]) {
+      if (!_settingsInitialLoads[scope === 'config' ? 'config' : 'ws']) continue;
+      group.append(name+' settings could not be loaded. ',settingsReloadButton(scope));
+    } else {
+      const keys = settingsFailures[scope] || settingsDiscarded[scope];
+      if (!keys) continue;
+      group.append(name + (settingsFailures[scope] ? ' changes could not be saved.' : ' unsaved changes were replaced by stored values.'));
+      for (const key of keys) {
+        const el = document.querySelector(/** @type {'div'} */ ('[data-setting-keys~="'+cssEscape(key)+'"]'));
+        const panel = el?.closest('section');
+        if (!el || !panel) continue;
+        const link = document.createElement('a');
+        link.href = '?category='+panel.dataset.settingsCategory+'#'+(scope === 'workspace' ? 'wsOverride_'+key : el.id);
+        link.textContent = settingsLabel(el);
+        link.onclick = event => {event.preventDefault(); goToSettings(panel.dataset.settingsCategory || '',link.hash.slice(1));};
+        group.append(link);
+      }
+      if (settingsFailures[scope]) {
+        const retry = document.createElement('button');
+        retry.className = 'btn-sm';
+        retry.textContent = 'Retry';
+        retry.setAttribute('aria-label','Retry '+name+' changes');
+        retry.onclick = () => scope === 'config' ? saveConfig() : saveWsConfig();
+        group.append(retry);
+      }
+    }
+    container.append(group);
+  }
+}

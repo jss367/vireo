@@ -1,3 +1,19 @@
+// Use the management card’s existing action and progress display from the summary.
+/** @param {HTMLElement} summary @param {Element|null|undefined} card */
+function addModelRecoveryAction(summary, card) {
+  const action = card?.querySelector('button[data-model-recovery]');
+  if (!(action instanceof HTMLButtonElement)) return;
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'btn-sm';
+  button.textContent = action.textContent;
+  button.onclick = () => {
+    revealSettingsTarget(action);
+    action.click();
+  };
+  summary.append(button);
+}
+
 async function loadPipelineModels() {
   var container = /** @type {HTMLElement} */ (document.getElementById('pipelineModelsContainer'));
   if (!container) return;
@@ -14,7 +30,7 @@ async function loadPipelineModels() {
       else if (m.status === 'repo cached') { statusColor = 'var(--warning)'; statusText = 'Repo only'; }
       else { statusColor = 'var(--warning)'; statusText = 'Not downloaded'; }
 
-      html += '<tr style="border-bottom:1px solid var(--border-primary);">';
+      html += '<tr data-find-name="' + escapeAttr(m.name) + '" style="border-bottom:1px solid var(--border-primary);">';
       html += '<td style="padding:8px;"><strong>' + m.name + '</strong><br><span style="color:var(--text-dim);font-size:11px;">' + m.description + '</span></td>';
       html += '<td style="padding:8px;color:var(--text-dim);">' + m.role + '</td>';
       html += '<td style="padding:8px;color:' + statusColor + ';">' + statusText + '</td>';
@@ -24,15 +40,28 @@ async function loadPipelineModels() {
         html += '<button class="btn-sm btn-danger" onclick="deletePipelineModel(\'' + m.id + '\',\'' + m.name + '\')">Delete</button>';
       } else if (m.status === 'corrupt' || m.status === 'incomplete') {
         html += '<button class="btn-sm btn-danger" onclick="deletePipelineModel(\'' + m.id + '\',\'' + m.name + '\')">Delete</button> ';
-        html += '<button class="btn-sm" onclick="downloadPipelineModel(\'' + m.id + '\',this)">Re-download</button>';
+        html += '<button class="btn-sm" data-model-recovery onclick="downloadPipelineModel(\'' + m.id + '\',this)">Re-download</button>';
       } else {
-        html += '<button class="btn-sm" onclick="downloadPipelineModel(\'' + m.id + '\',this)">Download</button>';
+        html += '<button class="btn-sm" data-model-recovery onclick="downloadPipelineModel(\'' + m.id + '\',this)">Download</button>';
       }
       html += '</td></tr>';
     });
     html += '</table>';
     container.innerHTML = html;
+    const summary = settingsElement('pipelineModelStatus');
+    summary.replaceChildren();
+    data.models.forEach((model, index) => {
+      const row = document.createElement('div');
+      const role = document.createElement('strong');
+      role.textContent = model.role || 'Processing';
+      const value = document.createElement('span');
+      value.textContent = model.name + ' · ' + model.status;
+      row.append(role,value);
+      addModelRecoveryAction(row,container.querySelectorAll('[data-find-name]')[index]);
+      summary.append(row);
+    });
   } catch(e) {
+    settingsElement('pipelineModelStatus').textContent = 'Pipeline model status unavailable';
     container.textContent = String('Error loading models: ' + e);
   }
 }
@@ -85,12 +114,32 @@ async function loadPipelineModels() {
 
 /* ---------- Models ---------- */
 /** @type {Record<string,SettingsModel>} */ var _modelsById = {};
+/** @param {string} state @param {boolean} hasMissingOptional */
+function speciesModelStatus(state, hasMissingOptional) {
+  var statusColor, statusText;
+  if (state === 'ok' && hasMissingOptional) {
+    statusColor = 'var(--warning)'; statusText = 'Downloaded — optional files available';
+  } else if (state === 'ok') {
+    statusColor = 'var(--accent)'; statusText = 'Downloaded';
+  } else if (state === 'incomplete') {
+    statusColor = 'var(--warning)'; statusText = 'Incomplete — repair available';
+  } else if (state === 'unverified' && hasMissingOptional) {
+    statusColor = 'var(--warning)'; statusText = 'Unverified — optional files available';
+  } else if (state === 'unverified') {
+    statusColor = 'var(--warning)'; statusText = 'Unverified — could not reach HuggingFace';
+  } else {
+    statusColor = 'var(--text-faint)'; statusText = 'Not downloaded';
+  }
+  return {statusColor,statusText};
+}
+
 async function loadModels() {
   try {
     /** @type {{models?:SettingsModel[];active_id?:string}} */ var data = await safeFetch('/api/models', {}, { toast: false });
     var models = data.models || [];
     var activeId = data.active_id;
 
+    settingsElement('speciesModelStatus').textContent = 'No species identification model selected';
     _modelsById = {};
     models.forEach(function(m) { _modelsById[m.id] = m; });
 
@@ -104,29 +153,13 @@ async function loadModels() {
       var isActive = m.id === activeId;
       var state = m.state || (m.downloaded ? 'ok' : 'missing');
       var missingOptional = m.missing_optional_files || [];
-      // Unverified installs also expose missing_optional_files in
-      // get_models() because they count as "downloaded", so gate on both
-      // 'ok' and 'unverified' — otherwise the Retry-verification button
-      // is the only action offered and it can't fetch optional artifacts
-      // (see downloadModel vs verifyAllModels below).
+      // Unverified installs can still need Repair to fetch optional files.
       var hasMissingOptional = (state === 'ok' || state === 'unverified') && missingOptional.length > 0;
-      var statusColor, statusText;
-      if (state === 'ok' && hasMissingOptional) {
-        statusColor = 'var(--warning)'; statusText = 'Downloaded — optional files available';
-      } else if (state === 'ok') {
-        statusColor = 'var(--accent)'; statusText = 'Downloaded';
-      } else if (state === 'incomplete') {
-        statusColor = 'var(--warning)'; statusText = 'Incomplete — repair available';
-      } else if (state === 'unverified' && hasMissingOptional) {
-        statusColor = 'var(--warning)'; statusText = 'Unverified — optional files available';
-      } else if (state === 'unverified') {
-        statusColor = 'var(--warning)'; statusText = 'Unverified — could not reach HuggingFace';
-      } else {
-        statusColor = 'var(--text-faint)'; statusText = 'Not downloaded';
-      }
+      var {statusColor,statusText} = speciesModelStatus(state,hasMissingOptional);
+      if (isActive) settingsElement('speciesModelStatus').textContent = 'Species identification · ' + m.name + ' · ' + statusText;
       var activeTag = isActive ? ' <span style="color:var(--accent);font-size:10px;font-weight:600;">ACTIVE</span>' : '';
 
-      html += '<div style="padding:10px 0;border-bottom:1px solid var(--border-subtle);">';
+      html += '<div id="species-model-' + escapeAttr(m.id) + '" data-find-name="' + escapeAttr(m.name) + '" style="padding:10px 0;border-bottom:1px solid var(--border-subtle);">';
       html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">';
       html += '<span style="font-size:14px;color:var(--text-primary);font-weight:600;">' + escapeHtml(m.name) + '</span>';
       html += '<span style="font-size:11px;color:var(--text-faint);">' + escapeHtml(m.architecture || m.model_str) + '</span>';
@@ -165,19 +198,19 @@ async function loadModels() {
 
       html += '<span style="margin-left:auto;display:flex;gap:6px;">';
       if (state === 'incomplete' && m.source !== 'custom') {
-        html += '<button data-model-id="' + escapeAttr(m.id) + '" onclick="downloadModel(this.dataset.modelId)" style="background:var(--warning);color:var(--accent-text);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;font-weight:600;">Repair</button>';
+        html += '<button data-model-id="' + escapeAttr(m.id) + '" data-model-recovery onclick="downloadModel(this.dataset.modelId)" style="background:var(--warning);color:var(--accent-text);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;font-weight:600;">Repair</button>';
       } else if (state === 'unverified' && hasMissingOptional && m.source !== 'custom') {
         // Missing optionals need download_model (Repair); retry-verification
         // alone would leave them absent. Offer both so the user can pick a
         // lighter re-check once they've handled the optional artifacts.
-        html += '<button data-model-id="' + escapeAttr(m.id) + '" onclick="downloadModel(this.dataset.modelId)" style="background:var(--warning);color:var(--accent-text);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;font-weight:600;">Repair</button>';
-        html += '<button onclick="verifyAllModels()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;">Retry verification</button>';
+        html += '<button data-model-id="' + escapeAttr(m.id) + '" data-model-recovery onclick="downloadModel(this.dataset.modelId)" style="background:var(--warning);color:var(--accent-text);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;font-weight:600;">Repair</button>';
+        html += '<button data-model-recovery onclick="verifyAllModels()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;">Retry verification</button>';
       } else if (state === 'unverified' && m.source !== 'custom') {
-        html += '<button onclick="verifyAllModels()" style="background:var(--warning);color:var(--accent-text);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;font-weight:600;">Retry verification</button>';
+        html += '<button data-model-recovery onclick="verifyAllModels()" style="background:var(--warning);color:var(--accent-text);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;font-weight:600;">Retry verification</button>';
       } else if (hasMissingOptional && m.source !== 'custom') {
-        html += '<button data-model-id="' + escapeAttr(m.id) + '" onclick="downloadModel(this.dataset.modelId)" style="background:var(--warning);color:var(--accent-text);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;font-weight:600;">Repair</button>';
+        html += '<button data-model-id="' + escapeAttr(m.id) + '" data-model-recovery onclick="downloadModel(this.dataset.modelId)" style="background:var(--warning);color:var(--accent-text);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;font-weight:600;">Repair</button>';
       } else if (state === 'missing' && m.source !== 'custom') {
-        html += '<button data-model-id="' + escapeAttr(m.id) + '" onclick="downloadModel(this.dataset.modelId)" style="background:var(--accent);color:var(--accent-text);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;">Download</button>';
+        html += '<button data-model-id="' + escapeAttr(m.id) + '" data-model-recovery onclick="downloadModel(this.dataset.modelId)" style="background:var(--accent);color:var(--accent-text);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;">Download</button>';
       }
       if (!isActive && (state === 'ok' || state === 'unverified')) {
         html += '<button data-model-id="' + escapeAttr(m.id) + '" onclick="setActiveModel(this.dataset.modelId)" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;">Use This</button>';
@@ -194,8 +227,10 @@ async function loadModels() {
       html += '</div>';
       html += '</div>';
     });
-    /** @type {HTMLElement} */ (document.getElementById('modelsContent')).innerHTML = html;
+    settingsElement('modelsContent').innerHTML = html;
+    addModelRecoveryAction(settingsElement('speciesModelStatus'),document.getElementById('species-model-'+activeId));
   } catch(e) {
+    settingsElement('speciesModelStatus').textContent = 'Species model status unavailable';
     /** @type {HTMLElement} */ (document.getElementById('modelsContent')).innerHTML = '<span style="color:var(--danger);font-size:13px;">Failed to load models</span>';
   }
 }

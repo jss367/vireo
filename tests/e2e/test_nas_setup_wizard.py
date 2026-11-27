@@ -70,7 +70,7 @@ def nas_env(live_server, tmp_path, monkeypatch):
 
 
 def _walk_to_ssh_step(page, live_server):
-    page.goto(f"{live_server['url']}/settings")
+    page.goto(f"{live_server['url']}/settings?category=storage")
     page.get_by_role("button", name="Set up from mounted volume…").click()
     page.locator("#nwTitle").wait_for(state="visible")
     # Step 1: the seeded mount is preselected.
@@ -156,3 +156,38 @@ def test_wizard_terminal_fallback_never_sends_password(nas_env, live_server, pag
     assert nas_env["state"]["installs"] == 0   # password path never used
     page.locator("#nwNext").click()
     _finish_from_share_step(page, live_server, nas_env)
+
+
+def test_wizard_can_reload_global_settings_and_retry(nas_env, live_server, page):
+    nas_env["state"]["auth"] = True
+    url = live_server["url"]
+    writes = []
+    page.on("request", lambda request: writes.append(request.post_data_json)
+            if request.method == "POST" and request.url.endswith("/api/config") else None)
+    page.route("**/api/config", lambda route: route.fulfill(status=503, json={"error": "offline"}))
+    page.goto(url + "/settings#nas-setup")
+    wizard = page.locator("#nasWizard")
+    next_step = wizard.locator("#nwNext")
+    wizard.get_by_text("Photography on synology-nas").wait_for()
+    next_step.click()
+    wizard.get_by_text("already authorized").wait_for()
+    next_step.click()
+    wizard.get_by_text("/volume1/Photography").wait_for()
+    next_step.click()
+    wizard.get_by_role("button", name="Create & use").click()
+    wizard.get_by_text("Archive folder:").wait_for()
+    next_step.click()
+    wizard.get_by_text("Connection OK").wait_for()
+    next_step.click()
+    reload_settings = wizard.get_by_role("button", name="Reload global settings")
+    expect(reload_settings).to_be_visible()
+    assert not writes
+    page.unroute("**/api/config")
+    reload_settings.click()
+    expect(reload_settings).to_have_count(0)
+    next_step.click()
+    expect(wizard).to_be_hidden()
+    assert len(writes) == 1
+    targets = page.request.get(url + "/api/config").json()["remote_targets"]
+    assert len(targets) == 1
+    assert targets[0]["mount_path"] == nas_env["mount_dir"]

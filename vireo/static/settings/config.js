@@ -1,6 +1,21 @@
 async function loadConfig() {
   try {
     /** @type {SettingsConfig} */ var cfg = await safeFetch('/api/config', {}, { toast: false });
+    const prior = settingsFailures.config ? {...flattenSettings(readConfigForm()), ..._readSecretFields()} : {};
+    populateConfigForm(cfg);
+    setSettingsBaseline('config', flattenSettings(readConfigForm()), prior);
+  } catch (e) {
+    console.warn('Could not load settings config:', e);
+    setSettingsBaseline('config', null);
+    _markSettingsInitialLoad('config');
+    return false;
+  }
+  _markSettingsInitialLoad('config');
+  return true;
+}
+
+/** @param {SettingsConfig} cfg */
+function populateConfigForm(cfg) {
     loadDisplayConfig(cfg);
     var pct = Math.round((cfg.classification_threshold != null ? cfg.classification_threshold : 0.4) * 100);
     /** @type {HTMLInputElement} */ (document.getElementById('cfgThreshold')).value = String(pct);
@@ -90,106 +105,99 @@ async function loadConfig() {
     var cph = cfg.cull_phash_threshold != null ? cfg.cull_phash_threshold : 19;
     /** @type {HTMLInputElement} */ (document.getElementById('cfgCullPhash')).value = String(cph);
     /** @type {HTMLElement} */ (document.getElementById('cfgCullPhashVal')).textContent = String(cph);
-    // Load pipeline settings
-    var p = VireoPipelineConfig.pipelineFromConfig(cfg);
-    var wf = VireoPipelineConfig.percent(p.w_focus, 'w_focus');
-    /** @type {HTMLInputElement} */ (document.getElementById('cfgWFocus')).value = String(wf);
-    /** @type {HTMLElement} */ (document.getElementById('cfgWFocusVal')).textContent = String(wf + '%');
-    var we = VireoPipelineConfig.percent(p.w_exposure, 'w_exposure');
-    /** @type {HTMLInputElement} */ (document.getElementById('cfgWExposure')).value = String(we);
-    /** @type {HTMLElement} */ (document.getElementById('cfgWExposureVal')).textContent = String(we + '%');
-    var wc = VireoPipelineConfig.percent(p.w_composition, 'w_composition');
-    /** @type {HTMLInputElement} */ (document.getElementById('cfgWComposition')).value = String(wc);
-    /** @type {HTMLElement} */ (document.getElementById('cfgWCompositionVal')).textContent = String(wc + '%');
-    var wa = VireoPipelineConfig.percent(p.w_area, 'w_area');
-    /** @type {HTMLInputElement} */ (document.getElementById('cfgWArea')).value = String(wa);
-    /** @type {HTMLElement} */ (document.getElementById('cfgWAreaVal')).textContent = String(wa + '%');
-    var wn = VireoPipelineConfig.percent(p.w_noise, 'w_noise');
-    /** @type {HTMLInputElement} */ (document.getElementById('cfgWNoise')).value = String(wn);
-    /** @type {HTMLElement} */ (document.getElementById('cfgWNoiseVal')).textContent = String(wn + '%');
-    var rc = VireoPipelineConfig.percent(p.reject_crop_complete, 'reject_crop_complete');
-    /** @type {HTMLInputElement} */ (document.getElementById('cfgRejectCrop')).value = String(rc);
-    /** @type {HTMLElement} */ (document.getElementById('cfgRejectCropVal')).textContent = String(rc + '%');
-    var rf = VireoPipelineConfig.percent(p.reject_focus, 'reject_focus');
-    /** @type {HTMLInputElement} */ (document.getElementById('cfgRejectFocus')).value = String(rf);
-    /** @type {HTMLElement} */ (document.getElementById('cfgRejectFocusVal')).textContent = String(rf + '%');
-    var rcl = VireoPipelineConfig.percent(p.reject_clip_high, 'reject_clip_high');
-    /** @type {HTMLInputElement} */ (document.getElementById('cfgRejectClip')).value = String(rcl);
-    /** @type {HTMLElement} */ (document.getElementById('cfgRejectClipVal')).textContent = String(rcl + '%');
-    var rco = VireoPipelineConfig.percent(p.reject_composite, 'reject_composite');
-    /** @type {HTMLInputElement} */ (document.getElementById('cfgRejectComposite')).value = String(rco);
-    /** @type {HTMLElement} */ (document.getElementById('cfgRejectCompositeVal')).textContent = String(rco + '%');
+    loadPipelineControls(cfg);
+}
 
-    // Miss detection tunables
-    /** @type {HTMLInputElement} */ (document.getElementById('cfgMissEnabled')).checked = p.miss_enabled !== false;
-    var mdc = VireoPipelineConfig.percent(p.miss_det_confidence, 'miss_det_confidence');
-    /** @type {HTMLInputElement} */ (document.getElementById('cfgMissDetConf')).value = String(mdc);
-    /** @type {HTMLElement} */ (document.getElementById('cfgMissDetConfVal')).textContent = String(mdc + '%');
-    var mbm = Math.round(VireoPipelineConfig.asNumber(p.miss_bbox_area_min, 'miss_bbox_area_min') * 1000);
-    /** @type {HTMLInputElement} */ (document.getElementById('cfgMissBboxMin')).value = String(mbm);
-    /** @type {HTMLElement} */ (document.getElementById('cfgMissBboxMinVal')).textContent = String((mbm / 1000).toFixed(3));
-    var mor = VireoPipelineConfig.percent(p.miss_oof_ratio, 'miss_oof_ratio');
-    /** @type {HTMLInputElement} */ (document.getElementById('cfgMissOofRatio')).value = String(mor);
-    /** @type {HTMLElement} */ (document.getElementById('cfgMissOofRatioVal')).textContent = String((mor / 100).toFixed(2));
+/** @param {SettingsConfig} cfg */
+function loadPipelineControls(cfg) {
+  var p = VireoPipelineConfig.pipelineFromConfig(cfg);
+  var wf = VireoPipelineConfig.percent(p.w_focus, 'w_focus');
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgWFocus')).value = String(wf);
+  /** @type {HTMLElement} */ (document.getElementById('cfgWFocusVal')).textContent = String(wf + '%');
+  var we = VireoPipelineConfig.percent(p.w_exposure, 'w_exposure');
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgWExposure')).value = String(we);
+  /** @type {HTMLElement} */ (document.getElementById('cfgWExposureVal')).textContent = String(we + '%');
+  var wc = VireoPipelineConfig.percent(p.w_composition, 'w_composition');
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgWComposition')).value = String(wc);
+  /** @type {HTMLElement} */ (document.getElementById('cfgWCompositionVal')).textContent = String(wc + '%');
+  var wa = VireoPipelineConfig.percent(p.w_area, 'w_area');
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgWArea')).value = String(wa);
+  /** @type {HTMLElement} */ (document.getElementById('cfgWAreaVal')).textContent = String(wa + '%');
+  var wn = VireoPipelineConfig.percent(p.w_noise, 'w_noise');
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgWNoise')).value = String(wn);
+  /** @type {HTMLElement} */ (document.getElementById('cfgWNoiseVal')).textContent = String(wn + '%');
+  var rc = VireoPipelineConfig.percent(p.reject_crop_complete, 'reject_crop_complete');
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgRejectCrop')).value = String(rc);
+  /** @type {HTMLElement} */ (document.getElementById('cfgRejectCropVal')).textContent = String(rc + '%');
+  var rf = VireoPipelineConfig.percent(p.reject_focus, 'reject_focus');
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgRejectFocus')).value = String(rf);
+  /** @type {HTMLElement} */ (document.getElementById('cfgRejectFocusVal')).textContent = String(rf + '%');
+  var rcl = VireoPipelineConfig.percent(p.reject_clip_high, 'reject_clip_high');
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgRejectClip')).value = String(rcl);
+  /** @type {HTMLElement} */ (document.getElementById('cfgRejectClipVal')).textContent = String(rcl + '%');
+  var rco = VireoPipelineConfig.percent(p.reject_composite, 'reject_composite');
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgRejectComposite')).value = String(rco);
+  /** @type {HTMLElement} */ (document.getElementById('cfgRejectCompositeVal')).textContent = String(rco + '%');
 
-    // Eye-focus detection tunables
-    /** @type {HTMLInputElement} */ (document.getElementById('cfgEyeDetectEnabled')).checked =
-      p.eye_detect_enabled === true;  // default false
-    var ecg = VireoPipelineConfig.percent(p.eye_classifier_conf_gate, 'eye_classifier_conf_gate');
-    /** @type {HTMLInputElement} */ (document.getElementById('cfgEyeClassifierConfGate')).value = String(ecg);
-    /** @type {HTMLElement} */ (document.getElementById('cfgEyeClassifierConfGateVal')).textContent = String(ecg + '%');
-    var edg = VireoPipelineConfig.asNumber(p.eye_detection_conf_gate, 'eye_detection_conf_gate');
-    /** @type {HTMLInputElement} */ (document.getElementById('cfgEyeDetectionConfGate')).value = String(edg);
-    /** @type {HTMLElement} */ (document.getElementById('cfgEyeDetectionConfGateVal')).textContent = String(edg);
-    var ewk = VireoPipelineConfig.percent(p.eye_window_k, 'eye_window_k');
-    /** @type {HTMLInputElement} */ (document.getElementById('cfgEyeWindowK')).value = String(ewk);
-    /** @type {HTMLElement} */ (document.getElementById('cfgEyeWindowKVal')).textContent = String((ewk / 100).toFixed(2));
-    var rejectEye = VireoPipelineConfig.percent(p.reject_eye_focus, 'reject_eye_focus');
-    /** @type {HTMLInputElement} */ (document.getElementById('cfgRejectEyeFocus')).value = String(rejectEye);
-    /** @type {HTMLElement} */ (document.getElementById('cfgRejectEyeFocusVal')).textContent = String(rejectEye + '%');
-    var btg = VireoPipelineConfig.asNumber(p.burst_time_gap, 'burst_time_gap');
-    /** @type {HTMLInputElement} */ (document.getElementById('cfgBurstTimeGap')).value = String(btg);
-    /** @type {HTMLElement} */ (document.getElementById('cfgBurstTimeGapVal')).textContent = String(btg + 's');
-    var bemb = VireoPipelineConfig.embeddingThresholdToDistancePercent(
-      p.burst_embedding_threshold
-    );
-    /** @type {HTMLInputElement} */ (document.getElementById('cfgBurstEmb')).value = String(bemb);
-    /** @type {HTMLElement} */ (document.getElementById('cfgBurstEmbVal')).textContent = String(bemb + '%');
-    var bl = VireoPipelineConfig.percent(p.burst_lambda, 'burst_lambda');
-    /** @type {HTMLInputElement} */ (document.getElementById('cfgBurstLambda')).value = String(bl);
-    /** @type {HTMLElement} */ (document.getElementById('cfgBurstLambdaVal')).textContent = String(bl + '%');
-    /** @type {HTMLInputElement} */ (document.getElementById('cfgBurstMaxKeep')).value = String(VireoPipelineConfig.asNumber(p.burst_max_keep, 'burst_max_keep'));
-    var el = VireoPipelineConfig.percent(p.encounter_lambda, 'encounter_lambda');
-    /** @type {HTMLInputElement} */ (document.getElementById('cfgEncLambda')).value = String(el);
-    /** @type {HTMLElement} */ (document.getElementById('cfgEncLambdaVal')).textContent = String(el + '%');
-    /** @type {HTMLInputElement} */ (document.getElementById('cfgEncMaxKeep')).value = String(VireoPipelineConfig.asNumber(p.encounter_max_keep, 'encounter_max_keep'));
-    /** @type {HTMLInputElement} */ (document.getElementById('cfgWTime')).value = String(VireoPipelineConfig.percent(p.w_time, 'w_time'));
-    /** @type {HTMLInputElement} */ (document.getElementById('cfgWSubj')).value = String(VireoPipelineConfig.percent(p.w_subj, 'w_subj'));
-    /** @type {HTMLInputElement} */ (document.getElementById('cfgWGlobal')).value = String(VireoPipelineConfig.percent(p.w_global, 'w_global'));
-    /** @type {HTMLInputElement} */ (document.getElementById('cfgWSpecies')).value = String(VireoPipelineConfig.percent(p.w_species, 'w_species'));
-    /** @type {HTMLInputElement} */ (document.getElementById('cfgWMeta')).value = String(VireoPipelineConfig.percent(p.w_meta, 'w_meta'));
-    /** @type {HTMLInputElement} */ (document.getElementById('cfgHardCutTime')).value = String(VireoPipelineConfig.asNumber(p.hard_cut_time, 'hard_cut_time'));
-    var hcs = VireoPipelineConfig.percent(p.hard_cut_score, 'hard_cut_score');
-    /** @type {HTMLInputElement} */ (document.getElementById('cfgHardCutScore')).value = String(hcs);
-    /** @type {HTMLElement} */ (document.getElementById('cfgHardCutScoreVal')).textContent = String(hcs + '%');
-    var scs = VireoPipelineConfig.percent(p.soft_cut_score, 'soft_cut_score');
-    /** @type {HTMLInputElement} */ (document.getElementById('cfgSoftCutScore')).value = String(scs);
-    /** @type {HTMLElement} */ (document.getElementById('cfgSoftCutScoreVal')).textContent = String(scs + '%');
-    var ms = VireoPipelineConfig.percent(p.merge_score, 'merge_score');
-    /** @type {HTMLInputElement} */ (document.getElementById('cfgMergeScore')).value = String(ms);
-    /** @type {HTMLElement} */ (document.getElementById('cfgMergeScoreVal')).textContent = String(ms + '%');
-    /** @type {HTMLInputElement} */ (document.getElementById('cfgMergeMaxGap')).value = String(VireoPipelineConfig.asNumber(p.merge_max_gap, 'merge_max_gap'));
-  } catch(e) {
-    console.warn('Could not load settings config:', e);
-    var fallbackDistance = VireoPipelineConfig.buildSliderDefaults()
-      .grouping.burst_embedding_distance;
-    /** @type {HTMLInputElement} */ (document.getElementById('cfgBurstEmb')).value = String(fallbackDistance);
-    /** @type {HTMLElement} */ (document.getElementById('cfgBurstEmbVal')).textContent = String(fallbackDistance + '%');
-    _markSettingsInitialLoad('config');
-    return false;
-  }
-  _markSettingsInitialLoad('config');
-  return true;
+  // Miss detection tunables
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgMissEnabled')).checked = p.miss_enabled !== false;
+  var mdc = VireoPipelineConfig.percent(p.miss_det_confidence, 'miss_det_confidence');
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgMissDetConf')).value = String(mdc);
+  /** @type {HTMLElement} */ (document.getElementById('cfgMissDetConfVal')).textContent = String(mdc + '%');
+  var mbm = Math.round(VireoPipelineConfig.asNumber(p.miss_bbox_area_min, 'miss_bbox_area_min') * 1000);
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgMissBboxMin')).value = String(mbm);
+  /** @type {HTMLElement} */ (document.getElementById('cfgMissBboxMinVal')).textContent = String((mbm / 1000).toFixed(3));
+  var mor = VireoPipelineConfig.percent(p.miss_oof_ratio, 'miss_oof_ratio');
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgMissOofRatio')).value = String(mor);
+  /** @type {HTMLElement} */ (document.getElementById('cfgMissOofRatioVal')).textContent = String((mor / 100).toFixed(2));
+
+  // Eye-focus detection tunables
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgEyeDetectEnabled')).checked =
+    p.eye_detect_enabled === true;  // default false
+  var ecg = VireoPipelineConfig.percent(p.eye_classifier_conf_gate, 'eye_classifier_conf_gate');
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgEyeClassifierConfGate')).value = String(ecg);
+  /** @type {HTMLElement} */ (document.getElementById('cfgEyeClassifierConfGateVal')).textContent = String(ecg + '%');
+  var edg = VireoPipelineConfig.asNumber(p.eye_detection_conf_gate, 'eye_detection_conf_gate');
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgEyeDetectionConfGate')).value = String(edg);
+  /** @type {HTMLElement} */ (document.getElementById('cfgEyeDetectionConfGateVal')).textContent = String(edg);
+  var ewk = VireoPipelineConfig.percent(p.eye_window_k, 'eye_window_k');
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgEyeWindowK')).value = String(ewk);
+  /** @type {HTMLElement} */ (document.getElementById('cfgEyeWindowKVal')).textContent = String((ewk / 100).toFixed(2));
+  var rejectEye = VireoPipelineConfig.percent(p.reject_eye_focus, 'reject_eye_focus');
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgRejectEyeFocus')).value = String(rejectEye);
+  /** @type {HTMLElement} */ (document.getElementById('cfgRejectEyeFocusVal')).textContent = String(rejectEye + '%');
+  var btg = VireoPipelineConfig.asNumber(p.burst_time_gap, 'burst_time_gap');
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgBurstTimeGap')).value = String(btg);
+  /** @type {HTMLElement} */ (document.getElementById('cfgBurstTimeGapVal')).textContent = String(btg + 's');
+  var bemb = VireoPipelineConfig.embeddingThresholdToDistancePercent(
+    p.burst_embedding_threshold
+  );
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgBurstEmb')).value = String(bemb);
+  /** @type {HTMLElement} */ (document.getElementById('cfgBurstEmbVal')).textContent = String(bemb + '%');
+  var bl = VireoPipelineConfig.percent(p.burst_lambda, 'burst_lambda');
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgBurstLambda')).value = String(bl);
+  /** @type {HTMLElement} */ (document.getElementById('cfgBurstLambdaVal')).textContent = String(bl + '%');
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgBurstMaxKeep')).value = String(VireoPipelineConfig.asNumber(p.burst_max_keep, 'burst_max_keep'));
+  var el = VireoPipelineConfig.percent(p.encounter_lambda, 'encounter_lambda');
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgEncLambda')).value = String(el);
+  /** @type {HTMLElement} */ (document.getElementById('cfgEncLambdaVal')).textContent = String(el + '%');
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgEncMaxKeep')).value = String(VireoPipelineConfig.asNumber(p.encounter_max_keep, 'encounter_max_keep'));
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgWTime')).value = String(VireoPipelineConfig.percent(p.w_time, 'w_time'));
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgWSubj')).value = String(VireoPipelineConfig.percent(p.w_subj, 'w_subj'));
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgWGlobal')).value = String(VireoPipelineConfig.percent(p.w_global, 'w_global'));
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgWSpecies')).value = String(VireoPipelineConfig.percent(p.w_species, 'w_species'));
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgWMeta')).value = String(VireoPipelineConfig.percent(p.w_meta, 'w_meta'));
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgHardCutTime')).value = String(VireoPipelineConfig.asNumber(p.hard_cut_time, 'hard_cut_time'));
+  var hcs = VireoPipelineConfig.percent(p.hard_cut_score, 'hard_cut_score');
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgHardCutScore')).value = String(hcs);
+  /** @type {HTMLElement} */ (document.getElementById('cfgHardCutScoreVal')).textContent = String(hcs + '%');
+  var scs = VireoPipelineConfig.percent(p.soft_cut_score, 'soft_cut_score');
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgSoftCutScore')).value = String(scs);
+  /** @type {HTMLElement} */ (document.getElementById('cfgSoftCutScoreVal')).textContent = String(scs + '%');
+  var ms = VireoPipelineConfig.percent(p.merge_score, 'merge_score');
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgMergeScore')).value = String(ms);
+  /** @type {HTMLElement} */ (document.getElementById('cfgMergeScoreVal')).textContent = String(ms + '%');
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgMergeMaxGap')).value = String(VireoPipelineConfig.asNumber(p.merge_max_gap, 'merge_max_gap'));
 }
 
 var CARD_FIELD_OPTIONS = [
@@ -235,6 +243,7 @@ function getSelectedCardFields() {
     // Direct callers (NAS wizard, etc.) don't hand us a generation, so mint
     // one here. Threading a fresh gen through inflight/ok/error keeps the
     // autosave pill honest when this call overlaps a debounced write.
+    if (!settingsBaseline.config) return Promise.reject(new Error('Reload global settings before saving.'));
     if (gen === undefined) gen = _nextSaveGen();
     // Settings import is replacing the whole config; a direct flush would
     // post the pre-import form over it. Refuse so the caller reports a
@@ -245,12 +254,7 @@ function getSelectedCardFields() {
     return _serializedSave('config', function() { return _postConfigSnapshot(gen); });
 }
 
-// The secret fields and the value each one held when the page loaded it or
-// last saved it. Every autosave posts the whole form, so sending these
-// unconditionally let any save (a photos-per-page change in another tab)
-// write back the token the page loaded with, over one saved since, and
-// cancel an in-flight iNat token validation. Only a field the user changed
-// here is sent; the server keeps the stored value for an absent key.
+// Track credentials separately so edits in another session survive unrelated saves.
 /** @type {Record<string,string>} */ var _SECRET_FIELDS = {
   hf_token: 'cfgHfToken',
   inat_token: 'cfgInatToken',
@@ -279,127 +283,138 @@ function _editedSecrets() {
   Object.keys(values).forEach(function(key) { _savedSecrets[key] = values[key] || ''; });
 }
 
-/** @param {number} gen */ async function _postConfigSnapshot(gen) {
-    // Runs only once any earlier config POST has settled; reads the form
-    // now so the snapshot reflects every edit made while waiting.
+function readConfigForm() {
     var threshold = parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgThreshold')).value, 10) / 100;
     var grouping = parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgGroupingWindow')).value, 10);
     if (isNaN(grouping)) grouping = 10;
     var similarity = parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgSimilarity')).value, 10) / 100;
-    var secrets = _editedSecrets();
+
     var keywordCase = /** @type {HTMLSelectElement} */ (document.getElementById('cfgKeywordCase')).value;
     var display = readDisplayConfig();
     var maxEditHistory = parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgMaxEditHistory')).value, 10);
     if (isNaN(maxEditHistory)) maxEditHistory = 1000;
+    return {
+      classification_threshold: threshold,
+      grouping_window_seconds: grouping,
+      similarity_threshold: similarity,
+      keyword_case: keywordCase,
+      ...display,
+      max_edit_history: maxEditHistory,
+      google_maps_prefer_english: /** @type {HTMLInputElement} */ (document.getElementById('cfgGoogleMapsPreferEnglish')).checked,
+      external_editors: collectExternalEditors(),
+      remote_targets: collectRemoteTargets(),
+      darktable_bin: /** @type {HTMLInputElement} */ (document.getElementById('cfgDarktableBin')).value.trim(),
+      darktable_style: /** @type {HTMLInputElement} */ (document.getElementById('cfgDarktableStyle')).value.trim(),
+      darktable_output_format: /** @type {HTMLSelectElement} */ (document.getElementById('cfgDarktableFormat')).value,
+      darktable_output_dir: /** @type {HTMLInputElement} */ (document.getElementById('cfgDarktableOutputDir')).value.trim(),
+      darktable_auto_convert_dng: /** @type {HTMLInputElement} */ (document.getElementById('cfgDarktableAutoConvertDng')).checked,
+      dng_converter_bin: /** @type {HTMLInputElement} */ (document.getElementById('cfgDngConverterBin')).value.trim(),
+      photos_per_page: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgPhotosPerPage')).value, 10) || 50,
+      browse_thumb_default: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgBrowseThumbDefault')).value, 10) || 220,
+      open_in_browser: /** @type {HTMLInputElement} */ (document.getElementById('cfgOpenInBrowser')).checked,
+      browse_card_fields: getSelectedCardFields(),
+      filter_shortcuts: collectFilterShortcuts(),
+      detector_confidence: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgDetectorConf')).value, 10) / 100,
+      detection_padding: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgDetectionPadding')).value, 10) / 100,
+      top_k_predictions: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgTopK')).value, 10) || 5,
+      redundancy_threshold: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgRedundancy')).value, 10) / 100,
+      cull_time_window: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgCullTimeWindow')).value, 10) || 60,
+      cull_phash_threshold: Number(/** @type {HTMLInputElement} */ (document.getElementById('cfgCullPhash')).value),
+      pipeline: readPipelineControls(),
+    };
+}
+
+function readPipelineControls() {
+  return {
+    w_focus: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgWFocus')).value, 10) / 100,
+    w_exposure: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgWExposure')).value, 10) / 100,
+    w_composition: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgWComposition')).value, 10) / 100,
+    w_area: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgWArea')).value, 10) / 100,
+    w_noise: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgWNoise')).value, 10) / 100,
+    reject_crop_complete: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgRejectCrop')).value, 10) / 100,
+    reject_focus: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgRejectFocus')).value, 10) / 100,
+    reject_clip_high: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgRejectClip')).value, 10) / 100,
+    reject_composite: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgRejectComposite')).value, 10) / 100,
+    miss_enabled: /** @type {HTMLInputElement} */ (document.getElementById('cfgMissEnabled')).checked,
+    // Keep paired thresholds consistent: the UI exposes one slider
+    // per pair, but classify_miss reads the sibling value (burst
+    // vs singleton) independently. If we only save one side, the
+    // other falls back to defaults, which can break the paired
+    // relationship when the user picks a value below the paired
+    // default. Derive the paired value from the same slider using
+    // the default ratio. Burst context and singleton context
+    // move in opposite numeric directions because they describe
+    // different kinds of evidence:
+    //   - det_conf: siblings confirm a subject, so a burst is
+    //     forgiving of low confidence (lower threshold). Default
+    //     det_conf=0.20 / det_conf_burst=0.12 -> burst = 0.60 * singleton.
+    //   - bbox_min: siblings showing a larger subject make a tiny
+    //     bbox look like lost framing, so a burst flags more
+    //     aggressively (higher threshold). Default bbox_min=0.005 /
+    //     bbox_min_singleton=0.002 → singleton = 0.40 * burst.
+    ...(function() {
+      var det = parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgMissDetConf')).value, 10) / 100;
+      var bbox = parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgMissBboxMin')).value, 10) / 1000;
+      return {
+        miss_det_confidence: det,
+        miss_det_confidence_burst: +(det * 0.60).toFixed(4),
+        miss_bbox_area_min: bbox,
+        miss_bbox_area_min_singleton: +(bbox * 0.40).toFixed(5),
+      };
+    })(),
+    miss_oof_ratio: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgMissOofRatio')).value, 10) / 100,
+    eye_detect_enabled: /** @type {HTMLInputElement} */ (document.getElementById('cfgEyeDetectEnabled')).checked,
+    eye_classifier_conf_gate: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgEyeClassifierConfGate')).value, 10) / 100,
+    eye_detection_conf_gate: parseFloat(/** @type {HTMLInputElement} */ (document.getElementById('cfgEyeDetectionConfGate')).value),
+    eye_window_k: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgEyeWindowK')).value, 10) / 100,
+    reject_eye_focus: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgRejectEyeFocus')).value, 10) / 100,
+    burst_time_gap: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgBurstTimeGap')).value, 10) || 3,
+    burst_embedding_threshold: VireoPipelineConfig.embeddingDistancePercentToThreshold(
+      parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgBurstEmb')).value, 10)
+    ),
+    burst_lambda: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgBurstLambda')).value, 10) / 100,
+    burst_max_keep: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgBurstMaxKeep')).value, 10) || 3,
+    encounter_lambda: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgEncLambda')).value, 10) / 100,
+    encounter_max_keep: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgEncMaxKeep')).value, 10) || 5,
+    w_time: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgWTime')).value, 10) / 100,
+    w_subj: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgWSubj')).value, 10) / 100,
+    w_global: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgWGlobal')).value, 10) / 100,
+    w_species: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgWSpecies')).value, 10) / 100,
+    w_meta: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgWMeta')).value, 10) / 100,
+    hard_cut_time: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgHardCutTime')).value, 10) || 180,
+    hard_cut_score: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgHardCutScore')).value, 10) / 100,
+    soft_cut_score: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgSoftCutScore')).value, 10) / 100,
+    merge_score: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgMergeScore')).value, 10) / 100,
+    merge_max_gap: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgMergeMaxGap')).value, 10) || 60,
+  };
+}
+
+/** @param {number} gen */
+async function _postConfigSnapshot(gen) {
+    if (!settingsBaseline.config) throw new Error('Reload global settings before saving.');
+    const form = readConfigForm();
+    const changed = settingsChanges('config', flattenSettings(form));
+    const secrets = _editedSecrets();
+    Object.assign(changed, secrets);
+    const payload = settingsPayload(changed);
+    // Without this clear the legacy editor would reappear after deleting the last editor.
+    if ('external_editors' in changed) payload.external_editor = '';
     _saveStatusMark('config', 'inflight', gen);
     try {
-      await safeFetch('/api/config', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(Object.assign({}, secrets, {
-          classification_threshold: threshold,
-          grouping_window_seconds: grouping,
-          similarity_threshold: similarity,
-          keyword_case: keywordCase,
-          ...display,
-          max_edit_history: maxEditHistory,
-          google_maps_prefer_english: /** @type {HTMLInputElement} */ (document.getElementById('cfgGoogleMapsPreferEnglish')).checked,
-          external_editors: collectExternalEditors(),
-          remote_targets: collectRemoteTargets(),
-          // Always clear the legacy single-editor field when we save the new
-          // list. Otherwise a user who once had `external_editor` set and now
-          // removes every editor from the list can't get back to OS-default
-          // behavior — `cfg.get_editors()` falls back to the legacy field
-          // whenever the new list is empty, so the old value keeps haunting
-          // them. Saving from the new UI is the migration completion step.
-          external_editor: '',
-          darktable_bin: /** @type {HTMLInputElement} */ (document.getElementById('cfgDarktableBin')).value.trim(),
-          darktable_style: /** @type {HTMLInputElement} */ (document.getElementById('cfgDarktableStyle')).value.trim(),
-          darktable_output_format: /** @type {HTMLSelectElement} */ (document.getElementById('cfgDarktableFormat')).value,
-          darktable_output_dir: /** @type {HTMLInputElement} */ (document.getElementById('cfgDarktableOutputDir')).value.trim(),
-          darktable_auto_convert_dng: /** @type {HTMLInputElement} */ (document.getElementById('cfgDarktableAutoConvertDng')).checked,
-          dng_converter_bin: /** @type {HTMLInputElement} */ (document.getElementById('cfgDngConverterBin')).value.trim(),
-          photos_per_page: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgPhotosPerPage')).value, 10) || 50,
-          browse_thumb_default: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgBrowseThumbDefault')).value, 10) || 220,
-          open_in_browser: /** @type {HTMLInputElement} */ (document.getElementById('cfgOpenInBrowser')).checked,
-          browse_card_fields: getSelectedCardFields(),
-          filter_shortcuts: collectFilterShortcuts(),
-          detector_confidence: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgDetectorConf')).value, 10) / 100,
-          detection_padding: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgDetectionPadding')).value, 10) / 100,
-          top_k_predictions: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgTopK')).value, 10) || 5,
-          redundancy_threshold: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgRedundancy')).value, 10) / 100,
-          cull_time_window: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgCullTimeWindow')).value, 10) || 60,
-          cull_phash_threshold: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgCullPhash')).value, 10) || 19,
-          pipeline: {
-            w_focus: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgWFocus')).value, 10) / 100,
-            w_exposure: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgWExposure')).value, 10) / 100,
-            w_composition: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgWComposition')).value, 10) / 100,
-            w_area: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgWArea')).value, 10) / 100,
-            w_noise: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgWNoise')).value, 10) / 100,
-            reject_crop_complete: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgRejectCrop')).value, 10) / 100,
-            reject_focus: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgRejectFocus')).value, 10) / 100,
-            reject_clip_high: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgRejectClip')).value, 10) / 100,
-            reject_composite: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgRejectComposite')).value, 10) / 100,
-            miss_enabled: /** @type {HTMLInputElement} */ (document.getElementById('cfgMissEnabled')).checked,
-            // Keep paired thresholds consistent: the UI exposes one slider
-            // per pair, but classify_miss reads the sibling value (burst
-            // vs singleton) independently. If we only save one side, the
-            // other falls back to defaults, which can break the paired
-            // relationship when the user picks a value below the paired
-            // default. Derive the paired value from the same slider using
-            // the default ratio. Burst context and singleton context
-            // move in opposite numeric directions because they describe
-            // different kinds of evidence:
-            //   - det_conf: siblings confirm a subject, so a burst is
-            //     forgiving of low confidence (lower threshold). Default
-            //     det_conf=0.20 / det_conf_burst=0.12 -> burst = 0.60 * singleton.
-            //   - bbox_min: siblings showing a larger subject make a tiny
-            //     bbox look like lost framing, so a burst flags more
-            //     aggressively (higher threshold). Default bbox_min=0.005 /
-            //     bbox_min_singleton=0.002 → singleton = 0.40 * burst.
-            ...(function() {
-              var det = parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgMissDetConf')).value, 10) / 100;
-              var bbox = parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgMissBboxMin')).value, 10) / 1000;
-              return {
-                miss_det_confidence: det,
-                miss_det_confidence_burst: +(det * 0.60).toFixed(4),
-                miss_bbox_area_min: bbox,
-                miss_bbox_area_min_singleton: +(bbox * 0.40).toFixed(5),
-              };
-            })(),
-            miss_oof_ratio: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgMissOofRatio')).value, 10) / 100,
-            eye_detect_enabled: /** @type {HTMLInputElement} */ (document.getElementById('cfgEyeDetectEnabled')).checked,
-            eye_classifier_conf_gate: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgEyeClassifierConfGate')).value, 10) / 100,
-            eye_detection_conf_gate: parseFloat(/** @type {HTMLInputElement} */ (document.getElementById('cfgEyeDetectionConfGate')).value),
-            eye_window_k: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgEyeWindowK')).value, 10) / 100,
-            reject_eye_focus: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgRejectEyeFocus')).value, 10) / 100,
-            burst_time_gap: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgBurstTimeGap')).value, 10) || 3,
-            burst_embedding_threshold: VireoPipelineConfig.embeddingDistancePercentToThreshold(
-              parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgBurstEmb')).value, 10)
-            ),
-            burst_lambda: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgBurstLambda')).value, 10) / 100,
-            burst_max_keep: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgBurstMaxKeep')).value, 10) || 3,
-            encounter_lambda: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgEncLambda')).value, 10) / 100,
-            encounter_max_keep: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgEncMaxKeep')).value, 10) || 5,
-            w_time: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgWTime')).value, 10) / 100,
-            w_subj: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgWSubj')).value, 10) / 100,
-            w_global: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgWGlobal')).value, 10) / 100,
-            w_species: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgWSpecies')).value, 10) / 100,
-            w_meta: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgWMeta')).value, 10) / 100,
-            hard_cut_time: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgHardCutTime')).value, 10) || 180,
-            hard_cut_score: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgHardCutScore')).value, 10) / 100,
-            soft_cut_score: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgSoftCutScore')).value, 10) / 100,
-            merge_score: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgMergeScore')).value, 10) / 100,
-            merge_max_gap: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgMergeMaxGap')).value, 10) || 60,
-          },
-        })),
-      });
+      if (Object.keys(payload).length) {
+        await safeFetch('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+      }
     } catch (e) {
+      recordSettingsFailure('config', changed);
       _saveStatusMark('config', 'error', gen);
       throw e;
     }
     _rememberSavedSecrets(secrets);
-    applyDisplayConfig(display);
+    delete changed.hf_token;
+    delete changed.inat_token;
+    delete changed.google_maps_api_key;
+    commitSettingsChanges('config', changed);
+    applyDisplayConfig(form);
     _saveStatusMark('config', 'ok', gen);
     if (typeof loadPreviewCacheStatus === 'function') loadPreviewCacheStatus();
     // Drop the cached editor list so the next "Open in Editor" action
@@ -432,6 +447,7 @@ function applyDisplayConfig(display) {
 }
 
 function saveConfig() {
+  if (!settingsBaseline.config) return;
   // Debounced fire-and-forget for the settings-page inline handlers. The
   // outcome is reported through the autosave pill (_saveStatusMark) and the
   // network layer toasts on failure; the next change re-tries. Callers that

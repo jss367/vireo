@@ -54,61 +54,6 @@
   }
   .scope-tab:hover { color: var(--text-primary); }
   .scope-tab.active { color: var(--text-primary); border-bottom-color: var(--accent); font-weight: 500; }
-  .settings-find-panel {
-    position: fixed;
-    top: 14px;
-    right: 18px;
-    z-index: 10000;
-    display: none;
-    align-items: center;
-    gap: 6px;
-    padding: 8px;
-    background: var(--bg-secondary);
-    border: 1px solid var(--border-secondary);
-    border-radius: 6px;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
-  }
-  .settings-find-panel.open { display: flex; }
-  .settings-find-panel input {
-    width: 220px;
-    background: var(--bg-input);
-    color: var(--text-primary);
-    border: 1px solid var(--border-secondary);
-    border-radius: 4px;
-    padding: 5px 8px;
-    font-size: 13px;
-    outline: none;
-  }
-  .settings-find-panel input:focus { border-color: var(--accent); }
-  .settings-find-panel button {
-    width: 28px;
-    height: 28px;
-    border-radius: 4px;
-    border: 1px solid var(--border-secondary);
-    background: var(--bg-tertiary);
-    color: var(--text-secondary);
-    font-size: 13px;
-    cursor: pointer;
-  }
-  .settings-find-panel button:hover { color: var(--text-primary); border-color: var(--accent); }
-  .settings-find-status {
-    min-width: 62px;
-    font-size: 12px;
-    color: var(--text-dim);
-    text-align: center;
-    white-space: nowrap;
-  }
-  .settings-find-mark {
-    background: color-mix(in srgb, var(--accent) 35%, transparent);
-    color: var(--text-primary);
-    border-radius: 2px;
-    padding: 0 1px;
-  }
-  .settings-find-mark.active {
-    background: var(--accent);
-    color: var(--accent-text);
-  }
-
   /* Autosave status pill. Every curated field on this page writes through
    * on change (no Save button), so the page has to say so out loud:
    * "Saving…" while a write is queued or in flight, then "Saved ✓ HH:MM:SS"
@@ -146,72 +91,170 @@
   .catalog-backup-table th { text-align: left; font-weight: normal; color: var(--text-dim); padding: 4px 6px; }
   .catalog-backup-table td { padding: 4px 6px; border-top: 1px solid var(--border-primary); vertical-align: top; }
 </style>
+<link rel="stylesheet" href="/static/settings/layout.css">
 </head>
 <body>
 
 {% include '_navbar.html' %}
 
-<div class="settings-find-panel" id="settingsFindPanel" role="search" aria-label="Find in settings">
-  <input type="search" id="settingsFindInput" placeholder="Find in settings" autocomplete="off" aria-label="Find in settings">
-  <span class="settings-find-status" id="settingsFindStatus">0 results</span>
-  <button type="button" onclick="moveSettingsFind(-1)" title="Previous match" aria-label="Previous match">^</button>
-  <button type="button" onclick="moveSettingsFind(1)" title="Next match" aria-label="Next match">v</button>
-  <button type="button" onclick="closeSettingsFind()" title="Close find" aria-label="Close find">x</button>
-</div>
-
-<div class="settings-save-status" id="settingsSaveStatus" role="status" aria-live="polite"></div>
-
-<div class="content">
-
-  <!-- Storage -->
+{% set categories = [
+  ('browsing', 'Browsing & Appearance'),
+  ('identification', 'Identification & Models'),
+  ('processing', 'Processing & Culling'),
+  ('integrations', 'Integrations'),
+  ('storage', 'Storage & Maintenance'),
+  ('advanced', 'Advanced')
+] %}
+<main class="content settings-shell">
+  <header class="settings-heading">
+    <h1>Settings</h1>
+    <div id="settingsFindPanel" role="search">
+      <input id="settingsFindInput" aria-keyshortcuts="Control+f Meta+f" type="search" aria-label="Search settings" placeholder="Search settings" autocomplete="off" aria-controls="settingsResults">
+      <div id="settingsResults" hidden></div>
+    </div>
+    <div class="settings-save-status" id="settingsSaveStatus" role="status"></div>
+    <div id="settingsSaveIssues" aria-live="polite"></div>
+  </header>
+  <div class="settings-layout">
+    <nav class="settings-categories" aria-label="Settings categories">
+      {% for key, title in categories %}<a href="?category={{ key }}" data-category-link="{{ key }}">{{ title }}</a>{% endfor %}
+    </nav>
+    <label class="settings-mobile">Category
+      <select id="settingsCategoryPicker" aria-label="Category">{% for key, title in categories %}<option value="{{ key }}">{{ title }}</option>{% endfor %}</select>
+    </label>
+    <div class="settings-panes">
+  <section data-settings-category="browsing">
+    <h2>Browsing & Appearance</h2>
   <div class="section">
-    <div class="section-title">Storage</div>
-    <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;">
-      <p style="font-size:13px;color:var(--text-dim);margin:0;">
-        View disk usage, configure preview caches, and clean up generated files on the dedicated Storage page.
-      </p>
-      <a href="/storage" class="btn btn-secondary" style="white-space:nowrap;">Open Storage</a>
+    <div class="section-title">Display</div>
+    <div class="setting-row">
+      <div class="setting-label"><label for="cfgBrowseThumbDefault">Default browse thumbnail</label>
+        <small>Default thumbnail size in Browse grid (pixels).</small>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <input type="range" data-search-terms="grid size preview thumbnails" id="cfgBrowseThumbDefault" data-setting-keys="browse_thumb_default" min="100" max="400" step="10" value="220"
+               style="width:120px;accent-color:var(--accent);"
+               oninput="document.getElementById('cfgBrowseThumbVal').textContent = this.value + 'px'; saveConfig()">
+        <span style="font-size:13px;color:var(--text-primary);min-width:42px;" id="cfgBrowseThumbVal">220px</span>
+      </div>
+    </div>
+    <div class="setting-row">
+      <div class="setting-label"><label for="cfgPhotosPerPage">Photos per page</label>
+        <small>Number of photos shown per page in Browse view.</small>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <input type="number" id="cfgPhotosPerPage" data-setting-keys="photos_per_page" min="10" max="200" step="10" value="50"
+               style="width:70px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
+               onchange="saveConfig()">
+      </div>
+    </div>
+    <div class="setting-row">
+      <div class="setting-label"><label for="cfgOpenInBrowser">Open in default browser on launch (skip the app window)</label>
+        <small>When enabled, launching Vireo opens this UI in your default web browser. The app keeps running as a menu-bar/tray icon. Takes effect after restart. (Only meaningful in the desktop app build.)</small>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <input type="checkbox" id="cfgOpenInBrowser" data-setting-keys="open_in_browser"
+               onchange="saveConfig()" style="accent-color:var(--accent);">
+      </div>
     </div>
   </div>
 
-  <!-- Catalog backups -->
-  <div class="section" id="catalogBackupsSection">
-    <div class="section-title">Catalog backups</div>
-    <p style="font-size:13px;color:var(--text-dim);margin:0 0 10px;line-height:1.5;">
-      Vireo copies the catalog once a day: labels, ratings, flags, edits, keywords, collections and workspaces.
-      Restore a copy to undo a bug or a mistake that changed the catalog. Photo files and these settings are not part of it.
-      To change how many copies are kept, find &ldquo;Daily catalog backups kept&rdquo; in Settings.
+  <div class="section">
+    <div class="section-title">Appearance</div>
+    <div class="setting-row">
+      <div class="setting-label">
+        Theme
+        <small>Change the look and feel of the app. You can also click the icon in the nav bar to cycle through themes.</small>
+      </div>
+      <div data-find-name="Theme" data-search-terms="appearance colors dark light mode" id="themePicker" style="display:flex;gap:6px;flex-wrap:wrap;"></div>
+    </div>
+    <div class="setting-row">
+      <div class="setting-label">
+        <label for="cfgTimeFormat">Time format</label>
+        <small>Choose how times are displayed throughout the app. System default follows your device or browser locale.</small>
+      </div>
+      <select id="cfgTimeFormat" data-setting-keys="time_format" onchange="saveConfig()">
+        <option value="system">System default</option>
+        <option value="12h">12-hour (3:45 PM)</option>
+        <option value="24h">24-hour (15:45)</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Quick filters</div>
+    <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">
+      The button row in the filter bar on Browse, Map, Review, Duplicates and Misses.
+      Clicking a button there adds its rule to the current filter; clicking it again removes it.
+      Buttons that share a group combine with <b>OR</b> — with both “Missing species” and
+      “Missing location tag” on, the grid shows photos missing <i>either</i> tag, and the flag
+      buttons work the same way. Buttons you add here are ungrouped, so they narrow
+      whatever else is on (AND). A button whose value a page hides — “Rejected” on Misses —
+      is hidden on that page instead of returning nothing.
     </p>
-    <div id="catalogBackupsRestoreNotice" role="status" style="display:none;"></div>
-    <div id="catalogBackupsSummary" style="font-size:12px;color:var(--text-secondary);line-height:1.5;">Loading&hellip;</div>
-    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:10px 0;">
-      <button class="btn-sm" id="catalogBackupNowBtn" style="margin-left:0;">Back up now</button>
-      <span id="catalogBackupAction" role="status" style="font-size:12px;color:var(--text-dim);"></span>
+    <div id="cfgFilterShortcutsList" data-setting-keys="filter_shortcuts" style="display:flex;flex-direction:column;gap:6px;margin-bottom:10px;"></div>
+    <div id="cfgFilterShortcutAdd" style="border:1px dashed var(--border-secondary);border-radius:6px;padding:10px;display:flex;flex-direction:column;gap:8px;">
+      <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;">
+        <select id="cfgShortcutField" style="background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 8px;font-size:12px;max-width:220px;"></select>
+        <select id="cfgShortcutOp" style="background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 8px;font-size:12px;"></select>
+        <span id="cfgShortcutValue" style="display:flex;gap:6px;align-items:center;"></span>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;">
+        <input type="text" id="cfgShortcutLabel" placeholder="Button text"
+               maxlength="40"
+               oninput="_shortcutLabelEdited = true;"
+               style="background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 10px;font-size:12px;width:200px;">
+        <button type="button" onclick="addFilterShortcut()"
+                style="background:var(--accent);color:var(--bg-primary);border:1px solid var(--accent);border-radius:4px;padding:6px 12px;font-size:12px;cursor:pointer;font-weight:600;">+ Add quick filter</button>
+        <span id="cfgShortcutPreview" style="font-size:12px;color:var(--text-dim);"></span>
+      </div>
     </div>
-    <div id="catalogBackupsList"></div>
-  </div>
-
-  <!-- Portable computation cache -->
-  <div class="section" id="computationCacheSection">
-    <div class="section-title">Computation Cache <span style="font-size:11px;color:var(--warning);font-weight:normal;">Experimental</span></div>
-    <p style="font-size:13px;color:var(--text-dim);margin:0 0 10px;line-height:1.5;">
-      Share completed animal detection and species-classification work with another Vireo computer.
-      Bundles contain machine results only&mdash;never originals, paths, XMP, or accepted/rejected review decisions.
-    </p>
-    <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap;margin-bottom:10px;font-size:12px;color:var(--text-secondary);">
-      <label><input type="checkbox" id="cacheExportDetections" checked> Detection</label>
-      <label><input type="checkbox" id="cacheExportClassifications" checked> Species classification</label>
-      <span id="computationCacheStatus" style="color:var(--text-dim);">Loading&hellip;</span>
-    </div>
-    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-      <button class="btn-sm" id="computationCacheExportBtn" onclick="exportComputationCache()" style="margin-left:0;">Export Results&hellip;</button>
-      <button class="btn-sm" id="computationCacheImportBtn" onclick="document.getElementById('computationCacheImportInput').click()">Import Results&hellip;</button>
-      <input type="file" id="computationCacheImportInput" accept=".vireo-cache,application/zip,application/vnd.vireo.cache+zip" style="display:none;" onchange="importComputationCache(this.files[0]); this.value='';">
-      <span id="computationCacheAction" style="font-size:12px;color:var(--text-dim);"></span>
+    <div style="display:flex;gap:8px;align-items:center;margin-top:10px;">
+      <button type="button" onclick="restoreDefaultFilterShortcuts()"
+              style="background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 12px;font-size:12px;cursor:pointer;">Restore the default buttons</button>
+      <span style="font-size:11px;color:var(--text-faint);">Adds back any of the five built-in buttons you removed. Your own stay.</span>
+      <span id="cfgShortcutCount" style="margin-left:auto;font-size:11px;color:var(--text-faint);"></span>
     </div>
   </div>
 
-  <!-- Models -->
+  <div class="section">
+    <button type="button" class="section-title collapsible-header" aria-expanded="false" onclick="toggleSection(this)">
+      Browse Grid
+      <span class="toggle-icon">&#9654;</span>
+    </button>
+    <div class="collapsible-body">
+      <div class="setting-row" style="flex-direction:column;align-items:flex-start;gap:8px;">
+        <div class="setting-label">
+          Card overlay fields
+          <small>Choose which fields appear below each thumbnail in the browse grid.</small>
+        </div>
+        <div id="cfgCardFieldsContainer" data-setting-keys="browse_card_fields" style="display:grid;grid-template-columns:1fr 1fr;gap:4px 24px;width:100%;"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Navigation</div>
+    <div class="setting-row">
+      <div class="setting-label">
+        <label for="cfgNumberedNavigationMode">Numbered navigation shortcuts</label>
+        <small>Cmd/Ctrl+1–9 can follow your pinned tab order, including after reordering tabs, or always open fixed pages.</small>
+        <small>Fixed pages: 1 Import, 2 Browse, 3 Process, 4 Process Review, 5 Review, 6 Cull, 7 Jobs, 8 Highlights, 9 Misses.</small>
+      </div>
+      <select id="cfgNumberedNavigationMode" data-setting-keys="numbered_navigation_mode" onchange="saveConfig()">
+        <option value="tab_order">Follow tab order</option>
+        <option value="fixed_pages">Fixed pages</option>
+      </select>
+    </div>
+  </div>
+
+  </section>
+  <section data-settings-category="identification" hidden>
+    <h2>Identification & Models</h2>
+  <div class="section"><div class="section-title">Model status</div>
+    <p id="speciesModelStatus">Loading species identification model…</p>
+    <div id="pipelineModelStatus"></div>
+    <details id="manage-models"><summary>Manage models</summary>
   <div class="section">
     <div class="section-title">Models</div>
     <div id="modelsContent"><span style="color:var(--text-ghost);font-size:13px;">Loading...</span></div>
@@ -242,13 +285,162 @@
     <span id="modelActionStatus" style="font-size:12px;color:var(--text-dim);margin-top:6px;display:block;"></span>
   </div>
 
-  <!-- Taxonomy -->
-  <div class="section">
-    <div class="section-title">Taxonomy</div>
-    <div id="taxonomyContent"><span style="color:var(--text-ghost);font-size:13px;">Loading...</span></div>
+  <div class="section" style="border-bottom:1px solid var(--border-primary);padding-bottom:16px;margin-bottom:16px;">
+    <div class="section-title">Model Setup</div>
+    <p style="font-size:12px;color:var(--text-dim);margin-bottom:8px;">
+      Re-run the first-launch setup wizard to download or change classification models.
+    </p>
+    <a href="/welcome?force=1" style="display:inline-block;padding:6px 14px;border-radius:4px;font-size:12px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border-secondary);text-decoration:none;">
+      Open Setup Wizard
+    </a>
   </div>
 
-  <!-- Labels -->
+  <div class="section">
+    <div class="section-title">Pipeline Models</div>
+    <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">
+      Models used by the culling pipeline. Download the ones you need before running Extract Features.
+    </p>
+    <div id="pipelineModelsContainer" style="font-size:12px;color:var(--text-dim);">Loading...</div>
+  </div>
+
+</details></div>
+  <div class="section">
+    <div class="section-title">Classification Defaults</div>
+
+    <div class="setting-row">
+      <div class="setting-label"><label for="cfgThreshold">Confidence threshold</label>
+        <small>Predictions below this are discarded. Can be overridden per-run.</small>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <input type="range" id="cfgThreshold" data-setting-keys="classification_threshold" min="10" max="90" step="5" value="40"
+               style="width:120px;accent-color:var(--accent);"
+               oninput="document.getElementById('cfgThresholdVal').textContent = this.value + '%'; saveConfig()">
+        <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgThresholdVal">40%</span>
+      </div>
+    </div>
+    <div class="setting-row" style="padding:0 0 8px 16px;">
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;color:var(--text-dim);">
+        <input type="checkbox" id="wsOverride_classification_threshold" onchange="toggleWsOverride('classification_threshold')" style="accent-color:var(--accent);">
+        Override for "<span class="ws-override-name">…</span>"
+      </label>
+      <div id="wsOverrideCtrl_classification_threshold" style="display:none;align-items:center;gap:8px;margin-left:24px;margin-top:4px;">
+        <input type="range" id="wsVal_classification_threshold" min="1" max="99"
+               style="width:120px;accent-color:var(--accent);"
+               oninput="document.getElementById('wsThresholdVal').textContent=this.value+'%'; saveWsConfig()">
+        <span id="wsThresholdVal" style="font-size:12px;color:var(--text-dim);min-width:30px;">-</span>
+      </div>
+    </div>
+    <div class="setting-row">
+      <div class="setting-label"><label for="cfgGroupingWindow">Grouping window</label>
+        <small>Photos taken within this many seconds are grouped and given a consensus prediction.</small>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <input type="number" id="cfgGroupingWindow" data-setting-keys="grouping_window_seconds" min="1" max="120" value="10"
+               style="width:60px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
+               onchange="saveConfig()">
+        <span style="font-size:13px;color:var(--text-dim);">seconds</span>
+      </div>
+    </div>
+    <div class="setting-row" style="padding:0 0 8px 16px;">
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;color:var(--text-dim);">
+        <input type="checkbox" id="wsOverride_grouping_window_seconds" onchange="toggleWsOverride('grouping_window_seconds')" style="accent-color:var(--accent);">
+        Override for "<span class="ws-override-name">…</span>"
+      </label>
+      <div id="wsOverrideCtrl_grouping_window_seconds" style="display:none;align-items:center;gap:8px;margin-left:24px;margin-top:4px;">
+        <input type="number" id="wsVal_grouping_window_seconds" min="1" max="120"
+               style="width:60px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
+               onchange="saveWsConfig()">
+        <span style="font-size:13px;color:var(--text-dim);">seconds</span>
+      </div>
+    </div>
+    <div class="setting-row" style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;">
+      <div class="setting-label"><label for="cfgSimilarity">Similarity threshold</label>
+        <small>Photos in a burst must be this visually similar (cosine similarity of AI embeddings) to stay grouped. Lower = more lenient grouping.</small>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <input type="range" id="cfgSimilarity" data-setting-keys="similarity_threshold" min="50" max="99" value="85"
+               style="width:100px;"
+               oninput="document.getElementById('cfgSimilarityVal').textContent=this.value+'%'"
+               onchange="saveConfig()">
+        <span id="cfgSimilarityVal" style="font-size:13px;color:var(--text-primary);min-width:30px;">85%</span>
+      </div>
+    </div>
+    <div class="setting-row" style="padding:0 0 8px 16px;">
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;color:var(--text-dim);">
+        <input type="checkbox" id="wsOverride_similarity_threshold" onchange="toggleWsOverride('similarity_threshold')" style="accent-color:var(--accent);">
+        Override for "<span class="ws-override-name">…</span>"
+      </label>
+      <div id="wsOverrideCtrl_similarity_threshold" style="display:none;align-items:center;gap:8px;margin-left:24px;margin-top:4px;">
+        <input type="range" id="wsVal_similarity_threshold" min="50" max="99"
+               style="width:120px;accent-color:var(--accent);"
+               oninput="document.getElementById('wsSimilarityVal').textContent=this.value+'%'; saveWsConfig()">
+        <span id="wsSimilarityVal" style="font-size:12px;color:var(--text-dim);min-width:30px;">-</span>
+      </div>
+    </div>
+    <div class="setting-row" style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;">
+      <div class="setting-label"><label for="cfgKeywordCase">Keyword casing</label>
+        <small>How species names are capitalized when added as keywords. "Auto" matches your existing keywords.</small>
+      </div>
+      <select id="cfgKeywordCase" data-setting-keys="keyword_case" onchange="saveConfig()"
+              style="background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 8px;font-size:13px;">
+        <option value="auto">Auto-detect</option>
+        <option value="title">Title Case (House Finch)</option>
+        <option value="lower">Sentence case (House fench)</option>
+      </select>
+    </div>
+  </div>
+  <div class="section">
+    <button type="button" class="section-title collapsible-header" aria-expanded="false" onclick="toggleSection(this)">
+      Detection &amp; Classification
+      <span class="toggle-icon">&#9654;</span>
+    </button>
+    <div class="collapsible-body">
+      <div class="setting-row">
+        <div class="setting-label"><label for="cfgDetectorConf">Detector confidence</label>
+          <small>Minimum confidence for MegaDetector animal detections.</small>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="range" id="cfgDetectorConf" data-setting-keys="detector_confidence" min="5" max="50" step="1" value="20"
+                 style="width:120px;accent-color:var(--accent);"
+                 oninput="document.getElementById('cfgDetectorConfVal').textContent = (this.value / 100).toFixed(2); saveConfig()">
+          <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgDetectorConfVal">0.20</span>
+        </div>
+      </div>
+      <div class="setting-row" style="padding:0 0 8px 16px;">
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;color:var(--text-dim);">
+          <input type="checkbox" id="wsOverride_detector_confidence" onchange="toggleWsOverride('detector_confidence')" style="accent-color:var(--accent);">
+          Override for "<span class="ws-override-name">…</span>"
+        </label>
+        <div id="wsOverrideCtrl_detector_confidence" style="display:none;align-items:center;gap:8px;margin-left:24px;margin-top:4px;">
+          <input type="range" id="wsVal_detector_confidence" min="5" max="50" step="1" value="20"
+                 style="width:120px;accent-color:var(--accent);"
+                 oninput="document.getElementById('wsDetectorConfVal').textContent=(this.value/100).toFixed(2); saveWsConfig()">
+          <span id="wsDetectorConfVal" style="font-size:12px;color:var(--text-dim);min-width:36px;">-</span>
+        </div>
+      </div>
+      <div class="setting-row">
+        <div class="setting-label"><label for="cfgDetectionPadding">Detection box padding</label>
+          <small>Fraction of padding added around detected bounding boxes.</small>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="range" id="cfgDetectionPadding" data-setting-keys="detection_padding" min="0" max="50" step="1" value="20"
+                 style="width:120px;accent-color:var(--accent);"
+                 oninput="document.getElementById('cfgDetectionPaddingVal').textContent = (this.value / 100).toFixed(2); saveConfig()">
+          <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgDetectionPaddingVal">0.20</span>
+        </div>
+      </div>
+      <div class="setting-row">
+        <div class="setting-label"><label for="cfgTopK">Top-K predictions</label>
+          <small>Number of top classification predictions to keep per photo.</small>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="number" id="cfgTopK" data-setting-keys="top_k_predictions" min="1" max="20" value="5"
+                 style="width:60px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
+                 onchange="saveConfig()">
+        </div>
+      </div>
+    </div>
+  </div>
   <div class="section">
     <div class="section-title">Species Labels</div>
     <p style="font-size:13px;color:var(--text-dim);margin-bottom:12px;">
@@ -292,343 +484,97 @@
     </div>
   </div>
 
-  <!-- Classification Defaults -->
   <div class="section">
-    <div class="section-title">Classification Defaults</div>
-
-    <div class="setting-row">
-      <div class="setting-label">
-        Confidence threshold
-        <small>Predictions below this are discarded. Can be overridden per-run.</small>
-      </div>
-      <div style="display:flex;align-items:center;gap:8px;">
-        <input type="range" id="cfgThreshold" min="10" max="90" step="5" value="40"
-               style="width:120px;accent-color:var(--accent);"
-               oninput="document.getElementById('cfgThresholdVal').textContent = this.value + '%'; saveConfig()">
-        <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgThresholdVal">40%</span>
-      </div>
-    </div>
-    <div class="setting-row" style="padding:0 0 8px 16px;">
-      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;color:var(--text-dim);">
-        <input type="checkbox" id="wsOverride_classification_threshold" onchange="toggleWsOverride('classification_threshold')" style="accent-color:var(--accent);">
-        Override for "<span class="ws-override-name">…</span>"
-      </label>
-      <div id="wsOverrideCtrl_classification_threshold" style="display:none;align-items:center;gap:8px;margin-left:24px;margin-top:4px;">
-        <input type="range" id="wsVal_classification_threshold" min="1" max="99"
-               style="width:120px;accent-color:var(--accent);"
-               oninput="document.getElementById('wsThresholdVal').textContent=this.value+'%'; saveWsConfig()">
-        <span id="wsThresholdVal" style="font-size:12px;color:var(--text-dim);min-width:30px;">-</span>
-      </div>
-    </div>
-    <div class="setting-row">
-      <div class="setting-label">
-        Grouping window
-        <small>Photos taken within this many seconds are grouped and given a consensus prediction.</small>
-      </div>
-      <div style="display:flex;align-items:center;gap:8px;">
-        <input type="number" id="cfgGroupingWindow" min="1" max="120" value="10"
-               style="width:60px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
-               onchange="saveConfig()">
-        <span style="font-size:13px;color:var(--text-dim);">seconds</span>
-      </div>
-    </div>
-    <div class="setting-row" style="padding:0 0 8px 16px;">
-      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;color:var(--text-dim);">
-        <input type="checkbox" id="wsOverride_grouping_window_seconds" onchange="toggleWsOverride('grouping_window_seconds')" style="accent-color:var(--accent);">
-        Override for "<span class="ws-override-name">…</span>"
-      </label>
-      <div id="wsOverrideCtrl_grouping_window_seconds" style="display:none;align-items:center;gap:8px;margin-left:24px;margin-top:4px;">
-        <input type="number" id="wsVal_grouping_window_seconds" min="1" max="120"
-               style="width:60px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
-               onchange="saveWsConfig()">
-        <span style="font-size:13px;color:var(--text-dim);">seconds</span>
-      </div>
-    </div>
-    <div class="setting-row" style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;">
-      <div class="setting-label">
-        Similarity threshold
-        <small>Photos in a burst must be this visually similar (cosine similarity of AI embeddings) to stay grouped. Lower = more lenient grouping.</small>
-      </div>
-      <div style="display:flex;align-items:center;gap:8px;">
-        <input type="range" id="cfgSimilarity" min="50" max="99" value="85"
-               style="width:100px;"
-               oninput="document.getElementById('cfgSimilarityVal').textContent=this.value+'%'"
-               onchange="saveConfig()">
-        <span id="cfgSimilarityVal" style="font-size:13px;color:var(--text-primary);min-width:30px;">85%</span>
-      </div>
-    </div>
-    <div class="setting-row" style="padding:0 0 8px 16px;">
-      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;color:var(--text-dim);">
-        <input type="checkbox" id="wsOverride_similarity_threshold" onchange="toggleWsOverride('similarity_threshold')" style="accent-color:var(--accent);">
-        Override for "<span class="ws-override-name">…</span>"
-      </label>
-      <div id="wsOverrideCtrl_similarity_threshold" style="display:none;align-items:center;gap:8px;margin-left:24px;margin-top:4px;">
-        <input type="range" id="wsVal_similarity_threshold" min="50" max="99"
-               style="width:120px;accent-color:var(--accent);"
-               oninput="document.getElementById('wsSimilarityVal').textContent=this.value+'%'; saveWsConfig()">
-        <span id="wsSimilarityVal" style="font-size:12px;color:var(--text-dim);min-width:30px;">-</span>
-      </div>
-    </div>
-    <div class="setting-row" style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;">
-      <div class="setting-label">
-        Keyword casing
-        <small>How species names are capitalized when added as keywords. "Auto" matches your existing keywords.</small>
-      </div>
-      <select id="cfgKeywordCase" onchange="saveConfig()"
-              style="background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 8px;font-size:13px;">
-        <option value="auto">Auto-detect</option>
-        <option value="title">Title Case (House Finch)</option>
-        <option value="lower">Sentence case (House fench)</option>
-      </select>
-    </div>
-    <div class="setting-row" style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;">
-      <div class="setting-label">
-        Edit history limit
-        <small>Maximum number of undo-able edits to keep per workspace (default: 1000)</small>
-      </div>
-      <div style="display:flex;align-items:center;gap:8px;">
-        <input type="number" id="cfgMaxEditHistory" min="100" max="10000" step="100" value="1000"
-               style="width:80px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
-               onchange="saveConfig()">
-        <span style="font-size:13px;color:var(--text-dim);">entries</span>
-      </div>
-    </div>
+    <div class="section-title">Taxonomy</div>
+    <div id="taxonomyContent"><span style="color:var(--text-ghost);font-size:13px;">Loading...</span></div>
   </div>
 
-  <!-- Display -->
-  <div class="section">
-    <div class="section-title">Display</div>
-    <div class="setting-row">
-      <div class="setting-label">
-        Photos per page
-        <small>Number of photos shown per page in Browse view.</small>
-      </div>
-      <div style="display:flex;align-items:center;gap:8px;">
-        <input type="number" id="cfgPhotosPerPage" min="10" max="200" step="10" value="50"
-               style="width:70px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
-               onchange="saveConfig()">
-      </div>
-    </div>
-    <div class="setting-row">
-      <div class="setting-label">
-        Default browse thumbnail
-        <small>Default thumbnail size in Browse grid (pixels).</small>
-      </div>
-      <div style="display:flex;align-items:center;gap:8px;">
-        <input type="range" id="cfgBrowseThumbDefault" min="100" max="400" step="10" value="220"
-               style="width:120px;accent-color:var(--accent);"
-               oninput="document.getElementById('cfgBrowseThumbVal').textContent = this.value + 'px'; saveConfig()">
-        <span style="font-size:13px;color:var(--text-primary);min-width:42px;" id="cfgBrowseThumbVal">220px</span>
-      </div>
-    </div>
-    <div class="setting-row">
-      <div class="setting-label">
-        Open in default browser on launch (skip the app window)
-        <small>When enabled, launching Vireo opens this UI in your default web browser. The app keeps running as a menu-bar/tray icon. Takes effect after restart. (Only meaningful in the desktop app build.)</small>
-      </div>
-      <div style="display:flex;align-items:center;gap:8px;">
-        <input type="checkbox" id="cfgOpenInBrowser"
-               onchange="saveConfig()" style="accent-color:var(--accent);">
-      </div>
-    </div>
-  </div>
-
-  <!-- Quick filters -->
-  <div class="section">
-    <div class="section-title">Quick filters</div>
-    <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">
-      The button row in the filter bar on Browse, Map, Review, Duplicates and Misses.
-      Clicking a button there adds its rule to the current filter; clicking it again removes it.
-      Buttons that share a group combine with <b>OR</b> — with both “Missing species” and
-      “Missing location tag” on, the grid shows photos missing <i>either</i> tag, and the flag
-      buttons work the same way. Buttons you add here are ungrouped, so they narrow
-      whatever else is on (AND). A button whose value a page hides — “Rejected” on Misses —
-      is hidden on that page instead of returning nothing.
-    </p>
-    <div id="cfgFilterShortcutsList" style="display:flex;flex-direction:column;gap:6px;margin-bottom:10px;"></div>
-    <div id="cfgFilterShortcutAdd" style="border:1px dashed var(--border-secondary);border-radius:6px;padding:10px;display:flex;flex-direction:column;gap:8px;">
-      <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;">
-        <select id="cfgShortcutField" style="background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 8px;font-size:12px;max-width:220px;"></select>
-        <select id="cfgShortcutOp" style="background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 8px;font-size:12px;"></select>
-        <span id="cfgShortcutValue" style="display:flex;gap:6px;align-items:center;"></span>
-      </div>
-      <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;">
-        <input type="text" id="cfgShortcutLabel" placeholder="Button text"
-               maxlength="40"
-               oninput="_shortcutLabelEdited = true;"
-               style="background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 10px;font-size:12px;width:200px;">
-        <button type="button" onclick="addFilterShortcut()"
-                style="background:var(--accent);color:var(--bg-primary);border:1px solid var(--accent);border-radius:4px;padding:6px 12px;font-size:12px;cursor:pointer;font-weight:600;">+ Add quick filter</button>
-        <span id="cfgShortcutPreview" style="font-size:12px;color:var(--text-dim);"></span>
-      </div>
-    </div>
-    <div style="display:flex;gap:8px;align-items:center;margin-top:10px;">
-      <button type="button" onclick="restoreDefaultFilterShortcuts()"
-              style="background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 12px;font-size:12px;cursor:pointer;">Restore the default buttons</button>
-      <span style="font-size:11px;color:var(--text-faint);">Adds back any of the five built-in buttons you removed. Your own stay.</span>
-      <span id="cfgShortcutCount" style="margin-left:auto;font-size:11px;color:var(--text-faint);"></span>
-    </div>
-  </div>
-
-  <!-- Browse Grid -->
-  <div class="section">
-    <div class="section-title collapsible-header" onclick="toggleSection(this)">
-      Browse Grid
-      <span class="toggle-icon">&#9654;</span>
-    </div>
-    <div class="collapsible-body">
-      <div class="setting-row" style="flex-direction:column;align-items:flex-start;gap:8px;">
-        <div class="setting-label">
-          Card overlay fields
-          <small>Choose which fields appear below each thumbnail in the browse grid.</small>
-        </div>
-        <div id="cfgCardFieldsContainer" style="display:grid;grid-template-columns:1fr 1fr;gap:4px 24px;width:100%;"></div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Detection & Classification -->
-  <div class="section">
-    <div class="section-title collapsible-header" onclick="toggleSection(this)">
-      Detection &amp; Classification
-      <span class="toggle-icon">&#9654;</span>
-    </div>
-    <div class="collapsible-body">
+  </section>
+  <section data-settings-category="processing" hidden>
+    <h2>Processing & Culling</h2>
+<div class="section"><div class="section-title">Culling defaults</div>
       <div class="setting-row">
-        <div class="setting-label">
-          Detector confidence
-          <small>Minimum confidence for MegaDetector animal detections.</small>
-        </div>
-        <div style="display:flex;align-items:center;gap:8px;">
-          <input type="range" id="cfgDetectorConf" min="5" max="50" step="1" value="20"
-                 style="width:120px;accent-color:var(--accent);"
-                 oninput="document.getElementById('cfgDetectorConfVal').textContent = (this.value / 100).toFixed(2); saveConfig()">
-          <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgDetectorConfVal">0.20</span>
-        </div>
-      </div>
-      <div class="setting-row" style="padding:0 0 8px 16px;">
-        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;color:var(--text-dim);">
-          <input type="checkbox" id="wsOverride_detector_confidence" onchange="toggleWsOverride('detector_confidence')" style="accent-color:var(--accent);">
-          Override for "<span class="ws-override-name">…</span>"
-        </label>
-        <div id="wsOverrideCtrl_detector_confidence" style="display:none;align-items:center;gap:8px;margin-left:24px;margin-top:4px;">
-          <input type="range" id="wsVal_detector_confidence" min="5" max="50" step="1" value="20"
-                 style="width:120px;accent-color:var(--accent);"
-                 oninput="document.getElementById('wsDetectorConfVal').textContent=(this.value/100).toFixed(2); saveWsConfig()">
-          <span id="wsDetectorConfVal" style="font-size:12px;color:var(--text-dim);min-width:36px;">-</span>
-        </div>
-      </div>
-      <div class="setting-row">
-        <div class="setting-label">
-          Detection box padding
-          <small>Fraction of padding added around detected bounding boxes.</small>
-        </div>
-        <div style="display:flex;align-items:center;gap:8px;">
-          <input type="range" id="cfgDetectionPadding" min="0" max="50" step="1" value="20"
-                 style="width:120px;accent-color:var(--accent);"
-                 oninput="document.getElementById('cfgDetectionPaddingVal').textContent = (this.value / 100).toFixed(2); saveConfig()">
-          <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgDetectionPaddingVal">0.20</span>
-        </div>
-      </div>
-      <div class="setting-row">
-        <div class="setting-label">
-          Top-K predictions
-          <small>Number of top classification predictions to keep per photo.</small>
-        </div>
-        <div style="display:flex;align-items:center;gap:8px;">
-          <input type="number" id="cfgTopK" min="1" max="20" value="5"
-                 style="width:60px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
-                 onchange="saveConfig()">
-        </div>
-      </div>
-      <div class="setting-row">
-        <div class="setting-label">
-          Redundancy threshold
+        <div class="setting-label"><label for="cfgRedundancy">Redundancy threshold</label>
           <small>Cosine similarity above which two predictions are considered redundant.</small>
         </div>
         <div style="display:flex;align-items:center;gap:8px;">
-          <input type="range" id="cfgRedundancy" min="50" max="99" step="1" value="88"
+          <input type="range" id="cfgRedundancy" data-setting-keys="redundancy_threshold" min="50" max="99" step="1" value="88"
                  style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgRedundancyVal').textContent = (this.value / 100).toFixed(2); saveConfig()">
           <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgRedundancyVal">0.88</span>
         </div>
       </div>
       <div class="setting-row">
-        <div class="setting-label">
-          Cull time window
+        <div class="setting-label"><label for="cfgCullTimeWindow">Cull time window</label>
           <small>Photos within this many seconds are candidates for culling.</small>
         </div>
         <div style="display:flex;align-items:center;gap:8px;">
-          <input type="number" id="cfgCullTimeWindow" min="5" max="600" step="5" value="60"
+          <input type="number" id="cfgCullTimeWindow" data-setting-keys="cull_time_window" min="5" max="600" step="5" value="60"
                  style="width:70px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
                  onchange="saveConfig()">
           <span style="font-size:13px;color:var(--text-dim);">seconds</span>
         </div>
       </div>
       <div class="setting-row">
-        <div class="setting-label">
-          Cull pHash threshold
+        <div class="setting-label"><label for="cfgCullPhash">Cull pHash threshold</label>
           <small>Perceptual hash distance below which photos are considered near-duplicates.</small>
         </div>
         <div style="display:flex;align-items:center;gap:8px;">
-          <input type="range" id="cfgCullPhash" min="0" max="32" step="1" value="19"
+          <input type="range" id="cfgCullPhash" data-setting-keys="cull_phash_threshold" min="0" max="32" step="1" value="19"
                  style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgCullPhashVal').textContent = this.value; saveConfig()">
           <span style="font-size:13px;color:var(--text-primary);min-width:24px;" id="cfgCullPhashVal">19</span>
         </div>
       </div>
-    </div>
   </div>
-
-  <!-- Pipeline Tuning -->
   <div class="section">
-    <div class="section-title collapsible-header" onclick="toggleSection(this)">
+    <button type="button" class="section-title collapsible-header" aria-expanded="false" onclick="toggleSection(this)">
       Pipeline Tuning
       <span class="toggle-icon">&#9654;</span>
-    </div>
+    </button>
     <div class="collapsible-body">
 
       <div style="font-size:13px;font-weight:600;color:var(--text-secondary);margin:12px 0 8px 0;border-bottom:1px solid var(--border-primary);padding-bottom:6px;">Quality Scoring Weights</div>
       <div class="setting-row">
-        <div class="setting-label">Relative focus weight<small>Weights relative focus in quality scores and candidate ordering; it does not establish absolute sharpness.</small></div>
+        <div class="setting-label"><label for="cfgWFocus">Relative focus weight</label><small>Weights relative focus in quality scores and candidate ordering; it does not establish absolute sharpness.</small></div>
         <div style="display:flex;align-items:center;gap:8px;">
-          <input type="range" id="cfgWFocus" min="0" max="100" value="45"
+          <input type="range" id="cfgWFocus" data-setting-keys="pipeline.w_focus" min="0" max="100" value="45"
                  style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgWFocusVal').textContent = this.value + '%'; saveConfig()">
           <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgWFocusVal">45%</span>
         </div>
       </div>
       <div class="setting-row">
-        <div class="setting-label">Exposure</div>
+        <div class="setting-label"><label for="cfgWExposure">Exposure</label></div>
         <div style="display:flex;align-items:center;gap:8px;">
-          <input type="range" id="cfgWExposure" min="0" max="100" value="20"
+          <input type="range" id="cfgWExposure" data-setting-keys="pipeline.w_exposure" min="0" max="100" value="20"
                  style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgWExposureVal').textContent = this.value + '%'; saveConfig()">
           <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgWExposureVal">20%</span>
         </div>
       </div>
       <div class="setting-row">
-        <div class="setting-label">Composition</div>
+        <div class="setting-label"><label for="cfgWComposition">Composition</label></div>
         <div style="display:flex;align-items:center;gap:8px;">
-          <input type="range" id="cfgWComposition" min="0" max="100" value="15"
+          <input type="range" id="cfgWComposition" data-setting-keys="pipeline.w_composition" min="0" max="100" value="15"
                  style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgWCompositionVal').textContent = this.value + '%'; saveConfig()">
           <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgWCompositionVal">15%</span>
         </div>
       </div>
       <div class="setting-row">
-        <div class="setting-label">Subject area</div>
+        <div class="setting-label"><label for="cfgWArea">Subject area</label></div>
         <div style="display:flex;align-items:center;gap:8px;">
-          <input type="range" id="cfgWArea" min="0" max="100" value="10"
+          <input type="range" id="cfgWArea" data-setting-keys="pipeline.w_area" min="0" max="100" value="10"
                  style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgWAreaVal').textContent = this.value + '%'; saveConfig()">
           <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgWAreaVal">10%</span>
         </div>
       </div>
       <div class="setting-row">
-        <div class="setting-label">Noise</div>
+        <div class="setting-label"><label for="cfgWNoise">Noise</label></div>
         <div style="display:flex;align-items:center;gap:8px;">
-          <input type="range" id="cfgWNoise" min="0" max="100" value="10"
+          <input type="range" id="cfgWNoise" data-setting-keys="pipeline.w_noise" min="0" max="100" value="10"
                  style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgWNoiseVal').textContent = this.value + '%'; saveConfig()">
           <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgWNoiseVal">10%</span>
@@ -637,36 +583,36 @@
 
       <div style="font-size:13px;font-weight:600;color:var(--text-secondary);margin:16px 0 8px 0;border-bottom:1px solid var(--border-primary);padding-bottom:6px;">Rejection Thresholds</div>
       <div class="setting-row">
-        <div class="setting-label">Crop completeness</div>
+        <div class="setting-label"><label for="cfgRejectCrop">Crop completeness</label></div>
         <div style="display:flex;align-items:center;gap:8px;">
-          <input type="range" id="cfgRejectCrop" min="0" max="100" value="60"
+          <input type="range" id="cfgRejectCrop" data-setting-keys="pipeline.reject_crop_complete" min="0" max="100" value="60"
                  style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgRejectCropVal').textContent = this.value + '%'; saveConfig()">
           <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgRejectCropVal">60%</span>
         </div>
       </div>
       <div class="setting-row">
-        <div class="setting-label">Relative focus rejection (inactive)<small>Relative rank cannot establish absolute defocus.</small></div>
+        <div class="setting-label"><label for="cfgRejectFocus">Relative focus rejection (inactive)</label><small>Relative rank cannot establish absolute defocus.</small></div>
         <div style="display:flex;align-items:center;gap:8px;">
-          <input type="range" id="cfgRejectFocus" disabled min="0" max="100" value="35"
+          <input type="range" id="cfgRejectFocus" data-setting-keys="pipeline.reject_focus" disabled min="0" max="100" value="35"
                  style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgRejectFocusVal').textContent = this.value + '%'; saveConfig()">
           <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgRejectFocusVal">35%</span>
         </div>
       </div>
       <div class="setting-row">
-        <div class="setting-label">Highlight clipping</div>
+        <div class="setting-label"><label for="cfgRejectClip">Highlight clipping</label></div>
         <div style="display:flex;align-items:center;gap:8px;">
-          <input type="range" id="cfgRejectClip" min="0" max="100" value="30"
+          <input type="range" id="cfgRejectClip" data-setting-keys="pipeline.reject_clip_high" min="0" max="100" value="30"
                  style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgRejectClipVal').textContent = this.value + '%'; saveConfig()">
           <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgRejectClipVal">30%</span>
         </div>
       </div>
       <div class="setting-row">
-        <div class="setting-label">Composite quality floor</div>
+        <div class="setting-label"><label for="cfgRejectComposite">Composite quality floor</label></div>
         <div style="display:flex;align-items:center;gap:8px;">
-          <input type="range" id="cfgRejectComposite" min="0" max="100" value="40"
+          <input type="range" id="cfgRejectComposite" data-setting-keys="pipeline.reject_composite" min="0" max="100" value="40"
                  style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgRejectCompositeVal').textContent = this.value + '%'; saveConfig()">
           <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgRejectCompositeVal">40%</span>
@@ -675,46 +621,42 @@
 
       <div style="font-size:13px;font-weight:600;color:var(--text-secondary);margin:16px 0 8px 0;border-bottom:1px solid var(--border-primary);padding-bottom:6px;">Miss Detection</div>
       <div class="setting-row">
-        <div class="setting-label">
-          Enable miss detection
+        <div class="setting-label"><label for="cfgMissEnabled">Enable miss detection</label>
           <small>After regrouping, flag frames where no subject was detected, the subject is clipped/tiny, or image gradients suggest focus review. Surfaced on the /misses page and in pipeline review.</small>
         </div>
         <div style="display:flex;align-items:center;gap:8px;">
-          <input type="checkbox" id="cfgMissEnabled" checked
+          <input type="checkbox" id="cfgMissEnabled" data-setting-keys="pipeline.miss_enabled" checked
                  onchange="saveConfig()" style="accent-color:var(--accent);">
         </div>
       </div>
       <div class="setting-row">
-        <div class="setting-label">
-          Subject-present confidence
+        <div class="setting-label"><label for="cfgMissDetConf">Subject-present confidence</label>
           <small>Detector confidence below this flags the frame as "no subject". Burst siblings relax the bar; singletons use the full threshold.</small>
         </div>
         <div style="display:flex;align-items:center;gap:8px;">
-          <input type="range" id="cfgMissDetConf" min="10" max="50" step="1" value="20"
+          <input type="range" id="cfgMissDetConf" data-setting-keys="pipeline.miss_det_confidence pipeline.miss_det_confidence_burst" min="10" max="50" step="1" value="20"
                  style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgMissDetConfVal').textContent = this.value + '%'; saveConfig()">
           <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgMissDetConfVal">20%</span>
         </div>
       </div>
       <div class="setting-row">
-        <div class="setting-label">
-          Minimum subject area
+        <div class="setting-label"><label for="cfgMissBboxMin">Minimum subject area</label>
           <small>Subjects smaller than this fraction of the frame are flagged as "clipped / tiny" in a burst (a tiny bbox next to larger siblings signals lost framing). Singletons require an even smaller subject (40% of this) before being flagged, since without siblings a small subject may be intentional framing.</small>
         </div>
         <div style="display:flex;align-items:center;gap:8px;">
-          <input type="range" id="cfgMissBboxMin" min="1" max="20" step="1" value="5"
+          <input type="range" id="cfgMissBboxMin" data-setting-keys="pipeline.miss_bbox_area_min pipeline.miss_bbox_area_min_singleton" min="1" max="20" step="1" value="5"
                  style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgMissBboxMinVal').textContent = (this.value / 1000).toFixed(3); saveConfig()">
           <span style="font-size:13px;color:var(--text-primary);min-width:44px;" id="cfgMissBboxMinVal">0.005</span>
         </div>
       </div>
       <div class="setting-row">
-        <div class="setting-label">
-          Focus review ratio (subject / background)
+        <div class="setting-label"><label for="cfgMissOofRatio">Focus review ratio (subject / background)</label>
           <small>When subject Tenengrad is below this ratio of background Tenengrad, suggest focus review. This heuristic does not establish absolute defocus.</small>
         </div>
         <div style="display:flex;align-items:center;gap:8px;">
-          <input type="range" id="cfgMissOofRatio" min="30" max="80" step="5" value="50"
+          <input type="range" id="cfgMissOofRatio" data-setting-keys="pipeline.miss_oof_ratio" min="30" max="80" step="5" value="50"
                  style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgMissOofRatioVal').textContent = (this.value / 100).toFixed(2); saveConfig()">
           <span style="font-size:13px;color:var(--text-primary);min-width:44px;" id="cfgMissOofRatioVal">0.50</span>
@@ -723,58 +665,53 @@
 
       <div style="font-size:13px;font-weight:600;color:var(--text-secondary);margin:16px 0 8px 0;border-bottom:1px solid var(--border-primary);padding-bottom:6px;">Eye-Focus Detection</div>
       <div class="setting-row">
-        <div class="setting-label">
-          Enable eye-focus detection
+        <div class="setting-label"><label for="cfgEyeDetectEnabled">Enable eye-focus detection</label>
           <small>Runs the SuperAnimal keypoint stage to localize the animal's eye and use a windowed sharpness around it for the focus score. Weights are opt-in on the Process page.</small>
         </div>
         <div style="display:flex;align-items:center;gap:8px;">
-          <input type="checkbox" id="cfgEyeDetectEnabled"
+          <input type="checkbox" id="cfgEyeDetectEnabled" data-setting-keys="pipeline.eye_detect_enabled"
                  onchange="saveConfig()" style="accent-color:var(--accent);">
         </div>
       </div>
       <div class="setting-row">
-        <div class="setting-label">
-          Classifier confidence gate
+        <div class="setting-label"><label for="cfgEyeClassifierConfGate">Classifier confidence gate</label>
           <small>Skip photos whose species classifier confidence is below this — the keypoint model has nothing reliable to route on.</small>
         </div>
         <div style="display:flex;align-items:center;gap:8px;">
-          <input type="range" id="cfgEyeClassifierConfGate" min="0" max="100" value="50"
+          <input type="range" id="cfgEyeClassifierConfGate" data-setting-keys="pipeline.eye_classifier_conf_gate" min="0" max="100" value="50"
                  style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgEyeClassifierConfGateVal').textContent = this.value + '%'; saveConfig()">
           <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgEyeClassifierConfGateVal">50%</span>
         </div>
       </div>
       <div class="setting-row">
-        <div class="setting-label">
-          Minimum eye keypoint score
+        <div class="setting-label"><label for="cfgEyeDetectionConfGate">Minimum eye keypoint score</label>
           <small>Minimum raw model score required to trust an eye location. This is not a probability; scores and thresholds can exceed one. Bird and mammal model scores are not calibrated to each other.</small>
         </div>
         <div style="display:flex;align-items:center;gap:8px;">
-          <input type="number" id="cfgEyeDetectionConfGate" min="0" step="0.01" value="0.5"
+          <input type="number" id="cfgEyeDetectionConfGate" data-setting-keys="pipeline.eye_detection_conf_gate" min="0" step="0.01" value="0.5"
                  style="width:90px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 8px;text-align:center;"
                  onchange="document.getElementById('cfgEyeDetectionConfGateVal').textContent = this.value; saveConfig()">
           <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgEyeDetectionConfGateVal">0.5</span>
         </div>
       </div>
       <div class="setting-row">
-        <div class="setting-label">
-          Eye window size
+        <div class="setting-label"><label for="cfgEyeWindowK">Eye window size</label>
           <small>Fraction of the subject bbox used as the windowed Tenengrad region. 8% is tuned for portrait crops; raise for small birds, lower for tight head shots.</small>
         </div>
         <div style="display:flex;align-items:center;gap:8px;">
-          <input type="range" id="cfgEyeWindowK" min="2" max="25" value="8"
+          <input type="range" id="cfgEyeWindowK" data-setting-keys="pipeline.eye_window_k" min="2" max="25" value="8"
                  style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgEyeWindowKVal').textContent = (this.value / 100).toFixed(2); saveConfig()">
           <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgEyeWindowKVal">0.08</span>
         </div>
       </div>
       <div class="setting-row">
-        <div class="setting-label">
-          Relative eye rejection (inactive)
+        <div class="setting-label"><label for="cfgRejectEyeFocus">Relative eye rejection (inactive)</label>
           <small>This saved legacy setting is inactive. Eye percentile ranks do not establish absolute defocus.</small>
         </div>
         <div style="display:flex;align-items:center;gap:8px;">
-          <input type="range" id="cfgRejectEyeFocus" disabled min="0" max="100" value="35"
+          <input type="range" id="cfgRejectEyeFocus" data-setting-keys="pipeline.reject_eye_focus" disabled min="0" max="100" value="35"
                  style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgRejectEyeFocusVal').textContent = this.value + '%'; saveConfig()">
           <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgRejectEyeFocusVal">35%</span>
@@ -783,18 +720,18 @@
 
       <div style="font-size:13px;font-weight:600;color:var(--text-secondary);margin:16px 0 8px 0;border-bottom:1px solid var(--border-primary);padding-bottom:6px;">Burst Detection</div>
       <div class="setting-row">
-        <div class="setting-label">Time gap</div>
+        <div class="setting-label"><label for="cfgBurstTimeGap">Time gap</label></div>
         <div style="display:flex;align-items:center;gap:8px;">
-          <input type="range" id="cfgBurstTimeGap" min="1" max="30" value="3"
+          <input type="range" id="cfgBurstTimeGap" data-setting-keys="pipeline.burst_time_gap" min="1" max="30" value="3"
                  style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgBurstTimeGapVal').textContent = this.value + 's'; saveConfig()">
           <span style="font-size:13px;color:var(--text-primary);min-width:30px;" id="cfgBurstTimeGapVal">3s</span>
         </div>
       </div>
       <div class="setting-row">
-        <div class="setting-label">Embedding distance</div>
+        <div class="setting-label"><label for="cfgBurstEmb">Embedding distance</label></div>
         <div style="display:flex;align-items:center;gap:8px;">
-          <input type="range" id="cfgBurstEmb" min="1" max="100"
+          <input type="range" id="cfgBurstEmb" data-setting-keys="pipeline.burst_embedding_threshold" min="1" max="100"
                  style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgBurstEmbVal').textContent = this.value + '%'; saveConfig()">
           <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgBurstEmbVal"></span>
@@ -803,35 +740,35 @@
 
       <div style="font-size:13px;font-weight:600;color:var(--text-secondary);margin:16px 0 8px 0;border-bottom:1px solid var(--border-primary);padding-bottom:6px;">Selection (MMR)</div>
       <div class="setting-row">
-        <div class="setting-label">Burst quality bias (lambda)</div>
+        <div class="setting-label"><label for="cfgBurstLambda">Burst quality bias (lambda)</label></div>
         <div style="display:flex;align-items:center;gap:8px;">
-          <input type="range" id="cfgBurstLambda" min="0" max="100" value="85"
+          <input type="range" id="cfgBurstLambda" data-setting-keys="pipeline.burst_lambda" min="0" max="100" value="85"
                  style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgBurstLambdaVal').textContent = this.value + '%'; saveConfig()">
           <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgBurstLambdaVal">85%</span>
         </div>
       </div>
       <div class="setting-row">
-        <div class="setting-label">Burst max keep</div>
+        <div class="setting-label"><label for="cfgBurstMaxKeep">Burst max keep</label></div>
         <div style="display:flex;align-items:center;gap:8px;">
-          <input type="number" id="cfgBurstMaxKeep" min="1" max="10" value="3"
+          <input type="number" id="cfgBurstMaxKeep" data-setting-keys="pipeline.burst_max_keep" min="1" max="10" value="3"
                  style="width:60px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
                  onchange="saveConfig()">
         </div>
       </div>
       <div class="setting-row">
-        <div class="setting-label">Encounter quality bias (lambda)</div>
+        <div class="setting-label"><label for="cfgEncLambda">Encounter quality bias (lambda)</label></div>
         <div style="display:flex;align-items:center;gap:8px;">
-          <input type="range" id="cfgEncLambda" min="0" max="100" value="70"
+          <input type="range" id="cfgEncLambda" data-setting-keys="pipeline.encounter_lambda" min="0" max="100" value="70"
                  style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgEncLambdaVal').textContent = this.value + '%'; saveConfig()">
           <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgEncLambdaVal">70%</span>
         </div>
       </div>
       <div class="setting-row">
-        <div class="setting-label">Encounter max keep</div>
+        <div class="setting-label"><label for="cfgEncMaxKeep">Encounter max keep</label></div>
         <div style="display:flex;align-items:center;gap:8px;">
-          <input type="number" id="cfgEncMaxKeep" min="1" max="20" value="5"
+          <input type="number" id="cfgEncMaxKeep" data-setting-keys="pipeline.encounter_max_keep" min="1" max="20" value="5"
                  style="width:60px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
                  onchange="saveConfig()">
         </div>
@@ -839,69 +776,68 @@
 
       <div style="font-size:13px;font-weight:600;color:var(--text-secondary);margin:16px 0 8px 0;border-bottom:1px solid var(--border-primary);padding-bottom:6px;">Encounter Segmentation</div>
       <div class="setting-row">
-        <div class="setting-label">
-          Encounter weights
+        <div class="setting-label"><label for="cfgWTime">Encounter weights</label>
           <small>Relative importance of time / subject / global / species / meta similarity.</small>
         </div>
         <div style="display:flex;align-items:center;gap:6px;">
-          <input type="number" id="cfgWTime" min="0" max="100" value="35" title="Time"
+          <input type="number" id="cfgWTime" data-setting-keys="pipeline.w_time" min="0" max="100" value="35" title="Time"
                  style="width:48px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px;font-size:12px;text-align:center;"
                  onchange="saveConfig()">
-          <input type="number" id="cfgWSubj" min="0" max="100" value="35" title="Subject"
+          <input type="number" id="cfgWSubj" data-setting-keys="pipeline.w_subj" min="0" max="100" value="35" title="Subject"
                  style="width:48px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px;font-size:12px;text-align:center;"
                  onchange="saveConfig()">
-          <input type="number" id="cfgWGlobal" min="0" max="100" value="15" title="Global"
+          <input type="number" id="cfgWGlobal" data-setting-keys="pipeline.w_global" min="0" max="100" value="15" title="Global"
                  style="width:48px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px;font-size:12px;text-align:center;"
                  onchange="saveConfig()">
-          <input type="number" id="cfgWSpecies" min="0" max="100" value="10" title="Species"
+          <input type="number" id="cfgWSpecies" data-setting-keys="pipeline.w_species" min="0" max="100" value="10" title="Species"
                  style="width:48px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px;font-size:12px;text-align:center;"
                  onchange="saveConfig()">
-          <input type="number" id="cfgWMeta" min="0" max="100" value="5" title="Meta"
+          <input type="number" id="cfgWMeta" data-setting-keys="pipeline.w_meta" min="0" max="100" value="5" title="Meta"
                  style="width:48px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px;font-size:12px;text-align:center;"
                  onchange="saveConfig()">
           <span style="font-size:11px;color:var(--text-dim);">T/S/G/Sp/M</span>
         </div>
       </div>
       <div class="setting-row">
-        <div class="setting-label">Hard cut time</div>
+        <div class="setting-label"><label for="cfgHardCutTime">Hard cut time</label></div>
         <div style="display:flex;align-items:center;gap:8px;">
-          <input type="number" id="cfgHardCutTime" min="30" max="600" value="180"
+          <input type="number" id="cfgHardCutTime" data-setting-keys="pipeline.hard_cut_time" min="30" max="600" value="180"
                  style="width:70px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
                  onchange="saveConfig()">
           <span style="font-size:13px;color:var(--text-dim);">seconds</span>
         </div>
       </div>
       <div class="setting-row">
-        <div class="setting-label">Hard cut score</div>
+        <div class="setting-label"><label for="cfgHardCutScore">Hard cut score</label></div>
         <div style="display:flex;align-items:center;gap:8px;">
-          <input type="range" id="cfgHardCutScore" min="0" max="100" value="42"
+          <input type="range" id="cfgHardCutScore" data-setting-keys="pipeline.hard_cut_score" min="0" max="100" value="42"
                  style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgHardCutScoreVal').textContent = this.value + '%'; saveConfig()">
           <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgHardCutScoreVal">42%</span>
         </div>
       </div>
       <div class="setting-row">
-        <div class="setting-label">Soft cut score</div>
+        <div class="setting-label"><label for="cfgSoftCutScore">Soft cut score</label></div>
         <div style="display:flex;align-items:center;gap:8px;">
-          <input type="range" id="cfgSoftCutScore" min="0" max="100" value="52"
+          <input type="range" id="cfgSoftCutScore" data-setting-keys="pipeline.soft_cut_score" min="0" max="100" value="52"
                  style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgSoftCutScoreVal').textContent = this.value + '%'; saveConfig()">
           <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgSoftCutScoreVal">52%</span>
         </div>
       </div>
       <div class="setting-row">
-        <div class="setting-label">Merge score</div>
+        <div class="setting-label"><label for="cfgMergeScore">Merge score</label></div>
         <div style="display:flex;align-items:center;gap:8px;">
-          <input type="range" id="cfgMergeScore" min="0" max="100" value="62"
+          <input type="range" id="cfgMergeScore" data-setting-keys="pipeline.merge_score" min="0" max="100" value="62"
                  style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgMergeScoreVal').textContent = this.value + '%'; saveConfig()">
           <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgMergeScoreVal">62%</span>
         </div>
       </div>
       <div class="setting-row">
-        <div class="setting-label">Merge max gap</div>
+        <div class="setting-label"><label for="cfgMergeMaxGap">Merge max gap</label></div>
         <div style="display:flex;align-items:center;gap:8px;">
-          <input type="number" id="cfgMergeMaxGap" min="10" max="300" value="60"
+          <input type="number" id="cfgMergeMaxGap" data-setting-keys="pipeline.merge_max_gap" min="10" max="300" value="60"
                  style="width:70px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
                  onchange="saveConfig()">
           <span style="font-size:13px;color:var(--text-dim);">seconds</span>
@@ -909,12 +845,14 @@
       </div>
 
       <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border-primary);">
-        <button onclick="resetPipelineDefaults()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;">Reset to defaults</button>
+        <button id="resetPipeline" data-find-name="Reset pipeline defaults" onclick="resetPipelineDefaults()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;">Reset to defaults</button>
       </div>
     </div>
   </div>
 
-  <!-- HuggingFace -->
+  </section>
+  <section data-settings-category="integrations" hidden>
+    <h2>Integrations</h2>
   <div class="section">
     <div class="section-title">HuggingFace</div>
     <div class="setting-row">
@@ -923,14 +861,13 @@
         <small>Optional. Enables faster downloads and access to gated models. Get one at <span style="color:var(--accent);">huggingface.co/settings/tokens</span></small>
       </div>
       <div style="display:flex;align-items:center;gap:8px;">
-        <input type="text" id="cfgHfToken" placeholder="hf_..."
+        <input type="text" id="cfgHfToken" data-setting-keys="hf_token" placeholder="hf_..."
                style="width:220px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 10px;font-size:12px;font-family:monospace;"
                onchange="saveConfig()">
       </div>
     </div>
   </div>
 
-  <!-- iNaturalist -->
   <div class="section">
     <div class="section-title">iNaturalist</div>
     <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">
@@ -938,12 +875,11 @@
       Get your API token from <a href="https://www.inaturalist.org/users/api_token" target="_blank" onclick="return openExternalLink(event, this.href)" style="color:var(--accent);text-decoration:none;">inaturalist.org/users/api_token</a>
     </p>
     <div class="setting-row">
-      <div class="setting-label">
-        API Token
+      <div class="setting-label"><label for="cfgInatToken">API Token</label>
         <small>Paste your personal API token to enable direct uploads</small>
       </div>
       <div style="display:flex;align-items:center;gap:8px;">
-        <input type="password" id="cfgInatToken" placeholder="eyJhbGciOi..."
+        <input type="password" id="cfgInatToken" data-setting-keys="inat_token" placeholder="eyJhbGciOi..."
                style="width:260px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 10px;font-size:12px;font-family:monospace;"
                onchange="saveConfig()">
         <button onclick="toggleInatTokenVisibility()" style="background:var(--bg-tertiary);color:var(--text-dim);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 10px;font-size:11px;cursor:pointer;">Show</button>
@@ -953,7 +889,6 @@
     <div id="inatTokenStatus" style="font-size:12px;margin-top:4px;min-height:18px;"></div>
   </div>
 
-  <!-- Google Maps -->
   <div class="section" id="google-maps">
     <div class="section-title">Google Maps</div>
     <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">
@@ -965,31 +900,29 @@
         <small>Stored in <code>~/.vireo/config.json</code>. The key is sent to the browser when needed so Google Maps can provide maps, autocomplete, and nearby-place suggestions.</small>
       </div>
       <div style="display:flex;align-items:center;gap:8px;">
-        <input type="password" id="cfgGoogleMapsApiKey" placeholder="AIza..."
+        <input type="password" id="cfgGoogleMapsApiKey" data-setting-keys="google_maps_api_key" placeholder="AIza..."
                style="width:260px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 10px;font-size:12px;font-family:monospace;"
                onchange="saveConfig()">
         <button onclick="toggleGoogleMapsKeyVisibility()" style="background:var(--bg-tertiary);color:var(--text-dim);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 10px;font-size:11px;cursor:pointer;">Show</button>
       </div>
     </div>
     <div class="setting-row">
-      <div class="setting-label">
-        Prefer English place names
+      <div class="setting-label"><label for="cfgGoogleMapsPreferEnglish">Prefer English place names</label>
         <small>Ask Google Maps for English names and addresses when available. Official proper names may remain in their local language.</small>
       </div>
       <div style="display:flex;align-items:center;gap:8px;">
-        <input type="checkbox" id="cfgGoogleMapsPreferEnglish" checked
+        <input type="checkbox" id="cfgGoogleMapsPreferEnglish" data-setting-keys="google_maps_prefer_english" checked
                onchange="saveConfig()" style="accent-color:var(--accent);">
       </div>
     </div>
   </div>
 
-  <!-- Location metadata -->
   <div class="section" id="location-metadata">
     <div class="section-title">Location metadata in XMP</div>
     <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">
       Assigning a place in Vireo queues a sidecar write for that photo. What the write does is decided by two settings in
-      the Metadata category below &mdash; <code>write_assigned_location_to_xmp</code> writes GPS coordinates,
-      <code>write_location_keywords_to_xmp</code> writes the place and its parents as XMP keywords. Photos you located
+      Advanced. <a href="?category=advanced#setting-write_assigned_location_to_xmp">Write assigned location</a> writes GPS coordinates,
+      and <a href="?category=advanced#setting-write_location_keywords_to_xmp">Write location keywords</a> writes the place and its parents as XMP keywords. Photos you located
       before turning a setting on have nothing queued, so they need a one-off backfill.
     </p>
     <div id="locationWriteStatus" style="font-size:12px;color:var(--text-secondary);margin-bottom:10px;">Loading location counts...</div>
@@ -1003,7 +936,6 @@
     </div>
   </div>
 
-  <!-- Assistant setup and independent server verification -->
   <div class="section" id="mcpConnectSection">
     <div class="section-title">Codex, Claude and AI assistants</div>
     <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">
@@ -1073,45 +1005,15 @@
     </p>
   </div>
 
-  <!-- External Editors -->
   <div class="section">
     <div class="section-title">External Editors</div>
     <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">
       Applications used by "Open in Editor" context-menu and app-menu actions. Add as many as you like (e.g. Lightroom, Affinity, Photoshop); context menus show each configured editor, while the app menu uses the first. With none configured, photos open in the OS default app.
     </p>
-    <div id="cfgExternalEditorsList" style="display:flex;flex-direction:column;gap:6px;margin-bottom:8px;"></div>
+    <div id="cfgExternalEditorsList" data-setting-keys="external_editors" style="display:flex;flex-direction:column;gap:6px;margin-bottom:8px;"></div>
     <button type="button" onclick="addExternalEditor()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 12px;font-size:12px;cursor:pointer;">+ Add editor</button>
   </div>
 
-  <!-- Remote targets (SSH folder moves) -->
-  <div class="section">
-    <div class="section-title">Remote targets (NAS / SSH)</div>
-    <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">
-      Destinations for moving folders to a NAS over SSH — far more reliable than an SMB mount over a slow/remote link, with resume and integrity verification. The <b>Remote path</b> is the NAS-side filesystem path rsync writes to (e.g. <code>/volume1/Photography</code>); the <b>Local mount path</b> is where you can read those same files afterward (e.g. <code>/Volumes/Photography</code>) — moved photos are repointed there so they stay in your library. Remote moves need GNU rsync (set its path under “GNU rsync path” in the Paths settings if auto-detect fails). <b>Local archive root</b> is the local folder that mirrors the remote path. Imports under this folder can chain an automatic move to this target after processing. It must be an absolute path outside the local mount path — other values are cleared on save.
-    </p>
-    <div id="cfgRemoteTargetsList" style="display:flex;flex-direction:column;gap:10px;margin-bottom:8px;"></div>
-    <div style="display:flex;gap:8px;align-items:center;">
-      <button type="button" onclick="openNasWizard()" style="background:var(--accent);color:var(--bg-primary);border:1px solid var(--accent);border-radius:4px;padding:6px 12px;font-size:12px;cursor:pointer;font-weight:600;">Set up from mounted volume…</button>
-      <button type="button" onclick="addRemoteTarget()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 12px;font-size:12px;cursor:pointer;">+ Add manually</button>
-    </div>
-  </div>
-
-  <!-- NAS setup wizard -->
-  <div id="nasWizard" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:1000;align-items:center;justify-content:center;">
-    <div style="background:var(--bg-secondary);border:1px solid var(--border-secondary);border-radius:8px;width:560px;max-width:92vw;max-height:86vh;display:flex;flex-direction:column;">
-      <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--border-secondary);">
-        <h3 id="nwTitle" style="margin:0;font-size:15px;">Set up NAS</h3>
-        <button type="button" onclick="closeNasWizard()" style="background:none;border:0;color:var(--text-dim);font-size:18px;cursor:pointer;line-height:1;">&times;</button>
-      </div>
-      <div id="nwBody" style="padding:16px 18px;overflow-y:auto;font-size:13px;color:var(--text-primary);"></div>
-      <div style="display:flex;gap:8px;justify-content:space-between;padding:12px 18px;border-top:1px solid var(--border-secondary);">
-        <button type="button" id="nwBack" onclick="nwBack()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;">Back</button>
-        <button type="button" id="nwNext" onclick="nwNext()" style="background:var(--accent);color:var(--bg-primary);border:1px solid var(--accent);border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;font-weight:600;">Next</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- darktable Development -->
   <div class="section">
     <div class="section-title">RAW Development (darktable)</div>
     <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">
@@ -1122,65 +1024,59 @@
       <span style="color:var(--text-ghost);font-size:13px;">Checking...</span>
     </div>
     <div class="setting-row">
-      <div class="setting-label">
-        darktable-cli path
+      <div class="setting-label"><label for="cfgDarktableBin">darktable-cli path</label>
         <small>Leave empty to auto-detect from PATH. Set explicitly if darktable is installed in a non-standard location.</small>
       </div>
       <div style="display:flex;align-items:center;gap:6px;">
-        <input type="text" id="cfgDarktableBin" placeholder="auto-detect"
+        <input type="text" id="cfgDarktableBin" data-setting-keys="darktable_bin" placeholder="auto-detect"
                style="width:280px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 10px;font-size:12px;font-family:monospace;"
                onchange="saveConfig()">
         <button onclick="browseForDarktable()" class="btn btn-secondary tauri-only" style="display:none;white-space:nowrap;">Browse&hellip;</button>
       </div>
     </div>
     <div class="setting-row">
-      <div class="setting-label">
-        Default style
+      <div class="setting-label"><label for="cfgDarktableStyle">Default style</label>
         <small>A darktable style to apply during development (e.g. "Wildlife"). Leave empty for no style.</small>
       </div>
-      <input type="text" id="cfgDarktableStyle" placeholder="none"
+      <input type="text" id="cfgDarktableStyle" data-setting-keys="darktable_style" placeholder="none"
              style="width:200px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 10px;font-size:12px;"
              onchange="saveConfig()">
     </div>
     <div class="setting-row">
-      <div class="setting-label">
-        Output format
+      <div class="setting-label"><label for="cfgDarktableFormat">Output format</label>
         <small>File format for developed photos.</small>
       </div>
-      <select id="cfgDarktableFormat" onchange="saveConfig()"
+      <select id="cfgDarktableFormat" data-setting-keys="darktable_output_format" onchange="saveConfig()"
               style="background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 8px;font-size:13px;">
         <option value="jpg">JPEG</option>
         <option value="tiff">TIFF</option>
       </select>
     </div>
     <div class="setting-row">
-      <div class="setting-label">
-        Output directory
+      <div class="setting-label"><label for="cfgDarktableOutputDir">Output directory</label>
         <small>Where developed photos are saved. Leave empty to create a "developed" subfolder next to originals.</small>
       </div>
       <div style="display:flex;align-items:center;gap:6px;">
-        <input type="text" id="cfgDarktableOutputDir" placeholder="alongside originals"
+        <input type="text" id="cfgDarktableOutputDir" data-setting-keys="darktable_output_dir" placeholder="alongside originals"
                style="width:280px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 10px;font-size:12px;font-family:monospace;"
                onchange="saveConfig()">
         <button onclick="browseForOutputDir()" class="btn btn-secondary tauri-only" style="display:none;white-space:nowrap;">Browse&hellip;</button>
       </div>
     </div>
     <div class="setting-row">
-      <div class="setting-label">
-        Auto convert to DNG if necessary
+      <div class="setting-label"><label for="cfgDarktableAutoConvertDng">Auto convert to DNG if necessary</label>
         <small>For Nikon High Efficiency NEFs that darktable cannot decode, convert through Adobe DNG Converter first.</small>
       </div>
-      <input type="checkbox" id="cfgDarktableAutoConvertDng"
+      <input type="checkbox" id="cfgDarktableAutoConvertDng" data-setting-keys="darktable_auto_convert_dng"
              onchange="saveConfig(); loadDarktableStatus();"
              style="accent-color:var(--accent);">
     </div>
     <div class="setting-row">
-      <div class="setting-label">
-        Adobe DNG Converter path
+      <div class="setting-label"><label for="cfgDngConverterBin">Adobe DNG Converter path</label>
         <small>Leave empty to auto-detect the Windows installation, macOS app bundle, or PATH. Required only when DNG conversion is enabled.</small>
       </div>
       <div style="display:flex;align-items:center;gap:6px;">
-        <input type="text" id="cfgDngConverterBin" placeholder="auto-detect"
+        <input type="text" id="cfgDngConverterBin" data-setting-keys="dng_converter_bin" placeholder="auto-detect"
                style="width:280px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 10px;font-size:12px;font-family:monospace;"
                onchange="saveConfig(); loadDarktableStatus();">
         <button onclick="browseForDngConverter()" class="btn btn-secondary tauri-only" style="display:none;white-space:nowrap;">Browse&hellip;</button>
@@ -1188,7 +1084,131 @@
     </div>
   </div>
 
-  <!-- System Info -->
+  </section>
+  <section data-settings-category="storage" hidden>
+    <h2>Storage & Maintenance</h2>
+  <div class="section">
+    <div class="section-title">Storage</div>
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;">
+      <p style="font-size:13px;color:var(--text-dim);margin:0;">
+        View disk usage, configure preview caches, and clean up generated files on the dedicated Storage page.
+      </p>
+      <a href="/storage" class="btn btn-secondary" style="white-space:nowrap;">Open Storage</a>
+    </div>
+  </div>
+
+  <div class="section" id="catalogBackupsSection">
+    <div class="section-title">Catalog backups</div>
+    <p style="font-size:13px;color:var(--text-dim);margin:0 0 10px;line-height:1.5;">
+      Vireo copies the catalog once a day: labels, ratings, flags, edits, keywords, collections and workspaces.
+      Restore a copy to undo a bug or a mistake that changed the catalog. Photo files and these settings are not part of it.
+      To change how many copies are kept, open <a href="?category=advanced#setting-catalog_backup_keep">Daily catalog backups kept</a>.
+    </p>
+    <div id="catalogBackupsRestoreNotice" role="status" style="display:none;"></div>
+    <div id="catalogBackupsSummary" style="font-size:12px;color:var(--text-secondary);line-height:1.5;">Loading&hellip;</div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:10px 0;">
+      <button class="btn-sm" id="catalogBackupNowBtn" style="margin-left:0;">Back up now</button>
+      <span id="catalogBackupAction" role="status" style="font-size:12px;color:var(--text-dim);"></span>
+    </div>
+    <div id="catalogBackupsList"></div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Remote targets (NAS / SSH)</div>
+    <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">
+      Destinations for moving folders to a NAS over SSH — far more reliable than an SMB mount over a slow/remote link, with resume and integrity verification. The <b>Remote path</b> is the NAS-side filesystem path rsync writes to (e.g. <code>/volume1/Photography</code>); the <b>Local mount path</b> is where you can read those same files afterward (e.g. <code>/Volumes/Photography</code>) — moved photos are repointed there so they stay in your library. Remote moves need GNU rsync (set its path under “GNU rsync path” in the Paths settings if auto-detect fails). <b>Local archive root</b> is the local folder that mirrors the remote path. Imports under this folder can chain an automatic move to this target after processing. It must be an absolute path outside the local mount path — other values are cleared on save.
+    </p>
+    <div id="cfgRemoteTargetsList" data-setting-keys="remote_targets" style="display:flex;flex-direction:column;gap:10px;margin-bottom:8px;"></div>
+    <div style="display:flex;gap:8px;align-items:center;">
+      <button type="button" onclick="openNasWizard()" style="background:var(--accent);color:var(--bg-primary);border:1px solid var(--accent);border-radius:4px;padding:6px 12px;font-size:12px;cursor:pointer;font-weight:600;">Set up from mounted volume…</button>
+      <button type="button" onclick="addRemoteTarget()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 12px;font-size:12px;cursor:pointer;">+ Add manually</button>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Saved Scan Roots</div>
+    <p style="font-size:12px;color:var(--text-dim);margin-bottom:10px;">
+      Directories you've scanned before. These appear as suggestions on the Import page.
+    </p>
+    <div id="scanRootsContent"><span style="color:var(--text-ghost);font-size:13px;">Loading...</span></div>
+  </div>
+
+  <div class="section" id="computationCacheSection">
+    <div class="section-title">Computation Cache <span style="font-size:11px;color:var(--warning);font-weight:normal;">Experimental</span></div>
+    <p style="font-size:13px;color:var(--text-dim);margin:0 0 10px;line-height:1.5;">
+      Share completed animal detection and species-classification work with another Vireo computer.
+      Bundles contain machine results only&mdash;never originals, paths, XMP, or accepted/rejected review decisions.
+    </p>
+    <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap;margin-bottom:10px;font-size:12px;color:var(--text-secondary);">
+      <label><input type="checkbox" id="cacheExportDetections" checked> Detection</label>
+      <label><input type="checkbox" id="cacheExportClassifications" checked> Species classification</label>
+      <span id="computationCacheStatus" style="color:var(--text-dim);">Loading&hellip;</span>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+      <button class="btn-sm" id="computationCacheExportBtn" onclick="exportComputationCache()" style="margin-left:0;">Export Results&hellip;</button>
+      <button class="btn-sm" id="computationCacheImportBtn" onclick="document.getElementById('computationCacheImportInput').click()">Import Results&hellip;</button>
+      <input type="file" id="computationCacheImportInput" accept=".vireo-cache,application/zip,application/vnd.vireo.cache+zip" style="display:none;" onchange="importComputationCache(this.files[0]); this.value='';">
+      <span id="computationCacheAction" style="font-size:12px;color:var(--text-dim);"></span>
+    </div>
+  </div>
+
+<div class="section"><div class="section-title">Edit history</div>
+    <div class="setting-row" style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;">
+      <div class="setting-label"><label for="cfgMaxEditHistory">Edit history limit</label>
+        <small>Maximum number of undo-able edits to keep per workspace (default: 1000)</small>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <input type="number" id="cfgMaxEditHistory" data-setting-keys="max_edit_history" min="100" max="10000" step="100" value="1000"
+               style="width:80px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
+               onchange="saveConfig()">
+        <span style="font-size:13px;color:var(--text-dim);">entries</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Keyword maintenance</div>
+    <div id="advancedContent">
+      <div class="setting-row" style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;">
+        <div class="setting-label">
+          Clean up keywords
+          <small>Merge duplicate keywords that differ only in capitalization (e.g. "House Finch" and "House finch").</small>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <button id="cleanKeywords" data-find-name="Clean up keywords" onclick="cleanKeywords()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;">Clean Keywords</button>
+          <span id="cleanKeywordsStatus" style="font-size:12px;color:var(--text-dim);"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  </section>
+  <section data-settings-category="advanced" hidden>
+    <h2>Advanced</h2>
+  <div class="section" id="allSettingsSection">
+    <div class="section-title" style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+      <span>All settings</span>
+    </div>
+    <div style="font-size:12px;color:var(--text-dim);margin-bottom:10px;">
+      Every Vireo setting, including preferences available only in this editor. Edits save automatically; click Reset to revert.
+    </div>
+    <div style="display:flex;align-items:center;border-bottom:1px solid var(--border-primary);margin-bottom:14px;">
+      <button class="scope-tab active" data-scope="global" onclick="setSettingsScope('global')">Global</button>
+      <button class="scope-tab" data-scope="workspace" onclick="setSettingsScope('workspace')">Workspace</button>
+      <span style="flex:1;"></span>
+      <a href="/api/settings/export" class="btn-sm" style="margin-bottom:6px;text-decoration:none;display:inline-block;">Export…</a>
+      <button class="btn-sm" onclick="document.getElementById('settingsImportInput').click()" style="margin-bottom:6px;">Import…</button>
+      <input type="file" id="settingsImportInput" accept=".json,application/json" style="display:none;" onchange="importSettingsFile(this.files[0]); this.value='';">
+    </div>
+    <div style="font-size:11px;color:var(--text-dim);margin-bottom:14px;display:flex;gap:14px;flex-wrap:wrap;align-items:center;" id="allSettingsLegend">
+      <span style="display:inline-flex;align-items:center;gap:6px;"><span class="provenance-dot dot-default" style="margin-top:0;"></span> default</span>
+      <span style="display:inline-flex;align-items:center;gap:6px;"><span class="provenance-dot dot-global" style="margin-top:0;"></span> set globally</span>
+      <span style="display:inline-flex;align-items:center;gap:6px;"><span class="provenance-dot dot-workspace" style="margin-top:0;"></span> set for this workspace</span>
+    </div>
+    <div id="allSettingsCategories">
+      <span style="color:var(--text-ghost);font-size:13px;">Loading…</span>
+    </div>
+  </div>
   <div class="section">
     <div class="section-title">System</div>
     <div class="setting-row">
@@ -1232,93 +1252,6 @@
     </div>
   </div>
 
-  <!-- First-Launch Setup -->
-  <div class="section" style="border-bottom:1px solid var(--border-primary);padding-bottom:16px;margin-bottom:16px;">
-    <div class="section-title">Model Setup</div>
-    <p style="font-size:12px;color:var(--text-dim);margin-bottom:8px;">
-      Re-run the first-launch setup wizard to download or change classification models.
-    </p>
-    <a href="/welcome?force=1" style="display:inline-block;padding:6px 14px;border-radius:4px;font-size:12px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border-secondary);text-decoration:none;">
-      Open Setup Wizard
-    </a>
-  </div>
-
-  <!-- Pipeline Models -->
-  <div class="section">
-    <div class="section-title">Pipeline Models</div>
-    <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">
-      Models used by the culling pipeline. Download the ones you need before running Extract Features.
-    </p>
-    <div id="pipelineModelsContainer" style="font-size:12px;color:var(--text-dim);">Loading...</div>
-  </div>
-
-  <!-- Scan Roots -->
-  <div class="section">
-    <div class="section-title">Saved Scan Roots</div>
-    <p style="font-size:12px;color:var(--text-dim);margin-bottom:10px;">
-      Directories you've scanned before. These appear as suggestions on the Import page.
-    </p>
-    <div id="scanRootsContent"><span style="color:var(--text-ghost);font-size:13px;">Loading...</span></div>
-  </div>
-
-  <div class="section">
-    <div class="section-title">Navigation</div>
-    <div class="setting-row">
-      <div class="setting-label">
-        <label for="cfgNumberedNavigationMode">Numbered navigation shortcuts</label>
-        <small>Cmd/Ctrl+1–9 can follow your pinned tab order, including after reordering tabs, or always open fixed pages.</small>
-        <small>Fixed pages: 1 Import, 2 Browse, 3 Process, 4 Process Review, 5 Review, 6 Cull, 7 Jobs, 8 Highlights, 9 Misses.</small>
-      </div>
-      <select id="cfgNumberedNavigationMode" onchange="saveConfig()">
-        <option value="tab_order">Follow tab order</option>
-        <option value="fixed_pages">Fixed pages</option>
-      </select>
-    </div>
-  </div>
-
-  <!-- Theme -->
-  <div class="section">
-    <div class="section-title">Appearance</div>
-    <div class="setting-row">
-      <div class="setting-label">
-        Theme
-        <small>Change the look and feel of the app. You can also click the icon in the nav bar to cycle through themes.</small>
-      </div>
-      <div id="themePicker" style="display:flex;gap:6px;flex-wrap:wrap;"></div>
-    </div>
-    <div class="setting-row">
-      <div class="setting-label">
-        <label for="cfgTimeFormat">Time format</label>
-        <small>Choose how times are displayed throughout the app. System default follows your device or browser locale.</small>
-      </div>
-      <select id="cfgTimeFormat" onchange="saveConfig()">
-        <option value="system">System default</option>
-        <option value="12h">12-hour (3:45 PM)</option>
-        <option value="24h">24-hour (15:45)</option>
-      </select>
-    </div>
-  </div>
-
-  <!-- Advanced -->
-  <div class="section">
-    <div class="section-title" style="cursor:pointer;" onclick="document.getElementById('advancedContent').style.display = document.getElementById('advancedContent').style.display === 'none' ? '' : 'none'; this.querySelector('span').textContent = document.getElementById('advancedContent').style.display === 'none' ? '\u25B6' : '\u25BC';">
-      Advanced <span style="font-size:12px;color:var(--text-dim);">&#9654;</span>
-    </div>
-    <div id="advancedContent" style="display:none;">
-      <div class="setting-row" style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;">
-        <div class="setting-label">
-          Clean up keywords
-          <small>Merge duplicate keywords that differ only in capitalization (e.g. "House Finch" and "House finch").</small>
-        </div>
-        <div style="display:flex;align-items:center;gap:8px;">
-          <button onclick="cleanKeywords()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;">Clean Keywords</button>
-          <span id="cleanKeywordsStatus" style="font-size:12px;color:var(--text-dim);"></span>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- About & Updates -->
   <div class="section" id="updateSection" style="display:none;">
     <div class="section-title">About & Updates</div>
     <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
@@ -1338,40 +1271,25 @@
     </div>
   </div>
 
-  <!-- All settings (schema-driven) -->
-  <div class="section" id="allSettingsSection">
-    <div class="section-title" style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
-      <span>All settings</span>
-      <div class="search-control" style="flex:1;min-width:240px;max-width:340px;">
-        <input type="search" id="allSettingsSearch" placeholder="Search settings…" autocomplete="off"
-               oninput="filterAllSettings()"
-               style="background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);padding:4px 10px;font-size:13px;">
-        <button id="allSettingsMatchCaseBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="VireoTextSearch.toggle('allSettings', 'match_case', filterAllSettings)" title="Match case">Aa</button>
-        <button id="allSettingsWholeWordBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="VireoTextSearch.toggle('allSettings', 'whole_word', filterAllSettings)" title="Match whole word">ab</button>
+  </section>
+    </div>
+  </div>
+</main>
+  <div id="nasWizard" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:1000;align-items:center;justify-content:center;">
+    <div style="background:var(--bg-secondary);border:1px solid var(--border-secondary);border-radius:8px;width:560px;max-width:92vw;max-height:86vh;display:flex;flex-direction:column;">
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--border-secondary);">
+        <h3 id="nwTitle" style="margin:0;font-size:15px;">Set up NAS</h3>
+        <button type="button" onclick="closeNasWizard()" style="background:none;border:0;color:var(--text-dim);font-size:18px;cursor:pointer;line-height:1;">&times;</button>
       </div>
-    </div>
-    <div style="font-size:12px;color:var(--text-dim);margin-bottom:10px;">
-      Every Vireo setting, including ones not surfaced by the curated sections above. Edits save automatically; click Reset to revert.
-    </div>
-    <div style="display:flex;align-items:center;border-bottom:1px solid var(--border-primary);margin-bottom:14px;">
-      <button class="scope-tab active" data-scope="global" onclick="setSettingsScope('global')">Global</button>
-      <button class="scope-tab" data-scope="workspace" onclick="setSettingsScope('workspace')">Workspace</button>
-      <span style="flex:1;"></span>
-      <a href="/api/settings/export" class="btn-sm" style="margin-bottom:6px;text-decoration:none;display:inline-block;">Export…</a>
-      <button class="btn-sm" onclick="document.getElementById('settingsImportInput').click()" style="margin-bottom:6px;">Import…</button>
-      <input type="file" id="settingsImportInput" accept=".json,application/json" style="display:none;" onchange="importSettingsFile(this.files[0]); this.value='';">
-    </div>
-    <div style="font-size:11px;color:var(--text-dim);margin-bottom:14px;display:flex;gap:14px;flex-wrap:wrap;align-items:center;" id="allSettingsLegend">
-      <span style="display:inline-flex;align-items:center;gap:6px;"><span class="provenance-dot dot-default" style="margin-top:0;"></span> default</span>
-      <span style="display:inline-flex;align-items:center;gap:6px;"><span class="provenance-dot dot-global" style="margin-top:0;"></span> set globally</span>
-      <span style="display:inline-flex;align-items:center;gap:6px;"><span class="provenance-dot dot-workspace" style="margin-top:0;"></span> set for this workspace</span>
-    </div>
-    <div id="allSettingsCategories">
-      <span style="color:var(--text-ghost);font-size:13px;">Loading…</span>
+      <div id="nwBody" style="padding:16px 18px;overflow-y:auto;font-size:13px;color:var(--text-primary);"></div>
+      <div style="display:flex;gap:8px;justify-content:space-between;padding:12px 18px;border-top:1px solid var(--border-secondary);">
+        <button type="button" id="nwBack" onclick="nwBack()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;">Back</button>
+        <button type="button" id="nwNext" onclick="nwNext()" style="background:var(--accent);color:var(--bg-primary);border:1px solid var(--accent);border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;font-weight:600;">Next</button>
+      </div>
     </div>
   </div>
 
-</div>
+
 
 <!-- Reused for its rule-description helper so a quick filter reads the same
      here as it will on the filter bar's chip. -->

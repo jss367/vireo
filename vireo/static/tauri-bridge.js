@@ -351,7 +351,7 @@ async function startupUpdateCheck(cooldownHours) {
     + 'A new version of Vireo is available: <strong style="color:#24E5CA;">v'
     + (result.version || '?') + '</strong></span>'
     + '<span>'
-    + '<a href="/settings" style="color:#24E5CA;margin-right:12px;text-decoration:underline;">Update</a>'
+    + '<a href="/settings?category=advanced#updateSection" style="color:#24E5CA;margin-right:12px;text-decoration:underline;">Update</a>'
     + '<button onclick="this.parentElement.parentElement.remove()" '
     + 'style="background:none;border:none;color:#888;cursor:pointer;font-size:16px;">&times;</button>'
     + '</span>';

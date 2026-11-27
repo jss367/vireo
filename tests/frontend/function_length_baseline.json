@@ -38,9 +38,7 @@
   "vireo/static/pipeline/run.js:startPipeline": 195,
   "vireo/static/review/grid.js:renderPredictionCard": 127,
   "vireo/static/settings/all-settings.js:importSettingsFile": 110,
-  "vireo/static/settings/config.js:_postConfigSnapshot": 129,
-  "vireo/static/settings/config.js:loadConfig": 193,
-  "vireo/static/settings/models.js:loadModels": 114,
+  "vireo/static/settings/models.js:loadModels": 101,
   "vireo/static/settings/nas-setup.js:_nwRunSshCheck": 105,
   "vireo/static/settings/nas-setup.js:nwArchiveStep": 112,
   "vireo/static/settings/system-tools.js:downloadDarktable": 170

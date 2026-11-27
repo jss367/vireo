@@ -115,7 +115,7 @@ function bindStorageRenderedMarkup() {
   delegateStorageClick('storageGrid', '[data-storage-manage]', function(button) {
     var target = button.dataset.storageManage || '';
     if (target === 'hf-cache') openHfCacheModal();
-    else if (target === 'settings') window.location.href = '/settings';
+    else if (target === 'settings') window.location.href = '/settings?category=identification#manage-models';
     else openStorageModal(target);
   });
   delegateStorageClick('masksCard', '[data-masks-action]', function(button) {

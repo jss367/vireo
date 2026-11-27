@@ -1,235 +1,5 @@
-/** @type {{marks:HTMLElement[];activeIndex:number;observer:MutationObserver|null;refreshTimer:ReturnType<typeof setTimeout>|null}} */ var SETTINGS_FIND_STATE = {
-  marks: [],
-  activeIndex: -1,
-  observer: null,
-  refreshTimer: null,
-};
-
-function setupSettingsFind() {
-  var input = /** @type {HTMLInputElement} */ (document.getElementById('settingsFindInput'));
-  if (!input) return;
-  input.addEventListener('input', function() {
-    refreshSettingsFind(this.value, 0);
-  });
-  input.addEventListener('keydown', function(e) {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      moveSettingsFind(e.shiftKey ? -1 : 1);
-    } else if (e.key === 'Escape') {
-      e.preventDefault();
-      closeSettingsFind();
-    }
-  });
-  document.addEventListener('keydown', function(e) {
-    var key = (e.key || '').toLowerCase();
-    if ((e.metaKey || e.ctrlKey) && !e.altKey && key === 'f') {
-      e.preventDefault();
-      openSettingsFind();
-    } else if (key === 'escape' && isSettingsFindOpen()) {
-      e.preventDefault();
-      closeSettingsFind();
-    }
-  }, true);
-}
-
-function isSettingsFindOpen() {
-  var panel = /** @type {HTMLElement} */ (document.getElementById('settingsFindPanel'));
-  return !!panel && panel.classList.contains('open');
-}
-
-function openSettingsFind() {
-  var panel = /** @type {HTMLElement} */ (document.getElementById('settingsFindPanel'));
-  var input = /** @type {HTMLInputElement} */ (document.getElementById('settingsFindInput'));
-  if (!panel || !input) return;
-  panel.classList.add('open');
-  input.focus();
-  input.select();
-  refreshSettingsFind(input.value, SETTINGS_FIND_STATE.activeIndex >= 0 ? SETTINGS_FIND_STATE.activeIndex : 0);
-}
-
-function closeSettingsFind() {
-  var panel = /** @type {HTMLElement} */ (document.getElementById('settingsFindPanel'));
-  var input = /** @type {HTMLInputElement} */ (document.getElementById('settingsFindInput'));
-  if (panel) panel.classList.remove('open');
-  if (input) input.value = String('');
-  disconnectSettingsFindObserver();
-  clearTimeout(SETTINGS_FIND_STATE.refreshTimer ?? undefined);
-  SETTINGS_FIND_STATE.refreshTimer = null;
-  clearSettingsFindMarks();
-  updateSettingsFindStatus();
-}
-
-function getSettingsFindRoot() {
-  return document.querySelector(/** @type {'div'} */ ('.content'));
-}
-
-function disconnectSettingsFindObserver() {
-  if (SETTINGS_FIND_STATE.observer) {
-    SETTINGS_FIND_STATE.observer.disconnect();
-    SETTINGS_FIND_STATE.observer = null;
-  }
-}
-
-function connectSettingsFindObserver() {
-  var root = getSettingsFindRoot();
-  var input = /** @type {HTMLInputElement} */ (document.getElementById('settingsFindInput'));
-  if (!root || !input || !input.value.trim()) return;
-  SETTINGS_FIND_STATE.observer = new MutationObserver(function() {
-    clearTimeout(SETTINGS_FIND_STATE.refreshTimer ?? undefined);
-    SETTINGS_FIND_STATE.refreshTimer = setTimeout(function() {
-      refreshSettingsFind(input.value, SETTINGS_FIND_STATE.activeIndex);
-    }, 100);
-  });
-  SETTINGS_FIND_STATE.observer.observe(root, { childList: true, subtree: true, characterData: true });
-}
-
-function clearSettingsFindMarks() {
-  disconnectSettingsFindObserver();
-  document.querySelectorAll(/** @type {'div'} */ ('mark.settings-find-mark')).forEach(function(mark) {
-    var parent = mark.parentNode;
-    if (!parent) return;
-    parent.replaceChild(document.createTextNode(mark.textContent), mark);
-    parent.normalize();
-  });
-  SETTINGS_FIND_STATE.marks = [];
-  SETTINGS_FIND_STATE.activeIndex = -1;
-}
-
-/** @param {Node} node */ function shouldSkipSettingsFindTextNode(node) {
-  if (!node.nodeValue || !node.nodeValue.trim()) return true;
-  var el = node.parentElement;
-  if (!el) return true;
-  if (el.closest(/** @type {'div'} */ ('.settings-find-panel'))) return true;
-  if (el.closest(/** @type {'div'} */ ('script, style, noscript, textarea, input, select, option, mark.settings-find-mark'))) return true;
-  return isSettingsFindTextHidden(el);
-}
-
-/** @param {Element|null} el */ function isSettingsFindTextHidden(el) {
-  var root = getSettingsFindRoot();
-  var current = el;
-  while (current && current !== root) {
-    if (
-      !current.classList.contains('collapsible-body') &&
-      current.id !== 'advancedContent'
-    ) {
-      var style = window.getComputedStyle(current);
-      if (style.display === 'none' || style.visibility === 'hidden') return true;
-    }
-    if (current.hasAttribute('hidden') || current.getAttribute('aria-hidden') === 'true') return true;
-    current = current.parentElement;
-  }
-  return false;
-}
-
-/** @param {string} query @param {number=} preferredIndex */ function refreshSettingsFind(query, preferredIndex) {
-  var root = getSettingsFindRoot();
-  if (!root) return;
-  disconnectSettingsFindObserver();
-  clearSettingsFindMarks();
-  var q = (query || '').trim();
-  if (!q) {
-    updateSettingsFindStatus();
-    return;
-  }
-
-  var qLower = q.toLowerCase();
-  var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-    acceptNode: function(node) {
-      if (shouldSkipSettingsFindTextNode(node)) return NodeFilter.FILTER_REJECT;
-      return (node.nodeValue || '').toLowerCase().indexOf(qLower) !== -1
-        ? NodeFilter.FILTER_ACCEPT
-        : NodeFilter.FILTER_REJECT;
-    }
-  });
-  var nodes = [];
-  var current;
-  while ((current = walker.nextNode())) nodes.push(current);
-
-  nodes.forEach(function(node) {
-    var text = node.nodeValue || '';
-    var lower = text.toLowerCase();
-    var frag = document.createDocumentFragment();
-    var pos = 0;
-    var idx = lower.indexOf(qLower, pos);
-    while (idx !== -1) {
-      if (idx > pos) frag.appendChild(document.createTextNode(text.slice(pos, idx)));
-      var mark = document.createElement('mark');
-      mark.className = 'settings-find-mark';
-      mark.textContent = String(text.slice(idx, idx + q.length));
-      frag.appendChild(mark);
-      SETTINGS_FIND_STATE.marks.push(mark);
-      pos = idx + q.length;
-      idx = lower.indexOf(qLower, pos);
-    }
-    if (pos < text.length) frag.appendChild(document.createTextNode(text.slice(pos)));
-    node.parentNode?.replaceChild(frag, node);
-  });
-
-  if (SETTINGS_FIND_STATE.marks.length) {
-    setSettingsFindActive(Math.max(0, Math.min(preferredIndex || 0, SETTINGS_FIND_STATE.marks.length - 1)));
-  } else {
-    SETTINGS_FIND_STATE.activeIndex = -1;
-    updateSettingsFindStatus();
-  }
-  connectSettingsFindObserver();
-}
-
-/** @param {number} index */ function setSettingsFindActive(index) {
-  var marks = SETTINGS_FIND_STATE.marks;
-  marks.forEach(function(mark) { mark.classList.remove('active'); });
-  if (!marks.length) {
-    SETTINGS_FIND_STATE.activeIndex = -1;
-    updateSettingsFindStatus();
-    return;
-  }
-  SETTINGS_FIND_STATE.activeIndex = ((index % marks.length) + marks.length) % marks.length;
-  var active = marks[SETTINGS_FIND_STATE.activeIndex]; if (!active) return;
-  active.classList.add('active');
-  revealSettingsFindMatch(active);
-  updateSettingsFindStatus();
-}
-
-/** @param {HTMLElement} mark */ function revealSettingsFindMatch(mark) {
-  var body = mark.closest(/** @type {'div'} */ ('.collapsible-body'));
-  while (body) {
-    body.classList.add('open');
-    var header = body.previousElementSibling;
-    if (header && header.classList.contains('collapsible-header')) header.classList.add('open');
-    body = body.parentElement ? body.parentElement.closest(/** @type {'div'} */ ('.collapsible-body')) : null;
-  }
-  var advanced = mark.closest(/** @type {'div'} */ ('#advancedContent'));
-  if (advanced) {
-    advanced.style.display = '';
-    var advancedTitle = advanced.previousElementSibling;
-    var icon = advancedTitle ? advancedTitle.querySelector(/** @type {'div'} */ ('span')) : null;
-    if (icon) icon.textContent = String('\u25BC');
-  }
-  mark.scrollIntoView({ block: 'center', inline: 'nearest' });
-}
-
-/** @param {number} delta */ function moveSettingsFind(delta) {
-  var input = /** @type {HTMLInputElement} */ (document.getElementById('settingsFindInput'));
-  if (!isSettingsFindOpen()) openSettingsFind();
-  if (!SETTINGS_FIND_STATE.marks.length && input && input.value.trim()) {
-    refreshSettingsFind(input.value, 0);
-  }
-  if (!SETTINGS_FIND_STATE.marks.length) return;
-  setSettingsFindActive(SETTINGS_FIND_STATE.activeIndex + delta);
-}
-
-function updateSettingsFindStatus() {
-  var status = /** @type {HTMLElement} */ (document.getElementById('settingsFindStatus'));
-  if (!status) return;
-  var total = SETTINGS_FIND_STATE.marks.length;
-  if (!total) {
-    status.textContent = String('0 results');
-  } else {
-    status.textContent = String((SETTINGS_FIND_STATE.activeIndex + 1) + ' of ' + total);
-  }
-}
-
 /** @param {HTMLElement} header */ function toggleSection(header) {
-  header.classList.toggle('open');
+  header.setAttribute('aria-expanded', String(header.classList.toggle('open')));
   var body = header.nextElementSibling;
   body?.classList.toggle('open');
 }
@@ -259,4 +29,233 @@ function loadThemePicker() {
 /** @param {unknown} error */
 function settingsErrorMessage(error) {
   return error && typeof error === 'object' && 'message' in error && typeof error.message === 'string' ? error.message : '';
+}
+
+/** @param {string} id */
+function settingsElement(id) {
+  return /** @type {HTMLElement} */ (document.getElementById(id));
+}
+
+function settingsSearchInput() {
+  return /** @type {HTMLInputElement} */ (settingsElement('settingsFindInput'));
+}
+
+function openSettingsFind() {
+  const input = settingsSearchInput();
+  input.focus();
+  input.select();
+  showSettingsResults();
+}
+
+/** @param {HTMLElement} target */
+function revealSettingsTarget(target) {
+  for (let node = target; node; node = /** @type {HTMLElement} */ (node.parentElement)) {
+    if (node instanceof HTMLDetailsElement) node.open = true;
+    if (node.classList.contains('collapsible-body')) {
+      node.classList.add('open');
+      node.previousElementSibling?.classList.add('open');
+      node.previousElementSibling?.setAttribute('aria-expanded','true');
+    }
+    if (node.id === 'advancedContent') node.style.display = '';
+  }
+  const focus = target.matches('input,button,select,a,summary') ? target :
+    target.querySelector('input:not(:disabled),select:not(:disabled),button,a,summary') || target;
+  if (focus instanceof HTMLElement) {
+    if (focus === target && focus.tabIndex < 0) focus.tabIndex = -1;
+    focus.focus({preventScroll:true});
+  }
+  target.scrollIntoView({block:'center'});
+}
+
+function applySettingsAddress() {
+  const url = new URL(location.href);
+  const id = url.hash.slice(1);
+  const target = document.getElementById(id === 'nas-setup' ? 'cfgRemoteTargetsList' : id);
+  const category = target?.closest('section')?.dataset.settingsCategory || url.searchParams.get('category') || 'browsing';
+  const panels = Array.from(document.querySelectorAll('section[data-settings-category]'));
+  const selected = panels.find(p => p.getAttribute('data-settings-category') === category) || panels[0];
+  for (const panel of panels) panel.toggleAttribute('hidden', panel !== selected);
+  const key = selected?.getAttribute('data-settings-category') || 'browsing';
+  for (const link of Array.from(document.querySelectorAll('[data-category-link]'))) {
+    if (link.getAttribute('data-category-link') === key) link.setAttribute('aria-current','page');
+    else link.removeAttribute('aria-current');
+  }
+  /** @type {HTMLSelectElement} */ (settingsElement('settingsCategoryPicker')).value = key;
+  if (id.startsWith('setting-')) setSettingsScope(url.searchParams.get('scope') || 'global');
+  if (target && id !== 'nas-setup') {
+    revealSettingsTarget(document.getElementById(id) || target);
+  } else window.scrollTo(0,0);
+}
+
+/** @param {string} category @param {string} [id] @param {string} [scope] */
+function goToSettings(category, id = '', scope = '') {
+  const url = new URL(location.href);
+  url.searchParams.set('category',category);
+  if (scope) url.searchParams.set('scope',scope);
+  else url.searchParams.delete('scope');
+  url.hash = id;
+  if (url.href !== location.href) history.pushState(null,'',url);
+  applySettingsAddress();
+}
+
+/** @param {HTMLElement} el */
+function settingsLabel(el) {
+  const row = el.closest('.setting-row');
+  const label = row?.querySelector('.setting-label');
+  const first = label?.querySelector('label')?.textContent?.trim() || label?.firstChild?.textContent?.trim();
+  return el.title || first || label?.textContent?.trim() ||
+    el.closest('.section')?.querySelector('.section-title')?.textContent?.trim() || el.id;
+}
+
+/** @typedef {{title:string, terms:string, target:HTMLElement, category:string}} SettingsDestination */
+/** @param {string} query */
+function settingsMatches(query) {
+  /** @type {SettingsDestination[]} */ const matches = [];
+  const keys = new Set();
+  const seen = new Set();
+  const schema = ALL_SETTINGS_CACHE.schema || {};
+  /** @param {HTMLElement} target @param {string} title @param {string} terms */
+  function add(target,title,terms) {
+    const panel = target.closest('section[data-settings-category]');
+    if (!panel || !title || seen.has(target)) return;
+    for (let node = target; node && node !== panel; node = /** @type {HTMLElement} */ (node.parentElement)) {
+      if (node.id !== 'advancedContent' && (node.hidden || node.style.display === 'none')) return;
+    }
+    if (!(title+' '+terms).toLowerCase().includes(query)) return;
+    seen.add(target);
+    matches.push({title,terms,target,category:panel.getAttribute('data-settings-category') || 'advanced'});
+  }
+  for (const el of Array.from(document.querySelectorAll(/** @type {'div'} */ ('[data-setting-keys]')))) {
+    const owned = (el.dataset.settingKeys || '').split(' ');
+    owned.forEach(k => keys.add(k));
+    const terms = (el.dataset.searchTerms || '')+' '+owned.map(k => [k,schema[k]?.label,schema[k]?.desc].join(' ')).join(' ');
+    const options = el.id === 'cfgCardFieldsContainer' ? el.textContent : '';
+    add(el,settingsLabel(el),[terms,options,el.closest('.setting-row')?.querySelector('small')?.textContent].join(' '));
+  }
+  for (const [key,spec] of Object.entries(schema)) {
+    const target = document.getElementById('setting-'+key);
+    if (!target) continue;
+    if (key.toLowerCase() === query) return [{title:spec.label,terms:key,target,category:'advanced'}];
+    if (!keys.has(key)) add(target,spec.label,key+' '+spec.desc);
+  }
+  for (const el of Array.from(document.querySelectorAll(/** @type {'div'} */ ('[data-find-name],.section-title,.section button[id],#themePicker,#scanRootsContent > div > span')))) {
+    if (el.closest('#allSettingsSection') || el.matches('.tauri-only') && !isTauri()) continue;
+    const title = el.dataset.findName || (el.id === 'themePicker' ? 'Theme' : el.textContent?.trim());
+    add(el,title || '',el.id==='catalogBackupNowBtn' ? 'backup' : el.dataset.searchTerms || '');
+  }
+  for (const label of Array.from(document.querySelectorAll(/** @type {'div'} */ ('.setting-row .setting-label')))) {
+    const row = label.closest('.setting-row');
+    if (!(row instanceof HTMLElement) || row.querySelector('[data-setting-keys],#themePicker')) continue;
+    const title = label.firstChild?.textContent?.trim();
+    const target = row.querySelector('button,input,select') || row;
+    if (target instanceof HTMLElement && title) add(target,title,label.textContent || '');
+  }
+  const named = '#cfgRemoteTargetsList input[aria-label="Name"],#cfgExternalEditorsList input[placeholder^="Display name"],#cfgFilterShortcutsList input[aria-label="Button text"]';
+  for (const el of Array.from(document.querySelectorAll(/** @type {'input'} */ (named)))) {
+    add(el,el.value.trim(),'');
+  }
+  return matches.sort((a,b)=>Number(b.title.toLowerCase().includes(query))-Number(a.title.toLowerCase().includes(query)));
+}
+
+function showSettingsResults() {
+  const query = settingsSearchInput().value.trim().toLowerCase();
+  const box = settingsElement('settingsResults');
+  box.replaceChildren();
+  box.hidden = !query;
+  if (!query) return;
+  const matches = settingsMatches(query);
+  if (!matches.length) {
+    const clear = document.createElement('button');
+    clear.textContent = 'No matches for “'+settingsSearchInput().value.trim()+'”. Clear search';
+    clear.onclick = () => {settingsSearchInput().value = ''; openSettingsFind();};
+    box.append(clear);
+  }
+  for (const result of matches) {
+    const button = document.createElement('button');
+    button.textContent = result.title;
+    const category = document.createElement('small');
+    category.textContent = document.querySelector('[data-category-link="'+result.category+'"]')?.textContent || '';
+    button.append(category);
+    button.onclick = () => {
+      box.hidden = true;
+      settingsSearchInput().value = '';
+      const key = result.target.dataset.key;
+      const scope = key && ALL_SETTINGS_CACHE.schema?.[key]?.scope === 'workspace' ? 'workspace' : '';
+      goToSettings(result.category,result.target.id,scope);
+      if (!result.target.id) revealSettingsTarget(result.target);
+    };
+    box.append(button);
+  }
+}
+
+function setupSettingsFind() {
+  const input = settingsSearchInput();
+  const box = settingsElement('settingsResults');
+  input.addEventListener('input',showSettingsResults);
+  input.addEventListener('focus',showSettingsResults);
+  document.addEventListener('keydown', event => {
+    if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey &&
+        event.key.toLowerCase() === 'f' && !document.querySelector('dialog:modal')) {
+      event.preventDefault();
+      openSettingsFind();
+    }
+  });
+  settingsElement('settingsFindPanel').addEventListener('keydown', event => {
+    const buttons = Array.from(box.querySelectorAll('button'));
+    const index = buttons.indexOf(/** @type {HTMLButtonElement} */ (document.activeElement));
+    if (event.key === 'Escape') {input.focus(); box.hidden = true;}
+    if (box.hidden || !buttons.length) return;
+    if (event.key === 'Enter' && event.target === input) {event.preventDefault(); buttons[0]?.click();}
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      buttons[(index + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length]?.focus();
+    }
+  });
+  document.addEventListener('focusin', event => {
+    if (event.target instanceof Element && !event.target.closest('#settingsFindPanel')) box.hidden = true;
+  });
+  document.querySelectorAll(/** @type {'a'} */ ('[data-category-link]')).forEach(link => {
+    link.onclick = event => {
+      if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      event.preventDefault(); goToSettings(link.dataset.categoryLink || 'browsing');
+    };
+  });
+  const picker = /** @type {HTMLSelectElement} */ (settingsElement('settingsCategoryPicker'));
+  picker.onchange = () => goToSettings(picker.value);
+  const updates = new MutationObserver(() => {
+    if (document.activeElement === input && input.value && !box.hidden) showSettingsResults();
+  });
+  updates.observe(/** @type {Element} */ (document.querySelector('.settings-panes')), {subtree:true,childList:true});
+  window.addEventListener('popstate',applySettingsAddress);
+  applySettingsAddress();
+}
+
+function renderOverrideLinks() {
+  const cache = ALL_SETTINGS_CACHE;
+  if (!cache.schema || !cache.values) return;
+  for (const el of Array.from(document.querySelectorAll(/** @type {'div'} */ ('[data-setting-keys]')))) {
+    const row = el.closest('.setting-row');
+    if (!row) continue;
+    row.querySelector('[data-overrides-for="'+el.id+'"]')?.remove();
+    const links = document.createElement('div');
+    links.className = 'override-links';
+    links.dataset.overridesFor = el.id;
+    for (const key of (el.dataset.settingKeys || '').split(' ')) {
+      const spec = cache.schema[key];
+      if (spec?.scope !== 'both' || document.getElementById('wsOverride_'+key)) continue;
+      const link = document.createElement('a');
+      link.href = '?category=advanced&scope=workspace#setting-'+key;
+      if (Object.hasOwn(cache.values.workspace,key)) {
+        const qualifier = el.dataset.settingKeys?.includes(' ') ? spec.label+' · ' : '';
+        link.textContent = qualifier+settingsWorkspaceName+' uses '+cache.values.workspace[key]+' · Edit override';
+      } else {
+        link.className = 'inherited';
+        link.textContent = 'Override for this workspace';
+      }
+      link.setAttribute('aria-label',link.textContent+' — '+spec.label);
+      link.onclick = event => {event.preventDefault();goToSettings('advanced','setting-'+key,'workspace');};
+      links.append(link);
+    }
+    if (links.childElementCount) row.append(links);
+  }
 }

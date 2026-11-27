@@ -558,6 +558,9 @@ async function nwSave() {
     var body = /** @type {HTMLElement} */ (document.getElementById('nwBody'));
     if (body) body.appendChild(_nwEl('div', _nwErrCss,
       '⚠ Could not save: ' + ((e && settingsErrorMessage(e)) || e)));
+    if (body && !settingsBaseline.config) {
+      body.appendChild(settingsReloadButton('config'));
+    }
     _nwSetNext(true, 'Save');
     /** @type {HTMLButtonElement} */ (document.getElementById('nwBack')).disabled = false;
     return;

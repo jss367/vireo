@@ -29,7 +29,7 @@ export function renderClassificationInventory(data) {
   if (!data || !data.models || data.models.length === 0) {
     body.innerHTML = '<div style="color:var(--text-ghost);font-size:13px;">' +
       'No downloaded models or classification history in this workspace. ' +
-      '<a href="/settings" style="color:var(--accent);">Download a model in Settings</a></div>';
+      '<a href="/settings?category=identification#manage-models" style="color:var(--accent);">Download a model in Settings</a></div>';
     return;
   }
   if (data.total_real_detections === 0) {
