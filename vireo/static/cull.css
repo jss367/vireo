@@ -5,6 +5,7 @@
 #cullSpeciesPicker summary { cursor: pointer; padding: 10px 12px; border: 1px solid var(--border-primary); border-radius: 6px; background: var(--bg-secondary); }
 .cull-species-menu { position: absolute; top: 100%; left: 0; width: min(360px, 85vw); z-index: 20; padding: 12px; background: var(--bg-secondary); border: 1px solid var(--border-primary); border-radius: 6px; box-shadow: 0 8px 24px #0005; }
 #cullSpeciesSearch { width: 100%; margin-bottom: 8px; }
+.cull-species-controls { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
 #cullSpeciesOptions { max-height: 280px; overflow: auto; margin-top: 8px; }
 #cullSpeciesOptions label { display: flex; gap: 8px; align-items: center; padding: 8px 2px; cursor: pointer; }
 .cull-hint { color: var(--text-dim); font-size: 12px; line-height: 1.5; margin: 6px 0 12px; }
