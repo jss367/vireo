@@ -2,9 +2,8 @@ import os
 import sqlite3
 import threading
 
-import pytest
-
 import catalog_backups
+import pytest
 import schema
 from canonical_schema import SCHEMA_VERSION
 from db import Database
