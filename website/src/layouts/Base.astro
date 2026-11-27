@@ -10,6 +10,8 @@ interface Props {
 
 const { title, description = 'AI-powered wildlife photo organizer. Triage thousands of photos in minutes.' } = Astro.props;
 const base = import.meta.env.BASE_URL;
+const pageUrl = new URL(Astro.url.pathname, Astro.site).href;
+const socialImageUrl = new URL(`${base}images/vireo-social-preview.png`, Astro.site).href;
 const cloudflareAnalyticsToken = import.meta.env.PUBLIC_CLOUDFLARE_WEB_ANALYTICS_TOKEN;
 const cloudflareBeaconConfig = cloudflareAnalyticsToken
   ? JSON.stringify({ token: cloudflareAnalyticsToken })
@@ -36,6 +38,13 @@ const cloudflareBeaconConfig = cloudflareAnalyticsToken
   <meta property="og:title" content={title} />
   <meta property="og:description" content={description} />
   <meta property="og:type" content="website" />
+  <meta property="og:url" content={pageUrl} />
+  <meta property="og:site_name" content="Vireo" />
+  <meta property="og:image" content={socialImageUrl} />
+  <meta property="og:image:width" content="1280" />
+  <meta property="og:image:height" content="640" />
+  <meta property="og:image:alt" content="Vireo, an AI-powered wildlife photo organizer, shown grouping bird photos by species with keep, review, and reject suggestions." />
+  <meta name="twitter:card" content="summary_large_image" />
 
   <title>{title}</title>
 
