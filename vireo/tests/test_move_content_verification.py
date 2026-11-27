@@ -488,11 +488,42 @@ def test_a_copy_is_kept_when_a_source_file_vanishes_before_recording(tmp_path, m
     result = move_mod.move_folder(db=db, folder_id=fid, destination=str(dst))
 
     assert result["moved"] == 0
-    assert result["errors"]
+    assert ("1 file at the destination has no original in the source folder any more"
+            in result["errors"][0])
     assert (dst / "shoot" / "a.jpg").read_bytes() == original
+    # The other copy can be made again from its original, so it is discarded.
+    assert not (dst / "shoot" / "b.jpg").exists()
     assert (src / "b.jpg").exists()
     assert db.conn.execute(
         "SELECT path FROM folders WHERE id = ?", (fid,)).fetchone()["path"] == str(src)
+
+
+def test_a_copy_is_kept_when_its_original_vanishes_after_the_comparison_failed(tmp_path, monkeypatch):
+    """No listing of the source taken earlier decides what is discarded: each
+    copy is checked against the source at the moment it would be removed."""
+    import move as move_mod
+
+    db, src, dst, fid, _ids = _folder(tmp_path)
+    _transfer_that_corrupts(monkeypatch, "b.jpg")
+    original = (src / "a.jpg").read_bytes()
+    real_verify = move_mod.folder_transfer._fresh_copy_mismatch
+
+    def fail_then_lose_a_file(*args, **kwargs):
+        mismatch = real_verify(*args, **kwargs)
+        assert mismatch is not None
+        (src / "a.jpg").unlink()
+        return mismatch
+
+    monkeypatch.setattr(move_mod.folder_transfer, "_fresh_copy_mismatch", fail_then_lose_a_file)
+
+    result = move_mod.move_folder(db=db, folder_id=fid, destination=str(dst))
+
+    assert result["moved"] == 0
+    assert "contents differ" in result["errors"][0]
+    assert "1 file at the destination has no original" in result["errors"][0]
+    assert (dst / "shoot" / "a.jpg").read_bytes() == original
+    assert not (dst / "shoot" / "b.jpg").exists()
+    assert (src / "b.jpg").exists()
 
 
 def test_a_file_added_after_verification_is_kept_and_reported(tmp_path, monkeypatch):

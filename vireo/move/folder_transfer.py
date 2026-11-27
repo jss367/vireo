@@ -4,7 +4,6 @@ import contextlib
 import logging
 import os
 import posixpath
-import shutil
 import sys
 
 from job_runner.work_control import JobCancelled
@@ -12,7 +11,7 @@ from job_runner.work_control import JobCancelled
 from .folder_catalog import _plan_moved_file_mtimes
 from .mounted_verify import mounted_verification_target, verification_notice, verify_mounted_copy
 from .remote import _remote_mkdir_p, _ssh_rsh_string, resolve_rsync_bin
-from .source_cleanup import record_source_tree
+from .source_cleanup import discard_copies_with_originals, record_source_tree
 from .transfer import (
     RSYNC_STALL_TIMEOUT,
     _copy_tree_with_progress,
@@ -230,7 +229,7 @@ class _FolderTransfer:
                     # Only remove a destination we created — never one that
                     # pre-existed (a merge target may hold the user's own files).
                     if self._owns_destination():
-                        shutil.rmtree(self.target.catalog_path, ignore_errors=True)
+                        discard_copies_with_originals(self.target.catalog_path, src_path)
                     return {"moved": 0, "errors": [f"Copy failed: {exc}"]}
             except OSError as exc:
                 # rsync exists but could not be started: not executable
@@ -335,7 +334,7 @@ class _FolderTransfer:
                 # already there is never removed -- it may hold the user's own
                 # files.
                 if self._owns_destination():
-                    shutil.rmtree(self.target.transfer_dest, ignore_errors=True)
+                    discard_copies_with_originals(self.target.transfer_dest, self.src_path)
                 return {"moved": 0, "errors": [
                     f"Verification failed: {problem}. Originals preserved."
                 ]}
@@ -370,52 +369,34 @@ class _FolderTransfer:
                 f"Verification could not be completed ({exc}). "
                 f"Originals preserved.", copy_disproven=False)
         if error is not None:
-            return self._refuse(error, copy_disproven=self._fresh_copy_can_be_discarded(record))
+            return self._refuse(error, copy_disproven=bool(record))
         self.source_record = record
         return None
 
     def _refuse(self, message, *, copy_disproven):
-        """Fail verification, removing only a local destination this move made.
+        """Fail verification, removing only copies this move made and can spare.
 
         A destination that was already there may hold the user's own files and
-        is never removed. A remote destination is not reachable from this
+        is never touched. A remote destination is not reachable from this
         filesystem, so it is left for the next run to resume into.
 
-        The new copy is removed only when it was compared with a source that
-        is still there, unchanged since it was recorded, and found wrong
-        (``copy_disproven``). When the source could not be listed or read, or
-        lost or changed a file during the comparison (a disconnected drive, a
-        dropped mount, a failing disk), the copy just made may be the only
-        one that can still be read, so it is kept even though it was never
-        verified.
+        The new copy is discarded only when it was compared with the source
+        and found wrong (``copy_disproven``), and then only file by file: a
+        destination file goes when its original is in the source at that
+        moment. A file whose original is gone or cannot be reached (it
+        vanished at any point after the copy, the drive disconnected, the
+        mount dropped) may be the only copy left, so it stays and the message
+        says so.
         """
-        if (copy_disproven and not self.remote and self._owns_destination()
-                and self._source_holds_entries()):
-            shutil.rmtree(self.target.transfer_dest, ignore_errors=True)
+        if copy_disproven and not self.remote and self._owns_destination():
+            kept = discard_copies_with_originals(self.target.transfer_dest, self.src_path)
+            if kept:
+                message += (
+                    f" {kept} {'file' if kept == 1 else 'files'} at the destination "
+                    f"{'has' if kept == 1 else 'have'} no original in the source "
+                    f"folder any more and {'was' if kept == 1 else 'were'} left "
+                    f"there.")
         return {"moved": 0, "errors": [message]}
-
-    def _fresh_copy_can_be_discarded(self, record):
-        """A failed copy is disposable only if all of its entries still have sources.
-
-        A file may have vanished after copying, before the source record was
-        taken. That file will exist only at the destination, even if the
-        remaining source entries are unchanged. If either tree cannot be
-        enumerated, keep the fresh copy rather than guessing.
-        """
-        if not record or self.remote or not self._owns_destination():
-            return False
-        try:
-            copied = record_source_tree(self.target.transfer_dest)
-            return copied.keys() <= record.keys() and record_source_tree(self.src_path) == record
-        except OSError:
-            return False
-
-    def _source_holds_entries(self):
-        """Whether the source folder can be listed right now and is not empty."""
-        try:
-            return bool(os.listdir(self.src_path))
-        except OSError:
-            return False
 
     def _verify_remote_copy(self):
         """Ask rsync on the NAS for checksums; the error message, or None."""

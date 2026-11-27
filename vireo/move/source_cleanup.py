@@ -20,6 +20,7 @@ modification time, or a replacement written through a temporary file, which
 gets a new file index) is seen on every platform.
 """
 
+import contextlib
 import os
 import stat
 from dataclasses import dataclass, field
@@ -229,3 +230,35 @@ def _remove_directory(directory, src_path, cleanup):
         relative = os.path.relpath(directory, src_path)
         cleanup.failed.append((
             "the source folder itself" if relative == "." else relative, str(exc)))
+
+
+def discard_copies_with_originals(dest_path, src_path):
+    """Remove from a failed move's new destination the files the source still has.
+
+    ``dest_path`` is a destination this move created. Each entry under it is
+    removed only when an entry with the same relative path is in ``src_path``
+    at that moment, so nothing is deleted that the source cannot give back:
+    a file whose original vanished, or a whole copy whose source drive
+    dropped out, stays. The check and the removal are per entry, so no
+    earlier listing of the source is trusted. Directories are removed once
+    they are empty.
+
+    Returns how many entries were left at the destination.
+    """
+    kept = 0
+    for root, directories, files in os.walk(dest_path, topdown=False, onerror=lambda _error: None):
+        relative_root = os.path.relpath(root, dest_path)
+        for name in _entries(root, directories, files):
+            relative = name if relative_root == "." else os.path.join(relative_root, name)
+            if not os.path.lexists(os.path.join(src_path, relative)):
+                kept += 1
+                continue
+            try:
+                os.unlink(os.path.join(root, name))
+            except FileNotFoundError:
+                continue
+            except OSError:
+                kept += 1
+        with contextlib.suppress(OSError):
+            os.rmdir(root)
+    return kept
