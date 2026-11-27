@@ -316,7 +316,7 @@ test('boot.js sets pendingLinkedJobId from ?job=X and defers to the resolver', a
   const state = {activeJobs: [], historyJobs: [], pendingLinkedJobId: null,
     jobsPollState: {active: {loaded: false}, history: {loaded: false}}};
   const context = vm.createContext({state, URLSearchParams, window: {location: {search: '?job=export-1'}},
-    HTMLButtonElement: Element, HTMLSelectElement: Element, jobsElement: () => new Element(),
+    HTMLButtonElement: Element, HTMLSelectElement: Element, HTMLInputElement: Element, jobsElement: () => new Element(),
     bindJobListClicks() {}, bindSourceCleanupConfirm() {}, bindStepRetryButtons() {}, bindDetailPaneActions() {},
     retryJobsPolling() {}, applyFilters() {}, applyOriginFilter() {}, setInterval() {},
     fetchJobs: () => Promise.resolve(true), fetchHistory: () => Promise.resolve(true),
