@@ -5,7 +5,7 @@ import { state } from './state.js';
 import { loadEmbeddingCache, loadPreviewCacheStatus } from './caches.js';
 import { storageEscapeHtml, storageFormatBytes } from './format.js';
 import { loadStoragePanel } from './panel.js';
-import { safeFetch } from './shared.js';
+import { confirmInPage, safeFetch } from './shared.js';
 
 export const STORAGE_MODAL_FILE_LIMIT = 500;
 /** @type {Record<string, {title: string, desc: string}>} */
@@ -127,12 +127,16 @@ export async function deleteSelectedFiles() {
     if (cb.checked && file) names.push(file.name);
   });
   if (names.length === 0) return;
-  if (!confirm('Delete ' + names.length + ' file(s)?')) return;
+  // The type the question names; the modal's own state is read once.
+  var type = state.modalType;
+  if (!(await confirmInPage({
+    title: 'Delete ' + names.length + ' file(s)?', confirmLabel: 'Delete files', danger: true,
+  }))) return;
   try {
     await safeFetch('/api/storage/delete-files', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({type: state.modalType, files: names}),
+      body: JSON.stringify({type: type, files: names}),
     });
   } catch(e) {}
   loadStoragePanel();
@@ -142,15 +146,21 @@ export async function deleteSelectedFiles() {
 }
 
 export async function deleteAllFiles() {
-  var info = STORAGE_INFO[state.modalType] || {title: state.modalType};
-  var summary = state.storageSummary[state.modalType] || {count: 0, size: 0};
+  var type = state.modalType;
+  var info = STORAGE_INFO[type] || {title: type};
+  var summary = state.storageSummary[type] || {count: 0, size: 0};
   var count = summary.count || state.modalFiles.length;
-  if (!confirm('Delete all ' + count.toLocaleString() + ' ' + info.title.toLowerCase() + '? They will regenerate as needed.')) return;
+  if (!(await confirmInPage({
+    title: 'Delete all ' + count.toLocaleString() + ' ' + info.title.toLowerCase() + '?',
+    message: 'They will regenerate as needed.',
+    confirmLabel: 'Delete all',
+    danger: true,
+  }))) return;
   try {
     await safeFetch('/api/storage/clear', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({type: state.modalType}),
+      body: JSON.stringify({type: type}),
     });
   } catch(e) {}
   loadStoragePanel();

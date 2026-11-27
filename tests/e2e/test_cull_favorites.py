@@ -4,6 +4,8 @@ import json
 import pytest
 from playwright.sync_api import expect
 
+from e2e.in_page_dialogs import answer_dialogs
+
 
 def _results():
     photos = []
@@ -116,7 +118,7 @@ def test_species_dates_scope_analysis_and_apply_without_touching_other_photos(li
     posted = []
     page.route('**/api/culling/apply', lambda route: (posted.append(route.request.post_data_json), route.fulfill(json={'ok': True})))
     _card(page, 10).get_by_role('button', name='Reject', exact=True).click()
-    page.on('dialog', lambda dialog: dialog.accept())
+    answer_dialogs(page)
     page.locator('#applyBtn').click()
     expect(page.locator('#cullStatus')).to_contain_text('Applied!')
     # The reject is recorded against the kept photo of its encounter, by the
@@ -189,7 +191,7 @@ def test_two_species_photo_is_listed_under_each_species_and_counted_once(live_se
 
     posted = []
     page.route('**/api/culling/apply', lambda route: (posted.append(route.request.post_data_json), route.fulfill(json={'ok': True})))
-    page.on('dialog', lambda dialog: dialog.accept())
+    answer_dialogs(page)
     page.locator('#applyBtn').click()
     expect(page.locator('#cullStatus')).to_contain_text('Applied!')
     assert posted[0]['rejects'] == [14]
@@ -247,7 +249,7 @@ def test_apply_leaves_unreviewed_photos_unflagged(live_server, page):
     _open(page, live_server)
     posted = []
     page.route('**/api/culling/apply', lambda route: (posted.append(route.request.post_data_json), route.fulfill(json={'ok': True})))
-    page.on('dialog', lambda dialog: dialog.accept())
+    answer_dialogs(page)
     page.locator('#applyBtn').click()
     expect(page.locator('#cullStatus')).to_contain_text('Applied!')
     assert posted[0]['rejects'] == []

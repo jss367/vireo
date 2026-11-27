@@ -1,6 +1,7 @@
 {
   "extends": "../tsconfig.frontend.base.json",
   "files": [
+    "../types/in-page-dialogs.d.ts",
     "../types/pages/sync-panel.d.ts",
     "../types/page-hooks.d.ts",
     "../vireo/static/sync-panel/state.js",

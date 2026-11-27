@@ -10,6 +10,8 @@ import re
 
 from playwright.sync_api import expect
 
+from e2e.in_page_dialogs import answer_dialogs
+
 
 def _results(photo_overrides=None):
     photos = [
@@ -159,7 +161,7 @@ def test_apply_clears_the_flag_behind_a_review_decision(live_server, page):
         route.fulfill(json={"ok": True, "keepers": 1, "rejects": 0, "cleared": 1})
 
     page.route("**/api/culling/apply", capture)
-    page.on("dialog", lambda dialog: dialog.accept())
+    answer_dialogs(page)
 
     # Photo 1 carries a saved "flagged"; move it to Review by hand.
     _cycle(page, 1)
@@ -185,7 +187,7 @@ def test_apply_turns_keep_and_reject_pins_into_saved_flags(live_server, page):
         "**/api/culling/apply",
         lambda route: route.fulfill(json={"ok": True, "keepers": 2, "rejects": 1, "cleared": 0}),
     )
-    page.on("dialog", lambda dialog: dialog.accept())
+    answer_dialogs(page)
 
     # Photo 2 is suggested REVIEW; call it Reject (review -> reject).
     _cycle(page, 2)

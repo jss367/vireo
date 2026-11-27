@@ -1,8 +1,16 @@
 // Back to Browse, the unsaved-edits guard, and Prev/Next photo navigation.
 // Classic page script; load boot.js after all definitions.
 
-function goBackToBrowse() {
-  if (isEditorDirty() && !window.confirm('Discard unsaved edits to this photo?')) return;
+// Ask before unsaved edits are lost. Resolves true when there is nothing to
+// lose or the user agrees. The editor keeps running while the question is
+// open, so callers check their own guards again afterwards.
+/** @param {string} title @param {string=} confirmLabel */ async function confirmDiscardEdits(title, confirmLabel) {
+  if (!isEditorDirty()) return true;
+  return Vireo.confirm({title: title, confirmLabel: confirmLabel || 'Discard edits', danger: true});
+}
+
+async function goBackToBrowse() {
+  if (!(await confirmDiscardEdits('Discard unsaved edits to this photo?'))) return;
   // The explicit confirm above already covered this navigation; don't let the
   // beforeunload guard prompt a second time. Re-arm shortly after in case the
   // navigation is cancelled or the page comes back from the bfcache.
@@ -35,12 +43,15 @@ function updateNavControls() {
   if (pos) pos.textContent = hasNav ? (idx + 1) + ' / ' + ids.length : '';
 }
 
-/** @param {number} delta */ function editorNav(delta) {
+/** @param {number} delta */ async function editorNav(delta) {
   var ids = editorState.navIds || [];
-  var idx = ids.indexOf(Number(editorState.photoId));
+  var current = Number(editorState.photoId);
+  var idx = ids.indexOf(current);
   if (idx === -1) return;
   var newIdx = idx + delta;
   if (newIdx < 0 || newIdx >= ids.length) return;
-  if (isEditorDirty() && !window.confirm('Discard unsaved edits to this photo?')) return;
+  if (!(await confirmDiscardEdits('Discard unsaved edits to this photo?'))) return;
+  // The answer was about the photo that was open when the question was asked.
+  if (Number(editorState.photoId) !== current) return;
   var photoId = ids[newIdx]; if (photoId !== undefined) loadPhoto(photoId);
 }

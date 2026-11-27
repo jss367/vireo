@@ -182,10 +182,10 @@ async function downloadDarktable() {
   }
   // Name the exact artifact before any bytes move: version, filename, size,
   // source host.
-  if (!confirm('Download darktable ' + a.version + '?\n\n' +
-               a.name + ' (' + Math.round((a.size || 0) / 1048576) + ' MB)\n' +
-               'From: github.com/darktable-org/darktable\n\n' + what +
-               osWarning)) return;
+  if (!(await Vireo.confirm({
+    title: 'Download darktable ' + a.version + '?', message: what + osWarning, confirmLabel: 'Download',
+    details: [a.name + ' (' + Math.round((a.size || 0) / 1048576) + ' MB)', 'From: github.com/darktable-org/darktable'],
+  }))) return;
 
   // Hiding the button is a UX guard against double-clicks; the server also has
   // a singleton guard (a second POST joins the running job instead of starting

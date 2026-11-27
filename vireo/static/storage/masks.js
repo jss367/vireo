@@ -3,7 +3,7 @@
 import { state } from './state.js';
 import { storageEscapeHtml, storageFormatBytes } from './format.js';
 import { loadStoragePanel } from './panel.js';
-import { safeFetch } from './shared.js';
+import { confirmInPage, safeFetch } from './shared.js';
 
 /** @param {StorageMasks | undefined} storageData The masks summary /api/storage already returned, if any. */
 export async function loadMasksCard(storageData) {
@@ -147,7 +147,12 @@ export function _showMasksModalError(msg) {
 
 /** @param {string} variant */
 export async function deleteMaskVariant(variant) {
-  if (!confirm('Delete all "' + variant + '" masks? Files and DB rows will be removed.')) return;
+  if (!(await confirmInPage({
+    title: 'Delete all "' + variant + '" masks?',
+    message: 'Files and DB rows will be removed.',
+    confirmLabel: 'Delete masks',
+    danger: true,
+  }))) return;
   try {
     var resp = await fetch('/api/storage/masks/delete-variant', {
       method: 'POST',
@@ -170,7 +175,12 @@ export async function deleteMaskVariant(variant) {
 }
 
 export async function deleteInactiveMasks() {
-  if (!confirm('Delete all non-active mask variants across photos? The active variant per photo is kept.')) return;
+  if (!(await confirmInPage({
+    title: 'Delete all non-active mask variants across photos?',
+    message: 'The active variant per photo is kept.',
+    confirmLabel: 'Delete masks',
+    danger: true,
+  }))) return;
   try {
     await safeFetch('/api/storage/masks/delete-inactive', {
       method: 'POST',
@@ -181,7 +191,11 @@ export async function deleteInactiveMasks() {
 }
 
 export async function deleteStaleMasks() {
-  if (!confirm('Delete masks whose detection prompt no longer matches the photo primary detection?')) return;
+  if (!(await confirmInPage({
+    title: 'Delete masks whose detection prompt no longer matches the photo primary detection?',
+    confirmLabel: 'Delete masks',
+    danger: true,
+  }))) return;
   try {
     await safeFetch('/api/storage/masks/delete-stale', {
       method: 'POST',

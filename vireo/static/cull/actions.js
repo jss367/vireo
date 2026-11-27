@@ -196,18 +196,20 @@ async function applyCulling() {
   var appliedPins = payload.appliedPins;
   var split = splitUnflagByCurrentState(unflag);
 
-  var confirmMsg = 'Apply culling decisions?\n\n' +
-    keepers.length + ' photos flagged as keepers\n' +
-    rejects.length + ' photos flagged as rejected';
-  if (rejects.length) confirmMsg += ' (' + describeRejections(rejects, rejections) + ')';
-  if (split.clearing) {
-    confirmMsg += '\n' + split.clearing + ' photos cleared back to no flag (moved to Review)';
-  }
-  if (split.reviewOnly) {
-    confirmMsg += '\n' + split.reviewOnly + ' photos saved as Review';
-  }
-  confirmMsg += '\n\nThis sets the flag on each photo. Use Undo below to restore the previous flags.';
-  if (!confirm(confirmMsg)) return;
+  var changes = [
+    keepers.length + ' photos flagged as keepers',
+    rejects.length + ' photos flagged as rejected' +
+      (rejects.length ? ' (' + describeRejections(rejects, rejections) + ')' : ''),
+  ];
+  if (split.clearing) changes.push(split.clearing + ' photos cleared back to no flag (moved to Review)');
+  if (split.reviewOnly) changes.push(split.reviewOnly + ' photos saved as Review');
+  if (!(await Vireo.confirm({
+    title: 'Apply culling decisions?',
+    message: 'This sets the flag on each photo. Use Undo below to restore the previous flags.',
+    details: changes,
+    confirmLabel: 'Apply decisions',
+  }))) return;
+  if (!cullData || cullOperationPending()) return;
 
   cullBusy = true;
   /** @type {HTMLButtonElement} */ (document.getElementById('applyBtn')).disabled = true;

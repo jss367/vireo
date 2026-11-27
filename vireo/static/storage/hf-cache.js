@@ -10,7 +10,7 @@
 import { state } from './state.js';
 import { storageFormatBytes } from './format.js';
 import { loadStoragePanel } from './panel.js';
-import { safeFetch, showToast } from './shared.js';
+import { confirmInPage, safeFetch, showToast } from './shared.js';
 
 /** @param {{size?:number;unused_size?:number;retained_size?:number;installed_size?:number} | null | undefined} hf @returns {string | null} */
 export function hfCacheCardNote(hf) {
@@ -159,8 +159,12 @@ export async function _postHfCacheRemove(body, failure) {
 
 /** @param {HfCacheEntry} entry */
 export async function removeHfCacheEntry(entry) {
-  if (!confirm('Remove "' + entry.name + '" (' + storageFormatBytes(entry.size) +
-      ') from the Hugging Face cache? Installing that model again will download it from Hugging Face.')) return;
+  if (!(await confirmInPage({
+    title: 'Remove "' + entry.name + '" (' + storageFormatBytes(entry.size) + ') from the Hugging Face cache?',
+    message: 'Installing that model again will download it from Hugging Face.',
+    confirmLabel: 'Remove entry',
+    danger: true,
+  }))) return;
   await _postHfCacheRemove({keys: [entry.key]}, 'Failed to remove the cache entry');
 }
 
@@ -168,9 +172,13 @@ export async function removeUnusedHfCache() {
   var inv = state.hfCacheInventory;
   if (!inv || !inv.unused_size) return;
   var count = inv.entries.filter(function(e) { return !e.installed && e.removable !== false; }).length;
-  if (!confirm('Remove ' + count + (count === 1 ? ' entry' : ' entries') + ' (' +
-      storageFormatBytes(inv.unused_size) + ') that no installed model uses? ' +
-      'Installing those models again will download them from Hugging Face.')) return;
+  if (!(await confirmInPage({
+    title: 'Remove ' + count + (count === 1 ? ' entry' : ' entries') + ' (' +
+      storageFormatBytes(inv.unused_size) + ') that no installed model uses?',
+    message: 'Installing those models again will download them from Hugging Face.',
+    confirmLabel: count === 1 ? 'Remove entry' : 'Remove entries',
+    danger: true,
+  }))) return;
   await _postHfCacheRemove({unused: true}, 'Failed to remove unused cache entries');
 }
 
@@ -179,9 +187,14 @@ export async function removeInstalledHfCache() {
   if (!inv) return;
   var count = inv.entries.filter(function(entry) { return entry.installed && entry.removable !== false; }).length;
   if (!count) return;
-  if (!confirm('Remove ' + count + ' cache ' + (count === 1 ? 'entry' : 'entries') +
-      ' associated with existing model folders? Installed files stay in place. ' +
+  if (!(await confirmInPage({
+    title: 'Remove ' + count + ' cache ' + (count === 1 ? 'entry' : 'entries') +
+      ' associated with existing model folders?',
+    message: 'Installed files stay in place. ' +
       'A folder may be incomplete or a different revision; repair may need another download. ' +
-      'Other applications sharing these caches may also need to download them again.')) return;
+      'Other applications sharing these caches may also need to download them again.',
+    confirmLabel: count === 1 ? 'Remove entry' : 'Remove entries',
+    danger: true,
+  }))) return;
   await _postHfCacheRemove({installed: true}, 'Failed to remove caches for existing model folders');
 }

@@ -1,6 +1,7 @@
 {
   "extends": "../tsconfig.frontend.base.json",
   "files": [
+    "../types/in-page-dialogs.d.ts",
     "../types/pages/misses.d.ts",
     "../types/page-hooks.d.ts",
     "../vireo/static/misses/badges.js",

@@ -1,6 +1,7 @@
 from playwright.sync_api import expect
 
 from e2e.browser_doubles import fulfill_sse, record_toasts, toasts
+from e2e.in_page_dialogs import answer_dialogs
 
 
 def test_toasts_use_semantic_colors_and_accessibility_roles(live_server, page):
@@ -66,7 +67,7 @@ def test_develop_completion_toast_reads_nested_job_result(live_server, page):
     page.route("**/api/jobs/42/stream", lambda route: fulfill_sse(route, "complete", payloads.pop(0)))
     page.goto(f"{live_server['url']}/browse")
     record_toasts(page)
-    page.evaluate("window.confirm = () => true")
+    answer_dialogs(page)
 
     page.evaluate("developPhotos([1, 2])")
     page.wait_for_function("window.__toasts.some(toast => toast.message.startsWith('Development'))")

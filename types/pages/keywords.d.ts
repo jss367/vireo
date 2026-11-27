@@ -19,6 +19,7 @@ interface KeywordMenuItem {label?:string;title?:string;disabled?:boolean;disable
 // The shared globals the page's shared.js reads, and the Maps callback name
 // it sets for the Google Maps script.
 interface Window {
+  Vireo:VireoInPageDialogs;
   L?:KeywordLeaflet;
   _gmapsCallback?:()=>void;
   google?:KeywordGoogle;

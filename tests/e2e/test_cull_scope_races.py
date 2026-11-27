@@ -3,6 +3,7 @@ import json
 
 from playwright.sync_api import expect
 
+from e2e.in_page_dialogs import answer_dialogs
 from e2e.test_cull_favorites import _open, _results
 
 
@@ -35,7 +36,7 @@ def test_filter_change_during_collection_load_restarts_collection_source(live_se
     expect(page.locator('.cull-card')).to_have_count(1)
     posted = []
     page.route('**/api/culling/apply', lambda route: (posted.append(route.request.post_data_json), route.fulfill(json={'ok': True})))
-    page.on('dialog', lambda dialog: dialog.accept())
+    answer_dialogs(page)
     page.locator('#applyBtn').click()
     expect(page.locator('#cullStatus')).to_contain_text('Applied!')
     assert posted == [{'keepers': [10], 'rejects': [], 'unflag': [], 'rejections': []}]

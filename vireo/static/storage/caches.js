@@ -3,7 +3,7 @@
 
 import { storageEscapeAttr, storageEscapeHtml, storageFormatBytes } from './format.js';
 import { loadStoragePanel } from './panel.js';
-import { safeEventSource, safeFetch, showToast } from './shared.js';
+import { confirmInPage, safeEventSource, safeFetch, showToast } from './shared.js';
 
 export async function loadPreviewCacheStatus() {
   var statusEl = /** @type {HTMLElement} */ (document.getElementById('previewCacheStatus'));
@@ -29,7 +29,12 @@ export async function loadPreviewCacheStatus() {
 }
 
 export async function clearPreviewCache() {
-  if (!confirm('Clear all cached preview images? They will regenerate on demand from the originals.')) return;
+  if (!(await confirmInPage({
+    title: 'Clear all cached preview images?',
+    message: 'They will regenerate on demand from the originals.',
+    confirmLabel: 'Clear previews',
+    danger: true,
+  }))) return;
   var btn = /** @type {HTMLButtonElement} */ (document.getElementById('clearPreviewCacheBtn'));
   if (btn) btn.disabled = true;
   try {
@@ -67,7 +72,12 @@ export async function loadEmbeddingCache() {
 }
 
 export async function clearEmbeddingCache() {
-  if (!confirm('Clear all cached label embeddings? The next classification run will recompute them.')) return;
+  if (!(await confirmInPage({
+    title: 'Clear all cached label embeddings?',
+    message: 'The next classification run will recompute them.',
+    confirmLabel: 'Clear embeddings',
+    danger: true,
+  }))) return;
   try {
     await safeFetch('/api/embedding-cache', { method: 'DELETE' });
   } catch(e) {}

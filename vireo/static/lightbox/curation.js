@@ -142,7 +142,10 @@ async function chooseSpeciesRepresentativeForPhoto(/** @type {number} */ photoId
   var entry = entries[0]; if (!entry) return;
   if (entries.length > 1) {
     var names = entries.map(function(e) { return e.species; });
-    var choice = window.prompt('Make this the top highlight of which species?\n' + names.join('\n'), names[0]);
+    var choice = await Vireo.prompt({
+      title: 'Make this the top highlight of which species?',
+      label: 'Species', choices: names, value: names[0], confirmLabel: 'Make top highlight',
+    });
     if (!choice) return;
     entry = entries.find(function(e) { return e.species === choice; }) || { species: choice };
   }
@@ -251,7 +254,10 @@ async function chooseSpeciesHighlightForPhoto(/** @type {number} */ photoId) {
   var entry = entries[0]; if (!entry) return;
   if (entries.length > 1) {
     var names = entries.map(function(e) { return e.species; });
-    var choice = window.prompt('Add as a highlight for which species?\n' + names.join('\n'), names[0]);
+    var choice = await Vireo.prompt({
+      title: 'Add as a highlight for which species?',
+      label: 'Species', choices: names, value: names[0], confirmLabel: 'Add to highlights',
+    });
     if (!choice) return;
     entry = entries.find(function(e) { return e.species === choice; }) || { species: choice };
   }

@@ -7,6 +7,7 @@ The modal is navbar code (an ES module), so the tests answer its requests
 from playwright.sync_api import expect
 
 from e2e.browser_doubles import record_toasts, toasts
+from e2e.in_page_dialogs import answer_dialogs
 
 READY = {"status": "ready", "photos": []}
 REMOVED = {"deleted": 2, "restored": [], "folder_offline": [], "skipped": 0}
@@ -72,10 +73,10 @@ def _open_browse_with_two_missing_selected(live_server, page):
           document.getElementById('missingPhotosToolbar').style.display = 'flex';
           toggleMissingPhoto(101, true);
           toggleMissingPhoto(102, true);
-          window.confirm = () => true;
           Vireo.registerPageHooks({loadMisses: async () => {}});
         }"""
     )
+    answer_dialogs(page)
     return server
 
 

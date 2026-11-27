@@ -2,6 +2,8 @@ import re
 
 from playwright.sync_api import expect
 
+from e2e.in_page_dialogs import answer_dialogs
+
 
 def _open_editor(live_server, page):
     photo_id = live_server["data"]["photos"][0]
@@ -205,7 +207,7 @@ def test_photo_editor_context_revert_restores_saved_recipe(live_server, page):
     page.evaluate("() => rotateRecipe(90)")
     assert page.evaluate("() => isEditorDirty()") is True
 
-    page.once("dialog", lambda dialog: dialog.accept())
+    answer_dialogs(page, times=1)
     page.locator("#editorCanvasWrap").click(button="right", position={"x": 20, "y": 20})
     page.locator(".vireo-ctx-menu").get_by_text("Revert to Saved", exact=True).click()
 
@@ -227,7 +229,7 @@ def test_photo_editor_context_revert_restores_saved_stale_mask_state(
         }"""
     )
 
-    page.once("dialog", lambda dialog: dialog.accept())
+    answer_dialogs(page, times=1)
     page.locator("#editorCanvasWrap").click(button="right", position={"x": 20, "y": 20})
     page.locator(".vireo-ctx-menu").get_by_text("Revert to Saved", exact=True).click()
 
@@ -270,7 +272,7 @@ def test_photo_editor_context_revert_ignores_pending_mask_update(
         }"""
     )
 
-    page.once("dialog", lambda dialog: dialog.accept())
+    answer_dialogs(page, times=1)
     page.locator("#editorCanvasWrap").click(button="right", position={"x": 20, "y": 20})
     page.locator(".vireo-ctx-menu").get_by_text("Revert to Saved", exact=True).click()
 

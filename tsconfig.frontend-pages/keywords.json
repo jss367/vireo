@@ -1,6 +1,7 @@
 {
   "extends": "../tsconfig.frontend.base.json",
   "files": [
+    "../types/in-page-dialogs.d.ts",
     "../types/pages/keywords.d.ts",
     "../vireo/static/keywords/boot.js",
     "../vireo/static/keywords/bulk.js",

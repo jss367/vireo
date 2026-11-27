@@ -8,6 +8,7 @@ import pytest
 from playwright.sync_api import expect
 from services import photo_ingest, workspace_folders
 
+from e2e.in_page_dialogs import answer_dialogs
 from e2e.module_pages import install_page_module_exposure
 
 
@@ -212,7 +213,7 @@ def test_duplicates_bulk_decide_keep_folder_resolves_all_groups(live_server, pag
 
     # Auto-accept the confirm() dialog. Wired before navigation so any
     # early dialog is also handled.
-    page.on("dialog", lambda d: d.accept())
+    answer_dialogs(page)
     page.goto(f"{live_server['url']}/duplicates")
     expect(page.locator(".bucket-card")).to_have_count(1)
 
@@ -282,7 +283,7 @@ def test_bulk_decide_delete_files_offers_retry_after_batch_failure(
         )
 
     page.route("**/api/duplicates/delete-loser-files", handle_trash)
-    page.on("dialog", lambda d: d.accept())
+    answer_dialogs(page)
     page.goto(f"{live_server['url']}/duplicates")
     expect(page.locator(".bucket-card")).to_have_count(1)
 
@@ -408,7 +409,7 @@ def test_bulk_decide_scopes_action_to_visible_groups_under_filter(
         )
 
     page.route("**/api/duplicates/bulk-resolve", handle_resolve)
-    page.on("dialog", lambda d: d.accept())
+    answer_dialogs(page)
     page.goto(f"{live_server['url']}/duplicates")
     page.wait_for_selector(".bucket-card", timeout=15000)
 
@@ -499,7 +500,7 @@ def test_bulk_decide_retry_preserves_hashes_that_bulk_resolve_skipped(
 
     page.route("**/api/duplicates/bulk-resolve", handle_resolve)
     page.route("**/api/duplicates/delete-loser-files", handle_trash)
-    page.on("dialog", lambda d: d.accept())
+    answer_dialogs(page)
     page.goto(f"{live_server['url']}/duplicates")
     expect(page.locator(".bucket-card")).to_have_count(1)
 
@@ -613,7 +614,7 @@ def test_reveal_completion_preserves_applying_action_locks(
     page.route("**/api/folders/reveal", lambda route: reveals.append(route))
     page.route("**/api/duplicates/bulk-resolve", lambda route: actions.append(route))
     page.route("**/api/duplicates/delete-loser-files", lambda route: actions.append(route))
-    page.on("dialog", lambda dialog: dialog.accept())
+    answer_dialogs(page)
     page.goto(f"{live_server['url']}/duplicates")
     expect(page.locator(".bucket-card")).to_have_count(1)
     if not same_bucket:

@@ -1,6 +1,7 @@
 {
   "extends": "../tsconfig.frontend.base.json",
   "files": [
+    "../types/in-page-dialogs.d.ts",
     "../types/pages/photo-editor.d.ts",
     "../types/page-hooks.d.ts",
     "../vireo/static/photo-editor/adjustments.js",

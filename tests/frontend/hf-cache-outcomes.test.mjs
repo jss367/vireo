@@ -16,7 +16,7 @@ function page() {
       if (!elements.has(id)) elements.set(id, element());
       return elements.get(id);
     }},
-    confirm: () => true,
+    confirmInPage: async () => true, Vireo: {confirm: async () => true},
     showToast: (message, kind) => toasts.push({message, kind}),
     storageFormatBytes: bytes => `${bytes} B`,
     safeFetch() { throw new Error('Unexpected transport'); },
@@ -69,7 +69,7 @@ test('retained-only entries show retained bytes and cannot bind a remove action'
 test('bulk removal counts removable entries and does nothing for retained-only bytes', async () => {
   const {c} = page();
   const confirms = [], posts = [];
-  c.confirm = text => { confirms.push(text); return true; };
+  c.confirmInPage = async options => { confirms.push(options.title + ' ' + options.message); return true; };
   c._postHfCacheRemove = body => posts.push(body);
   c.state.hfCacheInventory = {unused_size: 10, entries: [
     {installed: false, removable: false}, {installed: false, removable: true}, {installed: true},
@@ -86,7 +86,7 @@ test('bulk removal counts removable entries and does nothing for retained-only b
 test('existing-model cache cleanup confirms its scope and leaves retained entries out', async () => {
   const {c} = page();
   const confirms = [], posts = [];
-  c.confirm = text => { confirms.push(text); return true; };
+  c.confirmInPage = async options => { confirms.push(options.title + ' ' + options.message); return true; };
   c._postHfCacheRemove = body => posts.push(body);
   c.state.hfCacheInventory = {unused_size: 0, entries: [
     {installed: true, removable: true}, {installed: true, removable: false},
@@ -96,7 +96,7 @@ test('existing-model cache cleanup confirms its scope and leaves retained entrie
   assert.match(confirms[0], /Remove 1 cache entry/);
   assert.match(confirms[0], /incomplete or a different revision/);
   assert.equal(JSON.stringify(posts), '[{"installed":true}]');
-  c.confirm = () => false;
+  c.confirmInPage = async () => false;
   await c.removeInstalledHfCache();
   assert.equal(posts.length, 1);
 });

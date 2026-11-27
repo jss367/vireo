@@ -55,7 +55,7 @@ test('manual Apply persists Review on a clear flag and retains confirmed UI stat
       {photo_id: 2, action: 'review', decision_source: 'manual'},
     ]}]}]},
     pipelineResults: {photos: [{id: 1, flag: 'none'}, {id: 2, flag: 'none'}]},
-    cullOperationPending: () => false, confirm: () => true,
+    cullOperationPending: () => false, Vireo: {confirm: async () => true},
     safeFetch: async (_url, options) => { payload = JSON.parse(options.body); },
     document: {getElementById: () => ({style: {}})},
     rebuildCullDataFromPipeline() {}, updateCullApplyButton() {},
@@ -88,7 +88,7 @@ test('Apply status distinguishes photos actually cleared from already-none Revie
       {id: 2, flag: 'none'},     // Already clear; saved as explicit Review only.
     ]},
     cullOperationPending: () => false,
-    confirm: (msg) => { prompts.push(msg); return true; },
+    Vireo: {confirm: async options => { prompts.push(options.details.join('\n')); return true; }},
     safeFetch: async () => ({ok: true, keepers: 0, rejects: 0, cleared: 1}),
     document: {getElementById: (id) => id === 'applyBtn' ? applyBtn : statusEl},
     rebuildCullDataFromPipeline() {}, updateCullApplyButton() {},
@@ -123,7 +123,7 @@ test('Undo releases Review attribution pins and later Apply does not clear a new
   Object.assign(ctx, {
     pipelineResults: {photos: [{id: 1, flag: 'none', flag_confirmation_status: 'confirmed'}]},
     cullSourceResults: {photos: [{id: 1, flag: 'none', flag_confirmation_status: 'confirmed'}]},
-    cullOperationPending: () => false, confirm: () => true,
+    cullOperationPending: () => false, Vireo: {confirm: async () => true},
     safeFetch: async (url, options) => {
       if (url === '/api/pipeline/group/state') return {photos: {1: saved}};
       payload = JSON.parse(options.body);

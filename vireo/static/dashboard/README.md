@@ -16,7 +16,7 @@ with catalog size estimates, retention age, destination and transfer status.
 | File | Responsibility |
 | --- | --- |
 | `state.js` | The `state` object: the scope and its options, the last stats, the per-folder coverage cache, and which detail panels are open |
-| `shared.js` | The boundary with shared code: `safeFetch`, `showToast`, the escape helpers |
+| `shared.js` | The boundary with shared code: `safeFetch`, `showToast`, `confirmInPage` (`Vireo.confirm`), the escape helpers |
 | `scope.js` | The scope's query parameters, the scope controls and summary, and opening Browse or Process with the same scope (Process is refused with a reason when it cannot keep the scope) |
 | `drill.js` | Bar rows that open the matching photos in Browse (`data-dashboard-drill`) |
 | `loading.js` | Loading the scope options (from the URL, skipping disabled collections) and reloading every section |

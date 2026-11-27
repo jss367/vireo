@@ -8,7 +8,7 @@ import { isBulkTrashProtected, pruneResolvedHashesFromScan, renderResolvedGroup 
 import { renderResults } from './results.js';
 import { bucketRevealButton } from './reveal.js';
 import { isActionableSkip, updateTrashProgress } from './trash-progress.js';
-import { safeFetch, showToast } from './shared.js';
+import { confirmInPage, safeFetch, showToast } from './shared.js';
 
 /** @param {number} photoId */
 export function duplicateFileTrashIsPending(photoId) {
@@ -269,14 +269,17 @@ export async function trashAllLoserFiles() {
     showToast('Nothing to trash', 'success');
     return;
   }
-  if (!confirm('Move ' + ids.length + ' file' + (ids.length === 1 ? '' : 's') +
-               ' to Trash and remove their entries from Vireo?\n\n' +
-               'Files go to your OS Trash (recoverable from there). The ' +
-               'corresponding extra-copy records (and their thumbnails/previews) ' +
-               'are deleted from Vireo. Kept copies retain all merged keywords ' +
-               'and ratings.')) {
-    return;
-  }
+  if (!(await confirmInPage({
+    title: 'Move ' + ids.length + ' file' + (ids.length === 1 ? '' : 's') +
+      ' to Trash and remove their entries from Vireo?',
+    message: 'Files go to your OS Trash (recoverable from there). The ' +
+      'corresponding extra-copy records (and their thumbnails/previews) ' +
+      'are deleted from Vireo. Kept copies retain all merged keywords ' +
+      'and ratings.',
+    confirmLabel: 'Move to Trash',
+    danger: true,
+  }))) return;
+  if (state.duplicateTrashActive || duplicateKeepBlocksTrash()) return;
 
   var btn = /** @type {HTMLButtonElement} */ (document.getElementById('trashAllBtn'));
   var progressEl = /** @type {HTMLElement} */ (document.getElementById('trashAllProgress'));
@@ -424,6 +427,19 @@ export async function retryBucketTrash(btn) {
   }
 }
 
+// Ask before one folder's copies are kept for every visible group of a bucket.
+/** @param {number} n @param {string} keepFolder @param {boolean} deleteFiles */
+function confirmBulkResolve(n, keepFolder, deleteFiles) {
+  var label = keepFolder.split('/').filter(Boolean).pop() || keepFolder;
+  return confirmInPage({
+    title: 'Keep all ' + n + ' photo' + (n === 1 ? '' : 's') + ' in ' + label + ' and reject the duplicates' +
+      (deleteFiles ? ', then move the duplicate files to Trash' : '') + '?',
+    details: [keepFolder],
+    confirmLabel: deleteFiles ? 'Keep and move duplicates to Trash' : 'Keep and reject duplicates',
+    danger: deleteFiles,
+  });
+}
+
 /** @param {number} bi @param {string} keepFolder */
 export async function bulkResolveByFolder(bi, keepFolder) {
   var card = document.querySelector('#results .bucket-card[data-bi="' + bi + '"]');
@@ -441,11 +457,10 @@ export async function bulkResolveByFolder(bi, keepFolder) {
   var btns = card.querySelectorAll(/** @type {'button'} */ ('.keep-btn'));
 
   var n = bucket.group_count;
-  var label = keepFolder.split('/').filter(Boolean).pop() || keepFolder;
-  var confirmMsg = 'Keep all ' + n + ' photo' + (n === 1 ? '' : 's') +
-    ' in ' + label + ' and reject the duplicates' +
-    (deleteFiles ? ', then move the duplicate files to Trash' : '') + '?';
-  if (!confirm(confirmMsg)) return;
+  if (!(await confirmBulkResolve(n, keepFolder, deleteFiles))) return;
+  // The results can re-render while the question is open. The answer was
+  // about this card, so stop when it is no longer the one on the page.
+  if (!card.isConnected) return;
 
   pinDuplicateBucketOperation(card, bi);
   card.classList.add('applying');

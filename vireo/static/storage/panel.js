@@ -11,7 +11,7 @@ import { hfCacheCardNote } from './hf-cache.js';
 import { loadMasksCard } from './masks.js';
 import { renderStorageCards, showStorageLoadError } from './overview.js';
 import { loadRetainedStorage } from './retained.js';
-import { formatTime, safeFetch, showToast } from './shared.js';
+import { confirmInPage, formatTime, safeFetch, showToast } from './shared.js';
 
 /** @param {string} id */
 export function storageEl(id) {
@@ -177,7 +177,12 @@ export async function refreshStoragePage() {
 
 export async function clearSafeCaches() {
   var size = /** @type {HTMLElement} */ (document.getElementById('storageReclaimableSize')).textContent;
-  if (!confirm('Clear ' + size + ' of thumbnails, previews, and label embeddings? They will regenerate as needed.')) return;
+  if (!(await confirmInPage({
+    title: 'Clear ' + size + ' of thumbnails, previews, and label embeddings?',
+    message: 'They will regenerate as needed.',
+    confirmLabel: 'Clear caches',
+    danger: true,
+  }))) return;
   var btn = /** @type {HTMLButtonElement} */ (document.getElementById('clearSafeCachesBtn'));
   btn.disabled = true;
   btn.textContent = 'Clearing…';

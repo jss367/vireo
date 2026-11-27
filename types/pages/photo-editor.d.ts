@@ -44,4 +44,4 @@ interface EditorHistorySnapshot {recipe:EditorRecipe;cropAspect:number|null;crop
 interface EditorHistoryGesture {pointerId:number;undoBefore?:EditorHistorySnapshot[];redoBefore?:EditorHistorySnapshot[]}
 interface Window {doUndo():void;doRedo():void}
 // The page-hook registry from vireo-page-hooks.js (types/page-hooks.d.ts).
-declare var Vireo: VireoPageHookRegistry;
+declare var Vireo: VireoPageHookRegistry & VireoInPageDialogs;

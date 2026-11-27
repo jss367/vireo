@@ -84,7 +84,7 @@ declare function openLightbox(id: number, filename: string, photos: {id: number;
 declare function showDeleteDialog(ids: number[], count: number, onComplete: (data: {failed_photo_ids?: number[]}) => void): void;
 declare function safeFetch<T>(url: string, init?: RequestInit, options?: {toast?: boolean}): Promise<T>;
 declare function showToast(message: string, type?: string): void;
-declare var Vireo: VireoPageHookRegistry;
+declare var Vireo: VireoPageHookRegistry & VireoInPageDialogs;
 declare var VireoPipelineConfig: {embeddingDistancePercentToThreshold(value: number): number; buildSliderDefaults(config?: unknown): {scoring: Record<string, number>; grouping: Record<string, number>}};
 declare function escapeHtml(value: unknown): string;
 declare function escapeAttr(value: unknown): string;

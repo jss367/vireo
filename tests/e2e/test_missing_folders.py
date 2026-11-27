@@ -1,6 +1,8 @@
 from playwright.sync_api import expect
 from services import photo_ingest, workspace_folders
 
+from e2e.in_page_dialogs import answer_dialogs, dialogs
+
 
 def _open_missing_folders(live_server, page):
     page.goto(f"{live_server['url']}/browse")
@@ -24,16 +26,11 @@ def test_remove_all_missing_folders(live_server, page, tmp_path):
 
     button = _open_missing_folders(live_server, page)
     expect(page.locator("#missingFoldersList .missing-folder-row")).to_have_count(3)
-    confirmations = []
-
-    def accept(dialog):
-        confirmations.append(dialog.message)
-        dialog.accept()
-
-    page.on("dialog", accept)
+    answer_dialogs(page)
     button.click()
     expect(page.locator("#missingFoldersList")).to_have_text("✓All folders are accounted for.")
     expect(button).to_be_hidden()
+    confirmations = dialogs(page)
     assert len(confirmations) == 1
     assert "3 missing folders" in confirmations[0]
     assert "6 photos" in confirmations[0]
@@ -45,7 +42,7 @@ def test_remove_all_missing_folders(live_server, page, tmp_path):
 
 def test_cancel_remove_all_missing_folders(live_server, page):
     button = _open_missing_folders(live_server, page)
-    page.on("dialog", lambda dialog: dialog.dismiss())
+    answer_dialogs(page, accept=False)
     button.click()
     expect(page.locator("#missingFoldersList .missing-folder-row")).to_have_count(2)
     expect(button).to_be_enabled()
@@ -61,7 +58,7 @@ def test_remove_all_failure_refreshes_remaining_folders(live_server, page):
             status=409, json={"error": "This folder has a shared local copy."}
         ),
     )
-    page.on("dialog", lambda dialog: dialog.accept())
+    answer_dialogs(page)
     button.click()
     expect(page.locator("#missingFoldersList .missing-folder-row")).to_have_count(1)
     expect(button).to_be_enabled()

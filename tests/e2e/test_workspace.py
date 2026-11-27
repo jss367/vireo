@@ -31,7 +31,6 @@ def test_work_locally_full_cycle(live_server, page, tmp_path):
     activate = page.request.post(f"{live_server['url']}/api/workspaces/{ws_id}/activate")
     assert activate.ok
 
-    page.on("dialog", lambda dialog: dialog.accept())
     page.goto(f"{live_server['url']}/workspace", timeout=5000)
 
     work_locally = page.get_by_role("button", name="Work Locally", exact=True)
@@ -82,7 +81,6 @@ def test_sync_back_replaces_folder_actions_with_live_progress(
         f"{live_server['url']}/api/workspaces/{workspace_id}/activate"
     ).ok
 
-    page.on("dialog", lambda dialog: dialog.accept())
     page.goto(f"{live_server['url']}/workspace", timeout=5000)
     page.get_by_role("button", name="Work Locally", exact=True).click()
     modal = page.locator("#stageLocalFoldersModal")
@@ -394,7 +392,6 @@ def test_shared_folder_local_status_follows_workspace_switch(live_server, page, 
     workspace_folders.add_workspace_folder(db, first, folder_id)
     workspace_folders.add_workspace_folder(db, second, folder_id)
 
-    page.on("dialog", lambda dialog: dialog.accept())
     assert page.request.post(f"{live_server['url']}/api/workspaces/{first}/activate").ok
     page.goto(f"{live_server['url']}/workspace", timeout=5000)
     page.get_by_role("button", name="Work Locally", exact=True).click()

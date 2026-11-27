@@ -4,7 +4,7 @@
 // ES module.
 
 import { byId, fetchActiveWorkspace, state } from './state.js';
-import { escapeAttr, escapeHtml, localFolders, safeFetch } from './shared.js';
+import { confirmInPage, escapeAttr, escapeHtml, localFolders, safeFetch } from './shared.js';
 import { updateMoveBtn, showMoveFoldersModal } from './move-folders.js';
 
 const SMALL_BUTTON = 'padding:4px 9px;font-size:11px;';
@@ -134,11 +134,15 @@ async function removeFolderFromWs(wsId, folderId) {
   var f = state.foldersById[folderId];
   var path = f ? f.path : '';
   var n = f ? (f.workspace_photo_count || 0) : 0;
-  var msg = 'Remove "' + path + '" from this workspace?\n\n' +
-            n + ' photo' + (n === 1 ? '' : 's') + ' in this folder will no longer appear in this workspace, ' +
-            'and predictions, collections, and pending changes referencing them will be hidden here too.\n\n' +
-            'Photos and the folder are not deleted. You can re-add the folder later to restore visibility.';
-  if (!confirm(msg)) return;
+  if (!(await confirmInPage({
+    title: 'Remove this folder from this workspace?',
+    message: n + ' photo' + (n === 1 ? '' : 's') + ' in this folder will no longer appear in this workspace, ' +
+      'and predictions, collections, and pending changes referencing them will be hidden here too.\n\n' +
+      'Photos and the folder are not deleted. You can re-add the folder later to restore visibility.',
+    details: [path],
+    confirmLabel: 'Remove folder',
+    danger: true,
+  }))) return;
   try { await safeFetch('/api/workspaces/' + wsId + '/folders/' + folderId, { method: 'DELETE' }); } catch(e) {}
   loadWsFolders();
 }

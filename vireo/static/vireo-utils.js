@@ -18,20 +18,32 @@ window.Vireo.dom = window.Vireo.dom || {
 };
 
 /*
- * Ask a yes/no question in the page and resolve with the answer.
+ * Questions and notices shown in the page: Vireo.confirm, Vireo.prompt and
+ * Vireo.alert.
  *
- * window.confirm() cannot gate an action: the desktop app's webview replaces
- * it with an async function, so `if (!confirm(...)) return;` sees a promise
- * (always truthy) and carries on without showing anything. Call this before
- * any action that removes files:
+ * The native dialogs cannot be used. The desktop app's webview replaces
+ * window.confirm() with an async function, so `if (!confirm(...)) return;`
+ * sees a promise (always truthy) and carries on without showing anything;
+ * window.alert() shows nothing and window.prompt() returns null at once.
  *
  *   if (!(await Vireo.confirm({title: ..., message: ..., confirmLabel: ...}))) return;
+ *   var name = await Vireo.prompt({title: ..., label: ..., value: ...});
+ *   await Vireo.alert({title: ..., message: ...});
  *
- * Resolves true only when the confirm button is pressed. Cancel, Esc and a
- * second call while a question is already open resolve false.
+ * confirm resolves true only when the confirm button is pressed. prompt
+ * resolves the text in its field (or the chosen entry of `choices`), and null
+ * when cancelled. Cancel, Esc and a question asked while a dialog is already
+ * open answer no: false or null. An alert asked while a dialog is open waits
+ * for it to close, so a notice is never dropped.
+ *
+ * The page keeps running while a dialog is open. After the await, check again
+ * whatever the caller checked before asking (a request in flight, the photo
+ * still on screen).
  */
-window.Vireo.confirm = window.Vireo.confirm || (function() {
+(function() {
   var open = false;
+  /** Settles when the open dialog closes. @type {Promise<unknown>} */
+  var closed = Promise.resolve();
 
   /** @param {string} tag @param {string} className @param {string} text */
   function element(tag, className, text) {
@@ -41,7 +53,15 @@ window.Vireo.confirm = window.Vireo.confirm || (function() {
     return node;
   }
 
-  /** @param {VireoConfirmOptions} options @param {HTMLDialogElement} dialog */
+  /** @param {string} role @param {string} className @param {string} text */
+  function button(role, className, text) {
+    var node = /** @type {HTMLButtonElement} */ (element('button', 'modal-btn ' + className, text));
+    node.type = 'button';
+    node.dataset.vireoConfirm = role;
+    return node;
+  }
+
+  /** @param {VireoDialogContent} options @param {HTMLDialogElement} dialog */
   function fill(options, dialog) {
     var title = element('h3', '', options.title);
     title.id = 'vireoConfirmTitle';
@@ -58,65 +78,141 @@ window.Vireo.confirm = window.Vireo.confirm || (function() {
     }
   }
 
-  /** @param {VireoConfirmOptions} options @returns {Promise<boolean>} */
-  return function confirmInPage(options) {
-    if (open) return Promise.resolve(false);
-    open = true;
+  // The prompt's field: a list when the answer must be one of `choices`,
+  // otherwise a text input.
+  /** @param {VireoDialogContent} options @param {HTMLDialogElement} dialog */
+  function field(options, dialog) {
+    var choices = options.choices || [];
+    var input = /** @type {HTMLInputElement | HTMLSelectElement} */ (
+      element(choices.length ? 'select' : 'input', 'modal-input vireo-confirm-input', ''));
+    input.id = 'vireoConfirmInput';
+    input.dataset.vireoConfirm = 'input';
+    choices.forEach(function(choice) {
+      var option = /** @type {HTMLOptionElement} */ (element('option', '', choice));
+      option.value = choice;
+      input.appendChild(option);
+    });
+    if (input instanceof HTMLInputElement) {
+      input.type = 'text';
+      input.autocomplete = 'off';
+      input.spellcheck = false;
+      if (options.placeholder) input.placeholder = options.placeholder;
+    }
+    if (options.value != null) input.value = options.value;
+    if (options.label) {
+      var label = /** @type {HTMLLabelElement} */ (element('label', 'modal-label', options.label));
+      label.htmlFor = input.id;
+      dialog.appendChild(label);
+    } else {
+      input.setAttribute('aria-labelledby', 'vireoConfirmTitle');
+    }
+    dialog.appendChild(input);
+    return input;
+  }
+
+  /** @param {VireoDialogContent} options @param {VireoDialogKind} kind @returns {VireoDialogParts} */
+  function build(options, kind) {
     var dialog = /** @type {HTMLDialogElement} */ (element('dialog', 'modal vireo-confirm', ''));
     dialog.id = 'vireoConfirmDialog';
+    dialog.dataset.vireoDialog = kind;
     fill(options, dialog);
+    var input = kind === 'prompt' ? field(options, dialog) : null;
+    var cancel = kind === 'alert' ? null : button('cancel', 'modal-btn-cancel', options.cancelLabel || 'Cancel');
+    var accept = button(
+      'accept', options.danger ? 'vireo-confirm-danger' : 'modal-btn-primary', options.confirmLabel || 'OK');
     var actions = element('div', 'modal-actions', '');
-    var cancel = /** @type {HTMLButtonElement} */ (
-      element('button', 'modal-btn modal-btn-cancel', options.cancelLabel || 'Cancel'));
-    var accept = /** @type {HTMLButtonElement} */ (element(
-      'button',
-      'modal-btn ' + (options.danger ? 'vireo-confirm-danger' : 'modal-btn-primary'),
-      options.confirmLabel || 'OK'));
-    cancel.type = accept.type = 'button';
-    cancel.dataset.vireoConfirm = 'cancel';
-    accept.dataset.vireoConfirm = 'accept';
-    actions.append(cancel, accept);
+    if (cancel) actions.appendChild(cancel);
+    actions.appendChild(accept);
     dialog.appendChild(actions);
+    return {dialog: dialog, input: input, cancel: cancel, accept: accept};
+  }
+
+  // Every key belongs to the dialog while it is open. The page's shortcuts
+  // listen on document and would otherwise act on the photo behind it, and
+  // Esc would also close the lightbox under it. Typing still reaches the
+  // field, and Enter and Space still press the focused button: stopping
+  // propagation does not cancel a key's default action.
+  /** @param {VireoDialogParts} parts @param {(accepted: boolean) => void} finish */
+  function keyHandler(parts, finish) {
+    var stops = /** @type {HTMLElement[]} */ ([parts.input, parts.cancel, parts.accept].filter(Boolean));
+    /** @param {KeyboardEvent} event */
+    return function onKeydown(event) {
+      event.stopImmediatePropagation();
+      // A key that commits an input-method composition is not an answer.
+      if (event.isComposing) return;
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        finish(false);
+      } else if (event.key === 'Tab') {
+        // WebKit's default keyboard setting skips buttons on Tab.
+        event.preventDefault();
+        var index = stops.indexOf(/** @type {HTMLElement} */ (document.activeElement));
+        var next = stops[(index + (event.shiftKey ? -1 : 1) + stops.length) % stops.length];
+        if (next) next.focus();
+      } else if (event.key === 'Enter' && parts.input && document.activeElement === parts.input) {
+        event.preventDefault();
+        finish(true);
+      }
+    };
+  }
+
+  // Resolves null when the dialog is dismissed, otherwise the field's text
+  // (an empty string for a dialog with no field).
+  /** @param {VireoDialogContent} options @param {VireoDialogKind} kind @returns {Promise<string | null>} */
+  function show(options, kind) {
+    open = true;
+    var parts = build(options, kind);
+    var dialog = parts.dialog;
     document.body.appendChild(dialog);
     var previousFocus = document.activeElement;
 
-    return new Promise(function(resolve) {
-      /** @param {boolean} answer */
-      function finish(answer) {
+    var answer = new Promise(function(resolve) {
+      /** @param {boolean} accepted */
+      function finish(accepted) {
         if (!open) return;
         open = false;
         window.removeEventListener('keydown', onKeydown, true);
         dialog.close();
         dialog.remove();
         if (previousFocus instanceof HTMLElement && previousFocus.isConnected) previousFocus.focus();
-        resolve(answer);
+        resolve(accepted ? (parts.input ? parts.input.value : '') : null);
       }
-      // Every key belongs to the question while it is open. The page's
-      // shortcuts listen on document and would otherwise act on the photo
-      // behind the dialog, and Esc would also close the lightbox under it.
-      // Enter and Space still press the focused button: stopping
-      // propagation does not cancel a key's default action.
-      /** @param {KeyboardEvent} event */
-      function onKeydown(event) {
-        event.stopImmediatePropagation();
-        if (event.key === 'Escape') {
-          event.preventDefault();
-          finish(false);
-        } else if (event.key === 'Tab') {
-          // WebKit's default keyboard setting skips buttons on Tab.
-          event.preventDefault();
-          (document.activeElement === cancel ? accept : cancel).focus();
-        }
-      }
+      var onKeydown = keyHandler(parts, finish);
       window.addEventListener('keydown', onKeydown, true);
-      cancel.addEventListener('click', function() { finish(false); });
-      accept.addEventListener('click', function() { finish(true); });
+      if (parts.cancel) parts.cancel.addEventListener('click', function() { finish(false); });
+      parts.accept.addEventListener('click', function() { finish(true); });
       dialog.addEventListener('cancel', function(event) { event.preventDefault(); finish(false); });
       dialog.showModal();
-      // Cancel holds the focus, so a stray Enter never confirms.
-      cancel.focus();
+      // A question keeps the focus off its confirm button, so a stray Enter
+      // never confirms.
+      (parts.input || parts.cancel || parts.accept).focus();
+      if (parts.input instanceof HTMLInputElement) parts.input.select();
     });
-  };
+    closed = answer;
+    return answer;
+  }
+
+  /** @type {VireoConfirm} */
+  function confirmInPage(options) {
+    if (open) return Promise.resolve(false);
+    return show(options, 'confirm').then(function(answer) { return answer !== null; });
+  }
+
+  /** @type {VireoPrompt} */
+  function promptInPage(options) {
+    if (open) return Promise.resolve(null);
+    return show(options, 'prompt');
+  }
+
+  /** @type {VireoAlert} */
+  function alertInPage(options) {
+    if (open) return closed.then(function() { return alertInPage(options); });
+    return show(options, 'alert').then(function() {});
+  }
+
+  window.Vireo.confirm = window.Vireo.confirm || confirmInPage;
+  window.Vireo.prompt = window.Vireo.prompt || promptInPage;
+  window.Vireo.alert = window.Vireo.alert || alertInPage;
 })();
 
 /*

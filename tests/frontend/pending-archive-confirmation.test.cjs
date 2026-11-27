@@ -15,7 +15,10 @@ for (const outcome of ['accept', 'cancel', 'stale']) {
     let prompt;
     const context = vm.createContext({
       sending: false, error: {textContent: ''}, actionError: '', signature: '', refresh() {},
-      window: {confirm(message) { prompt = message; return outcome !== 'cancel'; }},
+      Vireo: {async confirm(options) {
+        prompt = [options.title, options.message].concat(options.details).join('\n');
+        return outcome !== 'cancel';
+      }},
       async fetch(url, options) {
         requests.push({url, body: JSON.parse(options.body)});
         if (requests.length === 1) return {
@@ -28,6 +31,7 @@ for (const outcome of ['accept', 'cancel', 'stale']) {
     vm.runInContext(implementation, context);
     await context.startSend({id: 'import-1', destination: '/Volumes/Photos/Trip'}, true, []);
     assert.ok(prompt.includes('/Volumes/Photos/Trip'));
+    assert.ok(prompt.includes('Mounted at: /Volumes/Photos'));
     assert.ok(!prompt.includes('opaque-share-key'));
     assert.equal(requests.length, outcome === 'cancel' ? 1 : 2);
     if (outcome !== 'cancel') assert.deepEqual(requests[1].body, {

@@ -227,3 +227,13 @@ export function googleMaps() {
 export function setGoogleMapsCallback(callback) {
   window._gmapsCallback = callback;
 }
+
+/** Ask a yes/no question in the page (Vireo.confirm, vireo-utils.js). @param {VireoConfirmOptions} options */
+export function confirmInPage(options) {
+  return window.Vireo.confirm(options);
+}
+
+/** Ask for a line of text in the page (Vireo.prompt, vireo-utils.js); null when cancelled. @param {VireoPromptOptions} options */
+export function promptInPage(options) {
+  return window.Vireo.prompt(options);
+}

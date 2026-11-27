@@ -130,16 +130,6 @@ const classicSharedGlobals = {
   // vendor/fuse.min.js
   Fuse: 'readonly',
 };
-// Files that ask before removing files. The desktop app replaces
-// window.confirm() with an async function, so a native confirm() there is a
-// promise (always truthy) and the delete runs unasked; window.alert() and
-// window.prompt() show nothing. These files ask through Vireo.confirm
-// (vireo-utils.js). Add a file when its last native dialog is gone.
-const inPageDialogsOnly = [
-  'vireo/static/lightbox/delete.js',
-  'vireo/static/vireo-work-locally.js',
-  'vireo/static/import/staging.js',
-];
 const globalWrite = `AssignmentExpression > MemberExpression.left[object.name=${GLOBAL_OBJECTS}]`;
 
 const checkedControllers = [
@@ -173,6 +163,12 @@ export default [
       'no-undef': 'off',
       'no-unused-vars': 'off',
       'no-empty': ['error', {allowEmptyCatch: true}],
+      // The desktop app's webview replaces window.confirm() with an async
+      // function, so `if (!confirm(...)) return;` sees a promise (always
+      // truthy) and the action runs unasked; window.alert() shows nothing
+      // and window.prompt() returns null. Ask in the page instead:
+      // Vireo.confirm, Vireo.prompt and Vireo.alert (vireo-utils.js).
+      'no-alert': 'error',
     },
   },
   {
@@ -209,8 +205,4 @@ export default [
     rules: {'no-restricted-syntax': ['error', ...inlineMarkupRestrictions]},
   },
   ...Object.entries(modulePages).flatMap(([page, contract]) => modulePageConfig(page, contract)),
-  {
-    files: inPageDialogsOnly,
-    rules: {'no-alert': 'error'},
-  },
 ];

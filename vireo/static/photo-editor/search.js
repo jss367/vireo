@@ -103,9 +103,10 @@ function clearEditorSearchResults() {
     // untouched — otherwise the navIds/nav position/status would already
     // describe the search target while the still-loaded dirty photo isn't in
     // ids, leaving the editor visibly inconsistent.
-    if (target !== current && isEditorDirty() &&
-        !window.confirm('Discard unsaved edits to this photo?')) {
-      return;
+    if (target !== current) {
+      if (!(await confirmDiscardEdits('Discard unsaved edits to this photo?'))) return;
+      // A newer search, or another photo opened, while the question was open.
+      if (seq !== editorState.searchSeq || Number(editorState.photoId) !== current) return;
     }
     editorState.navIds = ids;
     if (window.vireoEditNav) window.vireoEditNav.setList(ids, target);

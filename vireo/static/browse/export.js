@@ -397,7 +397,7 @@ export async function startExport() {
     }, {toast: false});
   } catch (err) {
     if (requestGeneration !== exportRequestGeneration) return;
-    alert('Export check failed: ' + (err instanceof Error ? err.message : String(err)));
+    showToast('Export check failed: ' + (err instanceof Error ? err.message : String(err)), 'error');
     setExportControlsBusy(false);
     btn.disabled = false;
     btn.textContent = buttonLabel;
@@ -406,7 +406,7 @@ export async function startExport() {
   if (requestGeneration !== exportRequestGeneration ||
       !/** @type {HTMLElement} */ (document.getElementById('exportOverlay')).classList.contains('open')) return;
   if (preflight.error) {
-    alert('Export check failed: ' + preflight.error);
+    showToast('Export check failed: ' + preflight.error, 'error');
     setExportControlsBusy(false);
     btn.disabled = false;
     btn.textContent = buttonLabel;
@@ -433,7 +433,7 @@ export async function startExport() {
         !/** @type {HTMLElement} */ (document.getElementById('exportOverlay')).classList.contains('open')) return;
     if (data.error) {
       setExportDismissible(true);
-      alert('Export error: ' + data.error);
+      showToast('Export error: ' + data.error, 'error');
       setExportControlsBusy(false);
       btn.disabled = false;
       btn.textContent = buttonLabel;
@@ -446,7 +446,7 @@ export async function startExport() {
   } catch(err) {
     if (requestGeneration !== exportRequestGeneration) return;
     setExportDismissible(true);
-    alert('Export failed: ' + (err instanceof Error ? err.message : String(err)));
+    showToast('Export failed: ' + (err instanceof Error ? err.message : String(err)), 'error');
     setExportControlsBusy(false);
     btn.disabled = false;
     btn.textContent = buttonLabel;

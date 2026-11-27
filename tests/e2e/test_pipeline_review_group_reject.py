@@ -9,6 +9,8 @@ import pytest
 from playwright.sync_api import expect
 from services.photo_review import PhotoReviewService
 
+from e2e.in_page_dialogs import answer_dialogs
+
 pytestmark = pytest.mark.usefixtures("saved_pipeline_suggestions")
 
 
@@ -2863,7 +2865,7 @@ def test_culling_can_be_undone_without_leaving_the_page(live_server, page):
     with open(path, 'w') as cache_file:
         json.dump(cache, cache_file)
     page.goto(f"{live_server['url']}/cull")
-    page.on('dialog', lambda dialog: dialog.accept())
+    answer_dialogs(page)
     # ids[0] was flagged before this run. That decision is already applied, so
     # the page shows it as a keeper instead of the fresh REJECT suggestion,
     # and applying leaves the flag alone rather than overwriting it.
@@ -3070,7 +3072,7 @@ def test_cull_apply_keeps_saved_decisions_after_rating_undo(live_server, page, s
     for pid in ids[1:]:
         page.evaluate('id => setCullAction(id, "review")', pid)
         expect(page.locator(f'.cull-card[data-photo-id="{pid}"]')).to_have_class(re.compile(r'\breview\b'))
-    page.on('dialog', lambda dialog: dialog.accept())
+    answer_dialogs(page)
     page.locator('#applyBtn').click()
     expect(page.locator('#cullStatus')).to_contain_text('Applied!')
     assert page.evaluate('cullDirty') is False

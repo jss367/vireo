@@ -5,6 +5,14 @@ import json
 from playwright.sync_api import expect
 from services import photo_ingest, workspace_folders
 
+from e2e.in_page_dialogs import (
+    DESKTOP_NATIVE_DIALOGS,
+    DIALOG,
+    accept_dialog,
+    answer_dialogs,
+    dismiss_dialog,
+)
+
 
 def _seed_resolved_scan(db, loser_count):
     """Seed resolved groups over real catalog rows; returns the loser ids.
@@ -85,7 +93,7 @@ def test_trash_all_reports_progress_and_uses_small_batches(live_server, page):
         )
 
     page.route("**/api/duplicates/delete-loser-files", handle_trash)
-    page.on("dialog", lambda dialog: dialog.accept())
+    answer_dialogs(page)
     page.goto(f"{live_server['url']}/duplicates")
 
     expect(page.locator("#trashAllBtn")).to_contain_text("Move 55 extra copies")
@@ -134,7 +142,7 @@ def test_trash_progress_excludes_file_already_missing_from_skipped_count(
         )
 
     page.route("**/api/duplicates/delete-loser-files", handle_trash)
-    page.on("dialog", lambda dialog: dialog.accept())
+    answer_dialogs(page)
     page.goto(f"{live_server['url']}/duplicates")
 
     page.locator("#trashAllBtn").click()
@@ -146,3 +154,37 @@ def test_trash_progress_excludes_file_already_missing_from_skipped_count(
     expect(progress).not_to_contain_text("1 skipped")
     # And the card matches — terminal completion, not skipped.
     expect(page.locator(".dup-card.trashed")).to_have_count(1)
+
+
+def test_trash_all_asks_before_moving_files_in_the_desktop_app(live_server, page):
+    """In the desktop app a native confirm() answers yes without showing
+    anything, so "Move N extra copies to Trash" would run on one click."""
+    loser_ids = _seed_resolved_scan(live_server["db"], loser_count=2)
+    requested = []
+
+    def handle_trash(route):
+        ids = route.request.post_data_json["photo_ids"]
+        requested.append(ids)
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(
+            {"ok": True, "trashed": len(ids), "skipped": [], "failed": []},
+        ))
+
+    page.route("**/api/duplicates/delete-loser-files", handle_trash)
+    page.add_init_script(DESKTOP_NATIVE_DIALOGS)
+    page.goto(f"{live_server['url']}/duplicates")
+
+    page.locator("#trashAllBtn").click()
+    expect(page.locator(f"{DIALOG} h3")).to_have_text(
+        "Move 2 files to Trash and remove their entries from Vireo?"
+    )
+    # Nothing is sent while the question is open, or after it is declined.
+    assert requested == []
+    assert "recoverable" in dismiss_dialog(page)
+    expect(page.locator("#trashAllBtn")).to_be_enabled()
+    expect(page.locator(".dup-card.trashed")).to_have_count(0)
+    assert requested == []
+
+    page.locator("#trashAllBtn").click()
+    accept_dialog(page)
+    expect(page.locator(".dup-card.trashed")).to_have_count(2)
+    assert requested == [loser_ids]

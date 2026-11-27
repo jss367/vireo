@@ -2,14 +2,17 @@
 // panels.
 // ES module.
 
-import { escapeAttr, escapeHtml, safeFetch, showToast } from './shared.js';
+import { confirmInPage, escapeAttr, escapeHtml, safeFetch, showToast } from './shared.js';
 import { renderFolderCoverage } from './coverage.js';
 import { reloadDashboard } from './loading.js';
 import { scopedUrl } from './scope.js';
 import { state } from './state.js';
 
 export async function startDashboardSync() {
-  if (!window.confirm('Write all pending metadata changes in this workspace to XMP?')) return;
+  if (!(await confirmInPage({
+    title: 'Write all pending metadata changes in this workspace to XMP?',
+    confirmLabel: 'Write to XMP',
+  }))) return;
   try {
     var result = /** @type {{job_id?: string} | null} */ (await safeFetch('/api/jobs/sync', {method:'POST'}, {toast:false}));
     showToast('Metadata sync started.', 'success');

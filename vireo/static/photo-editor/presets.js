@@ -104,9 +104,11 @@ async function saveCurrentAsPreset() {
   // field — without this, tweak-then-Save silently replaces that preset when
   // the user may have meant to create a new one.
   var existing = editorState.presets.find(function(p) { return p.name === name; });
-  if (existing && !window.confirm('Overwrite preset "' + name + '" with the current adjustments?')) {
-    return;
-  }
+  if (existing && !(await Vireo.confirm({
+    title: 'Overwrite preset "' + name + '" with the current adjustments?',
+    confirmLabel: 'Overwrite preset',
+    danger: true,
+  }))) return;
   try {
     var fields = await VireoBatchEdits.selectFields({
       title: 'Save preset “' + name + '”', action: 'Save preset',
@@ -136,7 +138,9 @@ async function saveCurrentAsPreset() {
 async function deleteSelectedPreset() {
   var preset = selectedPreset();
   if (!preset) return;
-  if (!window.confirm('Delete preset "' + preset.name + '"?')) return;
+  if (!(await Vireo.confirm({
+    title: 'Delete preset "' + preset.name + '"?', confirmLabel: 'Delete preset', danger: true,
+  }))) return;
   try {
     await safeFetch('/api/edit-presets/' + preset.id, {method: 'DELETE'}, {toast: false});
     /** @type {HTMLInputElement} */ (document.getElementById('presetNameInput')).value = '';

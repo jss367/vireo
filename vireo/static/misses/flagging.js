@@ -4,7 +4,7 @@
 // ES module.
 
 import { state, CATEGORY_ORDER, CATEGORY_LABELS } from './state.js';
-import { showToast } from './shared.js';
+import { confirmInPage, showToast } from './shared.js';
 import { getSinceParam } from './helpers.js';
 import { addAppliedMissFiltersToBody, missRulesContainField } from './filters.js';
 import { loadMisses } from './loading.js';
@@ -22,8 +22,14 @@ import { clearSelection } from './selection.js';
   var label = CATEGORY_LABELS[cat];
   var n = (state.missesData[cat] || []).length;
   if (n === 0) return;
-  if (!confirm('Set flag=rejected on all ' + n + ' photos in "' + label + '"?\n' +
-               'Photos are not deleted — use the existing purge flow to remove them.')) {
+  if (!(await confirmInPage({
+    title: 'Set flag=rejected on all ' + n + ' photos in "' + label + '"?',
+    message: 'Photos are not deleted — use the existing purge flow to remove them.',
+    confirmLabel: 'Reject ' + n + ' photos',
+    danger: true,
+  }))) return;
+  if (state.previewActive) {
+    showToast('Save or reset the preview before bulk rejecting', 'error');
     return;
   }
   // Match the /misses?since=... review-window scope so bulk reject only
