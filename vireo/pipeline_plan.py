@@ -417,11 +417,15 @@ class _ClassifyPlan:
             runtime_fingerprint=_detector_runtime(),
         )
         # Photos with a detector run the detect stage will not reuse. A
-        # Re-classify detects everything again and says so itself.
+        # Re-classify detects everything again and says so itself. The
+        # detect stage filters out wildlife-excluded photos before it
+        # seeds its batches, so they never trigger redetection and the
+        # plan must not count them either.
         self.redetect_count = 0
         if not (self.params.reclassify or self.params.raw_subject_analysis):
+            detectable_ids = db.photos.filter_out_wildlife_excluded(self.scope_ids)
             self.redetect_count = len(
-                db.model_runs.detector_run_exists_photo_ids("megadetector-v6", self.scope_ids)
+                db.model_runs.detector_run_exists_photo_ids("megadetector-v6", detectable_ids)
                 - self.current_detector_photo_ids
             )
         self.contextual_weak_ids = set()

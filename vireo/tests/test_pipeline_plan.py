@@ -1265,6 +1265,24 @@ def test_reclassify_plan_does_not_count_redetection_twice(tmp_path, monkeypatch)
     assert stages["Classify"]["detail"]["redetect"] == 0
 
 
+def test_plan_does_not_count_wildlife_excluded_photos_for_redetection(
+    tmp_path, monkeypatch,
+):
+    """The detect stage filters out wildlife-excluded photos, so the plan must too."""
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    pid, _ = _classified_photo_detected_without_focus_area(db, folder_id, tmp_path, monkeypatch)
+    db.conn.execute("UPDATE photos SET wildlife_excluded = 1 WHERE id = ?", (pid,))
+    db.commit()
+
+    stages = compute_plan(db, _redetection_params(), str(tmp_path / "test.db"))["stages"]
+
+    assert stages["Classify"]["detail"]["redetect"] == 0
+    assert "detect again" not in stages["Classify"]["summary"]
+    assert stages["Extract"]["detail"].get("redetect", 0) == 0
+    assert "detects again" not in stages["Extract"]["summary"]
+
+
 def test_classify_plan_timm_intrinsic_uses_runtime_fingerprint(
     tmp_path, monkeypatch,
 ):
