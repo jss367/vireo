@@ -170,6 +170,75 @@ def test_move_photos_reports_a_copy_it_could_not_compare(tmp_path, monkeypatch):
     assert (dst / "a.jpg").exists()
 
 
+def test_move_photos_keeps_finished_copies_when_a_sidecar_cannot_be_compared(tmp_path, monkeypatch):
+    """The photo's own copy already matched. A read error on its sidecar may
+    mean the source is failing, so that copy is not thrown away."""
+    import move as move_mod
+    import move.transfer as transfer
+
+    db, src, dst, _fid, ids = _folder(tmp_path, names=("a.jpg",), extras=("a.xmp",))
+    real_match = transfer.files_match
+
+    def sidecar_unreadable(source, destination):
+        if str(source).endswith(".xmp"):
+            raise OSError(5, "Input/output error")
+        return real_match(source, destination)
+
+    monkeypatch.setattr(transfer, "files_match", sidecar_unreadable)
+
+    result = move_mod.move_photos(db=db, photo_ids=[ids["a.jpg"]], destination=str(dst))
+
+    assert result["moved"] == 0
+    assert len(result["errors"]) == 1
+    assert result["errors"][0].startswith("a.xmp: the copy at ")
+    assert "The copies of a.jpg made before it were left in place too" in result["errors"][0]
+    assert (dst / "a.jpg").read_bytes() == (src / "a.jpg").read_bytes()
+    assert (dst / "a.xmp").exists()
+    assert (src / "a.jpg").exists()
+    assert (src / "a.xmp").exists()
+
+
+@pytest.mark.parametrize("merge", [False, True])
+def test_a_source_folder_that_cannot_be_listed_fails_the_comparison(tmp_path, monkeypatch, merge):
+    """A folder the verifier cannot list holds files nobody compared, so the
+    move must not go on to remove them."""
+    import move as move_mod
+
+    db, src, dst, fid, _ids = _folder(tmp_path, extras=("sub/deep.txt",))
+    locked = str(src / "sub")
+    real_scandir = os.scandir
+    verifying = []
+
+    def scandir(path="."):
+        if verifying and os.fspath(path) == locked:
+            raise PermissionError(13, "Permission denied", locked)
+        return real_scandir(path)
+
+    def wrap(name):
+        real = getattr(move_mod.folder_transfer, name)
+
+        def verifier(*args, **kwargs):
+            verifying.append(True)
+            try:
+                return real(*args, **kwargs)
+            finally:
+                verifying.clear()
+
+        monkeypatch.setattr(move_mod.folder_transfer, name, verifier)
+
+    wrap("_fresh_copy_mismatch")
+    wrap("_first_missing_source_file")
+    monkeypatch.setattr(move_mod.verify.os, "scandir", scandir)
+
+    result = move_mod.move_folder(db=db, folder_id=fid, destination=str(dst), merge=merge)
+
+    assert result["moved"] == 0
+    assert any("Verification could not be completed" in error for error in result["errors"])
+    assert (src / "sub" / "deep.txt").exists()
+    assert (src / "a.jpg").exists()
+    assert (dst / "shoot" / "a.jpg").exists()
+
+
 def test_move_photos_keeps_the_original_when_the_copy_is_corrupted(tmp_path, monkeypatch):
     import move as move_mod
     import move.transfer as transfer

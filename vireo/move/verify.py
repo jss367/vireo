@@ -309,6 +309,17 @@ def _directory_mismatch(root, directories, src_path, dest_path, *, allow_missing
     return None
 
 
+def _raise_walk_error(error):
+    """``os.walk`` skips a directory it cannot list unless told otherwise.
+
+    A post-copy verifier that skipped one would pass without comparing the
+    files inside it, and the originals there would then be removed on the
+    strength of a comparison that never happened. Raising sends the move
+    down the same path as a file that could not be read: both sides stay.
+    """
+    raise error
+
+
 def _first_missing_source_file(src_path, dest_path, *, verify_contents=False,
                                is_merge=False, progress=None):
     """Return the relative path of the first source file absent (or
@@ -359,7 +370,7 @@ def _first_missing_source_file(src_path, dest_path, *, verify_contents=False,
     file has passed, where ``checked`` counts the source files done so far.
     """
     checked = 0
-    for root, directories, files in os.walk(src_path):
+    for root, directories, files in os.walk(src_path, onerror=_raise_walk_error):
         mismatch = _directory_mismatch(root, directories, src_path, dest_path)
         if mismatch is not None:
             return mismatch
@@ -381,10 +392,9 @@ def _first_missing_source_file(src_path, dest_path, *, verify_contents=False,
                 continue
             if not os.path.lexists(dst_file) or os.path.islink(dst_file):
                 return rel_name
-            try:
-                if os.path.samefile(src_file, dst_file):
-                    return rel_name
-            except OSError:
+            # A stat error here, like a failed read below, propagates: it
+            # says nothing about the copy.
+            if os.path.samefile(src_file, dst_file):
                 return rel_name
             if not os.path.isfile(dst_file) or \
                     os.path.getsize(src_file) != os.path.getsize(dst_file):
@@ -558,7 +568,7 @@ def _fresh_copy_mismatch(src_path, transfer_dest, progress=None):
     ``_first_missing_source_file``.
     """
     src_count = 0
-    for root, directories, files in os.walk(src_path):
+    for root, directories, files in os.walk(src_path, onerror=_raise_walk_error):
         mismatch = _directory_mismatch(root, directories, src_path, transfer_dest)
         if mismatch is not None:
             return f"'{mismatch}' directory missing, linked, or different at destination"

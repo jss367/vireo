@@ -730,13 +730,16 @@ class _PhotoFileTransfer:
             if comp == item.xmp_companion and \
                     (src_dir, comp) in copied_xmp_companions:
                 continue
+            not_compared = False
             try:
                 comp_copied = _copy_and_verify(comp_src, comp_dst)
                 comp_error = ("the copy did not match the original byte for "
                               "byte, so it was removed")
             except CopyNotCompared as e:
                 comp_copied = False
-                comp_error = str(e)
+                not_compared = True
+                comp_error = (f"{e}. The copies of {photo['filename']} made "
+                              "before it were left in place too")
             except OSError as e:
                 comp_copied = False
                 comp_error = f"companion copy failed: {e}"
@@ -744,7 +747,10 @@ class _PhotoFileTransfer:
                 log.warning("Move skipped for %s: %s: %s", photo["filename"],
                             comp, comp_error)
                 self.errors.append(f"{comp}: {comp_error}")
-                self.discard_partial_copies(item, copied_companions)
+                # A read error may mean the source is failing, and then the
+                # copies already made hold the only bytes that can be read.
+                if not not_compared:
+                    self.discard_partial_copies(item, copied_companions)
                 return False
             copied_companions.append(comp)
             if comp == item.xmp_companion:

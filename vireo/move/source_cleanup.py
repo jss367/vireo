@@ -12,6 +12,12 @@ entry has a proven copy. ``remove_verified_originals`` deletes an entry only
 when it is in the record and its ``lstat`` identity (inode, size, mtime,
 ctime, mode) is unchanged since, then removes the directories that emptied.
 Everything else stays where it is and is named in the result.
+
+On Windows ``st_ctime`` is the creation time, so there the identity cannot
+see a file rewritten in place after verification with the same size and its
+modification time put back. Every other change (a different size or
+modification time, or a replacement written through a temporary file, which
+gets a new file index) is seen on every platform.
 """
 
 import os
