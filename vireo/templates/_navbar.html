@@ -118,13 +118,19 @@
 <div class="report-overlay" id="reportModal" data-navbar-on="click:closeReportModalOnBackdrop">
   <div class="report-modal">
     <h3>Report Issue</h3>
-    <textarea id="reportDescription" placeholder="What happened? What did you expect?"></textarea>
-    <div class="report-hint">This report includes recent logs and system info to help diagnose the issue.</div>
+    <textarea aria-label="Issue description" data-navbar-on="input:resetReportPreview" id="reportDescription" placeholder="What happened? What did you expect?"></textarea>
+    <label class="report-hint"><input type="checkbox" id="reportDiagnostics" data-navbar-on="change:resetReportPreview"> Include diagnostics</label>
+    <div class="report-hint">Diagnostics include up to 200 log entries, 10 recent jobs, workspace name and counts, system details, and redacted settings.</div>
+    <section id="reportPreview" hidden>
+      <strong>Report preview</strong>
+      <div id="reportDestination"></div>
+      <pre tabindex="0" aria-label="Report JSON" id="reportJson"></pre>
+    </section>
     <div class="report-actions">
       <button class="modal-btn modal-btn-cancel" data-navbar-on="click:closeReportModal">Cancel</button>
-      <button class="modal-btn modal-btn-primary" id="reportSendBtn" data-navbar-on="click:sendReport">Send Report</button>
+      <button class="modal-btn modal-btn-primary" id="reportSendBtn" data-navbar-on="click:sendReport">Review report</button>
     </div>
-    <div class="report-status" id="reportStatus"></div>
+    <div class="report-status" id="reportStatus" role="status"></div>
   </div>
 </div>
 <!-- Load keymap.js before the navbar and page scripts below so window.Keymap

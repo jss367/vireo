@@ -8,7 +8,7 @@
 // lists against each other too).
 
 import { closeCommandPalette } from './navbar-command-palette-open.js';
-import { closeReportModal, openReportModal, sendReport } from './navbar-report-context-menu.js';
+import { closeReportModal, openReportModal, resetReportPreview, sendReport } from './navbar-report-context-menu.js';
 import { toggleOverflowMenu } from './navbar-tabs.js';
 import { closeShortcutsSheet } from './navbar-tab-reorder-hotkeys.js';
 import { vireoWorkspaceSwitcher } from './navbar-workspace-switcher-init.js';
@@ -85,6 +85,7 @@ const HANDLERS = {
   toggleHelpWholeWord: function() { VireoTextSearch.toggle('helpSearch', 'whole_word', window._helpSearchRefresh); },
   closeReportModalOnBackdrop: function(event) { if (event.target === this) closeReportModal(); },
   closeReportModal: function() { closeReportModal(); },
+  resetReportPreview: function() { resetReportPreview(); },
   sendReport: function() { sendReport(); },
   // vireo-color-labels.js is a classic script that publishes VireoColorLabels.
   closeColorLabelEditorOnBackdrop: function(event) { if (event.target === this) window.VireoColorLabels.closeEditor(); },

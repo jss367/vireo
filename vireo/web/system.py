@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import queue
+import secrets
 import sqlite3
 import subprocess
 import sys
@@ -892,16 +893,8 @@ def create_system_blueprint(
         count = min(max(1, request.args.get("count", 100, type=int)), 1000)
         return jsonify(get_log_broadcaster().get_recent(count))
 
-    @blueprint.route("/api/report-issue", methods=["POST"])
-    def api_report_issue() -> ResponseReturnValue:
-        """Collect diagnostics and optionally send to a configured report URL."""
+    def collect_report(description: str) -> JsonDict:
         import platform
-        import sys
-
-        data = request.get_json(force=True, silent=True) or {}
-        description = (data.get("description") or "").strip()
-        if not description:
-            return json_error("A description is required")
 
         vireo_version = _application_version()
 
@@ -935,7 +928,7 @@ def create_system_blueprint(
         # --- Build the bundle ---
         from datetime import datetime
 
-        bundle = {
+        return {
             "description": description,
             "timestamp": datetime.now(UTC).isoformat(),
             "vireo_version": vireo_version,
@@ -959,20 +952,51 @@ def create_system_blueprint(
             "config": sanitized_config,
         }
 
-        # --- Send or download ---
-        # Fall back to plain cfg.load() if the DB is degraded (e.g. schema or
-        # connection errors) so the download path still works when users are
-        # reporting DB problems.
-        try:
-            effective = db.get_effective_config(cfg.load()) if db else cfg.load()
-        except Exception:  # broad: the issue report collects what it can
-            log.exception("Failed to load effective config for issue report")
-            effective = cfg.load()
-        report_url = effective.get("report_url", "")
+    # Retain a bounded set of local snapshots so Send uses exactly what was reviewed.
+    previews: dict[str, tuple[str, JsonDict]] = {}
+    previews_lock = threading.Lock()
+
+    @blueprint.route("/api/report-issue", methods=["POST"])
+    def api_report_issue() -> ResponseReturnValue:
+        data = request.get_json(force=True, silent=True)
+        if not isinstance(data, dict):
+            return json_error("A description is required")
+        action = data.get("action", "submit")
+        if action == "send":
+            token = data.get("preview_id")
+            with previews_lock:
+                preview = previews.pop(token, None) if isinstance(token, str) else None
+            if preview is None:
+                return json_error("Please review the report again")
+            report_url, bundle = preview
+        elif action in ("preview", "submit"):
+            description = data.get("description")
+            if not isinstance(description, str) or not description.strip():
+                return json_error("A description is required")
+            diagnostics = data.get("include_diagnostics", True)
+            if not isinstance(diagnostics, bool):
+                return json_error("include_diagnostics must be true or false")
+            description = description.strip()
+            bundle = collect_report(description) if diagnostics else {"description": description}
+            try:
+                effective = get_db().get_effective_config(cfg.load())
+            except Exception:  # broad: allow reporting even when the catalog is degraded
+                log.exception("Failed to load effective config for issue report")
+                effective = cfg.load()
+            report_url = effective.get("report_url", "")
+            if action == "preview":
+                token = secrets.token_urlsafe()
+                with previews_lock:
+                    if len(previews) >= 8:
+                        del previews[next(iter(previews))]
+                    previews[token] = (report_url, bundle)
+                return jsonify({"status": "preview", "preview_id": token,
+                                "diagnostics": bundle, "destination": report_url})
+        else:
+            return json_error("Unknown report action")
 
         if report_url:
             return _send_issue_report(report_url, bundle)
-
         return jsonify({"status": "download", "diagnostics": bundle})
 
     return blueprint
