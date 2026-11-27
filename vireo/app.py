@@ -28,7 +28,7 @@ from flask import (
     Flask,
 )
 from jobs import JobRunner, LogBroadcaster
-from schema import ensure_schema
+from schema import MigrationBackupError, ensure_schema
 from services import scan_work, startup_tasks
 from services.folder_moves import FolderMoves
 from services.gps_locations import BulkGpsLocations
@@ -48,6 +48,7 @@ from web.browse import create_browse_blueprint
 from web.caches import create_caches_blueprint
 from web.capture_time import create_capture_time_blueprint
 from web.card_cleanup import create_card_cleanup_blueprint
+from web.catalog_backups import create_catalog_backups_blueprint
 from web.collections import create_collections_blueprint
 from web.dashboard import create_dashboard_blueprint
 from web.duplicates import create_duplicates_blueprint
@@ -822,7 +823,7 @@ def _start_app_runtime(app, db_path):
     app._log_broadcaster = LogBroadcaster(buffer_size=500)
     app._log_broadcaster.install()
 
-    app._cleanup_app_resources = startup.cleanup_app_resources
+    app._cleanup_app_resources = _start_catalog_backups(app, db_path, startup)
     app._start_thumbnail_recheck = startup.start_thumbnail_recheck
     app._kickoff_preview_cache_maintenance = startup.kickoff_preview_cache_maintenance
     if not os.environ.get("VIREO_DISABLE_STARTUP_BACKFILL_TIMERS"):
@@ -844,6 +845,44 @@ def _start_app_runtime(app, db_path):
     _schedule_startup_backfills(app, startup)
 
     return init_db, missing_originals
+
+
+def _start_catalog_backups(app, db_path, startup):
+    """Build the daily catalog backup schedule; return the app cleanup.
+
+    The returned cleanup stops the schedule before the job runner shuts
+    down, so no backup starts against a runner that is closing.
+    """
+    from services.catalog_backups import CatalogBackups
+
+    app._catalog_backups = CatalogBackups(
+        db_path, lambda: app._job_runner,
+        media_dir=media_root(app.config["THUMB_CACHE_DIR"]),
+    )
+    if not os.environ.get("VIREO_DISABLE_STARTUP_BACKFILL_TIMERS"):
+        app._catalog_backups.schedule()
+
+    def cleanup_app_resources(job_timeout=10.0):
+        app._catalog_backups.stop()
+        return startup.cleanup_app_resources(job_timeout=job_timeout)
+
+    return cleanup_app_resources
+
+
+def _apply_pending_catalog_restore(db_path, thumb_dir):
+    """Finish a restore Settings prepared, before anything opens the catalog.
+
+    Runs after the single-instance lock, so no other Vireo has the catalog
+    open. A restore that could not put the previous catalog back raises:
+    starting would create an empty catalog in its place. ``thumb_dir`` is
+    the same value ``create_app`` receives, so the restore reaches the
+    ``edit-masks/`` folder its snapshots belong in.
+    """
+    from services.catalog_backups import apply_pending_restore
+
+    outcome = apply_pending_restore(db_path, media_dir=media_root(thumb_dir))
+    if outcome is not None and not outcome["ok"]:
+        log.error("Catalog restore did not happen: %s", outcome["error"])
 
 
 def _start_missing_originals(app, db_path):
@@ -990,6 +1029,7 @@ def _register_core_blueprints(app, w):
             invalidate_missing_originals=lambda ws_id: missing_originals.invalidate(
                 workspace_ids=[ws_id]
             ),
+            trash=w.trash,
         )
     )
     app.register_blueprint(
@@ -1000,6 +1040,7 @@ def _register_core_blueprints(app, w):
             db_path,
             media_root(app.config["THUMB_CACHE_DIR"]),
             invalidate_missing_originals=missing_originals.invalidate,
+            trash=w.trash,
         )
     )
     app.register_blueprint(
@@ -1074,6 +1115,9 @@ def _register_library_blueprints(app, w):
         create_storage_blueprint(_get_db, json_error, db_path, app.config,
                                  get_runner=lambda: app._job_runner)
     )
+    app.register_blueprint(create_catalog_backups_blueprint(
+        _get_db, json_error, catalog_backups=app._catalog_backups,
+    ))
     app.register_blueprint(
         create_workspace_blueprint(
             _get_db,
@@ -1268,6 +1312,7 @@ def _register_photo_blueprints(app, w, serve_original_photo, serve_photo_preview
             start_missing_originals_scan=missing_originals.start_scan,
             invalidate_missing_originals=missing_originals.invalidate,
             run_batch_delete=w.photo_deletion.run_batch_delete,
+            trash=w.trash,
         )
     )
     app.register_blueprint(
@@ -1417,6 +1462,24 @@ def _emit_incompatible_database_exit(e):
     raise SystemExit(3) from e
 
 
+def _emit_migration_backup_exit(e):
+    # ensure_schema refused to migrate because the pre-migration backup
+    # could not be written. The catalog is unchanged. Mirror the
+    # startup_failed signal create_app's broad-exception handler emits,
+    # so the sidecar host surfaces a controlled dialog instead of a raw
+    # traceback.
+    import sys as _sys
+    log.error(
+        "Vireo could not back up %s before schema migration: %s",
+        e.db_path, e.cause,
+    )
+    _sys.stderr.write(json.dumps({
+        "error": "startup_failed",
+        "reason": str(e),
+    }) + "\n")
+    raise SystemExit(2) from e
+
+
 def _parse_main_args():
     parser = argparse.ArgumentParser(description="Vireo Photo Browser")
     parser.add_argument(
@@ -1486,6 +1549,13 @@ def _load_taxonomy_and_exit(db_path):
         ensure_schema(db_path)
     except IncompatibleDatabaseError as e:
         _emit_incompatible_database_exit(e)
+    except MigrationBackupError as e:
+        # The pre-migration backup failed (full disk, read-only volume,
+        # permission denied). ensure_schema has not touched the catalog, so
+        # emit the same structured startup_failed signal create_app's
+        # broad-exception handler uses instead of letting a raw traceback
+        # escape this CLI entry point.
+        _emit_migration_backup_exit(e)
     db = Database(db_path)
     log.info("Loading taxonomy tree from iNaturalist...")
     stats = load_taxonomy(db)
@@ -1655,6 +1725,7 @@ def main():
     )
 
     _reserve_single_instance_or_exit()
+    _apply_pending_catalog_restore(args.db, args.thumb_dir)
 
     api_token = generate_token()
     mode = "headless" if args.headless else "gui"

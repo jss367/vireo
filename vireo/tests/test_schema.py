@@ -237,14 +237,174 @@ def test_ensure_schema_keeps_older_backups_when_snapshot_fails(tmp_path, monkeyp
     with sqlite3.connect(db_path) as conn:
         conn.execute(f"PRAGMA user_version = {schema.OLDEST_UPGRADABLE_VERSION}")
 
-    # Simulate _snapshot_before_migrations failing silently (its except
-    # branch already swallows sqlite3.Error / OSError and logs a warning).
+    # Guard the prune on its own: a snapshot step that returns without
+    # writing the target-version backup must not cost the older ones.
     monkeypatch.setattr(schema, "_snapshot_before_migrations", lambda *a, **k: None)
 
     schema.ensure_schema(db_path)
 
     assert not os.path.exists(f"{db_path}.pre-v{latest}.bak")
     assert os.path.exists(stale_backup)
+
+
+def _db_one_upgrade_behind(tmp_path):
+    db_path = str(tmp_path / "vireo.db")
+    schema.ensure_schema(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(f"PRAGMA user_version = {schema.OLDEST_UPGRADABLE_VERSION}")
+    return db_path
+
+
+def _user_version(db_path):
+    with sqlite3.connect(db_path) as conn:
+        return conn.execute("PRAGMA user_version").fetchone()[0]
+
+
+def test_ensure_schema_refuses_to_migrate_without_room_for_backup(tmp_path, monkeypatch):
+    """Too little free space for the backup stops the upgrade before any
+    migration runs, and the error tells the user how much to free."""
+    import collections
+    import glob
+
+    db_path = _db_one_upgrade_behind(tmp_path)
+    usage = collections.namedtuple("usage", "total used free")
+    monkeypatch.setattr(schema.shutil, "disk_usage", lambda _path: usage(0, 0, 1024))
+
+    with pytest.raises(schema.MigrationBackupError) as excinfo:
+        schema.ensure_schema(db_path)
+
+    message = str(excinfo.value)
+    assert db_path in message
+    assert "has 0.0 GB free" in message
+    assert "Free at least" in message
+    assert "The catalog was not changed" in message
+    assert _user_version(db_path) == schema.OLDEST_UPGRADABLE_VERSION
+    assert glob.glob(f"{db_path}.pre-v*") == []
+
+
+def test_ensure_schema_near_threshold_shortfall_reports_nonzero_amount(tmp_path, monkeypatch):
+    """A deficit smaller than 0.05 GB must not round to "Free at least 0.0 GB":
+    the instruction stays actionable by falling back to MB."""
+    import collections
+
+    db_path = _db_one_upgrade_behind(tmp_path)
+    needed = schema._backup_space_needed(db_path)
+    # Leave the user 5 MB short of what the backup needs.
+    free = max(0, needed - 5 * 1024 * 1024)
+    usage = collections.namedtuple("usage", "total used free")
+    monkeypatch.setattr(schema.shutil, "disk_usage", lambda _path: usage(0, 0, free))
+
+    with pytest.raises(schema.MigrationBackupError) as excinfo:
+        schema.ensure_schema(db_path)
+
+    message = str(excinfo.value)
+    assert "Free at least" in message
+    assert "0.0 GB on that drive" not in message
+    assert " MB on that drive" in message
+
+
+def test_backup_space_needed_excludes_freelist_pages(tmp_path):
+    """A catalog whose deleted rows left substantial freelist space produces
+    a smaller backup than its raw file length; the preflight must size the
+    estimate against the compacted pages, not ``os.path.getsize``."""
+    import os as _os
+
+    db_path = str(tmp_path / "vireo.db")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA journal_mode = DELETE")
+        conn.execute("CREATE TABLE big (data BLOB)")
+        conn.executemany(
+            "INSERT INTO big VALUES (?)", [(b"x" * 1024,) for _ in range(5000)]
+        )
+        conn.commit()
+        conn.execute("DELETE FROM big")
+        conn.commit()
+    raw_size = _os.path.getsize(db_path)
+
+    needed = schema._backup_space_needed(db_path)
+
+    # The old raw-size estimate stayed at the un-compacted file length plus
+    # headroom; the new one must come in below that because freelist pages
+    # are dropped by VACUUM INTO.
+    old_estimate = raw_size + max(
+        int(raw_size * schema._BACKUP_HEADROOM_FRACTION),
+        schema._BACKUP_HEADROOM_MIN_BYTES,
+    )
+    assert needed < old_estimate, (
+        f"needed={needed}, old_estimate={old_estimate}, raw_size={raw_size}"
+    )
+
+
+def test_backup_space_needed_ignores_pinned_wal(tmp_path):
+    """Another connection can pin a WAL much larger than the live catalog.
+    Those bytes already sit on the volume, so the preflight must not add
+    them again — otherwise a tiny catalog with a big pinned WAL is refused
+    indefinitely even when the backup would fit."""
+    db_path = str(tmp_path / "vireo.db")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA journal_mode = DELETE")
+        conn.execute("CREATE TABLE t (data BLOB)")
+        conn.commit()
+
+    baseline = schema._backup_space_needed(db_path)
+
+    # A WAL left behind by another connection — often many times the live
+    # catalog when it has been pinned through repeated updates.
+    with open(db_path + "-wal", "wb") as wal:
+        wal.write(b"\0" * (128 * 1024 * 1024))
+
+    assert schema._backup_space_needed(db_path) == baseline
+
+
+def test_format_minimum_to_free_rounds_up_small_deficits():
+    """A 1-byte shortfall still asks the user to free at least 1 MB, and
+    sub-tenth-of-GB values are rendered in MB instead of rounding to 0.0 GB."""
+    assert schema._format_minimum_to_free(1) == "1 MB"
+    assert schema._format_minimum_to_free(5 * 1024 * 1024) == "5 MB"
+    # Exactly 1 GB tips into GB formatting.
+    assert schema._format_minimum_to_free(1024 ** 3) == "1.0 GB"
+    # 1 GB + 1 byte rounds up to the next tenth.
+    assert schema._format_minimum_to_free(1024 ** 3 + 1) == "1.1 GB"
+
+
+def test_ensure_schema_refuses_to_migrate_when_backup_write_fails(tmp_path, monkeypatch):
+    """A backup that fails after the space check (read-only volume, the
+    disk filling during the copy) stops the upgrade and leaves no partial
+    backup behind."""
+    import errno
+    import glob
+
+    db_path = _db_one_upgrade_behind(tmp_path)
+
+    def fail_replace(_src, _dst):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(schema, "replace_file", fail_replace)
+
+    with pytest.raises(schema.MigrationBackupError) as excinfo:
+        schema.ensure_schema(db_path)
+
+    assert "No space left on device" in str(excinfo.value)
+    assert _user_version(db_path) == schema.OLDEST_UPGRADABLE_VERSION
+    assert glob.glob(f"{db_path}.pre-v*") == []
+
+
+def test_ensure_schema_existing_backup_skips_space_check(tmp_path, monkeypatch):
+    """A backup from an earlier attempt at the same target already protects
+    the catalog, so a full disk does not block finishing the upgrade."""
+    db_path = _db_one_upgrade_behind(tmp_path)
+    latest = schema._latest_version()
+    with open(f"{db_path}.pre-v{latest}.bak", "w") as f:
+        f.write("earlier snapshot")
+
+    def no_disk_usage(_path):
+        raise AssertionError("free space checked although the backup exists")
+
+    monkeypatch.setattr(schema.shutil, "disk_usage", no_disk_usage)
+
+    schema.ensure_schema(db_path)
+
+    assert _user_version(db_path) == latest
 
 
 def test_ensure_schema_newer_db_raises_incompatible_database_error(tmp_path):
@@ -265,6 +425,46 @@ def test_ensure_schema_newer_db_raises_incompatible_database_error(tmp_path):
     assert excinfo.value.db_path == db_path
     with sqlite3.connect(db_path) as conn:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 99
+
+
+def test_load_taxonomy_cli_structured_exit_on_backup_failure(tmp_path, monkeypatch, capsys):
+    """``--load-taxonomy`` also opens the catalog through ensure_schema, so
+    a pre-migration backup failure (full disk, read-only volume) must emit
+    the same structured startup_failed signal create_app does instead of
+    letting a raw MigrationBackupError traceback escape."""
+    import collections
+    import json as _json
+
+    import app as vireo_app
+
+    db_path = _db_one_upgrade_behind(tmp_path)
+    usage = collections.namedtuple("usage", "total used free")
+    monkeypatch.setattr(schema.shutil, "disk_usage", lambda _path: usage(0, 0, 1024))
+
+    monkeypatch.setattr(
+        "sys.argv",
+        ["vireo", "--db", db_path, "--thumb-dir", str(tmp_path / "thumbs"),
+         "--load-taxonomy"],
+    )
+    # Guard against actually touching the DB or the network if the fix
+    # regresses and control ever reaches Database(args.db)/load_taxonomy.
+    def _boom(*_a, **_kw):  # pragma: no cover - regression guard
+        raise AssertionError("--load-taxonomy touched the DB after backup failure")
+
+    monkeypatch.setattr("db.Database", _boom)
+    monkeypatch.setattr(vireo_app, "_setup_file_logging", lambda: None)
+
+    with pytest.raises(SystemExit) as excinfo:
+        vireo_app.main()
+    assert excinfo.value.code == 2
+
+    captured = capsys.readouterr()
+    payload = _json.loads(captured.err.strip().splitlines()[-1])
+    assert payload["error"] == "startup_failed"
+    assert db_path in payload["reason"]
+    assert "backup" in payload["reason"].lower()
+
+    assert _user_version(db_path) == schema.OLDEST_UPGRADABLE_VERSION
 
 
 def test_load_taxonomy_cli_refuses_newer_db(tmp_path, monkeypatch, capsys):

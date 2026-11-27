@@ -11,7 +11,8 @@ interface StorageCount {size:number;count:number}
 interface StorageWorkingCopies {size:number;count:number;quota_bytes:number}
 interface StorageAuxiliaryCategory {name:string;size:number;entries:Array<{size:number;description:string;path:string}>}
 interface StorageMaskVariant {variant:string;count?:number;bytes?:number;active_count?:number}
-interface StorageMasks {variants?:StorageMaskVariant[];total_bytes?:number;stale_count?:number}
+interface StorageSetAsideMasks {set_aside_by:number;set_aside_reason:string;masks:number;active:number}
+interface StorageMasks {variants?:StorageMaskVariant[];total_bytes?:number;stale_count?:number;set_aside?:StorageSetAsideMasks[]}
 interface StorageReport {
   total:number;reclaimable:number;volumes?:StorageVolume[];locations?:StorageLocation[];
   working_copies:StorageWorkingCopies;database:{size:number};thumbnails:StorageCount;previews:StorageCount;

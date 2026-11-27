@@ -19,6 +19,7 @@ function _extractMasksSummary(ext) {
   // Cached masks measured for subject detail this run, and those whose
   // source could not be read for it (still masked, measurement pending).
   if (ext.detail_measured) parts.push(ext.detail_measured + ' detail measured');
+  if (ext.set_aside_reused) parts.push(ext.set_aside_reused + ' reused after an upgrade set them aside');
   if (ext.detail_unreadable) parts.push(ext.detail_unreadable + ' detail unmeasured');
   if (parts.length) return parts.join(', ');
   // Every counter is zero. `reason` means the backend emptied the worklist

@@ -29,22 +29,27 @@ from services.local_workspace import (
     LocalWorkspaceCancelled,
     LocalWorkspaceConflict,
     LocalWorkspaceError,
+    SourceDeletion,
     _add_recovery_republish,
     _ancestor_conflicts,
-    _atomic_publish,
     _change_summary,
     _collect_source_entries,
+    _confirmed_after_resume,
     _copy_entry,
     _entry_type,
     _is_within,
+    _load_trash_refused,
     _local_changes,
     _managed_root_state,
     _matches_remote,
     _norm,
+    _permanent_deletions,
     _physical_is_within,
-    _prepare_publish_target,
+    _publish_or_record_refusal,
     _relative,
     _source_state,
+    _sync_recovery_payload,
+    _sync_result,
     _walk_entries,
     _write_manifest,
     destination_case_insensitive,
@@ -53,6 +58,7 @@ from services.local_workspace import (
     source_tree_size,
     stage_boundary_lock,
 )
+from services.trash import TrashService
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -834,10 +840,15 @@ def _load_manifest(vireo_dir: str, root_folder_id: int) -> JsonDict | None:
     return data
 
 
-def _write_sync_recovery(vireo_dir: str, root_folder_id: int, deleted_keys: Iterable[ManifestKey]) -> None:
+def _write_sync_recovery(
+    vireo_dir: str,
+    root_folder_id: int,
+    deleted_keys: Iterable[ManifestKey],
+    trash_refused: AbstractSet[ManifestKey] = frozenset(),
+) -> None:
     _write_manifest(
         _sync_recovery_path(vireo_dir, root_folder_id),
-        {"confirmed_deletions": [[int(index), rel] for index, rel in deleted_keys]},
+        _sync_recovery_payload(deleted_keys, trash_refused),
     )
 
 
@@ -1513,33 +1524,6 @@ def _folder_sync_conflicts(
     return conflicts
 
 
-def _publish_folder_changes(
-    manifest: JsonDict,
-    local: Mapping[ManifestKey, LocalEntry],
-    changed: Sequence[ManifestKey],
-    deleted: Sequence[ManifestKey],
-    progress: StepProgress | None = None,
-) -> None:
-    """Apply local deletions, then publish created and modified files to source."""
-    total = len(changed) + len(deleted)
-    done = 0
-    for index, rel in deleted:
-        remote_path = os.path.join(manifest["roots"][index]["source_path"], rel)
-        with suppress(FileNotFoundError):
-            os.unlink(remote_path)
-        done += 1
-        if progress:
-            progress(done, total, rel)
-    for key in changed:
-        index, rel = key
-        remote_path = os.path.join(manifest["roots"][index]["source_path"], rel)
-        _prepare_publish_target(remote_path)
-        _atomic_publish(local[key][0], remote_path)
-        done += 1
-        if progress:
-            progress(done, total, rel)
-
-
 def sync_folder(
     db: Database,
     root_folder_id: int,
@@ -1551,6 +1535,7 @@ def sync_folder(
     scan_progress: StepProgress | None = None,
     cancel_check: CancelCheck | None = None,
     begin_commit: BeginCommit | None = None,
+    source_deletion: SourceDeletion | None = None,
 ) -> JsonDict:
     """Publish one shared local folder and restore its catalog paths.
 
@@ -1560,17 +1545,26 @@ def sync_folder(
     network, so on a large folder it owns most of the job's wall clock; it is
     reported separately rather than left as a silent wait. ``current`` counts
     entries already compared and ``rel`` names the one being compared now.
+
+    Source files the local copy no longer has go to the Trash
+    (``source_deletion``; the real Trash when not given). If the Trash keeps
+    any, the sync raises ``LocalWorkspaceTrashRefused`` before publishing and
+    stays resumable.
     """
+    source_deletion = source_deletion or SourceDeletion(TrashService())
     root_folder_id = int(local_root_for_folder(db, root_folder_id) or root_folder_id)
+    recovery_path = _sync_recovery_path(vireo_dir, root_folder_id)
     with _folder_lock(root_folder_id):
         state_row = folder_state(db, root_folder_id)
         if not state_row or state_row["state"] not in {"active", "syncing"}:
             raise LocalWorkspaceError("This folder is not working locally")
         resuming = state_row["state"] == "syncing"
         recovery_confirmed: set[ManifestKey] | None = None
+        trash_refused: set[ManifestKey] = set()
         if resuming:
             allow_deletions = True
             recovery_confirmed = _load_sync_recovery(vireo_dir, root_folder_id)
+            trash_refused = _load_trash_refused(recovery_path)
         manifest = _load_manifest(vireo_dir, root_folder_id)
         if manifest is None:
             raise LocalWorkspaceError(
@@ -1588,6 +1582,7 @@ def sync_folder(
             resuming=resuming,
             recovery_confirmed=recovery_confirmed,
         )
+        permanent = _permanent_deletions(deleted, source_deletion, trash_refused)
 
         conflicts = _folder_sync_conflicts(
             manifest, baseline, local, changed, deleted, recovery_republish,
@@ -1600,14 +1595,18 @@ def sync_folder(
             raise LocalWorkspaceCancelled("Local folder sync cancelled")
         if begin_commit and not begin_commit():
             raise LocalWorkspaceCancelled("Local folder sync cancelled")
+        confirmed = _confirmed_after_resume(deleted, recovery_confirmed)
         if not resuming:
-            _write_sync_recovery(vireo_dir, root_folder_id, deleted)
+            _write_sync_recovery(vireo_dir, root_folder_id, confirmed)
             db.local_folders.mark_syncing(root_folder_id)
             db.commit()
         elif fresh_confirmation:
-            _write_sync_recovery(vireo_dir, root_folder_id, deleted)
+            _write_sync_recovery(vireo_dir, root_folder_id, confirmed, trash_refused & set(deleted))
 
-        _publish_folder_changes(manifest, local, changed, deleted, progress)
+        removal = _publish_or_record_refusal(
+            recovery_path, confirmed, manifest, local, changed, deleted, progress,
+            source_deletion=source_deletion, permanent=permanent,
+        )
         workspace_ids = affected_workspace_ids(db, root_folder_id)
         _restore_catalog(db, root_folder_id)
         _remove_folder_dir(vireo_dir, root_folder_id, root["local_path"])
@@ -1615,10 +1614,8 @@ def sync_folder(
             db, root["source_path"], workspace_ids,
         )
         return {
-            "ok": True,
+            **_sync_result(changed, deleted, removal),
             "root_folder_id": root_folder_id,
-            "created_or_modified": len(changed),
-            "deleted": len(deleted),
             "files_examined": len(local),
         }
 

@@ -1687,6 +1687,99 @@ def test_missing_remove_refuses_unconfirmed_permanent_delete(app_and_db, tmp_pat
     assert db.photos.get(pid) is not None
 
 
+def _missing_photo_with_sidecar(db, tmp_path):
+    """A photo whose original is gone and whose ``.xmp`` is still on disk."""
+    pid, real_file = _photo_with_real_file(db, tmp_path)
+    os.remove(real_file)
+    sidecar = os.path.splitext(real_file)[0] + ".xmp"
+    with open(sidecar, "w") as handle:
+        handle.write("<x:xmpmeta/>")
+    return pid, sidecar
+
+
+@pytest.mark.parametrize(
+    "mode,extra",
+    [("vireo", {}), ("disk", {}), ("disk_permanent", {"confirm_permanent": True})],
+)
+def test_missing_remove_moves_sidecars_to_the_trash_in_every_mode(
+    app_and_db, tmp_path, fake_trash, mode, extra,
+):
+    """``mode`` says what happens to the photo's own files. Its leftover
+    sidecar goes to the Trash whichever mode is named, never an unlink."""
+    app, db = app_and_db
+    client = app.test_client()
+    pid, sidecar = _missing_photo_with_sidecar(db, tmp_path)
+
+    resp = client.post("/api/photos/missing/remove", json={
+        "photo_ids": [pid], "mode": mode, "delete_sidecars": True, **extra,
+    })
+
+    assert resp.status_code == 200, resp.get_json()
+    data = resp.get_json()
+    assert (data["sidecars_deleted"], data["sidecars_failed_total"]) == (1, 0)
+    assert fake_trash.trashed_paths[0] == [sidecar]
+    assert not os.path.exists(sidecar)
+    trashed = [
+        os.path.join(root, name)
+        for root, _dirs, names in os.walk(tmp_path / "test-trash") for name in names
+    ]
+    assert [os.path.basename(path) for path in trashed] == [os.path.basename(sidecar)]
+    assert db.photos.get(pid) is None
+
+
+def test_missing_remove_keeps_and_reports_a_sidecar_the_trash_refuses(
+    app_and_db, tmp_path, fake_trash,
+):
+    app, db = app_and_db
+    client = app.test_client()
+    pid, sidecar = _missing_photo_with_sidecar(db, tmp_path)
+    fake_trash.handle_trash(
+        lambda paths, *args, **kwargs: (0, set(), [{"path": path, "error": "Trash unavailable"} for path in paths])
+    )
+
+    resp = client.post("/api/photos/missing/remove", json={
+        "photo_ids": [pid], "mode": "vireo", "delete_sidecars": True,
+    })
+
+    assert resp.status_code == 200, resp.get_json()
+    data = resp.get_json()
+    assert (data["sidecars_deleted"], data["sidecars_skipped"]) == (0, 1)
+    assert data["sidecars_failed"] == [{"path": sidecar, "error": "Trash unavailable"}]
+    assert data["sidecars_failed_total"] == 1
+    assert os.path.exists(sidecar)
+    # The photo is still removed from Vireo: its original is gone either way.
+    assert data["deleted"] == 1
+    assert db.photos.get(pid) is None
+
+
+def test_missing_delete_sidecars_route_uses_the_trash(app_and_db, tmp_path, fake_trash):
+    app, db = app_and_db
+    client = app.test_client()
+    pid, sidecar = _missing_photo_with_sidecar(db, tmp_path)
+    refuse = {"on": True}
+
+    def handler(paths, *args, **kwargs):
+        if refuse["on"]:
+            return 0, set(), [{"path": path, "error": "Trash unavailable"} for path in paths]
+        for path in paths:
+            os.remove(path)
+        return len(paths), set(paths), []
+
+    fake_trash.handle_trash(handler)
+
+    kept = client.post("/api/photos/missing/delete-sidecars", json={"photo_ids": [pid]}).get_json()
+    assert (kept["deleted"], kept["skipped"], kept["sidecars_failed_total"]) == (0, 1, 1)
+    assert kept["sidecars_failed"] == [{"path": sidecar, "error": "Trash unavailable"}]
+    assert os.path.exists(sidecar)
+
+    # The photo is still listed as missing, so the same cleanup can be tried again.
+    refuse["on"] = False
+    moved = client.post("/api/photos/missing/delete-sidecars", json={"photo_ids": [pid]}).get_json()
+    assert (moved["deleted"], moved["sidecars_failed_total"]) == (1, 0)
+    assert fake_trash.trashed_paths == [[sidecar], [sidecar]]
+    assert not os.path.exists(sidecar)
+
+
 def test_run_batch_delete_refuses_unconfirmed_permanent_delete(app_and_db, tmp_path):
     """The gate is in ``run_batch_delete`` itself, so a caller that is not
     one of the routes cannot delete permanently by naming the mode."""

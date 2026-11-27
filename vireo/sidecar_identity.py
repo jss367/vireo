@@ -8,9 +8,15 @@ identity helpers at the bottom to compare sidecars that may not exist yet.
 
 import logging
 import os
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field
 
 log = logging.getLogger(__name__)
+
+# ``TrashService.trash_paths`` as this module calls it: the paths in, and
+# ``(moved, successful paths, failures)`` out, each failure a
+# ``{"path", "error"}`` dict.
+type TrashPaths = Callable[[list[str]], tuple[int, set[str], list[dict[str, str]]]]
 
 SIDECAR_EXTENSION = ".xmp"
 
@@ -126,8 +132,23 @@ def sidecar_has_owner(sidecar_path: str, keys: frozenset[str] | None = None) -> 
     return sidecar_owner_key(os.path.basename(sidecar_path)) in keys
 
 
-def delete_orphaned_sidecars(photo_paths: Iterable[str]) -> tuple[int, int]:
-    """Delete the sidecars of photos whose originals are confirmed gone.
+@dataclass(frozen=True)
+class SidecarCleanup:
+    """What ``trash_orphaned_sidecars`` did.
+
+    ``cleaned`` counts photos at least one of whose sidecars went to the
+    Trash and ``skipped`` photos with nothing removed. ``failures`` holds a
+    ``{"path", "error"}`` per sidecar the Trash refused; those files are
+    still on disk.
+    """
+
+    cleaned: int = 0
+    skipped: int = 0
+    failures: list[dict[str, str]] = field(default_factory=list)
+
+
+def trash_orphaned_sidecars(photo_paths: Iterable[str], trash_paths: TrashPaths) -> SidecarCleanup:
+    """Move to the Trash the sidecars of photos whose originals are confirmed gone.
 
     Callers verify each original is missing first. A sidecar that another
     file still owns is kept: ``IMG_1.xmp`` beside a surviving ``IMG_1.JPG``
@@ -135,31 +156,39 @@ def delete_orphaned_sidecars(photo_paths: Iterable[str]) -> tuple[int, int]:
     a sidecar whose own original reappeared is owned again. Each directory
     is listed once per call.
 
-    Returns ``(photos_cleaned, photos_skipped)``: photos at least one of
-    whose sidecars was removed, and photos with nothing removed.
+    ``trash_paths`` is the app's ``TrashService.trash_paths``. Every sidecar
+    goes to it in one call, so a network volume costs one Finder run per
+    batch, and a sidecar it refuses stays where it is.
     """
-    cleaned = 0
-    skipped = 0
     keys_by_directory: dict[str, frozenset[str] | None] = {}
+    # Each photo's unowned sidecars. A sidecar two missing photos share
+    # belongs to the first one listed.
+    targets_by_photo: list[list[str]] = []
+    claimed: set[str] = set()
     for photo_path in photo_paths:
         directory = os.path.dirname(photo_path) or os.curdir
         if directory not in keys_by_directory:
             keys_by_directory[directory] = directory_owner_keys(directory)
         keys = keys_by_directory[directory]
-        removed_one = False
-        for sidecar in photo_sidecars(photo_path):
-            if sidecar_has_owner(sidecar, keys):
-                continue
-            try:
-                os.remove(sidecar)
-                removed_one = True
-            except OSError as e:
-                log.warning("Failed to delete sidecar %s: %s", sidecar, e)
-        if removed_one:
-            cleaned += 1
-        else:
-            skipped += 1
-    return cleaned, skipped
+        targets = [
+            sidecar for sidecar in photo_sidecars(photo_path)
+            if sidecar not in claimed and not sidecar_has_owner(sidecar, keys)
+        ]
+        claimed.update(targets)
+        targets_by_photo.append(targets)
+
+    successful: set[str] = set()
+    failures: list[dict[str, str]] = []
+    if claimed:
+        _moved, successful, failures = trash_paths(
+            [sidecar for targets in targets_by_photo for sidecar in targets]
+        )
+        for failure in failures:
+            log.warning("Failed to move sidecar to Trash: %s", failure)
+    cleaned = sum(1 for targets in targets_by_photo if successful.intersection(targets))
+    return SidecarCleanup(
+        cleaned=cleaned, skipped=len(targets_by_photo) - cleaned, failures=list(failures),
+    )
 
 
 def directory_folds_case(directory: str) -> bool | None:

@@ -392,6 +392,28 @@ def count_mask_detail_pending(
     )
 
 
+def count_set_aside_masks(
+    db: Database, sam2_variant: str | None, photo_ids: Iterable[int] | None = None,
+    detector_confidence: float | None = None, *, rescue_floors: dict[int, float] | None = None,
+) -> int:
+    """Count photos in scope whose mask an upgrade set aside and the stage will check.
+
+    A schema migration that stops trusting a mask keeps its row
+    (``schema.set_aside_masks``). These photos have no active mask, so they
+    are part of ``pending``; the stage reuses the mask without SAM where it
+    still matches the original. The plan names them so "N to extract" does
+    not read as N SAM runs.
+    """
+    if not sam2_variant:
+        return 0
+    repo = _scoped_stats(db)
+    detector_confidence = _detector_confidence(db, detector_confidence)
+    scope_sql, scope_params = staged_scope_clause(db, photo_ids)
+    return repo.count_set_aside_masks(
+        sam2_variant, detector_confidence, scope_sql, scope_params, rescue_floors=rescue_floors,
+    )
+
+
 def count_eye_keypoint_eligible(
     db: Database, photo_ids: Iterable[int] | None = None,
 ) -> int:

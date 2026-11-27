@@ -108,6 +108,60 @@ def test_service_refuses_unverified_raw_prompt_before_segmentation(db, tmp_path,
     assert db.masks_features.get_mask(pid, extraction.options.sam2_variant) is None
 
 
+def test_mask_an_upgrade_set_aside_is_proven_and_reused_without_sam(db, tmp_path, extraction):
+    import schema
+
+    pid = seed_photo(db, tmp_path, "set-aside")
+    assert run(extraction)["masked"] == 1
+    before = dict(db.conn.execute("SELECT * FROM photos WHERE id=?", (pid,)).fetchone())
+    assert before["active_mask_variant"] == "sam2-base"
+    schema.set_aside_masks(db.conn, "m.photo_id=?", (pid,), version=99, reason="Test reason")
+    db.commit()
+    assert db.conn.execute("SELECT mask_path FROM photos WHERE id=?", (pid,)).fetchone()[0] is None
+
+    result = run(extraction)
+
+    assert (result["masked"], result["set_aside_reused"], result["ok"]) == (1, 1, True)
+    assert len(extraction.generated) == 1, "SAM ran again over a mask that was only set aside"
+    after = dict(db.conn.execute("SELECT * FROM photos WHERE id=?", (pid,)).fetchone())
+    for column in ("mask_path", "active_mask_variant", "subject_tenengrad", "subject_detail",
+                   "dino_subject_embedding", "dino_embedding_variant"):
+        assert after[column] == before[column], column
+    assert db.masks_features.get_mask(pid, "sam2-base")["set_aside_by"] is None
+
+
+def test_regenerated_set_aside_mask_is_not_counted_as_reused(db, tmp_path, extraction):
+    import schema
+
+    pid = seed_photo(db, tmp_path, "set-aside-different-embedding")
+    assert run(extraction)["masked"] == 1
+    schema.set_aside_masks(db.conn, "m.photo_id=?", (pid,), version=99, reason="Test reason")
+    db.commit()
+    extraction.options = replace(extraction.options, dinov2_variant="dinov2-large")
+
+    result = run(extraction)
+
+    assert (result["masked"], result["set_aside_reused"], result["ok"]) == (1, 0, True)
+    assert len(extraction.generated) == 2
+
+
+def test_set_aside_mask_whose_file_is_gone_is_made_again(db, tmp_path, extraction):
+    import schema
+
+    pid = seed_photo(db, tmp_path, "set-aside-lost")
+    run(extraction)
+    Path(db.masks_features.get_mask(pid, "sam2-base")["path"]).unlink()
+    schema.set_aside_masks(db.conn, "m.photo_id=?", (pid,), version=99, reason="Test reason")
+    db.commit()
+
+    result = run(extraction)
+
+    assert (result["masked"], result["set_aside_reused"]) == (1, 0)
+    assert len(extraction.generated) == 2
+    mask = db.masks_features.get_mask(pid, "sam2-base")
+    assert mask["set_aside_by"] is None and Path(mask["path"]).is_file()
+
+
 def assert_released(extraction, *photo_ids):
     assert extraction.opened and all(db.closed for db in extraction.opened)
     for pid in photo_ids:
@@ -127,7 +181,7 @@ def test_service_uses_captured_workspace_and_reports_progress(db, tmp_path, extr
 
     assert result == {
         "masked": 1, "skipped": 0, "failed": 0, "unreadable": 0,
-        "total": 1, "detail_measured": 0, "detail_unreadable": 0,
+        "total": 1, "detail_measured": 0, "set_aside_reused": 0, "detail_unreadable": 0,
         "mask_cache_invalidated": 0, "ok": True, "errors": [],
     }
     assert db.masks_features.get_mask(first, "sam2-base")["subject_detail"] == 100.0
@@ -356,7 +410,13 @@ def test_companion_box_cannot_prompt_raw_even_without_a_rejected_preview(
         schema._apply_pending(db.conn)
         projection = db.conn.execute("SELECT subject_detail, mask_path FROM photos WHERE id=?", (raw,)).fetchone()
         assert tuple(projection) == (None, None)
-        assert db.masks_features.get_mask(raw, "sam2-base") is None
+        kept = db.masks_features.get_mask(raw, "sam2-base")
+        if legacy_version == 52:
+            assert kept is None
+        else:
+            # The migration keeps the mask it stops trusting, out of use.
+            assert (kept["path"], kept["set_aside_by"], kept["subject_detail"]) == (
+                "old.png", 47 if legacy_version == 46 else 50, 123)
     row, = db.detections.get(raw, 0)
     assert row["runtime_fingerprint"] == COMPANION_FRAME_RUNTIME
     assert db.conn.execute("SELECT species FROM predictions WHERE detection_id=?", (row["id"],)).fetchone()[0] == "Mallard"
