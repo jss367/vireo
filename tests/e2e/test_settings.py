@@ -620,9 +620,11 @@ def test_settings_import_preserves_queued_workspace_override_save(live_server, p
     assert held_ws, "first workspace override POST was never requested"
 
     # Second override edit is queued behind the stalled POST via the
-    # workspace save chain.
+    # workspace save chain. Leaving the field commits it, as it does for a
+    # user who goes on to click Import; an edit still focused would commit
+    # again when the import's confirmation dialog takes the focus.
     value_input.fill("55")
-    value_input.dispatch_event("change")
+    value_input.blur()
     page.wait_for_timeout(700)  # past the 500 ms debounce
     assert len(ws_posts) == 1, (
         f"second POST fired before the first settled: {len(ws_posts)}"
