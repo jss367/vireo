@@ -1,3 +1,5 @@
+import re
+
 import pytest
 from playwright.sync_api import expect
 
@@ -11,6 +13,24 @@ def page(browser, page):
     ``browser`` first, as conftest's ``page`` does, so the browser launches
     before ``live_server`` moves HOME."""
     return install_page_module_exposure(page, "jobs", "jobsState")
+
+
+def test_system_history_is_opt_in_but_direct_links_open_it(live_server, page):
+    job = _move_folder_job(live_server, {})
+    job.update(id="maintenance", type="retained-cache-maintenance", status="completed",
+               origin="system", summary="Removed 0 generated files")
+    page.route("**/api/jobs", lambda route: route.fulfill(json={"active": []}))
+    page.route("**/api/jobs/history?*", lambda route: route.fulfill(
+        json=[] if "origin=user" in route.request.url else [job]))
+    with page.expect_response("**/api/jobs/history?limit=100&origin=user"):
+        page.goto(f"{live_server['url']}/jobs")
+    row = page.locator('.job-list-item[data-job-id="maintenance"]')
+    expect(page.locator("#filterOrigin")).to_have_value("user")
+    expect(row).to_have_count(0)
+    page.locator("#filterOrigin").select_option("system")
+    expect(row).to_be_visible()
+    page.goto(f"{live_server['url']}/jobs?job=maintenance")
+    expect(row).to_have_class(re.compile(r"\bselected\b"))
 
 
 @pytest.mark.parametrize("result", [

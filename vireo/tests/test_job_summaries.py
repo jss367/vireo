@@ -510,6 +510,22 @@ def test_failed_job_leads_with_error_and_keeps_partial_progress():
     assert out["details"] == ["1 error", "1 error:", "[model_loader] Fatal: incomplete"]
 
 
+def test_failed_pipeline_history_leads_with_failure_even_for_existing_rows():
+    from job_runner.outcome import attach_result_text, build_summary
+
+    reason = "64 of 2355 photos failed mask extraction"
+    steps = [
+        {"status": "completed", "summary": "Skipped (using collection), 2447 already cached"},
+        {"status": "failed", "label": "Extract features", "error": reason},
+    ]
+    job = {"type": "pipeline", "status": "failed", "steps": steps}
+    for result in ({"error": reason}, {}):
+        assert build_summary(job, result) == reason
+        row = {"type": "pipeline", "status": "failed", "result": result,
+               "summary": steps[0]["summary"], "tree": steps}
+        assert attach_result_text(row)["summary"] == reason
+
+
 def test_non_dict_results():
     assert describe_result("x", None) == {"summary": "", "details": [], "error": None}
     assert describe_result("x", "done")["summary"] == "done"

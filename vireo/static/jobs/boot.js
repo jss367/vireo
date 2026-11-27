@@ -26,7 +26,11 @@ jobsElement('filterOrigin', HTMLSelectElement).addEventListener('change', applyO
 // warning only fires once both lanes have actually loaded; a user who
 // picks another job or view clears the pending link (selection.js, list.js).
 const linkedJobId = new URLSearchParams(window.location.search).get('job');
-if (linkedJobId) state.pendingLinkedJobId = linkedJobId;
+if (linkedJobId) {
+  // Notifications can link to a system job, outside the default history filter.
+  jobsElement('filterOrigin', HTMLSelectElement).value = '';
+  state.pendingLinkedJobId = linkedJobId;
+}
 Promise.all([fetchJobs(), fetchHistory()]).then(resolvePendingLinkedJob);
 state.pollTimer = setInterval(function() { fetchJobs(true); }, 2000);
 setInterval(function() { fetchHistory(false, true); }, 10000);
