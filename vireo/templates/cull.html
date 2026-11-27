@@ -320,7 +320,17 @@ body { padding-bottom: 36px; }
       <summary id="cullSpeciesSummary">All species</summary>
       <div class="cull-species-menu">
         <input type="search" id="cullSpeciesSearch" aria-label="Search species" placeholder="Search species" data-cull-on="input:renderCullSpeciesOptions">
-        <button class="summary-link" data-cull-on="click:clearCullSpecies">All species</button>
+        <div class="cull-species-controls">
+          <button class="summary-link" data-cull-on="click:clearCullSpecies">All species</button>
+          <span>
+            <label for="cullSpeciesSort">Sort by</label>
+            <select id="cullSpeciesSort" class="btn btn-secondary" data-cull-on="change:renderCullSpeciesOptions">
+              <option value="most">Most photos</option>
+              <option value="fewest">Fewest photos</option>
+              <option value="name">Name (A–Z)</option>
+            </select>
+          </span>
+        </div>
         <div id="cullSpeciesOptions"></div>
       </div>
     </details>

@@ -93,7 +93,12 @@ function renderCullSpeciesOptions() {
   var search = /** @type {HTMLInputElement} */ (document.getElementById('cullSpeciesSearch')).value.toLocaleLowerCase();
   var list = /** @type {HTMLElement} */ (document.getElementById('cullSpeciesOptions'));
   list.replaceChildren();
-  Object.keys(counts).sort(function(a, b) { return a.localeCompare(b); }).forEach(function(name) {
+  var sort = /** @type {HTMLSelectElement} */ (document.getElementById('cullSpeciesSort')).value;
+  Object.entries(counts).sort(function(a, b) {
+    if (sort !== 'name' && a[1] !== b[1]) return sort === 'fewest' ? a[1] - b[1] : b[1] - a[1];
+    return a[0].localeCompare(b[0]);
+  }).forEach(function(entry) {
+    var name = entry[0];
     if (search && name.toLocaleLowerCase().indexOf(search) === -1) return;
     var label = document.createElement('label');
     var checkbox = document.createElement('input');
@@ -104,7 +109,7 @@ function renderCullSpeciesOptions() {
       else cullSelectedSpecies.delete(name);
       onCullScopeChange();
     });
-    label.append(checkbox, document.createTextNode(name + ' (' + counts[name] + ')'));
+    label.append(checkbox, document.createTextNode(name + ' (' + entry[1] + ')'));
     list.appendChild(label);
   });
   if (!list.childNodes.length) list.textContent = cullSourceResults ? 'No matching species.' : 'Analyze photos to load species.';
