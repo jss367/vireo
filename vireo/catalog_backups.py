@@ -346,7 +346,18 @@ def _move_one(
             # A move whose final local delete failed leaves the same file in
             # both places; anything else under that name may be another
             # catalog's snapshot, so only an identical copy lets the local one go.
-            if _file_hash(dest) != _file_hash(src):
+            # Hashing both sides on a slow external drive or NAS must still
+            # observe cancellation so a collision does not block shutdown for
+            # two full-file reads.
+            scanned = 0
+            total = os.path.getsize(dest) + os.path.getsize(src)
+
+            def checkpoint() -> None:
+                nonlocal scanned
+                scanned = min(scanned + _COPY_CHUNK, total)
+                report(name, scanned, total)
+
+            if _file_hash(dest, checkpoint) != _file_hash(src, checkpoint):
                 result.errors.append(
                     f"{name} is already in {backup_dir} with different contents, "
                     "so the copy next to the catalog was kept. Compare the two "

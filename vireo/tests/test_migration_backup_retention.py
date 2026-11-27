@@ -147,6 +147,27 @@ def test_offload_observes_cancellation_during_verification_readback(catalog, bac
     assert os.path.exists(local)
 
 
+def test_offload_observes_cancellation_while_hashing_an_existing_destination(catalog, backup_dir):
+    """A collision on a slow external drive or NAS must observe cancellation
+    while hashing both files, not block for two full-file reads."""
+    local = _write(f"{catalog}.pre-v10.bak", "this catalog")
+    existing = _write(os.path.join(backup_dir, "vireo.db.pre-v10.bak"), "another catalog")
+    calls = 0
+
+    def cancel(*_args):
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise RuntimeError("cancelled during hashing")
+
+    with pytest.raises(RuntimeError, match="hashing"):
+        catalog_backups.offload(catalog, backup_dir, cancel)
+
+    assert os.path.exists(local)
+    with open(existing) as f:
+        assert f.read() == "another catalog"
+
+
 def test_startup_job_moves_backups_and_keeps_the_newest_three(app_and_db, tmp_path, backup_dir):
     import config as cfg
     from canonical_schema import SCHEMA_VERSION
