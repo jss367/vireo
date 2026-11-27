@@ -268,6 +268,8 @@ def _copy_verified(
     The copy is written to ``dest + ".tmp"``, flushed to the device, read back
     and hashed, and renamed into place only when the hashes match, so a
     ``.bak`` in the backup folder is always a whole, verified file.
+    ``progress`` is also invoked between chunks of the readback so a slow
+    verification on an external drive or NAS still observes cancellation.
     """
     tmp = dest + ".tmp"
     written = 0
@@ -281,7 +283,7 @@ def _copy_verified(
                 progress(written)
             writer.flush()
             os.fsync(writer.fileno())
-        if _file_hash(tmp) != source_hash.digest():
+        if _file_hash(tmp, lambda: progress(written)) != source_hash.digest():
             raise OSError(f"the copy of {src} read back different from the original")
         replace_file(tmp, dest)
     finally:
@@ -321,11 +323,13 @@ def offload(
     return result
 
 
-def _file_hash(path: str) -> bytes:
+def _file_hash(path: str, checkpoint: Callable[[], None] | None = None) -> bytes:
     digest = hashlib.sha256()
     with open(path, "rb") as reader:
         while chunk := reader.read(_COPY_CHUNK):
             digest.update(chunk)
+            if checkpoint is not None:
+                checkpoint()
     return digest.digest()
 
 

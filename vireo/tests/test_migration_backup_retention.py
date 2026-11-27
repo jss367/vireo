@@ -126,6 +126,27 @@ def test_offload_removes_the_partial_copy_when_cancelled(catalog, backup_dir):
     assert os.listdir(backup_dir) == []
 
 
+def test_offload_observes_cancellation_during_verification_readback(catalog, backup_dir):
+    """A slow readback on an external drive or NAS must still observe
+    cancellation; otherwise shutdown waits for the full second I/O pass."""
+    local = _write(f"{catalog}.pre-v10.bak", "catalog bytes")
+    calls = 0
+
+    def cancel(*_args):
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise RuntimeError("cancelled during verification")
+
+    with pytest.raises(RuntimeError, match="verification"):
+        catalog_backups.offload(catalog, backup_dir, cancel)
+
+    dest = os.path.join(backup_dir, "vireo.db.pre-v10.bak")
+    assert not os.path.exists(dest)
+    assert not os.path.exists(dest + ".tmp")
+    assert os.path.exists(local)
+
+
 def test_startup_job_moves_backups_and_keeps_the_newest_three(app_and_db, tmp_path, backup_dir):
     import config as cfg
     from canonical_schema import SCHEMA_VERSION
