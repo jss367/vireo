@@ -466,6 +466,35 @@ def test_a_copy_is_kept_when_a_source_file_vanishes_before_the_comparison(tmp_pa
         "SELECT path FROM folders WHERE id = ?", (fid,)).fetchone()["path"] == str(src)
 
 
+def test_a_copy_is_kept_when_a_source_file_vanishes_before_recording(tmp_path, monkeypatch):
+    """A file already missing when the source is recorded may only be in the copy."""
+    import move as move_mod
+
+    db, src, dst, fid, _ids = _folder(tmp_path)
+    real_record = move_mod.folder_transfer.record_source_tree
+    original = (src / "a.jpg").read_bytes()
+    lost = False
+
+    def lose_file_before_recording(path):
+        nonlocal lost
+        if os.fspath(path) == str(src) and not lost:
+            (src / "a.jpg").unlink()
+            lost = True
+        return real_record(path)
+
+    monkeypatch.setattr(
+        move_mod.folder_transfer, "record_source_tree", lose_file_before_recording)
+
+    result = move_mod.move_folder(db=db, folder_id=fid, destination=str(dst))
+
+    assert result["moved"] == 0
+    assert result["errors"]
+    assert (dst / "shoot" / "a.jpg").read_bytes() == original
+    assert (src / "b.jpg").exists()
+    assert db.conn.execute(
+        "SELECT path FROM folders WHERE id = ?", (fid,)).fetchone()["path"] == str(src)
+
+
 def test_a_file_added_after_verification_is_kept_and_reported(tmp_path, monkeypatch):
     import move as move_mod
 

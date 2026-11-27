@@ -370,8 +370,7 @@ class _FolderTransfer:
                 f"Verification could not be completed ({exc}). "
                 f"Originals preserved.", copy_disproven=False)
         if error is not None:
-            return self._refuse(
-                error, copy_disproven=bool(record) and self._source_unchanged(record))
+            return self._refuse(error, copy_disproven=self._fresh_copy_can_be_discarded(record))
         self.source_record = record
         return None
 
@@ -395,15 +394,19 @@ class _FolderTransfer:
             shutil.rmtree(self.target.transfer_dest, ignore_errors=True)
         return {"moved": 0, "errors": [message]}
 
-    def _source_unchanged(self, record):
-        """Whether the source still holds exactly what was recorded.
+    def _fresh_copy_can_be_discarded(self, record):
+        """A failed copy is disposable only if all of its entries still have sources.
 
-        A mismatch found against a source that lost or changed a file while
-        it was being compared does not show the copy is wrong: the copy may
-        now hold the only bytes of that file.
+        A file may have vanished after copying, before the source record was
+        taken. That file will exist only at the destination, even if the
+        remaining source entries are unchanged. If either tree cannot be
+        enumerated, keep the fresh copy rather than guessing.
         """
+        if not record or self.remote or not self._owns_destination():
+            return False
         try:
-            return record_source_tree(self.src_path) == record
+            copied = record_source_tree(self.target.transfer_dest)
+            return copied.keys() <= record.keys() and record_source_tree(self.src_path) == record
         except OSError:
             return False
 
