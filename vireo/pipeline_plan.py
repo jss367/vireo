@@ -347,17 +347,21 @@ def _classify_plan(
     plan.count_stale()
 
     if plan.classifiable_units == 0:
-        return plan.name_label_read_error(plan.no_targets_result())
+        result = plan.name_label_read_error(plan.no_targets_result())
+    else:
+        plan.count_pending()
+        if plan.blocked:
+            return plan.name_label_read_error(plan.some_models_blocked_result())
+        result = plan.nothing_pending_result() if plan.pending_total == 0 else plan.will_classify_result()
 
-    plan.count_pending()
-
-    if plan.blocked:
-        return plan.name_label_read_error(plan.some_models_blocked_result())
-
-    if plan.pending_total == 0:
-        return plan.nothing_pending_result()
-
-    return plan.will_classify_result()
+    if photo_ids is not None and params.source_paths is None and result["state"] != "blocked":
+        # The Process ETA includes the detector pre-pass even if all previously
+        # discovered targets already have classifications.
+        missing = set(plan.scope_ids)
+        if not params.reclassify:
+            missing.difference_update(plan.current_detector_photo_ids)
+        result["detail"]["detector_pending"] = len(db.photos.filter_out_wildlife_excluded(missing))
+    return result
 
 
 def _classify_skip_result(summary):
@@ -1803,7 +1807,8 @@ def _has_process_timing_baseline():
 
 def _process_time_hint(stages, photo_count, params):
     """Approximate active processing time, excluding queue and download waits."""
-    if not photo_count or not any(s["state"] == "will-run" for s in stages.values()):
+    detector_pending = stages["Classify"].get("detail", {}).get("detector_pending", 0)
+    if not photo_count or not (detector_pending or any(s["state"] == "will-run" for s in stages.values())):
         return None
 
     # Per-item seconds from docs/investigations/subject-feature-extraction-throughput.md.
@@ -1812,19 +1817,30 @@ def _process_time_hint(stages, photo_count, params):
         entry = stages[stage]
         return entry.get("detail", {}).get("pending", uncounted) if entry["state"] == "will-run" else 0
 
-    classify = stages["Classify"]
-    cold = classify["state"] == "will-run" and classify.get("detail", {}).get("total_dets") == 0
     models = max(1, len(params.model_ids))
-    classify_units = photo_count * models if cold else pending("Classify")
-    seconds = pending("Previews") * 0.23 + classify_units * 0.65
-    if cold:
-        seconds += photo_count * 0.40
+    known_pairs = pending("Classify")
+    future_pairs = detector_pending * models
+    # Reclassification replaces prior detections across the entire scope.
+    classify_units = max(known_pairs, future_pairs) if params.reclassify else known_pairs + future_pairs
+    seconds = pending("Previews") * 0.23 + classify_units * 0.65 + detector_pending * 0.40
     for stage, rate in (("Extract", 4.53), ("EyeKeypoints", 0.11)):
-        if stages[stage]["state"] == "will-run":
-            seconds += (photo_count if cold else pending(stage, photo_count)) * rate
+        if stages[stage]["state"] in {"will-run", "done-prior"}:
+            seconds += min(photo_count, pending(stage, photo_count) + detector_pending) * rate
+
+    group = stages.get("Group", {})
+    group_time_uncertain = False
+    if group.get("state") == "will-run":
+        # The reference Full run grouped 2,549 photos in nine seconds.
+        # A single sample is too little to time a predominantly grouping
+        # run or a species-review run, which follows a different path.
+        group_seconds = photo_count * 9 / 2549
+        species_review = group.get("detail", {}).get("review_mode") == "species"
+        group_time_uncertain = group_seconds >= seconds or species_review
+        seconds += group_seconds
 
     quality_recompute = stages["Extract"]["state"] == "will-run" and "detail" not in stages["Extract"]
-    if seconds <= 0 or quality_recompute or params.raw_subject_analysis or not _has_process_timing_baseline():
+    if (seconds <= 0 or group_time_uncertain or quality_recompute
+            or params.raw_subject_analysis or not _has_process_timing_baseline()):
         return ("Processing this selection may take several hours." if seconds >= 3600
                 else "Processing time depends on this computer and the selected stages.")
     # Round outward. These are planning ranges, not statistical error bars.

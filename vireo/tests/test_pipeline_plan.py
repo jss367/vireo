@@ -1286,7 +1286,11 @@ def test_classify_plan_reclassify_bypasses_cache(tmp_path, monkeypatch, raw_subj
     from labels_fingerprint import TOL_SENTINEL
     from pipeline_plan import compute_plan
     db, folder_id = _make_db(tmp_path)
-    _, did = _add_photo_with_detection(db, folder_id, "a.jpg")
+    pid, did = _add_photo_with_detection(db, folder_id, "a.jpg")
+
+    other_pid, _ = _add_photo_with_detection(db, folder_id, "b.jpg")
+    monkeypatch.setattr("computation_cache.megadetector_runtime_fingerprint", lambda: "current")
+    db.model_runs.record_detector_run(pid, "megadetector-v6", 1, runtime_fingerprint="current")
 
     import models as models_mod
     monkeypatch.setattr(models_mod, "get_models", lambda: [
@@ -1300,13 +1304,14 @@ def test_classify_plan_reclassify_bypasses_cache(tmp_path, monkeypatch, raw_subj
 
     plan = compute_plan(
         db,
-        _params(model_ids=["m1"], reclassify=not raw_subject_analysis,
+        _params(photo_ids=[pid, other_pid], model_ids=["m1"], reclassify=not raw_subject_analysis,
                 raw_subject_analysis=raw_subject_analysis),
         str(tmp_path / "test.db"),
     )
     classify = plan["stages"]["Classify"]
     assert classify["state"] == "will-run"
     assert "Re-classify" in classify["summary"]
+    assert classify["detail"]["detector_pending"] == (1 if raw_subject_analysis else 2)
 
 
 def test_classify_plan_exposes_pending_and_eligible_done_prior(tmp_path, monkeypatch):
@@ -4599,13 +4604,14 @@ def test_extract_plan_counts_detail_measurements_as_work(tmp_path):
     assert extract["detail"]["detail_pending"] == 0
 
 
-def test_first_process_time_hint_accounts_for_future_detections(monkeypatch):
+@pytest.mark.parametrize("cached", [0, 1])
+def test_process_time_hint_accounts_for_future_detections(monkeypatch, cached):
     import pipeline_plan as planner
 
     params = planner.PipelinePlanParams()
     stages = {name: {"state": "will-run", "detail": {"pending": 0}}
               for name in ("Previews", "Classify", "Extract", "EyeKeypoints")}
-    stages["Classify"]["detail"]["total_dets"] = 0
+    stages["Classify"]["detail"].update(total_dets=cached, detector_pending=2500 - cached)
     stages["Previews"]["detail"]["pending"] = 2500
     monkeypatch.setattr(planner, "_has_process_timing_baseline", lambda: True)
     assert "hours" in planner._process_time_hint(stages, 2500, params)
@@ -4617,9 +4623,10 @@ def test_first_process_time_hint_accounts_for_future_detections(monkeypatch):
     assert planner._process_time_hint(stages, 0, params) is None
 
 
-def test_group_only_run_shows_qualitative_time_hint():
+def test_group_only_run_shows_qualitative_time_hint(monkeypatch):
     from pipeline_plan import PipelinePlanParams, _process_time_hint
 
+    monkeypatch.setattr("pipeline_plan._has_process_timing_baseline", lambda: True)
     stages = {
         "Previews": {"state": "done-prior"},
         "Classify": {"state": "will-skip"},
@@ -4629,5 +4636,8 @@ def test_group_only_run_shows_qualitative_time_hint():
     }
     params = PipelinePlanParams()
     assert "Processing time depends" in _process_time_hint(stages, 100, params)
+    stages["Previews"] = {"state": "will-run", "detail": {"pending": 1}}
+    assert "Processing time depends" in _process_time_hint(stages, 10000, params)
+    stages["Previews"]["state"] = "done-prior"
     stages["Group"]["state"] = "done-prior"
     assert _process_time_hint(stages, 100, params) is None
