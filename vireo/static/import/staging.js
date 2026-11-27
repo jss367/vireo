@@ -162,8 +162,8 @@ async function deleteStaging(path, btn) {
   const accepted = await Vireo.confirm({
     title: 'Delete this staging copy permanently?',
     message: 'Vireo deletes ' + size + ' from disk. The files are not moved to the Trash and cannot be recovered.\n\n' +
-      'Before deleting, Vireo checks again that every file has a cataloged copy in the archive with the same name and size. ' +
-      'It does not compare file contents.',
+      'Before deleting, Vireo checks again that every file has a cataloged copy in the archive with the same name and size, ' +
+      'and reads both copies to confirm their contents match byte for byte.',
     details: [path],
     confirmLabel: 'Delete permanently',
     danger: true,
