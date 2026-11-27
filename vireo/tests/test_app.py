@@ -4982,9 +4982,9 @@ def test_cull_page_uses_pipeline_controls(app_and_db):
     # collections silently truncate. Server-side scoping replaces it.
     assert "per_page=999999" not in html
     # Pipeline encounters can serialize species as [name, confidence]; Cull
-    # should group by the stable species name instead of the full tuple.
-    assert "function speciesName" in html
-    assert "Array.isArray(value)" in html
+    # should group by the stable species identity instead of the full tuple.
+    assert "function cullSpeciesIdentity" in html
+    assert "Array.isArray(label)" in html
 
 
 def test_static_vireo_utils_served(app_and_db):
