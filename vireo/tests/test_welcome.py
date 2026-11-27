@@ -348,7 +348,9 @@ def test_verify_all_models_endpoint_returns_job_id(app_and_db):
 
 
 def test_welcome_page_contains_download_button(app_and_db, monkeypatch):
-    """Welcome page contains the download button."""
+    """Welcome page contains the download button, and the starter model's id,
+    name and size reach the page through ``/config-defaults.js`` (templates
+    stay Jinja-free; see ``test_templates_jinja_free_except_includes``)."""
     import models
     monkeypatch.setattr(models, "get_active_model", lambda: None)
 
@@ -356,8 +358,14 @@ def test_welcome_page_contains_download_button(app_and_db, monkeypatch):
     client = app.test_client()
     resp = client.get("/welcome")
     assert resp.status_code == 200
-    assert b"downloadBtn" in resp.data
-    assert b"Download" in resp.data
+    assert b'id="downloadBtn"' in resp.data
+    assert b'src="/config-defaults.js"' in resp.data
+
+    defaults = client.get("/config-defaults.js").get_data(as_text=True)
+    assert "window.VIREO_WELCOME_STARTER" in defaults
+    assert '"id":"timm-inat21-eva02-l"' in defaults
+    assert '"name":"iNat21' in defaults
+    assert '"size_mb":1200' in defaults
 
 
 def test_welcome_page_contains_skip_link(app_and_db, monkeypatch):
@@ -369,7 +377,7 @@ def test_welcome_page_contains_skip_link(app_and_db, monkeypatch):
     client = app.test_client()
     resp = client.get("/welcome")
     assert resp.status_code == 200
-    assert b"Skip for now" in resp.data
+    assert b"Browse without AI" in resp.data.split(b'id="errorContainer"')[0]
     # Skipping finishes setup and lands on Browse (static/welcome/).
     assert "window.location.href = '/browse'" in page_with_scripts(client, "/welcome")
 
