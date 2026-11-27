@@ -805,29 +805,8 @@ def _card_cleanup_delete(result: dict, config: dict) -> tuple[str, list[str]]:
     return summary, details
 
 
-def _staging_verify(result: dict, config: dict) -> tuple[str, list[str]]:
-    name = result.get("name") or "Staging folder"
-    files = _int(result, "file_count")
-    verified = _int(result, "verified")
-    unaccounted = _int(result, "unaccounted")
-    unreachable = _int(result, "unreachable")
-    status = result.get("status")
-    if status == "safe_to_delete":
-        summary = f"{name}: all {_n(files, 'file')} verified in the archive, safe to delete"
-    elif status == "needs_import":
-        summary = (
-            f"{name}: {_n(unaccounted, 'file')} not found in the archive, "
-            f"still needs importing ({verified:,} of {files:,} verified)"
-        )
-    elif status == "unreachable":
-        summary = (
-            f"{name}: {_n(unreachable, 'file')} could not be checked because the "
-            f"archive is unreachable ({verified:,} of {files:,} verified)"
-        )
-    else:
-        summary = f"{name}: {verified:,} of {_n(files, 'file')} verified"
-    if result.get("deleted"):
-        summary += ", folder deleted"
+def _staging_details(result: dict) -> list[str]:
+    """Where the staging folder is, and the entries that were not verified."""
     details = []
     if result.get("source_root"):
         details.append(f"Staging folder: {result['source_root']}")
@@ -838,15 +817,66 @@ def _staging_verify(result: dict, config: dict) -> tuple[str, list[str]]:
         details.append(f"Size: {size}")
     problems = [
         d for d in (result.get("details") or [])
-        if isinstance(d, dict) and d.get("status") in ("unaccounted", "unreachable")
+        if isinstance(d, dict) and d.get("status") != "verified"
     ]
     if problems:
+        total = _int(result, "details_total")
+        heading = "Kept:" if "deleted" in result else "Not verified:"
+        if total > len(problems):
+            heading = f"{heading[:-1]} ({total:,} in all):"
         details += _list_details(
-            [{"path": d.get("rel") or d.get("path"), "reason": d.get("reason") or d.get("status")}
+            [{"path": d.get("rel_path") or d.get("path"),
+              "reason": d.get("reason") or d.get("status")}
              for d in problems],
-            "Not verified:",
+            heading,
         )
-    return summary, details
+    return details
+
+
+def _staging_verify(result: dict, config: dict) -> tuple[str, list[str]]:
+    name = result.get("name") or "Staging folder"
+    files = _int(result, "file_count")
+    verified = _int(result, "verified")
+    status = result.get("status")
+    # "Identical" is the whole claim: each counted file was read in full and
+    # so was its archive copy.
+    tally = f"({verified:,} of {_n(files, 'file')} identical to the archive copy)"
+    if status == "safe_to_delete" and not files:
+        summary = f"{name}: no files, safe to remove"
+    elif status == "safe_to_delete":
+        summary = f"{name}: all {_n(files, 'file')} identical to the archive copy, safe to delete"
+    elif status == "needs_import":
+        summary = (
+            f"{name}: {_n(_int(result, 'unaccounted'), 'file')} without an identical "
+            f"archive copy, still needs importing {tally}"
+        )
+    elif status == "unreachable":
+        summary = (
+            f"{name}: {_n(_int(result, 'unreachable'), 'file')} could not be compared "
+            f"because the archive is unreachable {tally}"
+        )
+    elif status == "unchecked":
+        unchecked = _int(result, "unchecked")
+        summary = f"{name}: {_n(unchecked, 'entry', 'entries')} could not be checked {tally}"
+    else:
+        summary = f"{name}: {tally[1:-1]}"
+    return summary, _staging_details(result)
+
+
+def _staging_delete(result: dict, config: dict) -> tuple[str, list[str]]:
+    name = result.get("name") or "Staging folder"
+    deleted = _int(result, "deleted")
+    summary = f"{name}: {_n(deleted, 'file')} deleted after matching the archive copy"
+    if _int(result, "deleted_bytes"):
+        summary += f" ({_human_bytes(result['deleted_bytes'])} freed)"
+    failed = _int(result, "delete_failed")
+    kept = _int(result, "kept") - failed
+    if failed:
+        summary += f", {failed:,} could not be deleted"
+    if kept:
+        summary += f", {_n(kept, 'entry', 'entries')} kept"
+    summary += ", folder removed" if result.get("folder_removed") else ", folder kept"
+    return summary, _staging_details(result)
 
 
 def _sync(result: dict, config: dict) -> tuple[str, list[str]]:
@@ -974,6 +1004,7 @@ _DESCRIBERS: dict[str, Callable[[dict, dict], tuple[str, list[str]]]] = {
     "missing_originals_scan": _missing_originals_scan,
     "card-cleanup-scan": _card_cleanup_scan,
     "staging-verify": _staging_verify,
+    "staging-delete": _staging_delete,
     "card-cleanup-verify": _card_cleanup_verify,
     "card-cleanup-delete": _card_cleanup_delete,
     "work-locally-sync": _work_locally_sync,

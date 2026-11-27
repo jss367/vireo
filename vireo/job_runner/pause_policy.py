@@ -11,7 +11,8 @@ PAUSABLE_JOBS = frozenset({
     "ingest", "move-photos", "offline-cache", "release-local-originals",
     "prepare-full-resolution", "classify", "develop", "extract-masks",
     "inat-export", "export", "publish-site", "export-site", "import",
-    "import-full", "import-in-place", "staging-verify", "card-cleanup-scan",
+    "import-full", "import-in-place", "staging-verify", "staging-delete",
+    "card-cleanup-scan",
     "card-cleanup-verify", "card-cleanup-delete", "send-to-nas", "move-folder",
 })
 

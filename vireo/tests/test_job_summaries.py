@@ -375,21 +375,61 @@ def test_staging_verify_leads_with_the_verdict():
             "unreachable": 0, "details": [], "can_delete": True, "status": "safe_to_delete",
             "inferred_destination": "/Volumes/Photography/2026-08-01"}
     out = describe_result("staging-verify", base)
-    assert out["summary"] == "abc: all 40 files verified in the archive, safe to delete"
+    assert out["summary"] == "abc: all 40 files identical to the archive copy, safe to delete"
     assert out["details"] == ["Staging folder: /v/staging/abc/files",
                               "Archive destination: /Volumes/Photography/2026-08-01",
                               "Size: 1.9 GB"]
 
     needs = dict(base, verified=38, unaccounted=2, can_delete=False, status="needs_import",
-                 details=[{"path": "/v/staging/abc/files/a.NEF", "rel": "a.NEF", "status": "unaccounted"},
-                          {"path": "/v/staging/abc/files/b.NEF", "rel": "b.NEF", "status": "verified"}])
+                 details_total=2,
+                 details=[{"path": "/v/staging/abc/files/a.NEF", "rel_path": "a.NEF",
+                           "status": "unaccounted", "reason": "different contents"},
+                          {"path": "/v/staging/abc/files/b.NEF", "rel_path": "b.NEF",
+                           "status": "unaccounted", "reason": None}])
     out = describe_result("staging-verify", needs)
-    assert out["summary"] == "abc: 2 files not found in the archive, still needs importing (38 of 40 verified)"
-    assert out["details"][-2:] == ["Not verified:", "a.NEF: unaccounted"]
+    assert out["summary"] == (
+        "abc: 2 files without an identical archive copy, still needs importing "
+        "(38 of 40 files identical to the archive copy)"
+    )
+    assert out["details"][-3:] == ["Not verified:", "a.NEF: different contents", "b.NEF: unaccounted"]
+
+    capped = dict(needs, unaccounted=300, details_total=300)
+    assert "Not verified (300 in all):" in describe_result("staging-verify", capped)["details"]
 
     unreachable = dict(base, verified=0, unreachable=40, can_delete=False, status="unreachable")
     out = describe_result("staging-verify", unreachable)
-    assert out["summary"].startswith("abc: 40 files could not be checked because the archive is unreachable")
+    assert out["summary"].startswith("abc: 40 files could not be compared because the archive is unreachable")
+
+    unchecked = dict(base, verified=39, unchecked=1, can_delete=False, status="unchecked")
+    out = describe_result("staging-verify", unchecked)
+    assert out["summary"] == "abc: 1 entry could not be checked (39 of 40 files identical to the archive copy)"
+
+    empty = dict(base, file_count=0, verified=0, bytes=0)
+    assert describe_result("staging-verify", empty)["summary"] == "abc: no files, safe to remove"
+
+
+def test_staging_delete_says_what_was_deleted_and_what_was_kept():
+    base = {"path": "/v/staging/abc", "source_root": "/v/staging/abc/files", "name": "abc",
+            "file_count": 40, "bytes": 2_000_000_000, "verified": 40, "details": [],
+            "details_total": 0, "deleted": 40, "deleted_bytes": 2_000_000_000,
+            "delete_failed": 0, "kept": 0, "folder_removed": True, "ok": True,
+            "status": "deleted", "inferred_destination": None}
+    out = describe_result("staging-delete", base)
+    assert out["summary"] == (
+        "abc: 40 files deleted after matching the archive copy (1.9 GB freed), folder removed"
+    )
+
+    partial = dict(base, deleted=37, kept=3, delete_failed=1, folder_removed=False, ok=False,
+                   details_total=3, status="delete_failed",
+                   details=[{"rel_path": "a.NEF", "status": "delete_failed", "reason": "busy"},
+                            {"rel_path": "notes.txt", "status": "unaccounted", "reason": "no match"},
+                            {"rel_path": "link", "status": "unchecked", "reason": "is a link"}])
+    out = describe_result("staging-delete", partial)
+    assert out["summary"] == (
+        "abc: 37 files deleted after matching the archive copy (1.9 GB freed), "
+        "1 could not be deleted, 2 entries kept, folder kept"
+    )
+    assert out["details"][-4:] == ["Kept:", "a.NEF: busy", "notes.txt: no match", "link: is a link"]
 
 
 def test_card_cleanup_verify_names_every_problem():

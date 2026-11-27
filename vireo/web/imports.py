@@ -2248,7 +2248,9 @@ def create_imports_blueprint(
         def work(job: JobDict) -> JsonDict:
             thread_db = ctx.thread_db()
             return verify_orphaned_staging(
-                thread_db, vireo_dir, path, pause_callback=lambda: ctx.checkpoint(job),
+                thread_db, vireo_dir, path,
+                pause_callback=lambda: ctx.checkpoint(job),
+                progress_callback=_staging_progress(ctx, job, "Comparing with the archive"),
             )
 
         return ctx.start(
@@ -2259,20 +2261,68 @@ def create_imports_blueprint(
         )
 
     @blueprint.route("/api/import/orphaned-staging", methods=["DELETE"])
-    def api_import_orphaned_staging_delete() -> ResponseReturnValue:
-        """Delete old staging only when a fresh verification is fully green."""
-        from staging_recovery import delete_verified_staging
+    @background_job
+    def api_import_orphaned_staging_delete(ctx: JobLaunch) -> ResponseReturnValue:
+        """Start a job that deletes the staged files matching the archive.
+
+        The job compares every file with its archive copy itself and deletes
+        each one right after it matches, so nothing rests on what an earlier
+        verification showed. The files are unlinked, not moved to the Trash,
+        which is why the request must say the user agreed.
+        """
+        from staging_recovery import delete_verified_staging, resolve_staging_root
 
         body = request.get_json(silent=True) or {}
         path = body.get("path")
         if not isinstance(path, str) or not path:
             return json_error("path required")
+        if body.get("confirm_permanent") is not True:
+            return json_error(
+                "Deleting a staging copy was not confirmed. The files are not "
+                "moved to the Trash, so ask first and send confirm_permanent: true."
+            )
         vireo_dir = media_root(config["THUMB_CACHE_DIR"])
-        db = get_db()
         try:
-            result = delete_verified_staging(db, vireo_dir, path)
+            resolve_staging_root(vireo_dir, path)
         except ValueError as exc:
-            return json_error(str(exc), status=409)
-        return jsonify(result)
+            return json_error(str(exc))
+
+        def work(job: JobDict) -> JsonDict:
+            thread_db = ctx.thread_db()
+            try:
+                return delete_verified_staging(
+                    thread_db, vireo_dir, path,
+                    pause_callback=lambda: ctx.checkpoint(job),
+                    progress_callback=_staging_progress(
+                        ctx, job, "Comparing with the archive, then deleting",
+                    ),
+                )
+            finally:
+                thread_db.close()
+
+        return ctx.start(
+            "staging-delete",
+            work,
+            pausable=True,
+            config={"path": path},
+        )
 
     return blueprint
+
+
+def _staging_progress(
+    ctx: JobLaunch, job: JobDict, phase: str,
+) -> Callable[[int, int, str], None]:
+    """Report a staging pass's file count on the job and its event stream."""
+
+    def report(current: int, total: int, current_file: str) -> None:
+        job["progress"]["current"] = current
+        job["progress"]["total"] = total
+        job["progress"]["current_file"] = current_file
+        job["progress"]["phase"] = phase
+        ctx.runner.push_event(job["id"], "progress", {
+            "current": current, "total": total,
+            "current_file": current_file, "phase": phase,
+        })
+
+    return report

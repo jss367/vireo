@@ -200,6 +200,8 @@ body {
 .staging-meta { font-size: 11px; color: var(--text-secondary); margin-top: 3px; }
 .staging-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
 .staging-details { margin: 8px 0 0 0; padding-left: 18px; font-size: 11px; color: var(--text-secondary); max-height: 120px; overflow: auto; }
+.staging-details-heading { list-style: none; margin-left: -18px; color: var(--text-primary); }
+.staging-outcome { font-size: 12px; color: var(--text-primary); overflow-wrap: anywhere; }
 .import-tag-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .import-location-panel { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
 .import-location-status { font-size: 13px; color: var(--text-secondary); }
@@ -248,7 +250,8 @@ body {
       <h3>Recover old staging folders</h3>
       <div class="hint">
         Vireo found local staging folders from the retired import-through-process flow.
-        Cleanup is only enabled after every staged file is verified in the archive.
+        Compare a folder with the archive before cleaning it up. Vireo reads each staged file and its archive
+        copy in full, and deletes only the staged files whose archive copy is identical.
       </div>
       <div class="staging-items" id="orphanedStagingItems"></div>
     </div>
