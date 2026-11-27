@@ -12,8 +12,6 @@ body { background: var(--bg-primary) !important; color: var(--text-primary) !imp
 .setting-row { border-color: var(--border-subtle) !important; }
 .setting-label { color: var(--text-secondary) !important; }
 .setting-label small { color: var(--text-faint) !important; }
-.btn-batch-accept { background: var(--accent) !important; color: var(--accent-text) !important; }
-.btn-batch-accept:hover { background: var(--accent-hover) !important; }
 .badge-new { background: var(--accent) !important; color: var(--accent-text) !important; }
 .badge-disagreement { background: var(--danger) !important; }
 .badge-refinement { background: var(--warning) !important; }
@@ -23,6 +21,11 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   background: var(--bg-input) !important; color: var(--text-primary) !important;
   border-color: var(--border-secondary) !important;
 }
+/* Must follow .model-selector so the accent background and text wins the
+   equal-specificity tie when the Review Accept All button carries both
+   classes to inherit toolbar sizing. */
+.btn-batch-accept { background: var(--accent) !important; color: var(--accent-text) !important; }
+.btn-batch-accept:hover { background: var(--accent-hover) !important; }
 .tree-item:hover { background: var(--bg-tertiary) !important; }
 .tree-item.active { background: var(--bg-tertiary) !important; color: var(--accent) !important; }
 .detail-panel { background: var(--bg-secondary) !important; border-color: var(--border-primary) !important; }
