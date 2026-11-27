@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from db import Database
+from fake_trash import FakeTrash
 from services import catalog_deletion, photo_ingest, workspace_folders
 from services.local_folder import (
     LocalWorkspaceConflict,
@@ -18,6 +19,8 @@ from services.local_folder import (
     sync_folder,
     workspace_status,
 )
+from services.local_workspace import LocalWorkspaceTrashRefused, SourceDeletion
+from services.trash import TrashService
 from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_client
 
@@ -3461,7 +3464,7 @@ def test_sync_job_shows_the_source_check_as_its_own_step(tmp_path, monkeypatch):
         assert sync_step["id"] == f"folder-{folder_id}"
         assert sync_step["label"] == "Sync 09 to source"
         assert sync_step["status"] == "completed"
-        assert sync_step["summary"] == "1 published, 1 deleted"
+        assert sync_step["summary"] == "1 published, 1 moved to Trash"
         assert job["progress"]["phase"] == "Syncing 09 to source"
 
     assert (source / "bird.jpg").read_bytes() == b"edited"
@@ -3755,3 +3758,199 @@ def test_cache_invalidation_does_not_probe_offline_originals(tmp_path, monkeypat
         monkeypatch.setattr(local_folder, "_resolve_physical", forbidden_probe)
         local_folder._invalidate_new_images_for_source(db, "/Volumes/offline/photos")
         assert db._new_images_cache.get(db._db_path, ws) is None
+
+
+def _refusing_trash(*refused_names, reason="Trash unavailable"):
+    """A Trash that keeps the files with these names and moves the rest."""
+    trash = FakeTrash()
+    real = TrashService()
+
+    def handler(paths, *args, **kwargs):
+        kept = [path for path in paths if Path(path).name in refused_names]
+        moved, successful, failures = real.trash_paths(
+            [path for path in paths if path not in kept], *args, **kwargs
+        )
+        return moved, successful, failures + [{"path": path, "error": reason} for path in kept]
+
+    trash.handle_trash(handler)
+    return trash
+
+
+def test_folder_sync_moves_deleted_source_files_to_the_trash(tmp_path):
+    db, vireo_dir, source, _first, _second, folder_id = _shared_environment(tmp_path)
+    try:
+        stage_folder(db, folder_id, str(vireo_dir))
+        (Path(db.folders.get(folder_id)["path"]) / "bird.jpg").unlink()
+        trash = FakeTrash()
+
+        result = sync_folder(
+            db, folder_id, str(vireo_dir), allow_deletions=True, confirmed_deletions=1,
+            source_deletion=SourceDeletion(trash),
+        )
+
+        assert trash.trashed_paths == [[str(source / "bird.jpg")]]
+        assert not (source / "bird.jpg").exists()
+        # Recoverable: the Trash holds the file with its contents.
+        [trashed] = (tmp_path / "test-trash").rglob("bird.jpg")
+        assert trashed.read_bytes() == b"original"
+        assert (result["deleted"], result["trashed"], result["deleted_permanently"]) == (1, 1, 0)
+    finally:
+        db.close()
+
+
+def test_folder_sync_keeps_a_refused_file_and_offers_it_again(tmp_path):
+    """A deletion the Trash refuses is not recorded as done: the folder stays
+    local and resumable, nothing is published, and the next sync asks again."""
+    db, vireo_dir, source, first, _second, folder_id = _shared_environment(tmp_path)
+    try:
+        (source / "kept.jpg").write_bytes(b"kept")
+        stage_folder(db, folder_id, str(vireo_dir))
+        local_root = Path(db.folders.get(folder_id)["path"])
+        (local_root / "bird.jpg").unlink()
+        (local_root / "kept.jpg").write_bytes(b"local edit")
+        trash = _refusing_trash("bird.jpg")
+
+        with pytest.raises(LocalWorkspaceTrashRefused) as raised:
+            sync_folder(
+                db, folder_id, str(vireo_dir), allow_deletions=True, confirmed_deletions=1,
+                source_deletion=SourceDeletion(trash),
+            )
+
+        assert raised.value.failures == [
+            {"path": str(source / "bird.jpg"), "error": "Trash unavailable"}
+        ]
+        assert (source / "bird.jpg").read_bytes() == b"original"
+        assert (source / "kept.jpg").read_bytes() == b"kept"
+        assert (local_root / "kept.jpg").read_bytes() == b"local edit"
+        current = folder_status(db, folder_id, str(vireo_dir))
+        assert (current["state"], current["recovery_kind"]) == ("recovery", "sync")
+        assert current["changes"] == {"created": 0, "modified": 1, "deleted": 1}
+        assert workspace_status(db, first, str(vireo_dir))["state"] == "active"
+
+        # Finishing the sync tries the same file again. Without a confirmed
+        # permanent delete it is kept again.
+        with pytest.raises(LocalWorkspaceTrashRefused):
+            sync_folder(db, folder_id, str(vireo_dir), source_deletion=SourceDeletion(trash))
+        assert trash.trashed_paths == [[str(source / "bird.jpg")], [str(source / "bird.jpg")]]
+        assert (source / "bird.jpg").exists()
+
+        result = sync_folder(db, folder_id, str(vireo_dir), source_deletion=SourceDeletion(FakeTrash()))
+        assert not (source / "bird.jpg").exists()
+        assert (source / "kept.jpg").read_bytes() == b"local edit"
+        assert result["trashed"] == 1
+        assert folder_status(db, folder_id, str(vireo_dir))["state"] == "remote"
+    finally:
+        db.close()
+
+
+def _folder_sync_app(tmp_path, monkeypatch, trash):
+    """An app over one staged folder whose local copy deleted ``culled.jpg``."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from app import create_app
+
+    source = tmp_path / "nas" / "09"
+    source.mkdir(parents=True)
+    (source / "bird.jpg").write_bytes(b"original")
+    (source / "culled.jpg").write_bytes(b"culled")
+    vireo_dir = tmp_path / "vireo"
+    thumbs = vireo_dir / "thumbnails"
+    thumbs.mkdir(parents=True)
+    db_path = str(vireo_dir / "vireo.db")
+    db = Database(db_path)
+    workspace_id = db.create_workspace("Trip")
+    db.commit()
+    folder_id = workspace_folders.add_folder(db, str(source), name="09", link_to_workspace=False)
+    workspace_folders.add_workspace_folder(db, workspace_id, folder_id)
+    db.set_active_workspace(workspace_id)
+    db.close()
+
+    app = create_app(db_path, thumb_cache_dir=str(thumbs), trash=trash)
+    app.config["TESTING"] = True
+    client = app.test_client()
+    assert client.post(f"/api/workspaces/{workspace_id}/activate", json={}).status_code == 200
+    staged = client.post(
+        "/api/workspaces/active/local-folders/stage", json={"folder_ids": [folder_id]}
+    )
+    assert staged.status_code == 202, staged.get_json()
+    assert wait_for_job_via_client(client, staged.get_json()["job_id"])["status"] == "completed"
+    check_db = Database(db_path)
+    local_root = Path(check_db.folders.get(folder_id)["path"])
+    check_db.close()
+    (local_root / "bird.jpg").write_bytes(b"edited")
+    (local_root / "culled.jpg").unlink()
+    return client, source, folder_id
+
+
+def test_folder_sync_job_reports_kept_files_and_stays_resumable(tmp_path, monkeypatch):
+    trash = _refusing_trash("culled.jpg", reason="Network volume Trash operation failed")
+    client, source, folder_id = _folder_sync_app(tmp_path, monkeypatch, trash)
+    sync_url = "/api/workspaces/active/local-folders/sync"
+    confirmed = {"folder_ids": [folder_id], "confirmed_deletion_counts": {str(folder_id): 1}}
+
+    response = client.post(sync_url, json=confirmed)
+    assert response.status_code == 202, response.get_json()
+    job = wait_for_job_via_client(client, response.get_json()["job_id"])
+
+    kept = {"path": str(source / "culled.jpg"), "error": "Network volume Trash operation failed"}
+    kept_line = f"{kept['path']}: {kept['error']}"
+    assert job["status"] == "failed"
+    assert job["result"]["ok"] is False
+    assert job["result"]["trash_failed"] == [kept]
+    assert job["result"]["trash_failed_total"] == 1
+    assert job["result"]["folders"] == [{
+        "ok": False, "root_folder_id": folder_id, "trash_failed": [kept],
+        "trash_failed_total": 1, "errors": [kept_line], "errors_total": 1,
+    }]
+    assert kept_line in job["errors"]
+    sync_step = job["steps"][1]
+    assert sync_step["status"] == "failed"
+    assert sync_step["summary"] == (
+        "1 source file could not be moved to the Trash and was kept; local changes were not synced"
+    )
+    # Nothing was deleted or published, and the folder still offers the sync.
+    assert (source / "culled.jpg").read_bytes() == b"culled"
+    assert (source / "bird.jpg").read_bytes() == b"original"
+    status = client.get("/api/workspaces/active/local-folders").get_json()["folders"][0]
+    assert (status["state"], status["recovery_kind"]) == ("recovery", "sync")
+    assert status["changes"]["deleted"] == 1
+
+
+def test_folder_sync_deletes_kept_files_permanently_only_when_confirmed(tmp_path, monkeypatch):
+    trash = _refusing_trash("culled.jpg")
+    client, source, folder_id = _folder_sync_app(tmp_path, monkeypatch, trash)
+    sync_url = "/api/workspaces/active/local-folders/sync"
+    confirmed = {"folder_ids": [folder_id], "confirmed_deletion_counts": {str(folder_id): 1}}
+    counted = {**confirmed, "permanent_deletion_counts": {str(folder_id): 1}}
+
+    def run(body):
+        response = client.post(sync_url, json=body)
+        assert response.status_code == 202, response.get_json()
+        return wait_for_job_via_client(client, response.get_json()["job_id"])
+
+    assert run(confirmed)["status"] == "failed"
+
+    # Only JSON true with the listed count deletes permanently.
+    for body in (
+        {**confirmed, "delete_permanently": True},
+        {**confirmed, "delete_permanently": True, "permanent_deletion_counts": {str(folder_id): "1"}},
+        {**confirmed, "delete_permanently": True, "permanent_deletion_counts": [1]},
+    ):
+        refused = client.post(sync_url, json=body)
+        assert refused.status_code == 400, body
+    for flag in ("true", 1, None):
+        assert run({**counted, "delete_permanently": flag})["status"] == "failed"
+        assert (source / "culled.jpg").exists()
+
+    # A count smaller than the kept files refuses, deleting nothing.
+    job = run({
+        **confirmed, "delete_permanently": True, "permanent_deletion_counts": {str(folder_id): 0},
+    })
+    assert job["status"] == "failed"
+    assert "more than the 0 you confirmed" in job["errors"][-1]
+    assert (source / "culled.jpg").exists()
+
+    job = run({**counted, "delete_permanently": True})
+    assert job["status"] == "completed", job
+    assert job["steps"][1]["summary"] == "1 published, 1 deleted permanently"
+    assert not (source / "culled.jpg").exists()
+    assert (source / "bird.jpg").read_bytes() == b"edited"

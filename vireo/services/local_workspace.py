@@ -31,11 +31,13 @@ import threading
 import time
 import unicodedata
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn, TypedDict
 
 from file_replace import replace_file
 from services import folder_merges, workspace_folders
+from services.trash import TrashService
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -151,6 +153,52 @@ class LocalWorkspaceConflict(LocalWorkspaceError):
 
 class LocalWorkspaceCancelled(LocalWorkspaceError):
     """The caller cancelled a still-interruptible transfer."""
+
+
+class LocalWorkspaceTrashRefused(LocalWorkspaceError):
+    """The Trash refused source files a sync was deleting, so they were kept.
+
+    ``failures`` holds one ``{"path", "error"}`` per kept file and ``keys``
+    the manifest keys of those files. The sync stops before it publishes
+    anything and the session stays in ``syncing``, so finishing the sync
+    offers the same deletions again.
+    """
+
+    def __init__(self, failures: list[JsonDict], keys: list[ManifestKey]) -> None:
+        self.failures = failures
+        self.keys = keys
+        count = len(failures)
+        preview = ", ".join(f"{item['path']} ({item['error']})" for item in failures[:3])
+        if count > 3:
+            preview += f", and {count - 3} more"
+        super().__init__(
+            f"{count} source file{'' if count == 1 else 's'} could not be moved to the Trash "
+            f"and {'was' if count == 1 else 'were'} kept: {preview}. "
+            "Local changes were not synced."
+        )
+
+
+@dataclass(frozen=True)
+class SourceDeletion:
+    """How a sync removes the source files the local copy no longer has.
+
+    Files go to the Trash through ``trash``. ``permanent_limit`` is the
+    user's answer after the Trash refused some of them: ``None`` keeps
+    every refused file, a number allows that many of the files recorded as
+    refused to be unlinked instead.
+    """
+
+    trash: TrashService
+    permanent_limit: int | None = None
+
+
+@dataclass(frozen=True)
+class SourceRemoval:
+    """What a sync's deletion pass did on source storage."""
+
+    trashed: int = 0
+    deleted_permanently: int = 0
+    links_removed: int = 0
 
 
 def local_space_reserve(total_bytes: int) -> int:
@@ -365,7 +413,40 @@ def _sync_recovery_path(vireo_dir: str, workspace_id: int) -> Path:
     return workspace_dir(vireo_dir, workspace_id) / "sync-recovery.json"
 
 
-def _write_sync_recovery(vireo_dir: str, workspace_id: int, deleted_keys: Iterable[ManifestKey]) -> None:
+def _sync_recovery_payload(
+    deleted_keys: Iterable[ManifestKey], trash_refused: AbstractSet[ManifestKey] = frozenset()
+) -> JsonDict:
+    """The recovery marker's contents: confirmed deletions and Trash refusals.
+
+    ``trash_refused`` lists the confirmed deletions the Trash kept on the
+    last attempt, the only files a later attempt may delete permanently.
+    """
+    deleted = [(int(root_index), rel) for root_index, rel in deleted_keys]
+    return {
+        "confirmed_deletions": [list(key) for key in deleted],
+        "trash_refused": [list(key) for key in deleted if key in trash_refused],
+    }
+
+
+def _confirmed_after_resume(
+    deleted: Sequence[ManifestKey], recovery_confirmed: AbstractSet[ManifestKey] | None
+) -> list[ManifestKey]:
+    """The confirmed-deletion set a resumed sync writes back to its marker.
+
+    It keeps every deletion an earlier attempt confirmed, not only the ones
+    still pending. A confirmed file that an earlier attempt removed and the
+    user then restored locally is republished because the marker lists it,
+    and a sync the Trash stops can be resumed any number of times.
+    """
+    return sorted(set(deleted) | (recovery_confirmed or set()))
+
+
+def _write_sync_recovery(
+    vireo_dir: str,
+    workspace_id: int,
+    deleted_keys: Iterable[ManifestKey],
+    trash_refused: AbstractSet[ManifestKey] = frozenset(),
+) -> None:
     """Record the deletion set the user confirmed before the sync began.
 
     A resumed sync must not silently authorize any additional source
@@ -373,10 +454,27 @@ def _write_sync_recovery(vireo_dir: str, workspace_id: int, deleted_keys: Iterab
     user only confirmed the deletions listed here.
     """
     path = _sync_recovery_path(vireo_dir, workspace_id)
-    payload = {
-        "confirmed_deletions": [[int(root_index), rel] for root_index, rel in deleted_keys],
-    }
-    _write_manifest(path, payload)
+    _write_manifest(path, _sync_recovery_payload(deleted_keys, trash_refused))
+
+
+def _load_trash_refused(path: Path) -> set[ManifestKey]:
+    """The keys a recovery marker records as refused by the Trash.
+
+    Only these may be deleted permanently. A missing or unreadable marker
+    records none, so the Trash is tried again first.
+    """
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return set()
+    refused = data.get("trash_refused") if isinstance(data, dict) else None
+    result: set[ManifestKey] = set()
+    for entry in refused if isinstance(refused, list) else []:
+        if isinstance(entry, list) and len(entry) == 2:
+            with suppress(TypeError, ValueError):
+                result.add((int(entry[0]), str(entry[1])))
+    return result
 
 
 def _load_sync_recovery(vireo_dir: str, workspace_id: int) -> set[ManifestKey] | None:
@@ -1683,26 +1781,105 @@ def _sync_conflicts(
     return conflicts
 
 
+def _permanent_deletions(
+    deleted: Sequence[ManifestKey],
+    source_deletion: SourceDeletion,
+    trash_refused: AbstractSet[ManifestKey],
+) -> set[ManifestKey]:
+    """The deletions this sync may unlink instead of sending to the Trash.
+
+    Only files an earlier attempt recorded as refused by the Trash qualify,
+    and no more of them than the user confirmed: the question listed that
+    many files.
+    """
+    limit = source_deletion.permanent_limit
+    if limit is None:
+        return set()
+    permanent = {key for key in deleted if key in trash_refused}
+    if len(permanent) > limit:
+        raise LocalWorkspaceError(
+            f"{len(permanent)} source file(s) would now be deleted permanently, more than the "
+            f"{limit} you confirmed. Review and confirm again."
+        )
+    return permanent
+
+
+def _delete_from_source(
+    manifest: JsonDict,
+    deleted: Sequence[ManifestKey],
+    source_deletion: SourceDeletion,
+    permanent: AbstractSet[ManifestKey],
+    report: StepProgress | None = None,
+) -> SourceRemoval:
+    """Move to the Trash each source file the local copy no longer has.
+
+    ``report(done, total, rel)`` counts within the deletions. Files in
+    ``permanent`` are unlinked. So is a symlink: it has no content of its
+    own, and Finder would trash the file it points at. A path already gone
+    needs nothing; a resumed sync meets those. Raises
+    ``LocalWorkspaceTrashRefused`` when the Trash keeps any file.
+    """
+    total = len(deleted)
+    done = links = unlinked = 0
+    to_trash: dict[str, ManifestKey] = {}
+    for key in deleted:
+        root_index, rel = key
+        remote_path = os.path.join(manifest["roots"][root_index]["source_path"], rel)
+        try:
+            is_link = stat.S_ISLNK(os.lstat(remote_path).st_mode)
+        except FileNotFoundError:
+            pass
+        else:
+            if not is_link and key not in permanent:
+                to_trash[remote_path] = key
+                continue
+            with suppress(FileNotFoundError):
+                os.unlink(remote_path)
+            links += is_link
+            unlinked += not is_link
+        done += 1
+        if report:
+            report(done, total, rel)
+    if not to_trash:
+        return SourceRemoval(deleted_permanently=unlinked, links_removed=links)
+
+    def trash_progress(current: int, _total: int, name: str) -> None:
+        if report:
+            report(done + current, total, name)
+
+    moved, _successful, failures = source_deletion.trash.trash_paths(
+        list(to_trash), progress_callback=trash_progress
+    )
+    if failures:
+        raise LocalWorkspaceTrashRefused(
+            failures, [to_trash[item["path"]] for item in failures if item["path"] in to_trash]
+        )
+    return SourceRemoval(trashed=moved, deleted_permanently=unlinked, links_removed=links)
+
+
 def _publish_sync_changes(
     manifest: JsonDict,
     local: Mapping[ManifestKey, LocalEntry],
     changed: Sequence[ManifestKey],
     deleted: Sequence[ManifestKey],
     progress: StepProgress | None = None,
-) -> None:
+    *,
+    source_deletion: SourceDeletion,
+    permanent: AbstractSet[ManifestKey] = frozenset(),
+) -> SourceRemoval:
     """Apply local deletions, then publish created and modified files to source."""
     total = len(changed) + len(deleted)
-    done = 0
+
+    def report_deletion(current: int, _total: int, rel: str) -> None:
+        if progress:
+            progress(current, total, rel)
+
     # Deletions first: a local rename of a directory to a file (or vice
     # versa) needs the old source entries gone before publishes create
-    # their replacements.
-    for root_index, rel in deleted:
-        remote_path = os.path.join(manifest["roots"][root_index]["source_path"], rel)
-        with suppress(FileNotFoundError):
-            os.unlink(remote_path)
-        done += 1
-        if progress:
-            progress(done, total, rel)
+    # their replacements. A file the Trash keeps stops the sync here, before
+    # anything is published.
+    removal = _delete_from_source(manifest, deleted, source_deletion, permanent, report_deletion)
+    done = len(deleted)
     for key in changed:
         root_index, rel = key
         remote_path = os.path.join(manifest["roots"][root_index]["source_path"], rel)
@@ -1711,6 +1888,118 @@ def _publish_sync_changes(
         done += 1
         if progress:
             progress(done, total, rel)
+    return removal
+
+
+def _sync_result(
+    changed: Sequence[ManifestKey], deleted: Sequence[ManifestKey], removal: SourceRemoval
+) -> JsonDict:
+    """The counts a finished sync reports.
+
+    ``deleted`` is every source file the sync removed, including those an
+    interrupted attempt already had; the three counts after it say where
+    this run's went.
+    """
+    return {
+        "ok": True,
+        "created_or_modified": len(changed),
+        "deleted": len(deleted),
+        "trashed": removal.trashed,
+        "deleted_permanently": removal.deleted_permanently,
+        "links_removed": removal.links_removed,
+    }
+
+
+def sync_summary(result: Mapping[str, int]) -> str:
+    """One line for a finished sync: what it published and where its deletions went.
+
+    A resumed sync finds some deletions already made by the attempt before
+    it; those are counted as already removed, not as this run's work.
+    """
+    trashed = result["trashed"]
+    permanently = result["deleted_permanently"]
+    links = result["links_removed"]
+    earlier = result["deleted"] - trashed - permanently - links
+    parts = [f"{result['created_or_modified']} published"]
+    for count, text in (
+        (trashed, "moved to Trash"),
+        (permanently, "deleted permanently"),
+        (links, "symlink removed" if links == 1 else "symlinks removed"),
+        (earlier, "already removed"),
+    ):
+        if count > 0:
+            parts.append(f"{count} {text}")
+    if len(parts) == 1:
+        parts.append("0 deleted")
+    return ", ".join(parts)
+
+
+def trash_refused_summary(total: int) -> str:
+    """The step summary of a sync the Trash stopped."""
+    return (
+        f"{total} source file{'' if total == 1 else 's'} could not be moved to the Trash "
+        f"and {'was' if total == 1 else 'were'} kept; local changes were not synced"
+    )
+
+
+# How many kept files a job result names; ``trash_failed_total`` has them all.
+TRASH_FAILED_LISTED = 20
+
+
+def trash_refused_result(refused: LocalWorkspaceTrashRefused) -> JsonDict:
+    """The job result of a sync the Trash stopped: failed, naming the kept files."""
+    listed = refused.failures[:TRASH_FAILED_LISTED]
+    total = len(refused.failures)
+    return {
+        "ok": False,
+        "trash_failed": listed,
+        "trash_failed_total": total,
+        "errors": [f"{item['path']}: {item['error']}" for item in listed],
+        "errors_total": total,
+    }
+
+
+def permanent_deletion_limit(delete_permanently: object, count: object) -> int | None:
+    """Read a request's answer to "delete permanently instead?".
+
+    ``None`` unless ``delete_permanently`` is JSON ``true``; then ``count``,
+    the number of files the question listed, must be a whole number.
+    """
+    if delete_permanently is not True:
+        return None
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        raise LocalWorkspaceError(
+            "Deleting permanently needs the number of files you confirmed"
+        )
+    return count
+
+
+def _publish_or_record_refusal(
+    recovery_path: Path,
+    confirmed: Sequence[ManifestKey],
+    manifest: JsonDict,
+    local: Mapping[ManifestKey, LocalEntry],
+    changed: Sequence[ManifestKey],
+    deleted: Sequence[ManifestKey],
+    progress: StepProgress | None,
+    *,
+    source_deletion: SourceDeletion,
+    permanent: AbstractSet[ManifestKey],
+) -> SourceRemoval:
+    """Publish a sync's changes, recording the files the Trash refused.
+
+    The record in the recovery marker is what lets a later attempt delete
+    exactly those files permanently, and only if the user then says so.
+    ``confirmed`` is the marker's confirmed-deletion set, written back as is.
+    """
+    try:
+        return _publish_sync_changes(
+            manifest, local, changed, deleted, progress,
+            source_deletion=source_deletion, permanent=permanent,
+        )
+    except LocalWorkspaceTrashRefused as refused:
+        _write_manifest(recovery_path, _sync_recovery_payload(confirmed, set(refused.keys)))
+        raise
 
 
 def sync_back(
@@ -1723,8 +2012,17 @@ def sync_back(
     progress: StepProgress | None = None,
     cancel_check: CancelCheck | None = None,
     begin_commit: BeginCommit | None = None,
+    source_deletion: SourceDeletion | None = None,
 ) -> JsonDict:
-    """Publish local changes, restore source paths, and remove the local copy."""
+    """Publish local changes, restore source paths, and remove the local copy.
+
+    Source files the local copy no longer has go to the Trash
+    (``source_deletion``; the real Trash when not given). If the Trash keeps
+    any, the sync raises ``LocalWorkspaceTrashRefused`` before publishing and
+    stays resumable.
+    """
+    source_deletion = source_deletion or SourceDeletion(TrashService())
+    recovery_path = _sync_recovery_path(vireo_dir, workspace_id)
     with _workspace_lock(workspace_id):
         state_row = local_state(db, workspace_id)
         if not state_row or state_row["state"] not in {"active", "syncing"}:
@@ -1737,9 +2035,11 @@ def sync_back(
         # the persisted recovery marker OR a fresh ``confirmed_deletions``
         # count the caller sends alongside ``confirm_deletions: true``.
         recovery_confirmed: set[ManifestKey] | None = None
+        trash_refused: set[ManifestKey] = set()
         if resuming:
             allow_deletions = True
             recovery_confirmed = _load_sync_recovery(vireo_dir, workspace_id)
+            trash_refused = _load_trash_refused(recovery_path)
 
         manifest = _load_manifest(vireo_dir, workspace_id)
         if manifest is None:
@@ -1759,6 +2059,7 @@ def sync_back(
             resuming=resuming,
             recovery_confirmed=recovery_confirmed,
         )
+        permanent = _permanent_deletions(deleted, source_deletion, trash_refused)
 
         conflicts = _sync_conflicts(
             manifest, baseline, local, changed, deleted, recovery_republish, cancel_check
@@ -1779,23 +2080,22 @@ def sync_back(
         # confirmation during resume, rewrite the marker so a second
         # interruption resumes against the newly-confirmed set instead of the
         # original (now smaller) one.
+        confirmed = _confirmed_after_resume(deleted, recovery_confirmed)
         if not resuming:
-            _write_sync_recovery(vireo_dir, workspace_id, deleted)
+            _write_sync_recovery(vireo_dir, workspace_id, confirmed)
             db.local_workspaces.mark_syncing(workspace_id)
             db.commit()
         elif fresh_confirmation:
-            _write_sync_recovery(vireo_dir, workspace_id, deleted)
+            _write_sync_recovery(vireo_dir, workspace_id, confirmed, trash_refused & set(deleted))
 
-        _publish_sync_changes(manifest, local, changed, deleted, progress)
+        removal = _publish_or_record_refusal(
+            recovery_path, confirmed, manifest, local, changed, deleted, progress,
+            source_deletion=source_deletion, permanent=permanent,
+        )
 
         _restore_catalog(db, workspace_id)
         _remove_workspace_dir(vireo_dir, workspace_id)
-        return {
-            "ok": True,
-            "created_or_modified": len(changed),
-            "deleted": len(deleted),
-            "files_examined": len(local),
-        }
+        return {**_sync_result(changed, deleted, removal), "files_examined": len(local)}
 
 
 def _source_state(

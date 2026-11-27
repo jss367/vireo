@@ -990,6 +990,7 @@ def _register_core_blueprints(app, w):
             invalidate_missing_originals=lambda ws_id: missing_originals.invalidate(
                 workspace_ids=[ws_id]
             ),
+            trash=w.trash,
         )
     )
     app.register_blueprint(
@@ -1000,6 +1001,7 @@ def _register_core_blueprints(app, w):
             db_path,
             media_root(app.config["THUMB_CACHE_DIR"]),
             invalidate_missing_originals=missing_originals.invalidate,
+            trash=w.trash,
         )
     )
     app.register_blueprint(
@@ -1268,6 +1270,7 @@ def _register_photo_blueprints(app, w, serve_original_photo, serve_photo_preview
             start_missing_originals_scan=missing_originals.start_scan,
             invalidate_missing_originals=missing_originals.invalidate,
             run_batch_delete=w.photo_deletion.run_batch_delete,
+            trash=w.trash,
         )
     )
     app.register_blueprint(

@@ -75,7 +75,7 @@ from services import browse_queries, workspace_config, workspace_folders
 from services.photo_deletion import permanent_delete_error
 from services.photo_review import flag_note
 from services.visual_scope import inject_active_visual_model, validate_visual_arg
-from sidecar_identity import delete_orphaned_sidecars
+from sidecar_identity import SidecarCleanup, trash_orphaned_sidecars
 from web.app_hooks import claim_search_lane
 from web.background_jobs import make_background_job
 from web.location_edits import (
@@ -105,6 +105,7 @@ if TYPE_CHECKING:
     from float_image import FloatImage
     from PIL import Image
     from services.service_types import ErrorResponse, JobDict, JsonDict, JsonError
+    from services.trash import TrashService
     from services.visual_scope import RuleTree, VisualScope
     from subject_ranking import SubjectComparison
     from web.background_jobs import JobLaunch
@@ -353,6 +354,18 @@ def _sort_missing_removals(
     return confirmed_ids, restored_ids, folder_offline_ids, skipped, sidecar_targets
 
 
+# How many kept sidecars a response names; ``sidecars_failed_total`` has them all.
+SIDECARS_FAILED_LISTED = 20
+
+
+def _sidecar_failure_fields(cleanup: SidecarCleanup) -> JsonDict:
+    """The response fields naming the sidecars the Trash refused and kept."""
+    return {
+        "sidecars_failed": cleanup.failures[:SIDECARS_FAILED_LISTED],
+        "sidecars_failed_total": len(cleanup.failures),
+    }
+
+
 def _score_sharpness_region(db: Database, raw: object, vireo_dir: str) -> JsonDict:
     """Score one requested region; the region's result row."""
     from image_loader import load_working_image
@@ -542,6 +555,7 @@ def create_photos_blueprint(
     start_missing_originals_scan: StartMissingOriginalsScan,
     invalidate_missing_originals: InvalidateMissingOriginals,
     run_batch_delete: RunBatchDelete,
+    trash: TrashService,
 ) -> Blueprint:
     """Build the ``/api/photos`` data blueprint.
 
@@ -553,9 +567,10 @@ def create_photos_blueprint(
     one ``VisualScope``, which owns the per-app query-text embedding cache),
     the Missing Originals cache methods (``missing_originals_payload``,
     ``start_missing_originals_scan``, ``invalidate_missing_originals`` --
-    the app's ``MissingOriginals``), and ``run_batch_delete`` (the app's
+    the app's ``MissingOriginals``), ``run_batch_delete`` (the app's
     ``PhotoDeletion``, shared with ``/api/batch/delete`` and the
-    batch-delete job).
+    batch-delete job), and ``trash`` (the app's ``TrashService``, which the
+    Missing Originals sidecar cleanup moves leftover sidecars through).
     """
     blueprint = Blueprint("photos", __name__)
     background_job = make_background_job(get_runner, get_db, db_path, Database)
@@ -607,16 +622,18 @@ def create_photos_blueprint(
 
     @blueprint.route("/api/photos/missing/delete-sidecars", methods=["POST"])
     def api_photos_missing_delete_sidecars() -> ResponseReturnValue:
-        """Delete leftover .xmp sidecar files for photos whose original is gone.
+        """Move leftover .xmp sidecar files to the Trash for photos whose original is gone.
 
         Body: ``{"photo_ids": [int, ...]}``.
 
         IDs are resolved server-side against the active workspace — the
-        client never names paths directly. Earlier drafts accepted
-        ``(folder_path, filename)`` from the body and were usable to
-        unlink any ``.xmp`` on disk as long as the paired non-xmp path
-        was absent. Now we only touch sidecars whose photo row is in
-        the active workspace AND whose source is verified missing.
+        client never names paths directly. Only sidecars whose photo row is
+        in the active workspace and whose source is verified missing are
+        touched, so a request cannot name an arbitrary ``.xmp`` on disk.
+
+        Response: ``{deleted, skipped, sidecars_failed, sidecars_failed_total}``.
+        A sidecar the Trash refuses stays on disk and is listed in
+        ``sidecars_failed`` with the reason.
         """
         body = request.get_json(silent=True) or {}
         photo_ids = body.get("photo_ids") or []
@@ -634,9 +651,13 @@ def create_photos_blueprint(
             _confirmed_ids, restored_ids, folder_offline_ids, skipped,
             sidecar_targets,
         ) = _sort_missing_removals(db, ws_id, photo_ids, True)
-        deleted, sidecars_skipped = delete_orphaned_sidecars(sidecar_targets)
-        skipped += len(restored_ids) + len(folder_offline_ids) + sidecars_skipped
-        return jsonify({"deleted": deleted, "skipped": skipped})
+        cleanup = trash_orphaned_sidecars(sidecar_targets, trash.trash_paths)
+        skipped += len(restored_ids) + len(folder_offline_ids) + cleanup.skipped
+        return jsonify({
+            "deleted": cleanup.cleaned,
+            "skipped": skipped,
+            **_sidecar_failure_fields(cleanup),
+        })
 
     @blueprint.route("/api/photos/missing/remove", methods=["POST"])
     def api_photos_missing_remove() -> ResponseReturnValue:
@@ -654,13 +675,18 @@ def create_photos_blueprint(
         photo's source on disk in the active workspace and only forwards
         the still-missing IDs to the shared batch-delete implementation.
         Sidecar cleanup follows the same guard, so a restored original
-        never loses its ``.xmp`` either.
+        never loses its ``.xmp`` either. Leftover sidecars go to the Trash
+        in every mode: ``mode`` says what happens to the photos' own files,
+        and a sidecar is the only copy of its metadata. One the Trash
+        refuses stays on disk; its photo row is still removed, and the
+        Audit page's stray-sidecar check lists the file afterwards.
 
         Response: ``{deleted, restored: [ids], skipped, sidecars_deleted,
-        sidecars_skipped, mode}``. ``restored`` lets the client show which
-        photos were saved from the cache-driven delete so the modal can
-        surface them (e.g. via toast) instead of silently discarding the
-        request.
+        sidecars_skipped, sidecars_failed, sidecars_failed_total, mode}``.
+        ``restored`` lets the client show which photos were saved from the
+        cache-driven delete so the modal can surface them (e.g. via toast)
+        instead of silently discarding the request. ``sidecars_failed``
+        names the sidecars that were kept, with the Trash's reason.
         """
         body = request.get_json(silent=True) or {}
         photo_ids = body.get("photo_ids") or []
@@ -688,12 +714,9 @@ def create_photos_blueprint(
             sidecar_targets,
         ) = _sort_missing_removals(db, ws_id, photo_ids, delete_sidecars)
 
-        sidecars_deleted = 0
-        sidecars_skipped = 0
+        cleanup = SidecarCleanup()
         if delete_sidecars:
-            sidecars_deleted, sidecars_skipped = delete_orphaned_sidecars(
-                sidecar_targets,
-            )
+            cleanup = trash_orphaned_sidecars(sidecar_targets, trash.trash_paths)
 
         deleted_count = 0
         if confirmed_ids:
@@ -724,8 +747,9 @@ def create_photos_blueprint(
             "restored": restored_ids,
             "folder_offline": folder_offline_ids,
             "skipped": skipped,
-            "sidecars_deleted": sidecars_deleted,
-            "sidecars_skipped": sidecars_skipped,
+            "sidecars_deleted": cleanup.cleaned,
+            "sidecars_skipped": cleanup.skipped,
+            **_sidecar_failure_fields(cleanup),
             "mode": mode,
         })
 
