@@ -11,7 +11,7 @@ use sidecar::{SidecarStartError, SidecarState};
 use tauri::webview::{DownloadEvent, NewWindowResponse};
 use tauri::window::{ProgressBarState, ProgressBarStatus};
 use tauri::{Manager, RunEvent};
-use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_opener::OpenerExt;
 
 const INDETERMINATE_PROGRESS_FALLBACK: u64 = 10;
@@ -180,18 +180,28 @@ fn build_log_plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
         .build()
 }
 
-fn show_startup_error(window: &tauri::WebviewWindow, title: &str, message: String, exit_code: i32) {
+fn show_backend_error(window: &tauri::WebviewWindow, title: &str, message: String, exit_code: i32) {
+    let app = window.app_handle().clone();
     if let Err(error) = window.show() {
-        log::warn!("Could not show the startup window: {error}");
+        log::warn!("Could not show the Vireo window: {error}");
     }
-    window
-        .app_handle()
-        .dialog()
+    let _ = window.unminimize();
+    let _ = window.set_focus();
+    app.dialog()
         .message(message)
         .parent(window)
         .title(title)
         .kind(MessageDialogKind::Error)
-        .show(move |_| std::process::exit(exit_code));
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Report Issue".into(),
+            "Quit Vireo".into(),
+        ))
+        .show(move |report| {
+            if report {
+                open_in_browser(&app, "https://github.com/jss367/vireo/issues/new");
+            }
+            app.exit(exit_code);
+        });
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -294,7 +304,7 @@ pub fn run() {
                                 db_path, reason, log_dir
                             )
                         };
-                        show_startup_error(&main_window, "Incompatible Vireo Database", message, 3);
+                        show_backend_error(&main_window, "Incompatible Vireo Database", message, 3);
                         return Ok(());
                     }
                     Err(e) => {
@@ -311,7 +321,7 @@ pub fn run() {
                             .unwrap_or_else(|_| "the Vireo application log directory".into());
                         log::error!("Failed to start sidecar: {}", reason);
                         eprintln!("Vireo: Failed to start Python backend: {}", reason);
-                        show_startup_error(
+                        show_backend_error(
                             &main_window,
                             "Vireo Couldn't Start",
                             format!(
@@ -445,6 +455,9 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app_handle, event| {
             if let RunEvent::Exit = event {
+                if let Some(poll) = app_handle.try_state::<tray::TrayPollState>() {
+                    poll.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
                 if let Some(window) = app_handle.get_webview_window("main") {
                     let _ = window.set_progress_bar(ProgressBarState {
                         status: Some(ProgressBarStatus::None),
