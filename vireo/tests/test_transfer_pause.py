@@ -47,7 +47,7 @@ def transfer_env(tmp_path, monkeypatch):
     runner.shutdown(timeout=synchronization_timeout(5))
 
 
-def start_move(env, *, lock=None, verify_contents=True):
+def start_move(env, *, lock=None):
     from move import move_folder
 
     runner, db_path, workspace_id, folder_id, source, destination = env
@@ -58,7 +58,6 @@ def start_move(env, *, lock=None, verify_contents=True):
             with SerializedWork(runner, job["id"], lock) as control:
                 result = move_folder(
                     db, folder_id, str(destination), control=control,
-                    verify_contents=verify_contents,
                 )
                 return {**result, "ok": not result.get("errors")}
 
@@ -149,7 +148,7 @@ def test_failed_fresh_verification_after_pause_preserves_other_files(transfer_en
         return original(src, dst, progress=report)
 
     monkeypatch.setattr(transfer, "_fresh_copy_mismatch", verify)
-    job_id = start_move(transfer_env, verify_contents=False)
+    job_id = start_move(transfer_env)
     try:
         assert entered.wait(synchronization_timeout(5))
         assert runner.pause_job(job_id)
@@ -173,24 +172,28 @@ def test_pause_during_verification_invalidates_earlier_checks(transfer_env, monk
 
     runner, db_path, _, folder_id, source, destination = transfer_env
     checked, release = threading.Event(), threading.Event()
-    original = transfer._first_missing_source_file
     verified = []
 
-    def verify(src, dst, **kwargs):
-        progress = kwargs["progress"]
+    def pausing(original):
+        def verify(src, dst, **kwargs):
+            progress = kwargs["progress"]
 
-        def report(current, name):
-            if current == 1 and not verified:
-                # The verifier already accepted the first file. Corrupt that
-                # file while paused; continuing from the second is unsafe.
-                verified.append(next(iter(os.listdir(src))))
-                checked.set()
-                assert release.wait(synchronization_timeout(5))
-            progress(current, name)
+            def report(current, name):
+                if current == 1 and not verified:
+                    # The verifier already accepted the first file. Corrupt that
+                    # file while paused; continuing from the second is unsafe.
+                    verified.append(next(iter(os.listdir(src))))
+                    checked.set()
+                    assert release.wait(synchronization_timeout(5))
+                progress(current, name)
 
-        return original(src, dst, **{**kwargs, "progress": report})
+            return original(src, dst, **{**kwargs, "progress": report})
+        return verify
 
-    monkeypatch.setattr(transfer, "_first_missing_source_file", verify)
+    # The first pass verifies a fresh destination; after the pause the
+    # destination is no longer this move's alone, so the merge verifier runs.
+    for name in ("_fresh_copy_mismatch", "_first_missing_source_file"):
+        monkeypatch.setattr(transfer, name, pausing(getattr(transfer, name)))
     job_id = start_move(transfer_env)
     try:
         assert checked.wait(synchronization_timeout(5))

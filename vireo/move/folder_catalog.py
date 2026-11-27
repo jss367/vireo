@@ -63,7 +63,7 @@ def _plan_moved_file_mtimes(db, src_path, dest_path, progress_cb=None):
     from the source still sitting next to it -- or None.
 
     That second return value exists because this pass is the last thing
-    that looks at the destination before ``shutil.rmtree`` deletes the
+    that looks at the destination before the source cleanup deletes the
     originals. Verification established "every source file is present at
     the destination" minutes earlier; a source that is still here whose
     copy has since vanished or gone unreadable means that no longer holds,
@@ -180,7 +180,7 @@ def _moved_row_mtime_update(row, src_path, dest_path):
         # row, so a differently sized copy differs from the file this
         # move is about to delete. On a merge the verification below
         # rejects it; a fresh local move only compares file counts, so
-        # nothing else ever would, and the rmtree would take the intact
+        # nothing else ever would, and the source cleanup would take the intact
         # original with it. Skipping the row would leave that damage
         # unreported -- the same mistake as swallowing a failed stat.
         return None, (f"'{dst_file}' does not match the source's size at "
@@ -219,7 +219,7 @@ class _FolderCatalogRewrite:
     def update_catalog(self):
         """Update DB first: cascade folder paths.
 
-        Safer — if rmtree fails, the old folder becomes an orphan on disk
+        Safer — if the source cleanup fails, the old folder becomes an orphan on disk
         rather than the DB pointing to deleted paths. Unless the caller opted
         into merging (``merge_into_tracked``), a merge into an already-tracked
         destination is refused above, so catalog_path is never a different

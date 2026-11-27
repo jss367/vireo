@@ -14,8 +14,12 @@ The package's modules, by responsibility:
   stall watchdog, the shutil fallback, Finder-metadata excludes).
 - ``verify``: checking a copy against its source, before and after it is
   made, locally and over SSH.
+- ``contents``: the byte-for-byte file comparison the local verifiers and
+  the single-photo copy share. No move removes a source on a size match.
 - ``mounted_verify``: proving a mounted folder's SSH mapping and checking
   its contents on the NAS in batches, with local byte-comparison fallback.
+- ``source_cleanup``: recording a folder's source entries before they are
+  verified, and deleting only those entries afterwards.
 - ``remote``: SSH and rsync plumbing for NAS targets.
 - ``paths``: destination naming and alias-aware path containment.
 

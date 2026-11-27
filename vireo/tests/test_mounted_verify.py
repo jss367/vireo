@@ -273,7 +273,7 @@ def test_transfer_uses_full_byte_fallback_or_remote_verdict(trees, monkeypatch, 
     transfer = _FolderTransfer(
         SimpleNamespace(effective_config=lambda: {}), str(source),
         SimpleNamespace(transfer_dest=str(dest), dest_exists=True),
-        remote=None, verify_contents=True, progress_cb=None,
+        remote=None, progress_cb=None,
         progress=lambda *a: events.append(a),
         verification_cb=lambda step, notice: notices.append((step, notice)),
     )
@@ -300,7 +300,7 @@ def test_job_step_names_actual_verification_method():
 
     job = {'id': 'job'}
     runner = StepTree(threading.RLock(), {'job': job})
-    steps = MoveSteps(runner, job, folder_move_steps(remote=False, verify_contents=True))
+    steps = MoveSteps(runner, job, folder_move_steps(remote=False))
     for phase in ('Checking NAS verification', 'Verifying copy on NAS',
                   'Verifying copy locally (NAS verification unavailable)'):
         steps.report(0, 3, '', phase)
@@ -329,7 +329,7 @@ def test_creation_timestamp_platform_keeps_full_byte_verification(tmp_path, monk
     transfer = _FolderTransfer(
         SimpleNamespace(effective_config=lambda: config), str(source),
         SimpleNamespace(transfer_dest=str(dest), dest_exists=True),
-        remote=None, verify_contents=True, progress_cb=None, progress=lambda *a: None,
+        remote=None, progress_cb=None, progress=lambda *a: None,
     )
     result = transfer.verify_copy()
     assert result['moved'] == 0

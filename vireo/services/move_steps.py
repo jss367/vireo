@@ -41,11 +41,15 @@ _TERMINAL = ("completed", "failed", "cancelled")
 _EVENT_INTERVAL = 0.25
 
 
-def folder_move_steps(*, remote: bool, verify_contents: bool) -> list[dict[str, str]]:
+def folder_move_steps(*, remote: bool) -> list[dict[str, str]]:
     """The steps ``move_folder`` runs through, in order.
 
     A remote move has no timestamp pass (``plan_mtime_corrections`` only runs
-    for local destinations), so it gets no step for one.
+    for local destinations), so it gets no step for one. The verify label
+    says what the step checks: a remote move compares rsync checksums of
+    both sides, the NAS computing its own, and a local or mounted move reads both sides and
+    compares every byte (``MoveSteps.report`` relabels the step when a saved
+    SSH route lets the NAS checksum a mounted copy instead).
     """
     steps = [
         {"id": "check", "label": "Check destination"},
@@ -55,8 +59,8 @@ def folder_move_steps(*, remote: bool, verify_contents: bool) -> list[dict[str, 
         steps.append({"id": "timestamps", "label": "Check timestamps"})
     steps.extend([
         {"id": "verify", "label": (
-            "Verify copy (compare every byte)" if verify_contents and not remote
-            else "Verify copy")},
+            "Verify copy (compare checksums with the NAS)" if remote
+            else "Verify copy (compare every byte)")},
         {"id": "catalog", "label": "Update catalog"},
         {"id": "cleanup", "label": "Remove originals"},
     ])

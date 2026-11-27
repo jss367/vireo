@@ -130,6 +130,15 @@ def _sha256(path):
     return h.hexdigest()
 
 
+def _flip_last_byte(path):
+    """Change a file's bytes in place without changing its size."""
+    with open(path, "r+b") as handle:
+        handle.seek(-1, os.SEEK_END)
+        last = handle.read(1)
+        handle.seek(-1, os.SEEK_END)
+        handle.write(bytes([last[0] ^ 0xFF]))
+
+
 def _error_kind(error):
     """An operation's error message with paths and numbers stripped, for events."""
     import re
@@ -966,7 +975,7 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
         kwargs = {
             "route": {},
             "route_merge": {"merge": True},
-            "archive": {"merge": True, "allow_tracked_merge": True, "verify_contents": True},
+            "archive": {"merge": True, "allow_tracked_merge": True},
         }[shape]
         before_disk = self._disk_snapshot()
         before_rows = self._catalog_rows()
@@ -1015,6 +1024,101 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
         assert sorted((r["id"], r["folder_path"]) for r in self._catalog_rows()) == before_rows
         for err in result["errors"]:
             event(f"move_folder with rsync that cannot start: {_error_kind(err)}")
+
+    @precondition(lambda self: self._has_visible_photos())
+    @rule(data=st.data())
+    def move_photos_when_a_copy_lands_with_the_wrong_bytes(self, data):
+        """Move Photos where every copy has the right size and the wrong
+        bytes (a write the share dropped). No photo moves, each bad copy is
+        removed from the destination, and the failures are reported."""
+        import move
+
+        chosen = data.draw(st.lists(st.sampled_from(self._visible_photo_ids()),
+                                    min_size=1, max_size=3, unique=True))
+        dest = data.draw(st.sampled_from([
+            os.path.join(self.moved, "picked"),
+            os.path.join(self.library, "picked"),
+        ]))
+        os.makedirs(dest, exist_ok=True)
+        before_rows = sorted((r["id"], r["folder_path"]) for r in self._catalog_rows())
+        real_copy = move.transfer.copy_via_temp
+        damaged = []
+
+        def copy_with_wrong_bytes(src, dst):
+            real_copy(src, dst)
+            _flip_last_byte(dst)
+            damaged.append(dst)
+
+        move.transfer.copy_via_temp = copy_with_wrong_bytes
+        try:
+            result = move.move_photos(self.db, chosen, dest)
+        finally:
+            move.transfer.copy_via_temp = real_copy
+        assert result["moved"] == 0, result
+        assert sorted((r["id"], r["folder_path"]) for r in self._catalog_rows()) == before_rows
+        left = [path for path in damaged if os.path.lexists(path)]
+        assert not left, f"copies with the wrong bytes left at the destination: {left}"
+        if damaged:
+            assert result["errors"], result
+        event(f"move_photos with wrong-byte copies: damaged={len(damaged)}")
+
+    @precondition(lambda self: self._has_visible_photos())
+    @rule(data=st.data(), merge=st.booleans())
+    def move_a_folder_when_a_copy_lands_with_the_wrong_bytes(self, data, merge):
+        """Move Folder where the copy reports success but one file at the
+        destination has the right size and the wrong bytes. The move fails
+        as a reported error; the folder, its photos and its catalog rows
+        stay where they were."""
+        import shutil
+
+        import move
+
+        folders = self._photo_folders()
+        if not folders:
+            return
+        folder = data.draw(st.sampled_from(folders))
+        dest = data.draw(st.sampled_from([self.moved, os.path.join(self.moved, "nested")]))
+        os.makedirs(dest, exist_ok=True)
+        real_rsync = move.folder_transfer._run_rsync_streamed
+        damaged = []
+
+        def copy_with_wrong_bytes(src_path, dest_spec, *_args, **_kwargs):
+            for root, _dirs, files in os.walk(src_path):
+                rel = os.path.relpath(root, src_path)
+                target = dest_spec if rel == "." else os.path.join(dest_spec, rel)
+                os.makedirs(target, exist_ok=True)
+                for name in files:
+                    landed = os.path.join(target, name)
+                    if os.path.lexists(landed):
+                        continue
+                    shutil.copy2(os.path.join(root, name), landed)
+                    if not damaged and name.lower().endswith(ORIGINAL_EXTENSIONS):
+                        _flip_last_byte(landed)
+                        damaged.append(landed)
+            return 0, "", False
+
+        before_rows = sorted((r["id"], r["folder_path"]) for r in self._catalog_rows())
+        move.folder_transfer._run_rsync_streamed = copy_with_wrong_bytes
+        try:
+            result = move.move_folder(self.db, folder["id"], dest, merge=merge)
+        finally:
+            move.folder_transfer._run_rsync_streamed = real_rsync
+        if not damaged:
+            # Refused before the copy, or a merge with nothing left to copy.
+            event("move_folder with a wrong-byte copy: nothing was copied")
+            return
+        assert result["moved"] == 0, result
+        assert result["errors"], result
+        assert sorted((r["id"], r["folder_path"]) for r in self._catalog_rows()) == before_rows
+        # A destination the move created is removed with the bad copy in it.
+        # One that was already there is never removed, so the bad copy stays
+        # for the user to deal with; take it away here so that later steps
+        # start from a destination without a known-bad file.
+        for path in damaged:
+            if os.path.lexists(path):
+                os.remove(path)
+        for err in result["errors"]:
+            event(f"move_folder with a wrong-byte copy: {_error_kind(err)}")
 
     @precondition(lambda self: self._has_visible_photos())
     @rule(data=st.data())
@@ -1703,7 +1807,7 @@ def test_archive_merge_keeps_photo_in_workspace_that_shared_its_folder():
         shared = next(f for f in machine._photo_folders() if f["id"] == imported["id"])
         merged = move_a_folder(
             shared, nested,
-            merge=True, allow_tracked_merge=True, verify_contents=True,
+            merge=True, allow_tracked_merge=True,
         )
         assert merged["merge"]["merged_folders"] == 1
         # The other workspace sees the photo it shared, not the folder's others.
@@ -1744,7 +1848,7 @@ def test_crashed_import_archive_merge_consolidates_verified_copy():
         before_rows = machine._catalog_rows()
         result = move.move_folder(
             machine.db, folder["id"], machine.moved,
-            merge=True, allow_tracked_merge=True, verify_contents=True,
+            merge=True, allow_tracked_merge=True,
         )
         assert not result["errors"]
         machine._record_verified_consolidations(

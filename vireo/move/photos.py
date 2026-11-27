@@ -19,7 +19,7 @@ from .paths import (
     _samefile_or_false,
     _tracked_destination_overlap,
 )
-from .transfer import _copy_and_verify
+from .transfer import CopyNotCompared, _copy_and_verify
 
 # The package's one logger, ``move``, shared by every module in it.
 log = logging.getLogger("move")
@@ -696,7 +696,8 @@ class _PhotoFileTransfer:
         self.copied_xmp_companions = set()
 
     def copy_files(self, item):
-        """Copy and verify the photo and its companions; False skips the photo."""
+        """Copy the photo and its companions, comparing each copy's bytes with
+        its source; False skips the photo."""
         photo = item.photo
         src_dir = item.src_dir
         destination = self.destination
@@ -705,13 +706,20 @@ class _PhotoFileTransfer:
         # this photo only; the rest of the batch still moves.
         try:
             copied_ok = _copy_and_verify(item.src_file, item.dst_file)
+        except CopyNotCompared as e:
+            log.warning("Move skipped for %s: %s", photo["filename"], e)
+            self.errors.append(f"{photo['filename']}: {e}")
+            return False
         except OSError as e:
             log.warning("Move skipped for %s: copy failed: %s", photo["filename"], e)
             self.errors.append(f"{photo['filename']}: copy failed: {e}")
             return False
         if not copied_ok:
-            log.warning("Move skipped for %s: verification failed after copy", photo["filename"])
-            self.errors.append(f"{photo['filename']}: verification failed after copy")
+            log.warning("Move skipped for %s: the copy did not match the original", photo["filename"])
+            self.errors.append(
+                f"{photo['filename']}: the copy at the destination did not match "
+                "the original byte for byte, so the copy was removed and the "
+                "original was kept")
             return False
 
         # Copy companions
@@ -722,9 +730,16 @@ class _PhotoFileTransfer:
             if comp == item.xmp_companion and \
                     (src_dir, comp) in copied_xmp_companions:
                 continue
+            not_compared = False
             try:
                 comp_copied = _copy_and_verify(comp_src, comp_dst)
-                comp_error = "companion verification failed"
+                comp_error = ("the copy did not match the original byte for "
+                              "byte, so it was removed")
+            except CopyNotCompared as e:
+                comp_copied = False
+                not_compared = True
+                comp_error = (f"{e}. The copies of {photo['filename']} made "
+                              "before it were left in place too")
             except OSError as e:
                 comp_copied = False
                 comp_error = f"companion copy failed: {e}"
@@ -732,7 +747,10 @@ class _PhotoFileTransfer:
                 log.warning("Move skipped for %s: %s: %s", photo["filename"],
                             comp, comp_error)
                 self.errors.append(f"{comp}: {comp_error}")
-                self.discard_partial_copies(item, copied_companions)
+                # A read error may mean the source is failing, and then the
+                # copies already made hold the only bytes that can be read.
+                if not not_compared:
+                    self.discard_partial_copies(item, copied_companions)
                 return False
             copied_companions.append(comp)
             if comp == item.xmp_companion:

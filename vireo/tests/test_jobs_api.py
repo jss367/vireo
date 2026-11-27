@@ -6129,8 +6129,6 @@ def test_pending_archive_sync_first_guards_final_verification(app_and_db, tmp_pa
 
 
 def test_pending_archive_cleanup_warning_does_not_reopen_verified_transfer(app_and_db, tmp_path, monkeypatch):
-    import shutil
-
     import move
 
     app, db = app_and_db
@@ -6140,17 +6138,17 @@ def test_pending_archive_cleanup_warning_does_not_reopen_verified_transfer(app_a
     db.commit()
     staging = imported["config"]["managed_staging"]["destination"]
     archive_id = imported["config"]["pending_archive_id"]
-    remove = shutil.rmtree
+    remove = os.unlink
 
     def cleanup(path, *args, **kwargs):
-        if os.path.realpath(path) == os.path.realpath(staging):
+        if os.path.realpath(path).startswith(os.path.realpath(staging) + os.sep):
             raise PermissionError("Local cleanup permission denied")
         return remove(path, *args, **kwargs)
 
     def no_rsync(*args, **kwargs):
         raise FileNotFoundError()
 
-    monkeypatch.setattr(shutil, "rmtree", cleanup)
+    monkeypatch.setattr(move.source_cleanup.os, "unlink", cleanup)
     monkeypatch.setattr(move.folder_transfer, "_run_rsync_streamed", no_rsync)
     client = app.test_client()
     response = client.post(f"/api/import/pending-archives/{archive_id}/send")
@@ -6660,8 +6658,6 @@ def test_pending_archive_preflight_failure_is_not_a_sync_failure(app_and_db, tmp
 
 @pytest.mark.parametrize("cleanup_warning", [False, True])
 def test_pending_archive_post_transfer_failure_stays_visible(app_and_db, tmp_path, monkeypatch, cleanup_warning):
-    import shutil
-
     import move
 
     app, db = app_and_db
@@ -6680,14 +6676,14 @@ def test_pending_archive_post_transfer_failure_stays_visible(app_and_db, tmp_pat
 
     monkeypatch.setattr(move.folder_transfer, "_run_rsync_streamed", no_rsync)
     if cleanup_warning:
-        remove = shutil.rmtree
+        remove = os.unlink
 
         def cleanup(path, *args, **kwargs):
-            if os.path.realpath(path) == os.path.realpath(staging):
+            if os.path.realpath(path).startswith(os.path.realpath(staging) + os.sep):
                 raise PermissionError("Local cleanup permission denied")
             return remove(path, *args, **kwargs)
 
-        monkeypatch.setattr(shutil, "rmtree", cleanup)
+        monkeypatch.setattr(move.source_cleanup.os, "unlink", cleanup)
     client = app.test_client()
     job = wait_for_job_via_client(client, client.post(
         f"/api/import/pending-archives/{archive_id}/send").get_json()["job_id"])

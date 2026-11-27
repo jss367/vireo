@@ -4,11 +4,17 @@
 runs the move's phases in order through three collaborators:
 ``_FolderMoveTarget`` (``folder_target``), ``_FolderTransfer``
 (``folder_transfer``) and ``_FolderCatalogRewrite`` (``folder_catalog``).
+
+Every move compares the copy's contents with the source before the catalog
+is updated: rsync checksums of both sides for a remote move; for a local or
+mounted one, NAS checksums over a proven saved SSH route or a byte-for-byte
+read of both sides. Afterwards only the source entries that comparison
+covered are deleted (``source_cleanup``); anything added to the source or
+changed in it since stays there and is named in the result.
 """
 
 import logging
 import os
-import shutil
 from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -17,6 +23,7 @@ from .folder_catalog import _FolderCatalogRewrite
 from .folder_target import _FolderMoveTarget
 from .folder_transfer import _FolderTransfer
 from .paths import normalize_destination_name
+from .source_cleanup import SourceCleanup, remove_verified_originals
 
 # The package's one logger, ``move``, shared by every module in it.
 log = logging.getLogger("move")
@@ -31,7 +38,6 @@ class FolderMoveOptions:
     reject_tracked_ancestor: bool = False
     allow_tracked_merge: bool = False
     destination_name: str = ""
-    verify_contents: bool = False
     verification_cb: Callable[[str, dict[str, str] | None], None] | None = None
     pre_commit_check: object = None
     thumb_cache_dir: str | None = None
@@ -52,10 +58,10 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
             for a remote move (the destination comes from ``remote``).
         destination_name: optional new name for the folder at the destination.
             Must be one path component. Empty preserves the source name.
-        verify_contents: verify every destination file's contents before
-            updating the catalog and deleting the source originals. Mounted
-            NAS destinations use checksums over a proven saved SSH route
-            when available, with local byte comparison as the fallback.
+        verification_cb: optional callback(step, notice) that receives the
+            NAS verification notice for a mounted destination: whether a saved
+            SSH route lets the NAS checksum the copy, or why Vireo compares
+            every byte locally instead.
         pre_commit_check: optional callback that raises if the destination
             is no longer safe, after verification and before catalog changes.
         progress_cb: optional callback(current, total, filename)
@@ -67,12 +73,12 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
             missing at the destination and never overwrites one already there
             (this is how an interrupted move is resumed). Originals are deleted
             only after every source file is verified present at the
-            destination. A failed merge never removes the destination, since it
-            may hold the user's pre-existing files. Finder ``.DS_Store`` files
+            destination with the same contents. A failed merge never removes
+            the destination, since it may hold the user's pre-existing files. Finder ``.DS_Store`` files
             are ignored on both sides: the copy skips them, the conflict and
             verification checks skip them, and the source's copy is discarded
-            only when the whole source tree is removed after success — a
-            failed merge leaves the source ``.DS_Store`` in place.
+            only when the originals are removed after success — a failed
+            merge leaves the source ``.DS_Store`` in place.
         developed_dir: optional path to the configured
             `darktable_output_dir`. When set, the folder's developed
             subdirectory — nested under a hash of its source path, see
@@ -115,10 +121,11 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
             already-correct pixels stay served without a regeneration.
 
     Returns dict with keys: moved (int), errors (list of str). When the
-    catalog has already been repointed at the new destination but deleting
-    the source originals afterwards fails, an extra ``cleanup_error`` (str)
-    is included — the archive is committed and ``errors`` stays empty, but
-    callers should still surface the leftover originals to the user.
+    catalog has already been repointed at the new destination but something
+    is left in the source afterwards, ``cleanup_error`` (str) says what and
+    why and ``source_leftovers`` names the files (``SourceCleanup.report``).
+    The archive is committed and ``errors`` stays empty, but callers should
+    still surface the leftover originals to the user.
     """
     options = FolderMoveOptions(**options)
     src_path, folder_name, landing_name, error = _folder_move_source(
@@ -191,7 +198,7 @@ class _FolderMove:
         )
         self.transfer = _FolderTransfer(
             db, src_path, self.target, remote=options.remote,
-            verify_contents=options.verify_contents, progress_cb=progress_cb,
+            progress_cb=progress_cb,
             progress=self.progress, control=control, verification_cb=options.verification_cb,
         )
         self.catalog = _FolderCatalogRewrite(
@@ -200,6 +207,7 @@ class _FolderMove:
             thumb_cache_dir=options.thumb_cache_dir, developed_dir=developed_dir,
         )
         self.cleanup_error = None
+        self.cleanup = SourceCleanup()
 
     def progress(self, current, total, filename, phase):
         if self.control and (phase in ("Checking timestamps", "Checking NAS verification")
@@ -274,7 +282,6 @@ class _FolderMove:
                     # destination. Preserve every existing file and recheck
                     # catalog ownership before publishing or cleaning up.
                     self.target.dest_exists = True
-                    self.transfer.verify_contents = True
                     error = self.target.resolve_tracked_destination()
                     if error:
                         return error
@@ -306,7 +313,7 @@ class _FolderMove:
         return None
 
     def remove_originals(self):
-        """Delete originals.
+        """Delete the originals the verification covered, and nothing else.
 
         The catalog already points at the new destination, so anything that
         goes wrong from here is post-commit: the archive is already published.
@@ -314,16 +321,34 @@ class _FolderMove:
         leftover originals without misreporting the move as failed (which
         would also leave the archive's tracked row in place while telling the
         user their data is still in staging).
+
+        The source tree is not removed wholesale. A file that arrived in it
+        after verification, or changed since, has no proven copy at the
+        destination, so it stays and is named in the result.
         """
         src_path = self.src_path
-        # A single rmtree: no per-item count to show.
-        self.progress(0, 0, "", "Removing originals")
-        log.info("Verification passed, deleting originals: %s", src_path)
-        try:
-            shutil.rmtree(src_path)
-        except OSError as e:
-            log.exception("Post-commit cleanup of %s failed", src_path)
-            self.cleanup_error = str(e)
+        record = self.transfer.source_record
+        if record is None:
+            # Unreachable while ``run`` verifies before it commits; with no
+            # record of what was verified, nothing may be deleted.
+            self.cleanup_error = (
+                "Vireo has no record of which files were verified, so it "
+                "deleted none of the originals.")
+            return
+        self.progress(0, len(record), "", "Removing originals")
+        log.info("Verification passed, deleting %d verified originals: %s",
+                 len(record), src_path)
+
+        def report(done, total, name):
+            self.progress(done, total, name, "Removing originals")
+
+        cleanup = remove_verified_originals(src_path, record, progress=report)
+        self.cleanup = cleanup
+        if not cleanup.complete:
+            log.warning("Post-commit cleanup of %s left %d unverified and %d "
+                        "undeletable entries", src_path, len(cleanup.kept),
+                        len(cleanup.failed))
+            self.cleanup_error = cleanup.describe()
 
     def result(self):
         merge_counts = self.catalog.merge_counts
@@ -364,4 +389,6 @@ class _FolderMove:
                     preserved_off_staging_identities)
         if self.cleanup_error is not None:
             result["cleanup_error"] = self.cleanup_error
+        if not self.cleanup.complete:
+            result["source_leftovers"] = self.cleanup.report()
         return result
