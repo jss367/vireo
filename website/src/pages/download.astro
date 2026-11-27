@@ -106,37 +106,8 @@ const linuxVersion = '0.78.0';
   <section class="section">
     <div class="container quickstart">
       <h2 class="quickstart__title">Quick Start</h2>
-      <p class="quickstart__subtitle">Up and running in under five minutes.</p>
-      <div class="quickstart__steps">
-        <div class="quickstart__step">
-          <span class="quickstart__number">1</span>
-          <div>
-            <h3>Install</h3>
-            <p>Download the installer for your platform and run it. No admin privileges required on macOS.</p>
-          </div>
-        </div>
-        <div class="quickstart__step">
-          <span class="quickstart__number">2</span>
-          <div>
-            <h3>Import photos</h3>
-            <p>Open Import, choose Add in place, and select one or more folders. Your photos stay where they are.</p>
-          </div>
-        </div>
-        <div class="quickstart__step">
-          <span class="quickstart__number">3</span>
-          <div>
-            <h3>Choose processing</h3>
-            <p>Select an After import option and start the import. Vireo downloads any required AI models, then processes your photos locally.</p>
-          </div>
-        </div>
-        <div class="quickstart__step">
-          <span class="quickstart__number">4</span>
-          <div>
-            <h3>Review &amp; organize</h3>
-            <p>Browse predictions, cull rejects, assign keywords, and export XMP sidecars — all from one interface.</p>
-          </div>
-        </div>
-      </div>
+      <p class="quickstart__subtitle">Follow one folder from installation to your first keeper.</p>
+      <a href={`${base}docs/#getting-started`} class="btn btn--primary">Getting started with Vireo</a>
     </div>
   </section>
 
@@ -279,6 +250,7 @@ const linuxVersion = '0.78.0';
 
   /* Quick Start */
   .quickstart {
+    text-align: center;
     max-width: 720px;
     margin: 0 auto;
   }
@@ -294,44 +266,6 @@ const linuxVersion = '0.78.0';
     color: var(--color-text-muted);
     text-align: center;
     margin-bottom: var(--space-3xl);
-  }
-
-  .quickstart__steps {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-xl);
-  }
-
-  .quickstart__step {
-    display: flex;
-    gap: var(--space-xl);
-    align-items: flex-start;
-  }
-
-  .quickstart__number {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 48px;
-    height: 48px;
-    min-width: 48px;
-    border-radius: 50%;
-    background: var(--color-accent);
-    color: var(--color-navy-deep);
-    font-size: var(--text-xl);
-    font-weight: 700;
-    line-height: 1;
-  }
-
-  .quickstart__step h3 {
-    font-size: var(--text-lg);
-    margin-bottom: var(--space-xs);
-  }
-
-  .quickstart__step p {
-    font-size: var(--text-base);
-    color: var(--color-text-muted);
-    line-height: var(--leading-normal);
   }
 
   @media (max-width: 768px) {
