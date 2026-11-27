@@ -92,7 +92,7 @@ function renderCacheScopeBanner(info) {
     text.innerHTML = '<strong>' + unreviewed + ' of ' + inScope + ' photo'
       + (inScope === 1 ? '' : 's') + ' in ' + noun + ' '
       + (unreviewed === 1 ? 'is' : 'are') + ' not in the saved review.</strong> '
-      + 'Run Process on ' + noun + ' to include ' + (unreviewed === 1 ? 'it' : 'them') + '. Species saved on these photos will be attached to encounters when grouping finishes.';
+      + 'Run Process on ' + noun + ' to include ' + (unreviewed === 1 ? 'it' : 'them') + '.';
     banner.style.display = 'flex';
     return;
   }
@@ -101,13 +101,9 @@ function renderCacheScopeBanner(info) {
 
   var shown = info.cached_photo_count || 0;
   var total = info.workspace_photo_count || 0;
-  var missing = info.missing_photo_count || Math.max(total - shown, 0);
   text.innerHTML = '<strong>Showing ' + shown + ' of ' + total
     + ' active workspace photo' + (total === 1 ? '' : 's') + '.</strong> '
-    + missing + ' photo' + (missing === 1 ? '' : 's')
-    + ' are not in this review cache. This usually means the last Process run '
-    + 'was scoped to selected folders, a collection, new images, or deselected photos. '
-    + 'Species saved on ungrouped photos will be attached to encounters when grouping finishes.';
+    + 'Run Process on additional photos to include them.';
   banner.style.display = 'flex';
 }
 
