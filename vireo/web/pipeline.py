@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from config import config_value, read_raw_config_file, settings_write_lock
 from flask import Blueprint, jsonify, request
+from job_runner.history import TERMINAL_STATUSES
 from jobs import SLOT_CAP
 from photo_payload import (
     attach_edit_recipes,
@@ -121,6 +122,11 @@ def create_pipeline_blueprint(
                 active += 1
             elif status == "queued":
                 queued += 1
+        if tracked_id and not tracked:
+            db = get_db()
+            saved_status = db.job_history.pipeline_status(tracked_id, db.active_workspace_id)
+            if saved_status in TERMINAL_STATUSES:
+                tracked["job"] = {"id": tracked_id, "status": saved_status, "phase": None}
         return jsonify({
             "active": active,
             "queued": queued,

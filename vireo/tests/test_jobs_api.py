@@ -343,6 +343,18 @@ def test_pipeline_slots_counts_only_pipeline_jobs(app_and_db):
     assert data["slot_cap"] == SLOT_CAP
 
 
+def test_pipeline_slots_restore_retained_terminal_status(app_and_db):
+    app, db = app_and_db
+    db.conn.execute(
+        "INSERT INTO job_history (id, type, status, workspace_id) VALUES (?, ?, ?, ?)",
+        ("past-run", "pipeline", "failed", db.active_workspace_id),
+    )
+    db.commit()
+    data = app.test_client().get("/api/pipeline/slots?job=past-run").get_json()
+    assert data["job"] == {"id": "past-run", "status": "failed", "phase": None}
+    assert data["active"] == data["queued"] == 0
+
+
 def test_pipeline_slots_counts_queued(app_and_db):
     """Queued pipelines (surfaced via ``list_jobs()`` from
     ``_queued_pipelines``) must appear in ``queued`` but not in
