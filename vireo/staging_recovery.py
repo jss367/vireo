@@ -364,10 +364,15 @@ def delete_verified_staging(db, vireo_dir: str, cleanup_root: str) -> dict:
         raise ValueError("staging folder is not fully verified in the archive")
     # A file added after the inventory has no verified archive copy.
     # Remove only inventoried files, then prune directories only if empty.
+    def _raise_walk_error(exc: OSError) -> None:
+        raise exc
+
     try:
         for detail in result["details"]:
             os.unlink(detail["path"])
-        for directory, _dirs, _files in os.walk(result["path"], topdown=False):
+        for directory, _dirs, _files in os.walk(
+            result["path"], topdown=False, onerror=_raise_walk_error,
+        ):
             os.rmdir(directory)
     except OSError as exc:
         raise ValueError(f"staging cleanup could not finish: {exc}") from exc

@@ -253,6 +253,26 @@ def test_cleanup_keeps_staged_file_without_readable_identical_archive(db, tmp_pa
     assert staged.read_bytes() == payload
 
 
+def test_cleanup_surfaces_walk_errors_rather_than_claiming_deletion(db, tmp_path, monkeypatch):
+    root = tmp_path / "staging" / "pipeline-1"
+    staged = _write(root / "USA" / "a.nef")
+    archive = _write(tmp_path / "archive" / "USA" / "a.nef")
+    _catalog_photo(db, archive.parent, archive.name, archive.stat().st_size)
+
+    real_walk = os.walk
+
+    def failing_walk(path, *args, **kwargs):
+        if os.fspath(path) == str(root):
+            if "onerror" in kwargs and kwargs["onerror"] is not None:
+                kwargs["onerror"](OSError("scan failed"))
+            return iter(())
+        return real_walk(path, *args, **kwargs)
+
+    monkeypatch.setattr(staging_recovery.os, "walk", failing_walk)
+    with pytest.raises(ValueError, match="could not finish"):
+        delete_verified_staging(db, str(tmp_path), str(root))
+
+
 def test_cleanup_preserves_a_file_added_after_verification(db, tmp_path, monkeypatch):
     root = tmp_path / "staging" / "pipeline-1"
     staged = _write(root / "USA" / "a.nef")
