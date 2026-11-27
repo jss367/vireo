@@ -2262,6 +2262,22 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   background: var(--accent);
   border-color: var(--accent);
 }
+/* VireoLoadingStatus (vireo-utils.js): the line a page shows while its main
+   request runs. In place of the results while there are none; during a
+   reload, a small box at the bottom of the window with the old results
+   dimmed. The helper sets the box's `bottom` above the status bar and the
+   bottom panel. It stacks below the lightbox (9999) so a reload behind an
+   open photo does not cover it. */
+.vireo-loading-status { text-align: center; padding: 64px 24px; font-size: 15px; color: var(--text-secondary); }
+.vireo-loading-status[hidden] { display: none; }
+.vireo-loading-status-elapsed { font-variant-numeric: tabular-nums; color: var(--text-muted); }
+.vireo-loading-status-hint { margin: 10px auto 0; max-width: 640px; font-size: 13px; line-height: 1.4; color: var(--text-muted); }
+.vireo-loading-status[data-state="error"] .vireo-loading-status-message { color: var(--danger); }
+.vireo-loading-status-retry { margin-left: 12px; padding: 4px 12px; border: 1px solid var(--border-primary); border-radius: 4px; background: var(--bg-secondary); color: var(--text-primary); font: inherit; font-size: 13px; cursor: pointer; }
+.vireo-loading-status-retry:hover { border-color: var(--accent); }
+.vireo-loading-status[data-over-results] { position: fixed; bottom: calc(var(--bottom-offset, 28px) + 16px); left: 50%; transform: translateX(-50%); z-index: 9000; max-width: min(680px, calc(100vw - 32px)); padding: 8px 16px; font-size: 13px; background: var(--bg-tertiary); border: 1px solid var(--border-primary); border-radius: 8px; box-shadow: 0 2px 8px #0005; }
+.vireo-loading-status[data-over-results] .vireo-loading-status-hint { margin-top: 4px; font-size: 12px; }
+[data-vireo-stale] { opacity: 0.45; transition: opacity 0.15s; }
 #toastContainer { position: fixed; top: 56px; right: 16px; z-index: 100000; display: flex; flex-direction: column; gap: 8px; pointer-events: none; max-height: calc(100vh - 72px); overflow-y: auto; }
 .notification-toast { pointer-events: auto; padding: 10px 16px; border-radius: 6px; font-size: 14px; max-width: min(400px, calc(100vw - 64px)); overflow-wrap: anywhere; background: var(--info); color: var(--info-text); box-shadow: 0 2px 8px #0005; }
 .notification-toast[data-type="success"] { background: var(--success); color: var(--success-text); }

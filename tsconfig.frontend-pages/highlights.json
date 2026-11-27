@@ -3,6 +3,7 @@
   "files": [
     "../types/pages/highlights.d.ts",
     "../types/page-hooks.d.ts",
+    "../types/loading-status.d.ts",
     "../vireo/static/highlights/boot.js",
     "../vireo/static/highlights/cards.js",
     "../vireo/static/highlights/flag-changes.js",

@@ -3,6 +3,7 @@
   "files": [
     "../types/pages/review.d.ts",
     "../types/page-hooks.d.ts",
+    "../types/loading-status.d.ts",
     "../vireo/static/review/boot.js",
     "../vireo/static/review/cards.js",
     "../vireo/static/review/collections.js",

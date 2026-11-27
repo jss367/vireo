@@ -15,7 +15,7 @@ separate implementations: a fix in one does not reach the other.
 | `state.js` | Page state: the loaded predictions and the active view selections |
 | `detection-boxes.js` | Show/Hide Boxes, species box colors, and re-syncing boxes after an edit |
 | `collections.js` | The collection picker and `switchCollection()` |
-| `loading.js` | `loadPredictions()`, its sequence guard, and the reload flag that gates decisions |
+| `loading.js` | `loadPredictions()`, its sequence guard, the reload flag that gates decisions, and the loading line (`reviewLoadStatus()`, shown from page start through the bootstrap requests, with a retry when a load fails) |
 | `deep-links.js` | `?model=`, `?labels_fingerprint=` and `?photo_id=` deep links and their filter pills |
 | `controls.js` | `renderAll()`, the toolbar (confidence, model, sort, photo size), the heading's pending count, the status tabs in the sticky header, and Accept All |
 | `grid.js` | Filtering and sorting the grid, building its cards in batches, prediction cards, burst-group buttons, and grid clicks |

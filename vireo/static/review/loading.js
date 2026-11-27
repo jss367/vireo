@@ -27,6 +27,41 @@ var _predictionsReloading = false;
   return epoch !== _loadPredictionsEpoch;
 }
 
+// With no collection, filter or photo chosen, the request returns every
+// prediction in the workspace, which takes from seconds to minutes on a large
+// catalog; a collection returns only its own.
+var REVIEW_WORKSPACE_LOAD_HINT = 'All collections loads every prediction in this workspace. '
+  + 'A single collection loads faster.';
+
+/** @type {VireoLoadingStatusHandle | null} */
+var _reviewLoadStatus = null;
+
+/** The line above the grid that says a load is running or has failed. */
+function reviewLoadStatus() {
+  if (!_reviewLoadStatus) {
+    _reviewLoadStatus = VireoLoadingStatus.create(
+      /** @type {HTMLElement} */ (document.getElementById('loading')),
+      { content: document.getElementById('grid') }
+    );
+  }
+  return _reviewLoadStatus;
+}
+
+/** @param {unknown} err */
+function showReviewLoadFailure(err) {
+  reviewLoadStatus().fail('Could not load predictions: ' + (err instanceof Error ? err.message : String(err)), {
+    retry: function() { switchCollection(currentCollection); },
+  });
+}
+
+/** @param {URLSearchParams} params */
+function reviewLoadHint(params) {
+  var narrowed = ['rules', 'visual', 'collection_id', 'photo_ids'].some(function(key) {
+    return params.has(key);
+  });
+  return narrowed ? '' : REVIEW_WORKSPACE_LOAD_HINT;
+}
+
 /** @param {URLSearchParams} params */
 async function fetchReviewScope(params) {
   var photoId = currentPhotoIdFilter;
@@ -55,7 +90,6 @@ async function loadPredictions() {
     _acceptAllReloadBtn.disabled = true;
     _acceptAllReloadBtn.textContent = 'Reloading…';
   }
-  /** @type {HTMLElement} */ (document.getElementById('loading')).style.display = 'block';
   /** @type {HTMLElement} */ (document.getElementById('empty')).style.display = 'none';
 
   try {
@@ -80,6 +114,7 @@ async function loadPredictions() {
       if (!isNaN(collId)) params.set('collection_id', String(collId));
     }
     if (currentPhotoIdFilter != null) params.set('photo_ids', String(currentPhotoIdFilter));
+    reviewLoadStatus().start('Loading photos…', { hint: reviewLoadHint(params) });
     const {predData, linkedPhoto} = await fetchReviewScope(params);
     if (myEpoch !== _loadPredictionsEpoch) return;
     reviewQueue.linkedPhoto = linkedPhoto;
@@ -128,13 +163,13 @@ async function loadPredictions() {
       'Review Predictions (' + pending + ' pending cards)';
     document.title = 'Vireo - Review (' + pending + ' pending cards)';
 
-    /** @type {HTMLElement} */ (document.getElementById('loading')).style.display = 'none';
     _predictionsReloading = false;
+    reviewLoadStatus().done();
     renderAll();
   } catch(err) {
     if (myEpoch !== _loadPredictionsEpoch) return;  // superseded — drop
     _predictionsReloading = false;
-    /** @type {HTMLElement} */ (document.getElementById('loading')).textContent = 'Error: ' + (err instanceof Error ? err.message : String(err));
+    showReviewLoadFailure(err);
     // Clear the stale ``predictions`` array before re-rendering so Accept
     // All and per-card handlers can't fire against the previous filter
     // or collection's rows under the new visible chips. Without this the
