@@ -35,6 +35,18 @@ function row(id, photo, model, group, confidence) {
 
 const ids = rows => Array.from(rows, p => p.id).sort();
 
+test('photo pages preserve burst links and separate two subjects in the same frame', () => {
+  const ctx = harness();
+  ctx.predictions.forEach(p => { p.card_id = 'local:' + p.photo_id; });
+  ctx.joinPagedReviewCards(ctx.predictions);
+  assert.deepEqual(ids(ctx.reviewCardMembers(ctx.predictions[0])), [1, 2, 3, 4, 5]);
+  ctx.predictions.push({...ctx.predictions[0], id: 6, detection_id: 100});
+  ctx.joinPagedReviewCards(ctx.predictions);
+  ctx.reviewCardIndexRows = null;
+  assert.deepEqual(ids(ctx.reviewCardMembers(ctx.predictions[0])), [1]);
+  assert.deepEqual(ids(ctx.reviewCardMembers(ctx.predictions[1])), [2, 3]);
+});
+
 test('one merged card exposes every model and counts distinct photos and cards', () => {
   const ctx = harness();
   assert.equal(ctx.getVisibleItems().length, 1);

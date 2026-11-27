@@ -7,8 +7,8 @@ function reviewCardScopeKey() {
   return JSON.stringify([currentModel, currentLabelsFingerprint, currentTab, minConfidence, reviewEvidenceFilter]);
 }
 
-/** @param {ReviewPrediction[]} rows */
-function indexVisibleReviewCards(rows) {
+/** @param {ReviewPrediction[]} rows @param {(p:ReviewPrediction)=>string[]} keysFor */
+function connectedReviewRows(rows, keysFor) {
   var parents = rows.map(function(_, index) { return index; });
   /** @param {number} index @returns {number} */
   function root(index) {
@@ -22,15 +22,7 @@ function indexVisibleReviewCards(rows) {
   }
   /** @type {Map<string, number>} */ var links = new Map();
   rows.forEach(function(p, index) {
-    var base = reviewBaseCardKey(p);
-    var keys = [base];
-    if (reviewEvidenceFilter === 'all' && currentModel === 'all' && !currentLabelsFingerprint && p.card_id) {
-      // A confidence filter can hide the frame that connected two groups.
-      // Reconnect the remaining nodes within the server's card boundaries,
-      // keyed on detection_id so two detected subjects in one photo stay apart.
-      keys = [JSON.stringify([base, p.model, p.group_id || p.id]), JSON.stringify([base, 'detection', p.detection_id])];
-    }
-    keys.forEach(function(key) {
+    keysFor(p).forEach(function(key) {
       var other = links.get(key);
       if (other == null) links.set(key, index);
       else parents[root(index)] = root(other);
@@ -41,6 +33,22 @@ function indexVisibleReviewCards(rows) {
     var key = root(index);
     if (!components.has(key)) components.set(key, []);
     components.get(key)?.push(p);
+  });
+  return components;
+}
+
+/** @param {ReviewPrediction[]} rows */
+function indexVisibleReviewCards(rows) {
+  var components = connectedReviewRows(rows, function(p) {
+    var base = reviewBaseCardKey(p);
+    var keys = [base];
+    if (reviewEvidenceFilter === 'all' && currentModel === 'all' && !currentLabelsFingerprint && p.card_id) {
+      // A confidence filter can hide the frame that connected two groups.
+      // Reconnect the remaining nodes within the server's card boundaries,
+      // keyed on detection_id so two detected subjects in one photo stay apart.
+      keys = [JSON.stringify([base, p.model, p.group_id || p.id]), JSON.stringify([base, 'detection', p.detection_id])];
+    }
+    return keys;
   });
   reviewCardMemberIndex = new Map();
   components.forEach(function(members) {
@@ -127,4 +135,33 @@ function reviewCardCounts() {
     counts[p.status]?.add(key);
   });
   return Object.fromEntries(Object.entries(counts).map(function(entry) { return [entry[0], entry[1].size]; }));
+}
+
+
+// A burst can cross photo pages. Rebuild its full membership before enabling
+// decisions. As in review_card_components, an ambiguous multi-subject burst
+// splits by detection, including subjects connected through another model.
+/** @param {ReviewPrediction[]} rows */
+function joinPagedReviewCards(rows) {
+  var groupedPhotos = new Set(rows.filter(p => p.group_id).map(p => p.photo_id));
+  var components = connectedReviewRows(rows.filter(p => groupedPhotos.has(p.photo_id)), function(p) {
+    var identity = [p.consensus_species_key, p.status];
+    var keys = [JSON.stringify([...identity, 'subject', p.detection_id])];
+    if (p.group_id) keys.push(JSON.stringify([...identity, 'burst', p.model, p.group_id]));
+    return keys;
+  });
+  components.forEach(function(members) {
+    var subjects = new Map();
+    var ambiguous = members.some(function(p) {
+      if (subjects.has(p.photo_id)) return subjects.get(p.photo_id) !== p.detection_id;
+      subjects.set(p.photo_id, p.detection_id);
+      return false;
+    });
+    var first = members[0];
+    if (!first) return;
+    for (var p of members) {
+      p.card_id = ambiguous ? 'page-subject:' + JSON.stringify([p.consensus_species_key, p.status, p.detection_id])
+        : 'page-card:' + first.id;
+    }
+  });
 }

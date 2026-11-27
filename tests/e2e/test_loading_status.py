@@ -10,7 +10,7 @@ from playwright.sync_api import expect
 
 HIGHLIGHTS_REQUEST = re.compile(r"/api/highlights\?")
 PREDICTIONS_REQUEST = re.compile(r"/api/predictions\?")
-COLLECTIONS_REQUEST = re.compile(r"/api/collections$")
+COLLECTIONS_REQUEST = re.compile(r"/api/dashboard/options$")
 SERVER_ERROR = {
     "status": 500,
     "content_type": "application/json",
@@ -78,6 +78,7 @@ def test_highlights_says_it_is_loading_and_counts_a_long_wait(live_server, page)
     status = page.locator("#highlightsStatus")
     expect(status).to_be_visible()
     expect(status.locator(".vireo-loading-status-message")).to_have_text("Loading highlights…")
+    expect(page.locator("#loadingPhotos a").first).to_be_visible()
     # A short wait shows neither the seconds nor the hint.
     expect(status.locator(".vireo-loading-status-elapsed")).to_have_text("")
     expect(status.locator(".vireo-loading-status-hint")).to_be_hidden()
@@ -93,6 +94,7 @@ def test_highlights_says_it_is_loading_and_counts_a_long_wait(live_server, page)
     release()
     expect(page.locator(".highlights-card").first).to_be_visible()
     expect(status).to_be_hidden()
+    expect(page.locator("#loadingPhotos")).to_be_hidden()
 
 
 def test_highlights_reload_dims_the_old_rows_until_the_new_ones_arrive(live_server, page):

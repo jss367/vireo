@@ -122,6 +122,8 @@ function initPipelineReviewPage() {
 }
 
 function loadPipelinePageInit() {
+  window.loadingPhotos.clear();
+  void window.loadingPhotos.load('/api/pipeline/review-preview', 'Photos from your saved review');
   // Readiness counts every photo in the workspace and takes longer than the
   // saved review, so it loads beside the results and never holds up the
   // photos. Captured so computeReviewNow() can re-render the degraded banner
@@ -136,6 +138,7 @@ function loadPipelinePageInit() {
   readinessRequest.catch(function() {});
   safeFetch('/api/pipeline/page-init?include=results', {}, { toast: false })
   .then(function(data) {
+    window.loadingPhotos.clear();
     pipelineReviewWorkspaceId = data.workspace_id ?? null;
     // Capture overrides regardless of state so computeReviewNow() can apply
     // the same review_min_confidence logic when the user clicks Compute.
@@ -170,6 +173,7 @@ function loadPipelinePageInit() {
     openRequestedGroupReviewFromUrl();
     loadReviewScopeOptions();
   }).catch(function(error) {
+    window.loadingPhotos.clear();
     var empty = /** @type {HTMLElement} */ (document.getElementById('emptyState'));
     if (empty) {
       empty.style.display = '';

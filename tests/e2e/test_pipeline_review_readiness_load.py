@@ -95,3 +95,19 @@ def test_review_reports_a_failed_readiness_check_and_keeps_the_photos(live_serve
     expect(page.locator('#toastContainer [data-type="error"]')).to_contain_text(
         "Could not check which analysis steps are missing")
     expect(page.locator("#encountersContainer .photo-card")).to_have_count(4)
+
+
+def test_saved_photos_can_open_while_review_results_refresh(live_server, page):
+    held = []
+    photo_id = live_server["data"]["photos"][0]
+    page.route("**/api/pipeline/page-init?include=results", lambda route: held.append(route))
+    page.route("**/api/pipeline/review-preview", lambda route: route.fulfill(
+        json={"photos": [{"id": photo_id, "label": "bird.NEF"}]}))
+    page.goto(live_server["url"] + "/pipeline/review", wait_until="domcontentloaded")
+    link = page.get_by_role("link", name="bird.NEF")
+    expect(link).to_be_visible()
+    expect(link).to_have_attribute("href", f"/browse?photo_id={photo_id}")
+    assert held
+    held[0].fulfill(json={"workspace_id": 1, "results": _saved_review(), "workspace_overrides": {}})
+    expect(page.locator("#encountersContainer .photo-card")).to_have_count(4)
+    expect(page.locator("#loadingPhotos")).to_be_hidden()

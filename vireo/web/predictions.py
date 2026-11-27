@@ -356,9 +356,23 @@ def create_predictions_blueprint(
             )
         except ValueError as e:
             return json_error(str(e), 400)
+        page_info: JsonDict = {}
+        page_ids = explicit_photo_ids
+        if "after_photo" in request.args:
+            after = request.args.get("after_photo", type=int)
+            size = request.args.get("page_size", 64, type=int)
+            workspace = db.require_workspace_id()
+            if (after is None or after < 0 or after >= 2**63 or not 1 <= size <= 512
+                    or collection_id or explicit_photo_ids is not None or rules or visual or status):
+                return json_error("Invalid workspace prediction page", 400)
+            if after and request.args.get("workspace_id", type=int) != workspace:
+                return json_error("Workspace changed. Reload Review.", 409)
+            ids = db.predictions.review_photo_page(after, size + 1)
+            page_ids = ids[:size]
+            page_info = {"workspace_id": workspace, "next_photo": ids[size - 1] if len(ids) > size else None}
         try:
             preds, alt_preds = _query_predictions_with_alternatives(
-                db, collection_id, explicit_photo_ids, status, rules,
+                db, collection_id, page_ids, status, rules,
             )
         except ValueError as e:
             return json_error(str(e), 400)
@@ -374,7 +388,7 @@ def create_predictions_blueprint(
         # over the broadened metadata-only prediction set. Response is a
         # dict envelope so the field can travel alongside the list;
         # callers unwrap ``data.predictions``.
-        response: JsonDict = {"predictions": results}
+        response: JsonDict = {"predictions": results, **page_info}
         if visual_info is not None:
             response["visual"] = visual_info
         # Only the per-photo callers (Browse's detail panel) need this, and

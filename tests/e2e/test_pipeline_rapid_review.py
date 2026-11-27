@@ -291,7 +291,7 @@ def test_rapid_review_species_edit_refreshes_existing_keyword_state(live_server,
     )
 
     _goto_rapid_review(page, live_server)
-    expect(page.locator("#applyBtn")).to_have_text("Apply: no DB changes")
+    expect(page.locator("#applyBtn")).to_have_text("No changes to save")
 
     page.locator("#speciesInput").fill("New bird")
 
@@ -435,13 +435,24 @@ def test_rapid_review_deep_link_opens_filtered_out_burst_via_all(live_server, pa
         ],
         "summary": {"keep_count": 1, "review_count": 1, "reject_count": 0},
     }
-    _mock_pipeline_rapid_review(page, results=results)
+    writes = []
+    page.on("request", lambda request: writes.append(request.url) if request.method == "POST"
+            and request.url.endswith(("/group/apply", "/encounters/species", "/save-cache")) else None)
+    _mock_pipeline_rapid_review(page, results=results, state_photos={
+        "1": {"flag": "flagged", "has_species_keyword": True, "has_species_keywords": {"Test bird": True}},
+        "2": {"flag": "none", "has_species_keyword": False},
+    })
 
     _goto_rapid_review(page, live_server, "?enc=0&burst=0")
 
     expect(page.locator("#queueFilter")).to_have_value("all")
     expect(page.locator("#burstTitle")).to_have_text("Encounter 1, Burst 1")
     expect(page.locator("#filename")).to_have_text("confirmed.jpg")
+    expect(page.locator("#applyBtn")).to_be_disabled()
+    expect(page.locator("#applyNextBtn")).to_have_text("Next burst")
+    page.locator("#applyNextBtn").click()
+    expect(page.locator("#filename")).to_have_text("needs.jpg")
+    assert writes == []
 
 
 def test_rapid_review_needs_species_includes_mixed_burst(live_server, page):
@@ -1101,7 +1112,7 @@ def test_rapid_review_cull_only_on_confirmed_burst_skips_species_post(live_serve
 
     # Deep-link forces the "all" queue so a fully-confirmed burst is reviewable.
     _goto_rapid_review(page, live_server, "?enc=0&burst=0")
-    expect(page.locator("#applyBtn")).to_be_enabled()
+    expect(page.locator("#applyBtn")).to_have_text("No changes to save")
     expect(page.locator("#filename")).to_have_text("a.jpg")
     # Species field already reflects the confirmed species; do NOT change it.
     expect(page.locator("#speciesInput")).to_have_value("Test bird")
@@ -1269,7 +1280,7 @@ def test_rapid_review_species_replacement_on_confirmed_burst_posts(live_server, 
     )
 
     _goto_rapid_review(page, live_server, "?enc=0&burst=0")
-    expect(page.locator("#applyBtn")).to_be_enabled()
+    expect(page.locator("#applyBtn")).to_have_text("No changes to save")
     expect(page.locator("#speciesInput")).to_have_value("Test bird")
     page.locator("#speciesInput").fill("Different bird")
 
@@ -1414,7 +1425,7 @@ def test_rapid_review_two_species_burst_prefills_both_and_is_not_queued(live_ser
     _goto_rapid_review(page, live_server, "?enc=0&burst=0")
     expect(page.locator("#speciesInput")).to_have_value("American Wigeon, Green-winged Teal")
     # Fully confirmed on both subjects: nothing left to tag, no species change.
-    expect(page.locator("#applyBtn")).to_have_text("Apply: no DB changes")
+    expect(page.locator("#applyBtn")).to_have_text("No changes to save")
     expect(page.locator(".reason-chip", has_text="No species")).to_have_count(0)
     expect(page.locator(".reason-chip", has_text="Mixed species")).to_have_count(0)
 
@@ -1517,9 +1528,8 @@ def test_rapid_review_clearing_species_field_removes_nothing(live_server, page):
     expect(page.locator("#speciesInput")).to_have_value("American Wigeon, Green-winged Teal")
 
     _fill_species_and_settle(page, "")
-    expect(page.locator("#applyBtn")).to_have_text("Apply: no DB changes")
-    with page.expect_response("**/api/pipeline/save-cache"):
-        page.locator("#applyBtn").click()
+    expect(page.locator("#applyBtn")).to_have_text("No changes to save")
+    expect(page.locator("#applyBtn")).to_be_disabled()
     assert species_payloads == []
 
 
@@ -1543,7 +1553,7 @@ def test_rapid_review_species_name_with_comma_round_trips(live_server, page):
     _mock_pipeline_rapid_review(page, results=results, state_photos=state, species_payloads=species_payloads)
     _goto_rapid_review(page, live_server, "?enc=0&burst=0")
     expect(page.locator("#speciesInput")).to_have_value('"Mallard, domestic"')
-    expect(page.locator("#applyBtn")).to_have_text("Apply: no DB changes")
+    expect(page.locator("#applyBtn")).to_have_text("No changes to save")
 
     page.keyboard.press("p")
     expect(page.locator("#applyBtn")).to_have_text("Apply: Flag 1")
@@ -1677,7 +1687,7 @@ def test_rapid_review_prefill_ignores_candidate_override_under_confirmed_encount
     _mock_pipeline_rapid_review(page, results=results, state_photos=state, species_payloads=species_payloads)
     _goto_rapid_review(page, live_server, "?enc=0&burst=0")
     expect(page.locator("#speciesInput")).to_have_value("American Wigeon")
-    expect(page.locator("#applyBtn")).to_have_text("Apply: no DB changes")
+    expect(page.locator("#applyBtn")).to_have_text("No changes to save")
 
     page.keyboard.press("p")
     expect(page.locator("#applyBtn")).to_have_text("Apply: Flag 1")
@@ -1778,8 +1788,8 @@ def test_rapid_review_partial_species_failure_keeps_applied_changes_and_reports(
     saved = {p["id"]: p for p in save_payloads[-1]["photos"]}
     for pid in (1, 2, 3):
         assert saved[pid]["confirmed_species_list"] == ["Gadwall", "Green-winged Teal"]
-    # Apply is usable again and the field reflects server truth after reload.
-    expect(page.locator("#applyBtn")).to_be_enabled()
+    # The server state has been restored and there is nothing left to save.
+    expect(page.locator("#applyBtn")).to_have_text("No changes to save")
 
 
 def test_rapid_review_mixed_burst_edited_baseline_beats_encounter_list(live_server, page):
@@ -1805,7 +1815,7 @@ def test_rapid_review_mixed_burst_edited_baseline_beats_encounter_list(live_serv
     _mock_pipeline_rapid_review(page, results=results, state_photos=state, species_payloads=species_payloads)
     _goto_rapid_review(page, live_server, "?enc=0&burst=0")
     expect(page.locator("#speciesInput")).to_have_value("American Wigeon")
-    expect(page.locator("#applyBtn")).to_have_text("Apply: no DB changes")
+    expect(page.locator("#applyBtn")).to_have_text("No changes to save")
 
     page.keyboard.press("p")
     with page.expect_response("**/api/pipeline/save-cache"):

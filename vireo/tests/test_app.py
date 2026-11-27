@@ -17371,6 +17371,38 @@ def test_predictions_api_accepts_photo_ids_filter(app_and_db):
     assert photo_b is not None
 
 
+def test_saved_review_preview_only_links_workspace_photos(app_and_db, monkeypatch):
+    app, db = app_and_db
+    visible_id, _ = _seed_prediction_photo(db, "visible.jpg", "Mallard", 0.8)
+    monkeypatch.setattr("pipeline.load_results_raw", lambda *_: {"photos": [
+        {"id": visible_id, "filename": "visible.jpg", "flag": "rejected"},
+        {"id": -1, "filename": "removed.jpg"},
+    ]})
+    response = app.test_client().get("/api/pipeline/review-preview")
+    assert response.get_json() == {"photos": [{"id": visible_id, "label": "visible.jpg"}]}
+
+
+def test_workspace_prediction_pages_match_full_queue(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    for i in range(3):
+        _seed_prediction_photo(db, f"page-{i}.jpg", "Mallard", 0.8)
+    complete = client.get("/api/predictions?evidence=1").get_json()["predictions"]
+    ids = []
+    cursor = 0
+    while cursor is not None:
+        page = client.get("/api/predictions", query_string={
+            "after_photo": cursor, "page_size": 1, "evidence": 1,
+            "workspace_id": db.require_workspace_id(),
+        }).get_json()
+        ids.extend(row["id"] for row in page["predictions"])
+        after = page["next_photo"]
+        assert after is None or after > cursor
+        cursor = after
+    assert sorted(ids) == sorted(row["id"] for row in complete)
+    assert client.get("/api/predictions?after_photo=1&workspace_id=-1").status_code == 409
+
+
 def test_predictions_api_photo_ids_rejects_foreign_photo(app_and_db):
     """A photo outside the active workspace must not leak predictions."""
     app, db = app_and_db

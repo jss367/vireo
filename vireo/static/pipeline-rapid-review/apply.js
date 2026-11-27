@@ -18,6 +18,15 @@ function updateSummaryFromPhotos() {
 /** @param {boolean} openNext */
 async function applyCurrent(openNext) {
   if (!rapid.seeded || rapid.applying || rapid.sessionIndex < 0) return false;
+  if (!rapidApplyLabelParts(rapidComputeApplyDiff()).length) {
+    if (openNext && rapid.sessionIndex + 1 < rapid.sessions.length) await openSession(rapid.sessionIndex + 1);
+    return true;
+  }
+  return applyBurstChanges(openNext);
+}
+
+/** @param {boolean} openNext */
+async function applyBurstChanges(openNext) {
   rapid.applying = true;
   renderApplyState();
   var targetList = parseSpeciesList(/** @type {HTMLInputElement} */ (document.getElementById('speciesInput')).value);

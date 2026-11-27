@@ -944,6 +944,30 @@ def create_highlights_blueprint(get_db: GetDb, json_error: JsonError, visual_sco
             highlight_filter=request.args.get("highlight_selection") or "all",
         )
 
+    @blueprint.get("/api/highlights/preview")
+    def highlights_preview() -> ResponseReturnValue:
+        db = get_db()
+        query = highlights_query(db)
+        if not isinstance(query, HighlightsQuery):
+            return query
+        if (query.scope != "workspace" or query.folder_id is not None or query.collection_id is not None
+                or query.search.text or query.species.text or query.highlight_filter != "all"):
+            return jsonify(photos=[])
+        candidates = db.species_curation.get_highlights_candidates(
+            None, min_quality=query.min_quality, preview_limit=48,
+        )
+        buckets, unidentified = collect_highlight_buckets(
+            candidates, query.confidence_threshold, query.confirmation_filter,
+            canonicalize_species=species_canonicalizer(db),
+        )
+        photos = [
+            {"id": b["photos"][0]["id"], "label": b["species"]}
+            for b in buckets[:8]
+        ]
+        if not photos:
+            photos = [{"id": p["id"], "label": p["filename"]} for p in unidentified[:8]]
+        return jsonify(photos=photos)
+
     @blueprint.route("/api/highlights")
     def api_highlights() -> ResponseReturnValue:
         db = get_db()

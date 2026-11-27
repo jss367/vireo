@@ -99,7 +99,7 @@ function rapidApplyTitle(diff, openNext) {
 /** @param {string} prefix @param {RapidApplyDiff} diff */
 function rapidApplyButtonText(prefix, diff) {
   var parts = rapidApplyLabelParts(diff);
-  return parts.length ? (prefix + ': ' + parts.join(' · ')) : (prefix + ': no DB changes');
+  return parts.length ? (prefix + ': ' + parts.join(' · ')) : 'No changes to save';
 }
 
 function renderApplyState() {
@@ -122,8 +122,8 @@ function renderApplyState() {
     applyBtn.title = 'Applying changes to this burst.';
     applyNextBtn.title = 'Applying changes to this burst.';
   } else if (waitingForState) {
-    applyBtn.textContent = 'Loading burst state...';
-    applyNextBtn.textContent = 'Loading burst state...';
+    applyBtn.textContent = 'Apply';
+    applyNextBtn.textContent = 'Apply & Next';
     applyBtn.title = 'Apply will be available after burst state loads.';
     applyNextBtn.title = 'Apply & Next will be available after burst state loads.';
   } else if (stateFailed) {
@@ -131,6 +131,12 @@ function renderApplyState() {
     applyNextBtn.textContent = 'Apply & Next unavailable';
     applyBtn.title = 'Apply is unavailable because burst state failed to load.';
     applyNextBtn.title = 'Apply & Next is unavailable because burst state failed to load.';
+  } else if (!rapidApplyLabelParts(diff).length) {
+    applyBtn.disabled = true;
+    applyBtn.textContent = 'No changes to save';
+    applyBtn.title = 'No changes to save';
+    applyNextBtn.textContent = 'Next burst';
+    applyNextBtn.title = 'Open the next burst';
   } else {
     applyBtn.textContent = rapidApplyButtonText('Apply', diff);
     applyNextBtn.textContent = rapidApplyButtonText('Apply & Next', diff);

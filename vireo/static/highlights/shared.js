@@ -15,6 +15,7 @@ export const escapeAttr = window.escapeAttr;
 export const photoThumbnailUrl = window.photoThumbnailUrl;
 export const VireoTextSearch = window.VireoTextSearch;
 export const VireoViewPreferences = window.VireoViewPreferences;
+export const loadingPhotos = window.loadingPhotos;
 export const VireoLoadingStatus = window.VireoLoadingStatus;
 
 /**

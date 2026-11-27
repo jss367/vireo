@@ -857,6 +857,18 @@ class PredictionRepository:
             [workspace_id],
         )
 
+    def review_photo_page(self, after: int, limit: int) -> list[int]:
+        """Keyset page of visible photos with predictions, including all subjects per photo."""
+        rows = self.conn.execute(
+            f"""SELECT DISTINCT d.photo_id
+                FROM detections d WHERE d.photo_id > ?
+                  AND EXISTS (SELECT 1 FROM predictions pr WHERE pr.detection_id = d.id)
+                  AND {photo_visible_in_workspace_sql("d.photo_id")}
+                ORDER BY d.photo_id LIMIT ?""",
+            (after, self.workspace_id, self.workspace_id, limit),
+        )
+        return [r["photo_id"] for r in rows]
+
     def get_rows(self, photo_ids=None, model=None, status=None,
                         rules=None):
         """Get predictions with photo, detection and review info.

@@ -1554,7 +1554,7 @@ def test_species_curation_signatures_unchanged():
     })
     assert sig["repo.get_highlights_candidates"] == (
         "(self, folder_id, min_quality=0.0, photo_id=None, rules=None, "
-        "collection_id=None)"
+        "collection_id=None, *, preview_limit=None)"
     )
     assert sig["repo.set_photo_preference"] == (
         "(self, purpose, species, photo_id)"

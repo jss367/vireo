@@ -8,6 +8,7 @@
 
 /* ---------- Render ---------- */
 function renderAll() {
+  showReviewPreview();
   // Nothing below changes a row or a filter, so the steps share one
   // filtered, sorted and indexed copy of the rows (see reviewVisibleRows).
   reviewVisibleRowsCache = new Map();

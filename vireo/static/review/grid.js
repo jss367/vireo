@@ -50,19 +50,9 @@ var predictionSkipSequence = 0;
  */
 var reviewVisibleRowsCache = null;
 
-/** @param {boolean} [includeAllStatuses] */
-function reviewVisibleRows(includeAllStatuses) {
-  var statusView = includeAllStatuses ? 'all' : currentTab;
-  var cached = reviewVisibleRowsCache?.get(statusView);
-  if (cached) {
-    // Card lookups read the index of the latest view asked for, so a
-    // status view brings back the index that was built with its rows.
-    reviewCardMemberIndex = cached.index;
-    reviewCardIndexRows = predictions;
-    reviewCardIndexScope = reviewCardScopeKey();
-    return cached.rows;
-  }
-  var filtered = predictions.slice(); // copy for sorting
+/** @param {ReviewPrediction[]} rows @param {string} statusView */
+function filterReviewRows(rows, statusView) {
+  var filtered = rows.slice();
 
   if (reviewEvidenceFilter !== 'all') {
     filtered = filtered.filter(function(p) {
@@ -92,6 +82,22 @@ function reviewVisibleRows(includeAllStatuses) {
   if (statusView !== 'all') {
     filtered = filtered.filter(function(p) { return p.status === statusView; });
   }
+  return filtered;
+}
+
+/** @param {boolean} [includeAllStatuses] */
+function reviewVisibleRows(includeAllStatuses) {
+  var statusView = includeAllStatuses ? 'all' : currentTab;
+  var cached = reviewVisibleRowsCache?.get(statusView);
+  if (cached) {
+    // Card lookups read the index of the latest view asked for, so a
+    // status view brings back the index that was built with its rows.
+    reviewCardMemberIndex = cached.index;
+    reviewCardIndexRows = predictions;
+    reviewCardIndexScope = reviewCardScopeKey();
+    return cached.rows;
+  }
+  var filtered = filterReviewRows(predictions, statusView);
 
   // Sort
   filtered.sort(function(a, b) {

@@ -3,16 +3,17 @@
 
 async function loadCollectionFilter() {
   try {
-    /** @type {{id:number;name:string;count_error?:string;photo_count?:number;has_visual?:boolean}[]} */ var collections = await safeFetch('/api/collections', {}, { toast: false });
+    /** @type {{collections:{id:number;name:string;degraded:boolean;has_visual:boolean}[]}} */
+    var options = await safeFetch('/api/dashboard/options', {}, {toast:false});
     var sel = /** @type {HTMLSelectElement} */ (document.getElementById('collectionFilter'));
-    collections.forEach(function(c) {
+    options.collections.forEach(function(c) {
       var opt = document.createElement('option');
       opt.value = String(c.id);
       opt.textContent = c.name;
-      // count_error means /api/collections couldn't resolve this collection's
-      // rules — selecting it would 400 the downstream /photos endpoint.
+      // A degraded choice has an unresolvable collection rule. Its
+      // photos endpoint would return a validation error.
       // Show it disabled with a hint so the state is visible.
-      if (c.count_error) {
+      if (c.degraded) {
         opt.disabled = true;
         opt.textContent = c.name + ' (unavailable — edit rules to fix)';
         opt.title = "This collection's rules could not be resolved. Edit it in Browse to make it usable.";
@@ -46,6 +47,8 @@ var _switchCollectionEpoch = 0;
 /** @param {string} val */ async function switchCollection(val) {
   var mySwitchEpoch = ++_switchCollectionEpoch;
   currentCollection = val;
+  ++_loadPredictionsEpoch;
+  clearReviewPreview();
   // Gate mutation entry points immediately: currentCollection has already
   // changed, but the /api/collections/<id>/photos fetch below may take a
   // moment before loadPredictions() runs (and flips the flag itself).

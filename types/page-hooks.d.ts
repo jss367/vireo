@@ -145,3 +145,11 @@ interface VireoPageHookRegistry {
   pageHook<K extends VireoPageHookName>(name: K): NonNullable<VireoPageHooks[K]> | null;
   pageHookNames: readonly VireoPageHookName[];
 }
+
+interface Window {
+  loadingPhotos: {
+    clear(): void;
+    show(title: string, photos: {id:number;label:string}[], path: string): void;
+    load(url: string, title: string): Promise<void>;
+  };
+}

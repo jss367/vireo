@@ -122,11 +122,10 @@ class PipelineFeaturesRepository:
             return self.conn.execute(
                 f"""SELECT {PIPELINE_PHOTO_COLS}
                     FROM photos p
-                    JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-                    WHERE wf.workspace_id = ?
-                      AND p.id IN (SELECT id FROM pipeline_scope_ids)
+                    WHERE p.id IN (SELECT id FROM pipeline_scope_ids)
+                      AND {photo_visible_in_workspace_sql("p.id")}
                     ORDER BY p.timestamp, p.filename ASC, p.id ASC""",
-                (workspace_id,),
+                (workspace_id, workspace_id),
             ).fetchall()
         return self.conn.execute(
             f"""SELECT {PIPELINE_PHOTO_COLS}
@@ -323,9 +322,8 @@ class PipelineFeaturesRepository:
             placeholders = ",".join("?" * len(chunk))
             rows = self.conn.execute(
                 f"""SELECT p.id FROM photos p
-                    JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-                    WHERE wf.workspace_id = ? AND p.id IN ({placeholders})""",
-                (workspace_id, *chunk),
+                    WHERE p.id IN ({placeholders}) AND {photo_visible_in_workspace_sql("p.id")}""",
+                (*chunk, workspace_id, workspace_id),
             ).fetchall()
             present.update(row["id"] for row in rows)
         return present

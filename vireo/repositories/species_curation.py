@@ -59,6 +59,7 @@ from repositories.effective_config import active_effective_config
 from repositories.folder_subtrees import folder_subtree_ids
 from repositories.keyword_taxa import KeywordTaxonRepository
 from repositories.photo_sql import LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE
+from repositories.photo_visibility import photo_visible_in_workspace_sql
 from repositories.prediction_review import (
     CLASSIFIER_MATCH_SCORE_JOIN,
     prediction_review_join,
@@ -381,7 +382,7 @@ class SpeciesCurationRepository:
 
     def get_highlights_candidates(
         self, folder_id, min_quality=0.0, photo_id=None, rules=None,
-        collection_id=None,
+        collection_id=None, *, preview_limit=None,
     ):
         """Return photos eligible for highlights selection.
 
@@ -425,6 +426,32 @@ class SpeciesCurationRepository:
         highlights ranking because it combines these persisted quality fields
         with prediction confidence and user ratings.
         """
+        scope_sql, scope_params = self._highlight_scope(
+            folder_id, photo_id, min_quality, rules, collection_id, preview_limit,
+        )
+        rows = [
+            dict(row) for row in
+            self._highlight_candidate_rows(scope_sql, scope_params)
+        ]
+        species_names = self._highlight_species_names(scope_sql, scope_params)
+        subjects = self._highlight_subject_predictions(
+            self.workspace_id, scope_sql, scope_params,
+        )
+        crops = self._highlight_crop_geometry(scope_sql, scope_params)
+        for row in rows:
+            names = species_names.get(row["id"], [])
+            preds = subjects.get(row["id"], [])
+            row["species_names"] = names
+            row["subject_predictions"] = preds
+            row["crop_geometry"] = crops.get(row["id"])
+            row["species"] = names[0] if names else None
+            top = preds[0] if preds else None
+            row["prediction_id"] = top["prediction_id"] if top else None
+            row["predicted_species"] = top["species"] if top else None
+            row["predicted_confidence"] = top["confidence"] if top else None
+        return rows
+
+    def _highlight_scope(self, folder_id, photo_id, min_quality, rules, collection_id, preview_limit):
         ws = self.workspace_id
         if folder_id is None:
             folder_filter = ""
@@ -441,11 +468,18 @@ class SpeciesCurationRepository:
             photo_filter = "AND p.id = ?"
             photo_params = (photo_id,)
         rules_filter, rules_params = self._rules_scope_filter(rules, collection_id)
+        visibility_join = "JOIN photo_workspace_visibility wf ON wf.photo_id = p.id"
+        membership = "wf.workspace_id = ?"
+        workspace_params = (ws,)
+        if preview_limit is not None or photo_id is not None:
+            visibility_join = ""
+            membership = photo_visible_in_workspace_sql("p.id")
+            workspace_params = (ws, ws)
         scope_sql = f"""SELECT p.id
                FROM photos p
-               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
+               {visibility_join}
                JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
-               WHERE wf.workspace_id = ?
+               WHERE {membership}
                  {folder_filter}
                  {photo_filter}
                  AND (p.quality_score >= ?
@@ -453,30 +487,13 @@ class SpeciesCurationRepository:
                  AND (p.flag IS NULL OR p.flag != 'rejected')
                  {rules_filter}"""
         scope_params = (
-            ws, *folder_params, *photo_params, min_quality, min_quality,
+            *workspace_params, *folder_params, *photo_params, min_quality, min_quality,
             *rules_params,
         )
-        rows = [
-            dict(row) for row in
-            self._highlight_candidate_rows(scope_sql, scope_params)
-        ]
-        species_names = self._highlight_species_names(scope_sql, scope_params)
-        subjects = self._highlight_subject_predictions(
-            ws, scope_sql, scope_params,
-        )
-        crops = self._highlight_crop_geometry(scope_sql, scope_params)
-        for row in rows:
-            names = species_names.get(row["id"], [])
-            preds = subjects.get(row["id"], [])
-            row["species_names"] = names
-            row["subject_predictions"] = preds
-            row["crop_geometry"] = crops.get(row["id"])
-            row["species"] = names[0] if names else None
-            top = preds[0] if preds else None
-            row["prediction_id"] = top["prediction_id"] if top else None
-            row["predicted_species"] = top["species"] if top else None
-            row["predicted_confidence"] = top["confidence"] if top else None
-        return rows
+        if preview_limit is not None:
+            scope_sql += " ORDER BY p.id DESC LIMIT ?"
+            scope_params += (preview_limit,)
+        return scope_sql, scope_params
 
     def _rules_scope_filter(self, rules, collection_id):
         """``(sql, params)`` restricting ``p.id`` to a rule tree and a collection.
@@ -1249,7 +1266,7 @@ class SpeciesCurationRepository:
             _REPRESENTATIVE_ELIGIBILITY_FILTER if eligible_only else ""
         )
         species_filter = ""
-        params = [ws]
+        params = [ws, ws]
         if species:
             species_filter = " AND sr.species = ?"
             params.append(species)
@@ -1257,9 +1274,8 @@ class SpeciesCurationRepository:
             f"""SELECT sr.species, sr.photo_id
                FROM species_representatives sr
                JOIN photos p ON p.id = sr.photo_id
-               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-                AND wf.workspace_id = ?
                JOIN folders f ON f.id = p.folder_id
+               WHERE {photo_visible_in_workspace_sql("sr.photo_id")}
                  {eligibility_filter}
                  {species_filter}
                ORDER BY sr.species, sr.selected_order DESC, sr.id DESC""",

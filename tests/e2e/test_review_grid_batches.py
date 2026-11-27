@@ -1,5 +1,7 @@
 """Review builds its grid in batches and adds cards as the reader scrolls."""
 
+import re
+
 from labels_fingerprint import TOL_SENTINEL
 from playwright.sync_api import expect
 from services import photo_ingest
@@ -78,3 +80,21 @@ def test_a_decision_keeps_the_cards_already_built(page, live_server):
     expect(page.locator(f'#grid .card[data-pred-id="{prediction_id}"]')).to_have_class("card accepted")
     assert cards.count() >= 120
     assert page.evaluate("window.scrollY") > 0
+
+
+def test_first_page_opens_individual_photos_while_bulk_decisions_wait(page, live_server):
+    _add_predictions(live_server["db"], live_server["data"]["folders"][0], 65)
+    later_page = re.compile(r"/api/predictions\?.*after_photo=[1-9]")
+    held = []
+    page.route(later_page, lambda route: held.append(route))
+
+    page.goto(live_server["url"] + "/review", wait_until="domcontentloaded")
+    link = page.locator("#loadingPhotos a").first
+    expect(link).to_be_visible()
+    expect(link).to_have_attribute("href", re.compile(r"/review\?photo_id=\d+"))
+    expect(page.locator("#acceptAllBtn")).to_be_disabled()
+    assert held
+    held[0].continue_()
+    expect(page.locator("#loadingPhotos")).to_be_hidden()
+    total = 65 + len(live_server["data"]["photos"])
+    expect(page.locator('#tabs [data-tab="all"] .count')).to_have_text(str(total))
