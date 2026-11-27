@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any, Protocol, TypedDict
 
 import numpy as np
 from config import config_value
-from detection_id import detection_prompt_runtime, require_original_box
+from detection_id import UnverifiedReviewerBox, detection_prompt_runtime, require_original_box
 from pipeline_locks import (
     acquire_photo_mask,
 )
@@ -905,7 +905,9 @@ class _MaskPass:
         self.processed = i + 1
         run.stages["extract_masks"]["count"] = self.processed
         run.stages["extract_masks"]["total"] = self.total
-        run.runner.update_step(run.job["id"], "extract_masks",
+        needs_confirmation = self.outcomes.counts.get("reviewer_box_needs_confirmation", 0)
+        summary = {"summary": f"{needs_confirmation} reviewer boxes to confirm in Audit → Subject Evidence"} if needs_confirmation else {}
+        run.runner.update_step(run.job["id"], "extract_masks", **summary,
                            progress={"current": self.processed, "total": self.total},
                            error_count=self.em_failed + self.em_unreadable)
         run.emit_progress(
@@ -991,9 +993,12 @@ class _MaskPass:
                     raise
                 continue
             except Exception as error:  # broad: per-photo boundary; one photo's failure is counted and the batch continues
-                self.outcomes.record(item.photo_id, "failed", error)
+                if isinstance(error, UnverifiedReviewerBox):
+                    self.outcomes.record(item.photo_id, "reviewer_box_needs_confirmation", error)
+                else:
+                    self.outcomes.record(item.photo_id, "failed", error)
+                    log.warning("Mask extraction failed for photo %s", item.photo_id, exc_info=True)
                 self.em_failed += 1
-                log.warning("Mask extraction failed for photo %s", item.photo_id, exc_info=True)
                 # A failed write can leave this connection inside a
                 # stale WAL snapshot. Without a rollback, every later
                 # photo fails immediately with the same ``database is
@@ -1635,9 +1640,13 @@ class _MaskPass:
                 f"so they have no mask and Process Review rejects "
                 f"them as `no_subject_mask`."
             )
-        if em_failed > 0:
+        needs_confirmation = self.outcomes.counts.get("reviewer_box_needs_confirmation", 0)
+        if needs_confirmation:
+            secondary.append(f"[extract_masks] {needs_confirmation} reviewer boxes need confirmation. "
+                             "Open Audit → Subject evidence to find the photos, confirm their boxes, and run Process again.")
+        if em_failed > needs_confirmation:
             secondary.append(
-                f"[extract_masks] {em_failed} of {em_total_candidates} photos "
+                f"[extract_masks] {em_failed - needs_confirmation} of {em_total_candidates} photos "
                 f"failed mask extraction"
             )
         if self.detail_unreadable > 0:

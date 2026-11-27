@@ -88,3 +88,15 @@ test('edit and remove target the region version that opened the dialog', async (
     assert.equal(h.puts[0].revision, subject.revision);
   }
 });
+
+test('confirming the displayed box submits its unchanged coordinates and signed frame', async () => {
+  const subject = {id: 19, revision: 'legacy', box_x: .1, box_y: .2, box_w: .3, box_h: .4};
+  const h = harness({subject});
+  assert.equal(h.save.disabled, true);
+  await tick();
+  assert.equal(h.save.disabled, false);
+  assert.equal(h.save.textContent, 'Confirm existing box');
+  await h.save.click();
+  assert.deepEqual(h.puts, [{operation: 'edit', detection_id: 19, revision: 'legacy',
+    box: {x: .1, y: .2, w: .3, h: .4}, frame_token: 'issued-frame-proof'}]);
+});

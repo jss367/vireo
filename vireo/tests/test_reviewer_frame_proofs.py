@@ -421,3 +421,19 @@ def test_detector_frame_upgrade_retires_measurements_and_keeps_choices_and_boxes
     assert write_detection_batch(db, pid, "megadetector-v6", original_frame_detections(source, rows)) == [did]
     assert db.conn.execute("SELECT species FROM predictions WHERE detection_id=?", (did,)).fetchone()[0] == "Synthetic bird"
     assert analyze_photo(db, pid, str(source)) == 1
+
+
+def test_confirming_legacy_box_clears_audit_and_allows_analysis(original_photo):
+    from subjects import analyze_photo
+
+    app, db, pid, source = original_photo
+    client = app.test_client()
+    response = client.put(f"/api/photos/{pid}/subjects/reviewer-box", json={
+        "box": {"x": .2, "y": .2, "w": .4, "h": .4},
+    })
+    did = response.get_json()["primary_detection_id"]
+    assert db.audit.subject_findings(.2)[0]["unverified_box"] == 1
+    confirmed = _save(client, pid, _token(client, pid), edit=did)
+    assert confirmed.get_json()["primary_detection_id"] == did
+    assert not any(row["unverified_box"] for row in db.audit.subject_findings(.2))
+    assert analyze_photo(db, pid, str(source)) == 1

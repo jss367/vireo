@@ -124,7 +124,7 @@ def create_audit_blueprint(
 
         rows = subject_findings(get_db())
         return jsonify({key: sum(row[key] for row in rows)
-                        for key in ("unnamed", "stale_mask", "stale_score")})
+                        for key in ("unnamed", "stale_mask", "stale_score", "unverified_box")})
 
     @blueprint.route("/api/audit/drift")
     def api_audit_drift() -> ResponseReturnValue:

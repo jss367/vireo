@@ -171,7 +171,7 @@ def test_redrawing_on_aligned_original_repairs_legacy_reviewer_box(app_and_db, c
     url = f"/api/photos/{pid}/subjects/reviewer-box"
     box = {"x": .4, "y": .65, "w": .2, "h": .1}
     previous = client.put(url, json={"box": box}).get_json()["primary_detection_id"]
-    with pytest.raises(ValueError, match="draw the box again"):
+    with pytest.raises(ValueError, match="confirm or redraw"):
         analyze_photo(db, pid, path, detection_id=previous)
     response = client.get(f"/photos/{pid}/preview?view=subject&size=1920")
     assert response.status_code == 200
@@ -184,7 +184,7 @@ def test_redrawing_on_aligned_original_repairs_legacy_reviewer_box(app_and_db, c
     assert result["primary_detection_id"] == previous
     assert analyze_photo(db, pid, path, detection_id=previous) == 1
     assert client.post("/api/undo").status_code == 200
-    with pytest.raises(ValueError, match="draw the box again"):
+    with pytest.raises(ValueError, match="confirm or redraw"):
         analyze_photo(db, pid, path, detection_id=previous, force=True)
     assert client.post("/api/redo").status_code == 200
     assert analyze_photo(db, pid, path, detection_id=previous, force=True) == 1

@@ -90,7 +90,7 @@ def test_reviewer_boxes_and_companion_boxes_still_need_their_own_proof(tmp_path,
     from detection_id import COMPANION_FRAME_RUNTIME
 
     with _aligned(_raw(tmp_path, monkeypatch)) as image:
-        with pytest.raises(PromptFrameError, match="draw the box again"):
+        with pytest.raises(PromptFrameError, match="confirm or redraw"):
             require_aligned_detector_prompt(image, "reviewer-v1", detector_model="reviewer-selected")
         with pytest.raises(PromptFrameError, match="JPEG companion"):
             require_aligned_detector_prompt(image, COMPANION_FRAME_RUNTIME, detector_model="megadetector-v6")

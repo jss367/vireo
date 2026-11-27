@@ -21,6 +21,7 @@ function card(row) {
   const caption = document.createElement('figcaption');
   caption.textContent = [row.filename, row.species, row.bucket_size && row.bucket_size + ' in bucket',
     row.whole_frame ? 'whole-frame guess' : row.weak && 'weak detector box',
+    row.unverified_box && 'Open Subjects → Edit box to confirm or redraw',
     row.unnamed && 'unclassified subject', row.stale_mask && 'mask prompt mismatch',
     row.stale_score && 'quality score from prior subject'].filter(Boolean).join(' · ');
   figure.append(link, caption);
@@ -67,7 +68,8 @@ async function checkSubjects() {
   content.replaceChildren();
   try {
     const result = /** @type {AuditSubjectReport} */ (await safeFetch('/api/audit/subjects', {}, {toast: false}));
-    content.append(section('Subjects missing a classification despite a whole-frame prediction', result.findings.filter(r => r.unnamed)),
+    content.append(section('Reviewer boxes to confirm on the original', result.findings.filter(r => r.unverified_box)),
+      section('Subjects missing a classification despite a whole-frame prediction', result.findings.filter(r => r.unnamed)),
       section('Active masks with a different prompt', result.findings.filter(r => r.stale_mask)),
       section('Quality scores from a different subject', result.findings.filter(r => r.stale_score)),
       section('Unconfirmed Highlights entries in small buckets or from weak regions', result.review),

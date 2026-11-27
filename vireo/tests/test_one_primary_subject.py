@@ -404,11 +404,11 @@ def test_audit_compares_active_evidence_with_retained_region(app_and_db):
     client = app.test_client()
     report = client.get('/api/audit/subjects').get_json()
     assert report['findings'] == [dict(id=pid, filename='DSC_8166.jpg', detection_id=hawk,
-                                      unnamed=0, stale_score=1, stale_mask=0)]
+                                      unnamed=0, stale_score=1, stale_mask=0, unverified_box=0)]
     assert [(r['species'], r['detection_id'], r['bucket_size']) for r in report['review']] == [
         ('Red-shouldered Hawk', hawk, 1)]
     assert client.get('/api/audit/subjects/counts').get_json() == dict(
-        unnamed=0, stale_score=1, stale_mask=0)
+        unnamed=0, stale_score=1, stale_mask=0, unverified_box=0)
 
 
 def test_subject_audit_checks_only_active_mask_and_visible_workspace(app_and_db):

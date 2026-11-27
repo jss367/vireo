@@ -50,7 +50,7 @@ interface Window {
 interface AuditSubjectPhoto {
   id: number; filename: string; detection_id: number | null; species?: string | null;
   bucket_size?: number; weak?: boolean; whole_frame?: boolean;
-  unnamed?: number; stale_mask?: number; stale_score?: number;
+  unverified_box?: number; unnamed?: number; stale_mask?: number; stale_score?: number;
 }
 interface AuditSubjectReport {
   findings: AuditSubjectPhoto[]; review: AuditSubjectPhoto[]; references: AuditSubjectPhoto[];
