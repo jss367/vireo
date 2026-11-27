@@ -185,7 +185,10 @@ def create_pages_blueprint(get_db: GetDb) -> Blueprint:
             classification_readiness(get_db())["ready"] or cfg.load().get("setup_complete")
         ):
             return redirect("/browse")
-        return render_template("welcome.html")
+        from models import DEFAULT_MODEL_ID, KNOWN_MODELS
+
+        starter = next(model for model in KNOWN_MODELS if model["id"] == DEFAULT_MODEL_ID)
+        return render_template("welcome.html", starter=starter)
 
     @blueprint.route("/favicon.ico")
     def favicon() -> ResponseReturnValue:

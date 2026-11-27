@@ -2,7 +2,7 @@
 // import `state` and read and write its fields; nothing here is a global.
 
 /** The classification model the first step downloads. */
-export const MODEL_ID = 'bioclip-2.5-vith14';
+export const MODEL_ID = byId('downloadBtn').dataset.modelId;
 
 /**
  * @typedef {object} WelcomeState

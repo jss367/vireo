@@ -45,5 +45,7 @@ checkModelStatus().then(function() {
     showLabelsStep();
     return;
   }
-  /** @type {HTMLButtonElement} */ (byId('downloadBtn')).disabled = false;
+  var button = /** @type {HTMLButtonElement} */ (byId('downloadBtn'));
+  if (state.modelAlreadyDownloaded) button.textContent = 'Continue';
+  button.disabled = false;
 });

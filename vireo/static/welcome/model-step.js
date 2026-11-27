@@ -63,6 +63,7 @@ export async function getStarted() {
         if (result.status === 'completed') {
           progressBar.style.width = '100%';
           progressLabel.textContent = 'Download complete!';
+          state.modelAlreadyDownloaded = true;
           proceedAfterModel();
         } else {
           var msg = (result.errors && result.errors[0]) || 'Download failed';
@@ -78,20 +79,15 @@ export async function getStarted() {
   }
 }
 
-/* The model is ready. The default model (BioCLIP-2.5) ships Tree of Life
-   embeddings, so it classifies label-free and setup can finish straight away.
-   The status endpoint reports classification usable when the active model is
-   label-free (Tree of Life or timm) OR a non-empty label list is present;
-   otherwise route the user to the labels step so the pipeline won't fail at
-   the classify stage. */
+// An existing active BioCLIP model may still need a regional species list.
 async function proceedAfterModel() {
-  var ready = false;
+  var ready;
   try {
     var status = /** @type {WelcomeModelStatus} */ (await safeFetch('/api/models/status', {}));
     ready = !!(status && status.classification && status.classification.labels_ready);
   } catch(e) {
-    /* On error, fall through to the labels step — better to offer it than
-       to silently land the user in a configuration that can't classify. */
+    showError('Could not check model readiness. Please retry.');
+    return;
   }
   if (ready) {
     await finishSetup();
@@ -111,10 +107,9 @@ export async function finishSetup() {
 function showError(message) {
   var btn = byId('downloadBtn');
   /** @type {HTMLButtonElement} */ (btn).disabled = false;
-  btn.textContent = 'Get Started';
+  btn.textContent = 'Retry model setup';
   byId('progressContainer').style.display = 'none';
   byId('errorMessage').textContent = message;
   byId('errorContainer').style.display = 'block';
-  byId('skipLink').style.display = 'inline';
 }
 

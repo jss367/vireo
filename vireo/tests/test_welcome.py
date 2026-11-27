@@ -356,8 +356,9 @@ def test_welcome_page_contains_download_button(app_and_db, monkeypatch):
     client = app.test_client()
     resp = client.get("/welcome")
     assert resp.status_code == 200
-    assert b"downloadBtn" in resp.data
-    assert b"Download" in resp.data
+    assert b'data-model-id="timm-inat21-eva02-l"' in resp.data
+    assert b"Download iNat21" in resp.data
+    assert b"1.2 GB" in resp.data
 
 
 def test_welcome_page_contains_skip_link(app_and_db, monkeypatch):
@@ -369,7 +370,7 @@ def test_welcome_page_contains_skip_link(app_and_db, monkeypatch):
     client = app.test_client()
     resp = client.get("/welcome")
     assert resp.status_code == 200
-    assert b"Skip for now" in resp.data
+    assert b"Browse without AI" in resp.data.split(b'id="errorContainer"')[0]
     # Skipping finishes setup and lands on Browse (static/welcome/).
     assert "window.location.href = '/browse'" in page_with_scripts(client, "/welcome")
 
