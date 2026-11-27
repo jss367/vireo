@@ -3,10 +3,19 @@
 // once the model status is known (or resumes at the region step).
 // ES module.
 
-import { byId, state } from './state.js';
+import { STARTER, byId, state } from './state.js';
 import { checkExiftool } from './system-check.js';
 import { checkModelStatus, finishSetup, getStarted } from './model-step.js';
 import { fetchLabels, searchPlacesDebounced, showLabelsStep } from './labels-step.js';
+
+// Starter details come from ``window.VIREO_WELCOME_STARTER`` (see state.js);
+// the button renders with a placeholder label until this fills it in.
+var downloadBtn = /** @type {HTMLButtonElement} */ (byId('downloadBtn'));
+downloadBtn.dataset.modelId = STARTER.id;
+// ``%g`` of ``size_mb / 1000`` in the previous Jinja template: strip trailing
+// zeros from the GB value so 1200 MB reads "1.2 GB" and 1000 MB reads "1 GB".
+var sizeGb = Number((STARTER.size_mb / 1000).toPrecision(6)).toString();
+downloadBtn.textContent = 'Download ' + STARTER.name + ' · about ' + sizeGb + ' GB';
 
 /** A link that runs `action` instead of navigating. @param {string} id @param {() => unknown} action */
 function onLinkClick(id, action) {

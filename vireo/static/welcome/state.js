@@ -1,8 +1,22 @@
 // Welcome (first-run setup) page state. ES module: the page's other modules
 // import `state` and read and write its fields; nothing here is a global.
 
+/**
+ * @typedef {object} WelcomeStarter
+ * @property {string} id
+ * @property {string} name
+ * @property {number} size_mb
+ */
+
+/** The starter model the first step downloads. Injected by
+ *  ``/config-defaults.js`` as ``window.VIREO_WELCOME_STARTER`` because
+ *  templates stay Jinja-free. */
+export const STARTER = /** @type {WelcomeStarter} */ (
+  /** @type {any} */ (window).VIREO_WELCOME_STARTER
+);
+
 /** The classification model the first step downloads. */
-export const MODEL_ID = byId('downloadBtn').dataset.modelId;
+export const MODEL_ID = STARTER.id;
 
 /**
  * @typedef {object} WelcomeState
