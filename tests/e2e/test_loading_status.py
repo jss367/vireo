@@ -35,6 +35,18 @@ def _hold(page, pattern):
     return held, release
 
 
+def _expect_box_above_panel(page):
+    """Wait until the floating box has settled clear of the open bottom panel."""
+    page.wait_for_function(
+        """() => {
+            const box = document.querySelector('.vireo-loading-status[data-over-results]');
+            const panel = document.getElementById('bottomPanel').getBoundingClientRect();
+            return box && panel.height > 100
+                && box.getBoundingClientRect().bottom <= panel.top;
+        }"""
+    )
+
+
 def _seed_highlights(db, data):
     """A quality score and a species keyword on every photo, so each is a highlight."""
     species = {
@@ -105,6 +117,19 @@ def test_highlights_reload_dims_the_old_rows_until_the_new_ones_arrive(live_serv
     status_bar_top = page.locator("#bottomPanel").bounding_box()["y"]
     assert box["y"] > controls["y"] + controls["height"]
     assert box["y"] + box["height"] <= status_bar_top
+
+    # Opening the bottom panel moves the box up with it, and closing it brings
+    # the box back down.
+    page.locator("#bpArrow").click()
+    expect(page.locator("#bottomPanel")).to_have_class(re.compile(r"\bopen\b"))
+    _expect_box_above_panel(page)
+    assert status.bounding_box()["y"] < box["y"]
+    page.locator("#bpArrow").click()
+    expect(page.locator("#bottomPanel")).not_to_have_class(re.compile(r"\bopen\b"))
+    page.wait_for_function(
+        "y => document.getElementById('highlightsStatus').getBoundingClientRect().top >= y",
+        arg=box["y"],
+    )
 
     release()
     expect(status).to_be_hidden()
