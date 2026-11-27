@@ -34,6 +34,7 @@ pub mod ids {
     pub const NAV_WORKSPACE: &str = "nav_workspace";
     pub const NAV_SETTINGS: &str = "nav_settings";
     pub const NAV_LOGS: &str = "nav_logs";
+    pub const ASK_QUESTION: &str = "ask_question";
     pub const REPORT_ISSUE: &str = "report_issue";
     pub const CHECK_FOR_UPDATES: &str = "check_for_updates";
     pub const OPEN_IN_BROWSER: &str = "open_in_browser_now";
@@ -542,6 +543,7 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
     let open_logs = MenuItemBuilder::with_id(ids::HELP_OPEN_LOGS, "Open Logs").build(app)?;
     let copy_diagnostics =
         MenuItemBuilder::with_id(ids::HELP_COPY_DIAGNOSTICS, "Copy Diagnostics").build(app)?;
+    let ask_question = MenuItemBuilder::with_id(ids::ASK_QUESTION, "Ask a Question").build(app)?;
     let report_issue =
         MenuItemBuilder::with_id(ids::REPORT_ISSUE, "Report an Issue...").build(app)?;
     help_builder = help_builder
@@ -556,7 +558,10 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
         help_builder = help_builder.separator().item(&check_updates);
     }
 
-    help_builder = help_builder.separator().item(&report_issue);
+    help_builder = help_builder
+        .separator()
+        .item(&ask_question)
+        .item(&report_issue);
 
     #[cfg(not(target_os = "macos"))]
     {
