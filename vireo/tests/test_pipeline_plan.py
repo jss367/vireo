@@ -4609,18 +4609,23 @@ def test_process_time_hint_accounts_for_future_detections(monkeypatch, cached):
     import pipeline_plan as planner
 
     params = planner.PipelinePlanParams()
+    measured = {"sam2_variant": "sam2-large", "dinov2_variant": "vit-b14", "proxy_longest_edge": 2048}
     stages = {name: {"state": "will-run", "detail": {"pending": 0}}
               for name in ("Previews", "Classify", "Extract", "EyeKeypoints")}
     stages["Classify"]["detail"].update(total_dets=cached, detector_pending=2500 - cached)
     stages["Previews"]["detail"]["pending"] = 2500
     monkeypatch.setattr(planner, "_has_process_timing_baseline", lambda: True)
-    assert "hours" in planner._process_time_hint(stages, 2500, params)
+    hint = planner._process_time_hint(stages, 2500, params, measured)
+    assert hint.startswith("Estimated processing time") and "hours" in hint
+    for variant in ("sam2-small", "sam2-base-plus"):
+        config = {**measured, "sam2_variant": variant}
+        assert "may take several hours" in planner._process_time_hint(stages, 2500, params, config)
     monkeypatch.setattr(planner, "_has_process_timing_baseline", lambda: False)
-    assert "may take several hours" in planner._process_time_hint(stages, 2500, params)
+    assert "may take several hours" in planner._process_time_hint(stages, 2500, params, measured)
     stages["Extract"]["state"] = "will-skip"
     monkeypatch.setattr(planner, "_has_process_timing_baseline", lambda: True)
-    assert "minutes" in planner._process_time_hint(stages, 2500, params)
-    assert planner._process_time_hint(stages, 0, params) is None
+    assert "minutes" in planner._process_time_hint(stages, 2500, params, {})
+    assert planner._process_time_hint(stages, 0, params, measured) is None
 
 
 def test_group_only_run_shows_qualitative_time_hint(monkeypatch):
@@ -4635,9 +4640,9 @@ def test_group_only_run_shows_qualitative_time_hint(monkeypatch):
         "Group": {"state": "will-run"},
     }
     params = PipelinePlanParams()
-    assert "Processing time depends" in _process_time_hint(stages, 100, params)
+    assert "Processing time depends" in _process_time_hint(stages, 100, params, {})
     stages["Previews"] = {"state": "will-run", "detail": {"pending": 1}}
-    assert "Processing time depends" in _process_time_hint(stages, 10000, params)
+    assert "Processing time depends" in _process_time_hint(stages, 10000, params, {})
     stages["Previews"]["state"] = "done-prior"
     stages["Group"]["state"] = "done-prior"
-    assert _process_time_hint(stages, 100, params) is None
+    assert _process_time_hint(stages, 100, params, {}) is None

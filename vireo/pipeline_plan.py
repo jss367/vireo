@@ -1805,7 +1805,7 @@ def _has_process_timing_baseline():
     return brand.strip() == "Apple M3 Max"
 
 
-def _process_time_hint(stages, photo_count, params):
+def _process_time_hint(stages, photo_count, params, pipeline_cfg):
     """Approximate active processing time, excluding queue and download waits."""
     detector_pending = stages["Classify"].get("detail", {}).get("detector_pending", 0)
     if not photo_count or not (detector_pending or any(s["state"] == "will-run" for s in stages.values())):
@@ -1823,9 +1823,17 @@ def _process_time_hint(stages, photo_count, params):
     # Reclassification replaces prior detections across the entire scope.
     classify_units = max(known_pairs, future_pairs) if params.reclassify else known_pairs + future_pairs
     seconds = pending("Previews") * 0.23 + classify_units * 0.65 + detector_pending * 0.40
+    extract_time_uncertain = False
     for stage, rate in (("Extract", 4.53), ("EyeKeypoints", 0.11)):
         if stages[stage]["state"] in {"will-run", "done-prior"}:
-            seconds += min(photo_count, pending(stage, photo_count) + detector_pending) * rate
+            units = min(photo_count, pending(stage, photo_count) + detector_pending)
+            seconds += units * rate
+            if stage == "Extract" and units:
+                extract_time_uncertain = (
+                    pipeline_cfg.get("sam2_variant") != "sam2-large"
+                    or pipeline_cfg.get("dinov2_variant") != "vit-b14"
+                    or pipeline_cfg.get("proxy_longest_edge") != 2048
+                )
 
     group = stages.get("Group", {})
     group_time_uncertain = False
@@ -1839,7 +1847,7 @@ def _process_time_hint(stages, photo_count, params):
         seconds += group_seconds
 
     quality_recompute = stages["Extract"]["state"] == "will-run" and "detail" not in stages["Extract"]
-    if (seconds <= 0 or group_time_uncertain or quality_recompute
+    if (seconds <= 0 or group_time_uncertain or extract_time_uncertain or quality_recompute
             or params.raw_subject_analysis or not _has_process_timing_baseline()):
         return ("Processing this selection may take several hours." if seconds >= 3600
                 else "Processing time depends on this computer and the selected stages.")
@@ -1935,7 +1943,7 @@ def compute_plan(db, params, db_path):
 
     return {
         "stages": stages,
-        "time_hint": _process_time_hint(stages, len(photo_ids), params)
+        "time_hint": _process_time_hint(stages, len(photo_ids), params, pipeline_cfg)
         if photo_ids is not None and params.source_paths is None else None,
         "scope": {
             "collection_id": params.collection_id,
