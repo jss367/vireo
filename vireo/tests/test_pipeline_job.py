@@ -19946,6 +19946,46 @@ def test_cached_mask_without_subject_detail_is_measured_without_sam(tmp_path, mo
     assert measured[1:] == [] and stage["detail_measured"] == 0
 
 
+def test_mask_an_upgrade_set_aside_is_proven_and_reused_without_sam(tmp_path, monkeypatch):
+    """A migration that stops trusting a mask keeps its row; Process proves it
+    against the original and puts it back in use, and the plan says so."""
+    import config as cfg
+    import pipeline_plan
+    import schema
+
+    spec = {"filename": "a.jpg", "box": (10, 20, 100, 200), "model": "MegaDetector"}
+    db, _, _, (pid,) = _run_extract_masks_for_test(tmp_path, monkeypatch, "sam2-small", [spec])
+    columns = "mask_path, active_mask_variant, subject_tenengrad, dino_subject_embedding, dino_embedding_variant"
+    before = tuple(db.conn.execute(f"SELECT {columns} FROM photos WHERE id=?", (pid,)).fetchone())
+    assert before[1] == "sam2-small"
+
+    schema.set_aside_masks(db.conn, "m.photo_id=?", (pid,), version=99, reason="Test reason")
+    db.conn.commit()
+    assert db.conn.execute("SELECT mask_path FROM photos WHERE id=?", (pid,)).fetchone()[0] is None
+    cfg.save({"pipeline": {"sam2_variant": "sam2-small", "dinov2_variant": "vit-b14"}})
+    plan = pipeline_plan._extract_plan(
+        db, PipelineParams(skip_classify=True, skip_regroup=True), None, db.get_effective_config(cfg.load()),
+    )
+    assert plan["detail"]["pending"] == 1 and plan["detail"]["set_aside"] == 1
+    assert plan["summary"] == (
+        "Will extract masks for 1 photo (1 eligible). 1 of them has a mask an upgrade set aside: "
+        "it is checked against the original and reused without SAM if it still matches"
+    )
+
+    # ``_rerun_extract_masks_cached`` fails the test if SAM runs.
+    stage, final = _rerun_extract_masks_cached(tmp_path, monkeypatch, db)
+
+    assert stage["masked"] == 1 and stage["set_aside_reused"] == 1
+    assert final["status"] == "completed"
+    assert "1 reused after an upgrade set them aside" in final["summary"]
+    assert tuple(db.conn.execute(f"SELECT {columns} FROM photos WHERE id=?", (pid,)).fetchone()) == before
+    assert db.masks_features.get_mask(pid, "sam2-small")["set_aside_by"] is None
+    plan = pipeline_plan._extract_plan(
+        db, PipelineParams(skip_classify=True, skip_regroup=True), None, db.get_effective_config(cfg.load()),
+    )
+    assert plan["state"] == "done-prior"
+
+
 def test_cached_mask_whose_source_cannot_be_read_stays_masked_but_fails_the_stage(tmp_path, monkeypatch):
     import quality
 

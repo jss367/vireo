@@ -192,6 +192,9 @@ def create_storage_blueprint(get_db: GetDb, json_error: JsonError, db_path: str,
             "variants": variants,
             "total_bytes": sum(v["bytes"] for v in variants),
             "stale_count": len(stale),
+            # Masks a schema migration stopped trusting and kept, per
+            # migration and reason, until Process proves or replaces them.
+            "set_aside": db.masks_features.count_set_aside(),
             "path": os.path.join(os.path.dirname(db_path), "masks"),
         }
 

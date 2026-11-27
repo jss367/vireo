@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Put back the masks and mask measurements migration 54 retired.
 
-Migration 54 deleted every MegaDetector mask and cleared the measurements
-projected from them, because none recorded which decoded frame it was made in.
+As v0.76.1 ran it, migration 54 deleted every MegaDetector mask and cleared
+the measurements projected from them, because none recorded which decoded frame
+it was made in. (Migration 54 now sets those rows aside in the catalog, and
+Process puts them back in use itself; a catalog migrated that way needs no
+restore, and this reports its masks as already present.)
 ``vireo/decoded_frame.py`` now recognizes the ones that can only have been made
 in today's frame, so this copies them back from the snapshot Vireo took before
 migrating (``vireo.db.pre-v57.bak``).

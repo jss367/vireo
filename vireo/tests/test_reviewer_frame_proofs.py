@@ -320,7 +320,9 @@ def test_migration_retires_derived_box_scores_but_preserves_human_data(original_
         assert conn.execute("SELECT COUNT(*) FROM detection_subjects").fetchone()[0] == 0
         assert conn.execute("SELECT rating, quality_score, subject_sharpness, subject_detail FROM photos WHERE id=?", (pid,)).fetchone() == (5, None, None, None)
         assert conn.execute("SELECT detection_id FROM photo_subject_choices WHERE photo_id=?", (pid,)).fetchone()[0] == did
-        assert conn.execute("SELECT path FROM photo_masks WHERE photo_id=?", (pid,)).fetchone() is None
+        assert conn.execute(
+            "SELECT path, set_aside_by, set_aside_reason FROM photo_masks WHERE photo_id=?", (pid,)
+        ).fetchone() == (str(path), 51, "The frame the reviewer drew this box on was not recorded")
         assert conn.execute("SELECT detection_id, source_key FROM subject_ranking_analysis").fetchall() == [(other, "unrelated")]
         assert conn.execute("SELECT COUNT(*) FROM subject_raw_analysis").fetchone()[0] == 0
         assert conn.execute("SELECT species FROM predictions WHERE detection_id=?", (did,)).fetchone()[0] == "Synthetic bird"

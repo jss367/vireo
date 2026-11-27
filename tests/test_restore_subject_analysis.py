@@ -88,6 +88,7 @@ class Catalogs:
         return pid
 
     def lose(self):
+        from canonical_schema import SET_ASIDE_TABLES
         from schema import _retire_unbound_detector_caches
 
         self.db.commit()
@@ -96,6 +97,11 @@ class Catalogs:
             copy.execute("ALTER TABLE detections DROP COLUMN frame_id")
             copy.commit()
         _retire_unbound_detector_caches(self.db.conn)
+        # The script repairs a catalog that v0.76.1 migrated. That build's
+        # migration 54 deleted these rows; today's sets them aside.
+        self.db.conn.execute("DELETE FROM photo_masks WHERE detector_model='megadetector-v6'")
+        for table in SET_ASIDE_TABLES.values():
+            self.db.conn.execute(f"DELETE FROM {table}")
         self.db.commit()
 
     def run(self, restore, *args):

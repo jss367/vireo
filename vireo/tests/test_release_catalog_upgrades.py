@@ -49,15 +49,9 @@ def _release_key(path):
 RELEASES = [p.name.removesuffix(".db.gz")
             for p in sorted(FIXTURE_DIR.glob("v*.db.gz"), key=_release_key)]
 
-# Data a migration deliberately removes, keyed by the migration's version: a
-# catalog stamped below it loses exactly this on upgrade. Anything else that
-# changes fails the test.
-#
-# 54 (``_retire_unbound_detector_caches``): a MegaDetector mask from before
-# decoded frames were recorded cannot prove it was made in the frame Vireo
-# decodes today, so the mask row goes and the photo has no active mask until
-# Process runs again or ``scripts/restore_subject_analysis.py`` verifies and
-# restores it.
+# Migration 54 sets aside pre-frame MegaDetector masks. Their rows must
+# survive; only the active photo projection is cleared until Process proves
+# the mask can be reused or replaces it.
 RETIRED_MASK_DETECTORS = {54: {"megadetector-v6"}}
 
 
@@ -69,11 +63,11 @@ def expected_after_upgrade(before):
             retired |= detectors
     photos = {}
     for filename, photo in before["photos"].items():
-        kept = [m for m in photo["masks"] if m["detector_model"] not in retired]
+        retired_paths = {m["path"] for m in photo["masks"] if m["detector_model"] in retired}
         active = photo["active_mask"]
-        if active is not None and active not in {m["path"] for m in kept}:
+        if active in retired_paths:
             active = None
-        photos[filename] = {**photo, "masks": kept, "active_mask": active}
+        photos[filename] = {**photo, "active_mask": active}
     return {
         "schema_version": SCHEMA_VERSION,
         "folder_workspaces": before["folder_workspaces"],
