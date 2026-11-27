@@ -475,8 +475,19 @@ class _MaskExtractionRun:
         was_set_aside = existing.get("set_aside_by") is not None
         if was_set_aside:
             # An upgrade set this mask aside; the checks above are the proof
-            # it needs. One that was not the photo's active mask stays set
-            # aside, and SAM replaces it below.
+            # it needs. Only reactivate when the full cache-hit state check
+            # below would pass — reactivation commits the mask back into
+            # active use, so a regeneration failure must never leave a
+            # migration-distrusted mask active with a stale embedding or
+            # recipe-rendered quality input. One that was not the photo's
+            # active mask, whose stored embedding no longer matches the
+            # configured DINO variant, or whose photo has a recipe-rendered
+            # quality input stays set aside, and SAM replaces it below.
+            if existing.get("set_aside_embedding_variant") != self.dinov2_variant:
+                return False
+            pre_state = thread_db.masks_features.photo_mask_state(item.photo_id)
+            if pre_state is None or pre_state["quality_input_recipe"] is not None:
+                return False
             if not thread_db.masks_features.reactivate_set_aside(
                 item.photo_id, self.sam2_variant, self.min_detector_conf,
             ):

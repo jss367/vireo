@@ -1154,8 +1154,20 @@ class _MaskPass:
                 and os.path.isfile(existing["path"])
                 and cached_mask_frame_matches(existing["path"], frame)):
             return False
-        if existing.get("set_aside_by") is not None and not self._reactivate_set_aside(item):
-            return False
+        if existing.get("set_aside_by") is not None:
+            # Only reactivate when the full cache-hit state check below
+            # would pass — reactivation commits the mask back into
+            # active use, so a regeneration failure must never leave a
+            # migration-distrusted mask active with a stale embedding
+            # or recipe-rendered quality input.
+            if (self.run.params.raw_subject_analysis
+                    or existing.get("set_aside_embedding_variant") != self.dinov2_variant):
+                return False
+            pre_state = self.thread_db.masks_features.photo_mask_state(item.photo_id)
+            if pre_state is None or pre_state["quality_input_recipe"] is not None:
+                return False
+            if not self._reactivate_set_aside(item):
+                return False
         # The cheap skip (re-activate only) is correct
         # ONLY when the photos row is already fully
         # consistent for this variant. set_active_mask_
