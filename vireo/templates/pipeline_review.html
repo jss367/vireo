@@ -14,18 +14,7 @@
   height: calc(100vh - 48px - var(--bottom-offset, 28px));
   overflow: hidden;
 }
-.pipeline-layout.sidebar-collapsed .pipeline-sidebar {
-  width: 44px;
-  padding: 10px 6px;
-  overflow: hidden;
-}
-.pipeline-layout.sidebar-collapsed .sidebar-content {
-  display: none;
-}
-.pipeline-layout.sidebar-collapsed .pipeline-sidebar-toggle {
-  margin-left: 0;
-  margin-right: 0;
-}
+.pipeline-layout.sidebar-collapsed .pipeline-sidebar { display: none; }
 
 /* -- Sidebar -- */
 .pipeline-sidebar {
@@ -35,30 +24,18 @@
   border-right: 1px solid var(--border-primary);
   padding: 20px 16px;
   overflow-y: auto;
-  transition: width 0.18s ease, padding 0.18s ease;
 }
-.pipeline-sidebar-toggle {
+.review-heading {
   display: flex;
   align-items: center;
-  justify-content: center;
-  position: sticky;
-  top: 0;
-  z-index: 2;
-  width: 32px;
-  height: 32px;
-  margin: 0 0 14px auto;
-  border: 1px solid var(--border-primary);
-  border-radius: 4px;
-  background: var(--bg-secondary);
-  color: var(--text-secondary);
-  font-size: 18px;
-  line-height: 1;
-  cursor: pointer;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin-bottom: 12px;
 }
-.pipeline-sidebar-toggle:hover {
-  border-color: var(--text-muted);
-  color: var(--text-primary);
-}
+.review-heading h1 { font-size: 20px; margin: 0 auto 0 0; }
+.review-heading summary { cursor: pointer; font-size: 13px; color: var(--text-secondary); }
+.review-heading details[open] { flex-basis: 100%; }
+.review-heading details[open] > summary { margin-bottom: 8px; }
 .sidebar-section { margin-bottom: 24px; position: relative; }
 .sidebar-title {
   font-size: 11px;
@@ -1618,19 +1595,10 @@ input[type="range"]::-moz-range-thumb {
 <body>
 {% include '_navbar.html' %}
 
-<div class="pipeline-layout" id="pipelineLayout">
+<div class="pipeline-layout sidebar-collapsed" id="pipelineLayout">
   <!-- Sidebar -->
   <div class="pipeline-sidebar" id="pipelineSidebar">
-    <button type="button"
-            class="pipeline-sidebar-toggle"
-            id="pipelineSidebarToggle"
-            data-testid="pipeline-sidebar-toggle"
-            onclick="togglePipelineSidebar()"
-            aria-controls="pipelineSidebarContent"
-            aria-label="Collapse sidebar"
-            aria-expanded="true"
-            title="Collapse sidebar">&#8249;</button>
-    <div class="sidebar-content" id="pipelineSidebarContent">
+    <div class="sidebar-content" id="pipelineSidebarContent" tabindex="-1">
     <div class="sidebar-section" id="sidebarScoring" style="display:none">
       <div class="sidebar-title">Scoring Thresholds</div>
       <div class="reflow-indicator" id="reflowIndicator">Recomputing...</div>
@@ -1792,6 +1760,16 @@ input[type="range"]::-moz-range-thumb {
 
     <div class="sidebar-section">
       <div class="sidebar-title">Advanced Display</div>
+      <div class="confidence-slider-wrap" title="Thumbnail size">
+        <label for="thumbSizeSlider">Thumbnail size</label>
+        <input type="range" id="thumbSizeSlider" min="100" max="320" step="20" value="160"
+               oninput="updateThumbSize(this.value)">
+      </div>
+      <div class="confidence-slider-wrap">
+        <label for="confSlider">Min confidence:</label>
+        <input type="range" id="confSlider" min="0" max="100" value="40" oninput="setMinConfidence(this.value)">
+        <span class="slider-val" id="confSliderVal">40%</span>
+      </div>
       <label class="view-setting-row">
         <input type="checkbox" id="showPhotoLabelsChk" onchange="togglePhotoLabels(this.checked)">
         <span>
@@ -1809,11 +1787,75 @@ input[type="range"]::-moz-range-thumb {
 
   <!-- Main area -->
   <div class="pipeline-main" id="mainArea">
-    <!-- Degraded-features banner (shown when results render with enhancing gaps) -->
-    <div class="degraded-banner" id="degradedBanner" style="display:none;">
-      <span id="degradedBannerText"></span>
-      <a href="/pipeline" class="degraded-banner-link">Open Pipeline</a>
-      <button class="degraded-banner-close" onclick="dismissDegradedBanner()" aria-label="Dismiss">&times;</button>
+    <div class="review-heading">
+      <h1>Process Review</h1>
+      <button type="button" class="filter-btn" id="pipelineSidebarToggle"
+              data-testid="pipeline-sidebar-toggle" onclick="togglePipelineSidebar()"
+              aria-controls="pipelineSidebarContent" aria-expanded="false">Adjust thresholds</button>
+      <details id="summaryBar" style="display:none">
+        <summary>Review details</summary>
+        <!-- Degraded-features banner (shown when results render with enhancing gaps) -->
+        <div class="degraded-banner" id="degradedBanner" style="display:none;">
+          <span id="degradedBannerText"></span>
+          <a href="/pipeline" class="degraded-banner-link">Open Pipeline</a>
+          <button class="degraded-banner-close" onclick="dismissDegradedBanner()" aria-label="Dismiss">&times;</button>
+        </div>
+        <div class="summary-bar">
+          <div class="summary-group" aria-label="Inventory counts">
+            <div class="summary-group-title">Inventory</div>
+            <div class="summary-group-stats">
+              <div class="summary-stat" title="Total photos included in this process review result">
+                <div class="num" id="statTotalPhotos">0</div>
+                <div class="label">Photos</div>
+              </div>
+              <div class="summary-stat" title="Encounter groups built from nearby, similar photos">
+                <div class="num" id="statEncounterCount">0</div>
+                <div class="label">Encounters</div>
+              </div>
+              <div class="summary-stat" title="Burst groups inside encounters">
+                <div class="num" id="statBurstCount">0</div>
+                <div class="label">Bursts</div>
+              </div>
+            </div>
+          </div>
+          <div class="summary-group" aria-label="Triage counts">
+            <div class="summary-group-title">Triage</div>
+            <div class="summary-group-stats">
+              <div class="summary-stat" title="Photos currently labeled KEEP by triage">
+                <div class="num" style="color:var(--accent);" id="statKeepCount">0</div>
+                <div class="label">Keep Photos</div>
+              </div>
+              <div class="summary-stat" title="Photos currently labeled REVIEW by triage">
+                <div class="num" style="color:var(--warning);" id="statReviewCount">0</div>
+                <div class="label">Review Photos</div>
+              </div>
+              <div class="summary-stat" title="Photos currently labeled REJECT by triage">
+                <div class="num" style="color:var(--danger);" id="statRejectCount">0</div>
+                <div class="label">Reject Photos</div>
+              </div>
+              <div class="summary-stat" id="statProtectedWrap" style="display:none" title="Protected photos that triage kept out of automatic rejection">
+                <div class="num" style="color:var(--warning);" id="statProtected">0</div>
+                <div class="label">Protected Photos</div>
+              </div>
+            </div>
+          </div>
+          <div class="summary-group" id="speciesReviewSummary" aria-label="Species review counts" title="Species confirmation is counted by review unit: bursts when an encounter has bursts, otherwise encounters.">
+            <div class="summary-group-title">Species Review</div>
+            <div class="summary-group-stats">
+              <div class="summary-stat wide">
+                <div class="num ratio" style="color:var(--success, #4caf50);" id="statConfirmedCount">0 / 0</div>
+                <div class="label" id="statConfirmedLabel">Review Units Confirmed</div>
+                <div class="detail" id="statConfirmedDetail">0 review units need confirmation</div>
+              </div>
+              <div class="summary-stat wide">
+                <div class="num" id="statUnconfirmedCount">0</div>
+                <div class="label" id="statUnconfirmedLabel">Need Confirmation</div>
+                <div class="detail" id="statUnconfirmedDetail">0 review units total</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </details>
     </div>
     <div class="cache-scope-banner" id="cacheScopeBanner" data-testid="pipeline-review-cache-scope">
       <span id="cacheScopeBannerText"></span>
@@ -1834,73 +1876,8 @@ input[type="range"]::-moz-range-thumb {
       </details>
     </div>
 
-    <!-- Summary bar (hidden until data loads) -->
-    <div class="summary-bar" id="summaryBar" style="display:none">
-      <div class="summary-group" aria-label="Inventory counts">
-        <div class="summary-group-title">Inventory</div>
-        <div class="summary-group-stats">
-          <div class="summary-stat" title="Total photos included in this process review result">
-            <div class="num" id="statTotalPhotos">0</div>
-            <div class="label">Photos</div>
-          </div>
-          <div class="summary-stat" title="Encounter groups built from nearby, similar photos">
-            <div class="num" id="statEncounterCount">0</div>
-            <div class="label">Encounters</div>
-          </div>
-          <div class="summary-stat" title="Burst groups inside encounters">
-            <div class="num" id="statBurstCount">0</div>
-            <div class="label">Bursts</div>
-          </div>
-        </div>
-      </div>
-      <div class="summary-group" aria-label="Triage counts">
-        <div class="summary-group-title">Triage</div>
-        <div class="summary-group-stats">
-          <div class="summary-stat" title="Photos currently labeled KEEP by triage">
-            <div class="num" style="color:var(--accent);" id="statKeepCount">0</div>
-            <div class="label">Keep Photos</div>
-          </div>
-          <div class="summary-stat" title="Photos currently labeled REVIEW by triage">
-            <div class="num" style="color:var(--warning);" id="statReviewCount">0</div>
-            <div class="label">Review Photos</div>
-          </div>
-          <div class="summary-stat" title="Photos currently labeled REJECT by triage">
-            <div class="num" style="color:var(--danger);" id="statRejectCount">0</div>
-            <div class="label">Reject Photos</div>
-          </div>
-          <div class="summary-stat" id="statProtectedWrap" style="display:none" title="Protected photos that triage kept out of automatic rejection">
-            <div class="num" style="color:var(--warning);" id="statProtected">0</div>
-            <div class="label">Protected Photos</div>
-          </div>
-        </div>
-      </div>
-      <div class="summary-group" id="speciesReviewSummary" aria-label="Species review counts" title="Species confirmation is counted by review unit: bursts when an encounter has bursts, otherwise encounters.">
-        <div class="summary-group-title">Species Review</div>
-        <div class="summary-group-stats">
-          <div class="summary-stat wide">
-            <div class="num ratio" style="color:var(--success, #4caf50);" id="statConfirmedCount">0 / 0</div>
-            <div class="label" id="statConfirmedLabel">Review Units Confirmed</div>
-            <div class="detail" id="statConfirmedDetail">0 review units need confirmation</div>
-          </div>
-          <div class="summary-stat wide">
-            <div class="num" id="statUnconfirmedCount">0</div>
-            <div class="label" id="statUnconfirmedLabel">Need Confirmation</div>
-            <div class="detail" id="statUnconfirmedDetail">0 review units total</div>
-          </div>
-        </div>
-      </div>
-      <a id="missesReviewBtn" href="/misses" data-testid="pipeline-review-misses"
-         style="display:none;margin-left:auto;padding:8px 14px;
-                background:var(--danger);color:#fff;border-radius:6px;
-                font-size:13px;font-weight:600;text-decoration:none;">
-        Review misses (<span id="missesReviewCount">0</span>)
-      </a>
-    </div>
-
     <!-- Filter bar (hidden until data loads) -->
     <div class="filter-bar" id="filterBar" style="display:none">
-      <a class="filter-btn" href="/pipeline/rapid-review" style="text-decoration:none;">Rapid Review</a>
-      <button type="button" class="filter-btn" id="analysisRetryAction">Analysis details / retry…</button>
       <button class="filter-btn active" data-filter="all" onclick="setFilter('all')">All<span class="count" id="countAll"></span></button>
       <button class="filter-btn" data-filter="KEEP" onclick="setFilter('KEEP')">Keep<span class="count" id="countKeep"></span></button>
       <button class="filter-btn" data-filter="REVIEW" onclick="setFilter('REVIEW')">Review<span class="count" id="countReview"></span></button>
@@ -1945,16 +1922,14 @@ input[type="range"]::-moz-range-thumb {
           <option value="time_asc">Oldest first</option>
         </select>
       </div>
-      <div class="confidence-slider-wrap" title="Thumbnail size">
-        <span>&#9638;</span>
-        <input type="range" id="thumbSizeSlider" min="100" max="320" step="20" value="160"
-               oninput="updateThumbSize(this.value)">
-      </div>
-      <div class="confidence-slider-wrap">
-        <label for="confSlider">Min confidence:</label>
-        <input type="range" id="confSlider" min="0" max="100" value="40" oninput="setMinConfidence(this.value)">
-        <span class="slider-val" id="confSliderVal">40%</span>
-      </div>
+      <a class="filter-btn" href="/pipeline/rapid-review" style="text-decoration:none;">Rapid Review</a>
+      <button type="button" class="filter-btn" id="analysisRetryAction">Analysis details / retry…</button>
+      <a id="missesReviewBtn" href="/misses" data-testid="pipeline-review-misses"
+         style="display:none;margin-left:auto;padding:8px 14px;
+                background:var(--danger);color:#fff;border-radius:6px;
+                font-size:13px;font-weight:600;text-decoration:none;">
+        Review misses (<span id="missesReviewCount">0</span>)
+      </a>
     </div>
 
     <p id="analysisRetryBanner" role="status" aria-live="polite"></p>
