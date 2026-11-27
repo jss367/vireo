@@ -1051,7 +1051,10 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
                     path = os.path.join(row["folder_path"], row["filename"])
                     if os.path.isfile(path):
                         permanent_hashes[row["id"]] = (path, _sha256(path))
-        result = self._deleter().run_batch_delete(self.db, chosen, mode=mode)
+        result = self._deleter().run_batch_delete(
+            self.db, chosen, mode=mode,
+            confirm_permanent=mode == "disk_permanent",
+        )
         self._record_successful_deletions(chosen, result, permanent_hashes)
         event(f"delete {mode}: ok={result.get('ok')}")
 
@@ -1817,7 +1820,9 @@ def test_missing_original_sidecar_cleanup_keeps_sidecars_living_files_own(app_an
     else:
         resp = client.post("/api/photos/missing/delete-sidecars", json={"photo_ids": [raw_id]})
         assert resp.status_code == 200, resp.get_data(as_text=True)
-        assert resp.get_json() == {"deleted": 1, "skipped": 0}
+        assert resp.get_json() == {
+            "deleted": 1, "skipped": 0, "sidecars_failed": [], "sidecars_failed_total": 0,
+        }
 
     assert sorted(os.listdir(folder)) == ["IMG_1.JPG", "IMG_1.xmp"]
     assert (folder / "IMG_1.xmp").read_text() == "<x:xmpmeta>jpeg rating</x:xmpmeta>"

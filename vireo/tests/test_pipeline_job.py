@@ -8916,6 +8916,134 @@ def test_progress_event_defaults_phase_triple_to_none():
     assert data["phase_label"] == "Extracting metadata"
 
 
+def test_progress_event_says_its_rate_is_per_minute():
+    """Pipeline stages report files per minute while standalone jobs report
+    items per second; the navbar status line labels the number from
+    rate_unit, so every pipeline payload carries it."""
+    from pipeline_job import _progress_event
+
+    stages = _empty_stages()
+    stages["thumbnails"]["status"] = "running"
+
+    data = _progress_event(
+        stages, "thumbnails", "Generating thumbnails", rate=120.0,
+    )
+    assert data["rate"] == 120.0
+    assert data["rate_unit"] == "per_minute"
+
+
+def test_progress_event_defaults_rate_to_none_for_rate_less_phases():
+    """A pipeline phase that reports no rate (model loading,
+    taxonomy/weight download) must leave `rate=None` in its payload so the
+    merge in JobRunner.push_event clears the previous phase's throughput.
+    Without this default, bpRateText would keep rendering the outgoing
+    phase's files/min across the whole rate-less phase."""
+    from pipeline_job import _progress_event
+
+    stages = _empty_stages()
+    stages["model_loader"]["status"] = "running"
+
+    data = _progress_event(
+        stages, "model_loader", "Loading model", current_file="Downloading weights",
+    )
+    assert data["rate"] is None
+    # And a caller with a real rate still overrides.
+    data = _progress_event(
+        stages, "model_loader", "Loading model", rate=0,
+    )
+    assert data["rate"] == 0
+
+
+def test_emit_progress_clears_stale_rate_at_phase_transition():
+    """End-to-end: after scan emits a rate (files/min), the next rate-less
+    emission (a taxonomy download, say) must land in the merged
+    job['progress'] with rate cleared. Without this, /api/jobs polling —
+    and the navbar status line — would keep showing the scan's throughput
+    labelled as the current phase's files/min."""
+    import queue as _queue
+    import sys as _sys
+
+    _sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
+    from jobs import JobRunner
+    from pipeline_job import _emit_progress
+    from wait import wait_for_job_via_runner
+
+    runner = JobRunner()
+    seen_progress = _queue.Queue()
+
+    def work(job):
+        stages = _empty_stages()
+        stages["scan"]["status"] = "running"
+        _emit_progress(
+            runner, job["id"], stages, "scan", "Scanning photos",
+            rate=120.0,
+        )
+        seen_progress.put(dict(job["progress"]))
+
+        stages["scan"]["status"] = "completed"
+        stages["model_loader"]["status"] = "running"
+        _emit_progress(
+            runner, job["id"], stages, "model_loader",
+            "Loading model", current_file="Downloading weights",
+        )
+        seen_progress.put(dict(job["progress"]))
+
+        return {"ok": True}
+
+    job_id = runner.start("scan", work)
+    wait_for_job_via_runner(runner, job_id)
+
+    scan_prog = seen_progress.get_nowait()
+    assert scan_prog["rate"] == 120.0
+    assert scan_prog["rate_unit"] == "per_minute"
+
+    loader_prog = seen_progress.get_nowait()
+    assert loader_prog["rate"] is None
+
+
+def test_update_stages_clears_stale_rate_in_merged_job_progress():
+    """_update_stages is the other code path that lands in
+    job['progress'] via push_event's merge. A stage transition pushed
+    through it (e.g. scan finishing, grouping starting) must also clear
+    the previous phase's rate so a stale files/min does not persist."""
+    import queue as _queue
+    import sys as _sys
+
+    _sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
+    from jobs import JobRunner
+    from pipeline_job import _emit_progress, _update_stages
+    from wait import wait_for_job_via_runner
+
+    runner = JobRunner()
+    seen_progress = _queue.Queue()
+
+    def work(job):
+        stages = _empty_stages()
+        stages["scan"]["status"] = "running"
+        _emit_progress(
+            runner, job["id"], stages, "scan", "Scanning photos",
+            rate=90.0,
+        )
+        seen_progress.put(dict(job["progress"]))
+
+        stages["scan"]["status"] = "completed"
+        stages["regroup"]["status"] = "running"
+        _update_stages(runner, job["id"], stages)
+        seen_progress.put(dict(job["progress"]))
+
+        return {"ok": True}
+
+    job_id = runner.start("scan", work)
+    wait_for_job_via_runner(runner, job_id)
+
+    scan_prog = seen_progress.get_nowait()
+    assert scan_prog["rate"] == 90.0
+
+    transition_prog = seen_progress.get_nowait()
+    assert transition_prog["rate"] is None
+    assert transition_prog["rate_unit"] is None
+
+
 def test_emit_progress_clears_stale_phase_in_merged_job_progress():
     """End-to-end: JobRunner.push_event merges into job['progress']; after a
     scan sub-phase emission followed by a plain status emission, the merged
@@ -19816,6 +19944,46 @@ def test_cached_mask_without_subject_detail_is_measured_without_sam(tmp_path, mo
     # Measured once: the next run has nothing to measure.
     stage, _ = _rerun_extract_masks_cached(tmp_path, monkeypatch, db)
     assert measured[1:] == [] and stage["detail_measured"] == 0
+
+
+def test_mask_an_upgrade_set_aside_is_proven_and_reused_without_sam(tmp_path, monkeypatch):
+    """A migration that stops trusting a mask keeps its row; Process proves it
+    against the original and puts it back in use, and the plan says so."""
+    import config as cfg
+    import pipeline_plan
+    import schema
+
+    spec = {"filename": "a.jpg", "box": (10, 20, 100, 200), "model": "MegaDetector"}
+    db, _, _, (pid,) = _run_extract_masks_for_test(tmp_path, monkeypatch, "sam2-small", [spec])
+    columns = "mask_path, active_mask_variant, subject_tenengrad, dino_subject_embedding, dino_embedding_variant"
+    before = tuple(db.conn.execute(f"SELECT {columns} FROM photos WHERE id=?", (pid,)).fetchone())
+    assert before[1] == "sam2-small"
+
+    schema.set_aside_masks(db.conn, "m.photo_id=?", (pid,), version=99, reason="Test reason")
+    db.conn.commit()
+    assert db.conn.execute("SELECT mask_path FROM photos WHERE id=?", (pid,)).fetchone()[0] is None
+    cfg.save({"pipeline": {"sam2_variant": "sam2-small", "dinov2_variant": "vit-b14"}})
+    plan = pipeline_plan._extract_plan(
+        db, PipelineParams(skip_classify=True, skip_regroup=True), None, db.get_effective_config(cfg.load()),
+    )
+    assert plan["detail"]["pending"] == 1 and plan["detail"]["set_aside"] == 1
+    assert plan["summary"] == (
+        "Will extract masks for 1 photo (1 eligible). 1 of them has a mask an upgrade set aside: "
+        "it is checked against the original and reused without SAM if it still matches"
+    )
+
+    # ``_rerun_extract_masks_cached`` fails the test if SAM runs.
+    stage, final = _rerun_extract_masks_cached(tmp_path, monkeypatch, db)
+
+    assert stage["masked"] == 1 and stage["set_aside_reused"] == 1
+    assert final["status"] == "completed"
+    assert "1 reused after an upgrade set them aside" in final["summary"]
+    assert tuple(db.conn.execute(f"SELECT {columns} FROM photos WHERE id=?", (pid,)).fetchone()) == before
+    assert db.masks_features.get_mask(pid, "sam2-small")["set_aside_by"] is None
+    plan = pipeline_plan._extract_plan(
+        db, PipelineParams(skip_classify=True, skip_regroup=True), None, db.get_effective_config(cfg.load()),
+    )
+    assert plan["state"] == "done-prior"
 
 
 def test_cached_mask_whose_source_cannot_be_read_stays_masked_but_fails_the_stage(tmp_path, monkeypatch):

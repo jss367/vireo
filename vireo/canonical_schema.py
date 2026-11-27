@@ -20,7 +20,7 @@ This module must not import ``db``: ``schema.py`` imports ``db``, and
 # database it creates from nothing. It is the newest registry migration in
 # ``schema.MIGRATIONS``: ``create_tables`` builds every migration's end state,
 # so a fresh database has nothing to migrate.
-SCHEMA_VERSION = 57
+SCHEMA_VERSION = 58
 
 # Promoted EXIF summary columns in the ``photos`` table — the canonical
 # list the scanner uses to clear absent fields on rescan (a metadata write
@@ -271,6 +271,57 @@ def create_subject_ranking_analysis(conn):
     )""")
 
 
+SET_ASIDE_MASK_COLUMNS = (
+    ("set_aside_by", "INTEGER"),
+    ("set_aside_reason", "TEXT"),
+    ("set_aside_active", "INTEGER NOT NULL DEFAULT 0"),
+    ("set_aside_embedding", "BLOB"),
+    ("set_aside_embedding_variant", "TEXT"),
+)
+
+# The per-detection analysis caches a migration may stop trusting, each with
+# the table that keeps its rows afterwards. A ``set_aside_*`` table has its
+# source's columns plus who set the row aside and why; nothing reads it but a
+# recovery, and its rows leave with their detection.
+SET_ASIDE_TABLES = {
+    "detection_subjects": "set_aside_detection_subjects",
+    "subject_raw_analysis": "set_aside_subject_raw_analysis",
+    "subject_ranking_analysis": "set_aside_subject_ranking_analysis",
+}
+
+_SET_ASIDE_COLUMNS = """set_aside_by INTEGER NOT NULL,
+        set_aside_reason TEXT NOT NULL,
+        set_aside_at TEXT NOT NULL DEFAULT (datetime('now'))"""
+
+
+def create_set_aside_analysis(conn):
+    """Where a migration puts analysis rows it stops trusting, instead of deleting them."""
+    conn.execute(f"""CREATE TABLE IF NOT EXISTS set_aside_detection_subjects (
+        detection_id INTEGER PRIMARY KEY REFERENCES detections(id) ON DELETE CASCADE,
+        source_key TEXT NOT NULL,
+        crop TEXT NOT NULL,
+        quality_score REAL NOT NULL,
+        exposure_ev REAL NOT NULL,
+        features TEXT NOT NULL,
+        {_SET_ASIDE_COLUMNS}
+    )""")
+    conn.execute(f"""CREATE TABLE IF NOT EXISTS set_aside_subject_raw_analysis (
+        detection_id INTEGER PRIMARY KEY REFERENCES detections(id) ON DELETE CASCADE,
+        recipe TEXT NOT NULL,
+        report_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        {_SET_ASIDE_COLUMNS}
+    )""")
+    conn.execute(f"""CREATE TABLE IF NOT EXISTS set_aside_subject_ranking_analysis (
+        detection_id INTEGER NOT NULL REFERENCES detections(id) ON DELETE CASCADE,
+        source_key TEXT NOT NULL,
+        features TEXT NOT NULL,
+        mask_png BLOB NOT NULL,
+        {_SET_ASIDE_COLUMNS},
+        PRIMARY KEY (detection_id, source_key)
+    )""")
+
+
 def create_same_shot_reviews(conn):
     """Library-wide review notes, independent of photo flags and file cleanup."""
     conn.execute("""CREATE TABLE IF NOT EXISTS same_shot_reviews (
@@ -388,6 +439,7 @@ def create_auxiliary_schema_objects(conn):
     create_subject_candidates(conn)
     create_subject_focus(conn)
     create_reviewed_gps(conn)
+    create_set_aside_analysis(conn)
 
 
 class CanonicalSchema:
@@ -791,6 +843,18 @@ class CanonicalSchema:
                 subject_detail REAL,
                 subject_detail_px REAL,
                 comparison_inputs TEXT,
+                -- Set when a schema migration stopped trusting this mask:
+                -- the migration's version and why, whether the mask was the
+                -- photo's active one, and the subject embedding the photo
+                -- held beside it. The row stays as an inactive mask that
+                -- nothing activates until the mask stage's own cache check
+                -- proves it (``MasksFeaturesRepository.reactivate_set_aside``)
+                -- or a new mask replaces it. NULL / 0 on every other row.
+                set_aside_by INTEGER,
+                set_aside_reason TEXT,
+                set_aside_active INTEGER NOT NULL DEFAULT 0,
+                set_aside_embedding BLOB,
+                set_aside_embedding_variant TEXT,
                 PRIMARY KEY (photo_id, variant)
             );
 

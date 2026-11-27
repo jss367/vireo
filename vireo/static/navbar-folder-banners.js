@@ -1761,7 +1761,7 @@ async function removeOneMissingPhoto(id) {
   if (_missingPhotosDeleteInFlight) return;
   const deleteSidecars = /** @type {HTMLInputElement} */ (document.getElementById('missingPhotosDeleteSidecars')).checked;
   const sidecarMsg = deleteSidecars
-    ? '\n\nLeftover XMP sidecars will also be deleted from disk.'
+    ? '\n\nLeftover XMP sidecars will also be moved to the Trash.'
     : '\n\nThe XMP sidecar on disk will not be touched.';
   if (!confirm(`Remove this photo from Vireo?\n\nCached thumbnail/preview/working copy (if any) will also be deleted.${sidecarMsg}`)) return;
   await _runMissingPhotosRemoval([id], deleteSidecars);
@@ -1772,7 +1772,7 @@ export async function removeSelectedMissingPhotos() {
   const ids = Array.from(_missingPhotosSelected);
   if (ids.length === 0) return;
   const deleteSidecars = /** @type {HTMLInputElement} */ (document.getElementById('missingPhotosDeleteSidecars')).checked;
-  const sidecarMsg = deleteSidecars ? '\n\nLeftover XMP sidecars will also be deleted from disk.' : '';
+  const sidecarMsg = deleteSidecars ? '\n\nLeftover XMP sidecars will also be moved to the Trash.' : '';
   if (!confirm(`Remove ${ids.length} photo${ids.length !== 1 ? 's' : ''} from Vireo?\n\nCached thumbnails/previews/working copies will be deleted.${sidecarMsg}`)) return;
   await _runMissingPhotosRemoval(ids, deleteSidecars);
 }
@@ -1831,6 +1831,23 @@ async function _runMissingPhotosRemoval(ids, deleteSidecars) {
   }
 }
 
+/**
+ * What to tell the user about sidecars the Trash refused: they are still on
+ * disk, and their photos are no longer in Vireo to remove them from here.
+ * Empty when every sidecar was moved.
+ * @param {{sidecars_failed?: {path: string; error: string}[]; sidecars_failed_total?: number} | null | undefined} payload
+ */
+function keptSidecarMessage(payload) {
+  const total = Number(payload && payload.sidecars_failed_total) || 0;
+  if (!total) return '';
+  const first = payload && Array.isArray(payload.sidecars_failed) ? payload.sidecars_failed[0] : null;
+  const example = first ? ` ${first.path}: ${first.error}.` : '';
+  const more = first && total > 1 ? ` ${total - 1} more ${total === 2 ? 'was' : 'were'} kept the same way.` : '';
+  return `${total} XMP sidecar${total === 1 ? '' : 's'} could not be moved to the Trash and ` +
+    `${total === 1 ? 'was' : 'were'} left on disk.${example}${more} ` +
+    `The Audit page lists ${total === 1 ? 'it' : 'them'} under stray sidecars.`;
+}
+
 /** @param {number[]} ids @param {boolean} deleteSidecars */
 async function _deleteMissingPhotoIds(ids, deleteSidecars) {
   // Ready /api/photos/missing payloads are cached for up to 30 min, so a
@@ -1838,8 +1855,8 @@ async function _deleteMissingPhotoIds(ids, deleteSidecars) {
   // deleted from Vireo just by trusting the cache. The dedicated
   // missing/remove endpoint re-checks each source on disk in the active
   // workspace, skips any whose original is back, and only deletes the
-  // still-missing rows (plus their sidecars in the same transaction).
-  /** @type {{deleted: number; restored?: number[]; folder_offline?: number[]; skipped?: number}} */ const payload = await safeFetch('/api/photos/missing/remove', {
+  // still-missing rows. Their leftover sidecars go to the Trash.
+  /** @type {{deleted: number; restored?: number[]; folder_offline?: number[]; skipped?: number; sidecars_failed?: {path: string; error: string}[]; sidecars_failed_total?: number}} */ const payload = await safeFetch('/api/photos/missing/remove', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({
@@ -1878,6 +1895,8 @@ async function _deleteMissingPhotoIds(ids, deleteSidecars) {
       'warning',
     );
   }
+  const keptSidecars = keptSidecarMessage(payload);
+  if (keptSidecars) showToast(keptSidecars, 'warning');
   // The server just invalidated the Missing Originals cache, but callers
   // only bump the modal/cache generation counters (via refreshMissingPhotosNow
   // → loadMissingPhotos). A banner /api/photos/missing GET that was already

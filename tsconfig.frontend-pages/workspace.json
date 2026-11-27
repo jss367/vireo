@@ -4,6 +4,7 @@
     "../types/pages/workspace.d.ts",
     "../types/pages/work-locally.d.ts",
     "../types/page-hooks.d.ts",
+    "../types/confirm.d.ts",
     "../vireo/static/workspace/boot.js",
     "../vireo/static/workspace/deletion.js",
     "../vireo/static/workspace/folders.js",

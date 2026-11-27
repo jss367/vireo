@@ -98,9 +98,14 @@ class PhotoDeletion:
 
     def run_batch_delete(
         self, db: Database, photo_ids: object, mode: str = "vireo", include_companions: bool = False,
-        progress_callback: DeleteProgress | None = None,
+        progress_callback: DeleteProgress | None = None, *, confirm_permanent: bool = False,
     ) -> BatchDeleteResult:
         """Delete photos using the same phases for sync and job endpoints.
+
+        ``disk_permanent`` unlinks originals with no Trash copy, so it runs
+        only with ``confirm_permanent=True``: the caller's statement that the
+        user was asked about this permanent delete and agreed. Without it the
+        call raises before any file or row is touched.
 
         Only photos visible in ``db``'s active workspace are acted on: photos
         are global, so an id from another workspace would otherwise let one
@@ -120,6 +125,9 @@ class PhotoDeletion:
             raise ValueError("photo_ids must be a list")
         if mode not in ("vireo", "disk", "disk_permanent"):
             raise ValueError("mode must be 'vireo', 'disk', or 'disk_permanent'")
+        unconfirmed = permanent_delete_error(mode, confirm_permanent)
+        if unconfirmed:
+            raise ValueError(unconfirmed)
         requested_ids = []
         for raw_id in photo_ids:
             # ``int(raw_id)`` would silently truncate a float like ``1.9``
@@ -145,6 +153,24 @@ class PhotoDeletion:
             return _catalog_only_result(result["deleted"])
 
         return run.delete_from_disk(photo_ids, include_companions)
+
+
+PERMANENT_DELETE_UNCONFIRMED = (
+    "Permanent delete was not confirmed. Files deleted this way cannot be "
+    "recovered, so ask first and send confirm_permanent: true."
+)
+
+
+def permanent_delete_error(mode: object, confirm_permanent: object) -> str | None:
+    """Why a delete request may not run, or ``None`` when it may.
+
+    Only ``disk_permanent`` needs the confirmation, and only the JSON value
+    ``true`` gives it: a truthy string or number is a malformed request, not
+    an answer from the user.
+    """
+    if mode == "disk_permanent" and confirm_permanent is not True:
+        return PERMANENT_DELETE_UNCONFIRMED
+    return None
 
 
 def _catalog_only_result(deleted: int) -> BatchDeleteResult:

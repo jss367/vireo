@@ -13,8 +13,9 @@ import logging
 import os
 import sqlite3
 import threading
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from dataclasses import dataclass, field
+from functools import partial
 
 import catalog_backups
 from canonical_schema import (
@@ -24,6 +25,8 @@ from canonical_schema import (
     JOB_HISTORY_LINEAGE_COLUMNS,
     JOB_HISTORY_PARENT_INDEX,
     JOB_HISTORY_WORKSPACE_OBJECTS,
+    SET_ASIDE_MASK_COLUMNS,
+    SET_ASIDE_TABLES,
     create_assignment_reviews,
     create_current_flag_attribution,
     create_detection_evidence_reviews,
@@ -32,6 +35,7 @@ from canonical_schema import (
     create_photo_versions,
     create_reviewed_gps,
     create_same_shot_reviews,
+    create_set_aside_analysis,
     create_species_choices,
     create_subject_candidates,
     create_subject_focus,
@@ -49,10 +53,181 @@ _SCHEMA_LOCK = threading.Lock()
 
 @dataclass(frozen=True)
 class Migration:
+    """One numbered schema change.
+
+    ``deletes`` names every table the migration may ``DELETE`` from or
+    ``DROP``, each with the reason its rows are not needed afterwards. The
+    runner refuses any other delete (``_DeleteGuard``).
+    """
+
     version: int
     name: str
     apply: Callable[[sqlite3.Connection], None]
     validate: Callable[[sqlite3.Connection], None] | None = None
+    deletes: Mapping[str, str] = field(default_factory=dict, hash=False)
+
+
+# What a detector, a classifier, SAM or a measurement produced. Only a Process
+# run recomputes these, so a migration never deletes from them: it sets the
+# rows aside (``set_aside_rows``, ``set_aside_masks``), which keeps them in the
+# catalog and leaves Process to prove or replace them.
+# ``test_migration_data_safety.py`` fails on a ``Migration.deletes`` entry that
+# names one of these, or a table whose deleted rows cascade into one.
+DERIVED_DATA_TABLES = frozenset({
+    "detections", "detector_runs", "predictions", "classifier_runs",
+    "classifier_match_scores", "photo_embeddings", "photo_masks",
+    "detection_subjects", "subject_raw_analysis", "subject_ranking_analysis",
+    "subject_candidates", "subject_focus",
+})
+
+
+class DestructiveMigrationError(RuntimeError):
+    """A migration tried to delete rows it had not declared."""
+
+
+class _DeleteGuard:
+    """SQLite authorizer for a migration run.
+
+    SQLite asks it when a statement is prepared, so a ``DELETE`` or ``DROP
+    TABLE`` is refused whether or not any row would match, and a table name
+    built at run time is seen as SQLite resolved it. Deletes a trigger makes,
+    deletes in the temp schema and SQLite's own bookkeeping tables pass.
+    Rows removed through a foreign key cascade or ``INSERT OR REPLACE`` are
+    never reported here; the cascade half is held by the test that reads
+    ``Migration.deletes``.
+    """
+
+    def __init__(self) -> None:
+        self.migration: Migration | None = None
+        # The table ``set_aside_rows`` is emptying into its set-aside table.
+        self.moving: str | None = None
+        self.refused: str | None = None
+
+    def __call__(
+        self, action: int, table: str | None, _detail: str | None,
+        database: str | None, source: str | None,
+    ) -> int:
+        if action not in (sqlite3.SQLITE_DELETE, sqlite3.SQLITE_DROP_TABLE):
+            return sqlite3.SQLITE_OK
+        if source is not None or database == "temp" or table is None or table.startswith("sqlite_"):
+            return sqlite3.SQLITE_OK
+        declared = self.migration.deletes if self.migration is not None else {}
+        if table == self.moving or table in declared:
+            return sqlite3.SQLITE_OK
+        self.refused = table
+        return sqlite3.SQLITE_DENY
+
+    def error(self, migration: Migration) -> DestructiveMigrationError:
+        advice = (
+            "Set the rows aside with set_aside_rows or set_aside_masks instead."
+            if self.refused in DERIVED_DATA_TABLES else
+            "Name the table and the reason in the migration's deletes."
+        )
+        return DestructiveMigrationError(
+            f"Migration {migration.version} ({migration.name}) tried to delete from "
+            f"{self.refused}, which it does not declare. {advice}"
+        )
+
+
+# The guard of each connection ``_apply_pending`` is migrating, by ``id``.
+_GUARDS: dict[int, _DeleteGuard] = {}
+
+
+@contextlib.contextmanager
+def _moving(conn: sqlite3.Connection, table: str) -> Iterator[None]:
+    guard = _GUARDS.get(id(conn))
+    if guard is None:
+        yield
+        return
+    guard.moving = table
+    try:
+        yield
+    finally:
+        guard.moving = None
+
+
+def _ensure_set_aside_schema(conn: sqlite3.Connection) -> None:
+    """The columns and tables a set-aside writes to; a no-op once they exist."""
+    present = {row[1] for row in conn.execute("PRAGMA table_info(photo_masks)")}
+    for column, definition in SET_ASIDE_MASK_COLUMNS:
+        if column not in present:
+            conn.execute(f"ALTER TABLE photo_masks ADD COLUMN {column} {definition}")
+    create_set_aside_analysis(conn)
+
+
+def _validate_set_aside_schema(conn: sqlite3.Connection) -> None:
+    present = {row[1] for row in conn.execute("PRAGMA table_info(photo_masks)")}
+    missing = [column for column, _ in SET_ASIDE_MASK_COLUMNS if column not in present]
+    if missing:
+        raise RuntimeError(f"photo_masks is missing {', '.join(missing)}")
+    for source, target in SET_ASIDE_TABLES.items():
+        kept = {row[1] for row in conn.execute(f"PRAGMA table_info({target})")}
+        lost = [row[1] for row in conn.execute(f"PRAGMA table_info({source})") if row[1] not in kept]
+        if lost:
+            raise RuntimeError(f"{target} cannot hold {source}.{', '.join(lost)}")
+
+
+def set_aside_rows(
+    conn: sqlite3.Connection, table: str, where: str, params: Sequence[object] = (),
+    *, version: int, reason: str,
+) -> int:
+    """Move the ``table`` rows matching ``where`` into its set-aside table.
+
+    For the per-detection analysis caches (``SET_ASIDE_TABLES``). The live
+    table loses the rows, so every reader sees them as not measured and
+    Process measures them again; the catalog keeps them, with the migration
+    and the reason, until their detection is deleted. Returns how many moved.
+    """
+    _ensure_set_aside_schema(conn)
+    target = SET_ASIDE_TABLES[table]
+    columns = ", ".join(row[1] for row in conn.execute(f"PRAGMA table_info({table})"))
+    conn.execute(
+        f"INSERT OR REPLACE INTO {target} ({columns}, set_aside_by, set_aside_reason) "
+        f"SELECT {columns}, ?, ? FROM {table} WHERE {where}",
+        (version, reason, *params),
+    )
+    with _moving(conn, table):
+        return conn.execute(f"DELETE FROM {table} WHERE {where}", tuple(params)).rowcount
+
+
+def set_aside_masks(
+    conn: sqlite3.Connection, where: str, params: Sequence[object] = (),
+    *, version: int, reason: str,
+) -> list[int]:
+    """Stop trusting the subject masks matching ``where``, keeping every row.
+
+    ``where`` is written over ``photo_masks AS m``. Each matching row is
+    marked with the migration and the reason. Where the mask is the photo's
+    active one, the row also records that and keeps the subject embedding
+    made from it, and the photo's projected mask, measurements and embedding
+    are cleared, so every reader sees the photo as not analyzed. The mask
+    stage puts such a mask back in use, without running SAM, when its own
+    cache check proves it. Returns the photos whose projection was cleared.
+    """
+    from repositories.subjects import SubjectsRepository
+
+    _ensure_set_aside_schema(conn)
+    active = [row[0] for row in conn.execute(
+        "SELECT DISTINCT m.photo_id FROM photo_masks m JOIN photos p ON p.id=m.photo_id "
+        f"AND p.mask_path=m.path WHERE m.set_aside_by IS NULL AND ({where})", tuple(params),
+    )]
+    conn.execute(
+        "UPDATE photo_masks AS m SET set_aside_by=?, set_aside_reason=?, set_aside_active=1, "
+        "set_aside_embedding=p.dino_subject_embedding, "
+        "set_aside_embedding_variant=p.dino_embedding_variant "
+        "FROM photos p WHERE p.id=m.photo_id AND p.mask_path=m.path "
+        f"AND m.set_aside_by IS NULL AND ({where})",
+        (version, reason, *params),
+    )
+    conn.execute(
+        "UPDATE photo_masks AS m SET set_aside_by=?, set_aside_reason=? "
+        f"WHERE m.set_aside_by IS NULL AND ({where})",
+        (version, reason, *params),
+    )
+    subjects = SubjectsRepository(conn)
+    for photo_id in active:
+        subjects.clear_primary_features(photo_id)
+    return active
 
 
 # The version every catalog is stamped to before registry migrations run.
@@ -314,14 +489,21 @@ def _validate_subject_detail(conn):
 
 
 def _unmeasure_unverified_reviewer_detail(conn):
-    """Retire coordinate-analysis caches while preserving human decisions/files."""
+    """Stop trusting box measurements whose frame was not verified.
+
+    Every ``detection_subjects`` row is set aside, so the catalog still holds
+    it; human decisions and mask files are untouched.
+    """
     affected = "SELECT d.photo_id FROM detection_subjects s JOIN detections d ON d.id=s.detection_id"
     conn.execute("UPDATE photos SET quality_score=NULL, subject_sharpness=NULL "
                  f"WHERE id IN ({affected})")
     conn.execute("UPDATE photos SET subject_size=NULL, subject_clip_high=NULL, "
                  "subject_clip_low=NULL, subject_y_median=NULL "
                  f"WHERE mask_path IS NULL AND id IN ({affected})")
-    conn.execute("DELETE FROM detection_subjects")
+    set_aside_rows(
+        conn, "detection_subjects", "1", version=49,
+        reason="Measured in a frame that was not verified",
+    )
     conn.execute("UPDATE photo_masks SET subject_detail=NULL, subject_detail_px=NULL "
                  "WHERE detector_model='reviewer-selected' AND "
                  "(subject_detail_px IS NOT NULL OR subject_detail != 0)")
@@ -330,42 +512,50 @@ def _unmeasure_unverified_reviewer_detail(conn):
                  "AND d.detector_model='reviewer-selected')")
 
 
-def _retire_reviewer_frame_caches(conn):
-    """Old history replay could retain a mask from a different reviewer frame."""
+def _set_aside_detector_analysis(conn, detector_model, *, version, reason):
+    """Stop trusting what was measured from one detector's boxes, keeping all of it.
+
+    The analysis rows of those detections move to their set-aside tables.
+    Masks prompted by them, and the masks of photos whose primary subject is
+    one of them, are set aside in place, and those photos read as not
+    analyzed until Process proves or replaces the mask.
+    """
     from repositories.subjects import SubjectsRepository
 
-    reviewer = "SELECT id FROM detections WHERE detector_model='reviewer-selected'"
-    projected = conn.execute(
-        f"SELECT photo_id FROM photo_subject_state WHERE detection_id IN ({reviewer}) "
-        "UNION SELECT p.id FROM photos p JOIN photo_masks m ON m.photo_id=p.id AND p.mask_path=m.path "
-        "WHERE m.detector_model='reviewer-selected'"
-    ).fetchall()
+    boxes = "SELECT id FROM detections WHERE detector_model=?"
+    for table in SET_ASIDE_TABLES:
+        set_aside_rows(
+            conn, table, f"detection_id IN ({boxes})", (detector_model,),
+            version=version, reason=reason,
+        )
+    primary = f"SELECT photo_id FROM photo_subject_state WHERE detection_id IN ({boxes})"
+    photo_ids = [row[0] for row in conn.execute(primary, (detector_model,))]
+    set_aside_masks(
+        conn, f"m.detector_model=? OR m.photo_id IN ({primary})", (detector_model, detector_model),
+        version=version, reason=reason,
+    )
     subjects = SubjectsRepository(conn)
-    for photo_id, in projected:
+    for photo_id in photo_ids:
         subjects.clear_primary_features(photo_id)
-    for table in ("detection_subjects", "subject_ranking_analysis", "subject_raw_analysis"):
-        conn.execute(f"DELETE FROM {table} WHERE detection_id IN ({reviewer})")
-    conn.execute("DELETE FROM photo_masks WHERE detector_model='reviewer-selected'")
+
+
+def _retire_reviewer_frame_caches(conn):
+    """A replayed history entry could keep a mask made in another reviewer frame."""
+    _set_aside_detector_analysis(
+        conn, "reviewer-selected", version=51,
+        reason="The frame the reviewer drew this box on was not recorded",
+    )
 
 
 def _retire_unbound_detector_caches(conn):
-    """Keep historical detector decisions but retire measurements without frame proof."""
-    from repositories.subjects import SubjectsRepository
-
+    """Keep detector decisions, and set aside what was measured without frame proof."""
     columns = {row[1] for row in conn.execute("PRAGMA table_info(detections)")}
     if "frame_id" not in columns:
         conn.execute("ALTER TABLE detections ADD COLUMN frame_id TEXT")
-    detector = "SELECT id FROM detections WHERE detector_model='megadetector-v6'"
-    projected = conn.execute(
-        f"SELECT photo_id FROM photo_subject_state WHERE detection_id IN ({detector}) "
-        "UNION SELECT p.id FROM photos p JOIN photo_masks m ON m.photo_id=p.id AND p.mask_path=m.path "
-        "WHERE m.detector_model='megadetector-v6'"
-    ).fetchall()
-    for photo_id, in projected:
-        SubjectsRepository(conn).clear_primary_features(photo_id)
-    for table in ("detection_subjects", "subject_ranking_analysis", "subject_raw_analysis"):
-        conn.execute(f"DELETE FROM {table} WHERE detection_id IN ({detector})")
-    conn.execute("DELETE FROM photo_masks WHERE detector_model='megadetector-v6'")
+    _set_aside_detector_analysis(
+        conn, "megadetector-v6", version=54,
+        reason="The frame the detector found this box in was not recorded",
+    )
 
 
 def _repair_alternate_branch_schemas(conn):
@@ -548,10 +738,16 @@ def _merge_species_highlights(conn):
     conn.execute("DROP TABLE species_highlights")
 
 
-def _invalidate_ambiguous_companion_boxes(conn):
-    """Paired legacy boxes have no record of which photo supplied their coordinates."""
+def _invalidate_ambiguous_companion_boxes(conn, *, version):
+    """Paired legacy boxes have no record of which photo supplied their coordinates.
+
+    The boxes are marked so nothing prompts with them, and what was measured
+    from them is set aside, never deleted.
+    """
     from detection_id import COMPANION_FRAME_RUNTIME
     from repositories.subjects import SubjectsRepository
+
+    reason = "The box may come from a differently cropped JPEG companion"
 
     conn.execute(
         "UPDATE detections SET runtime_fingerprint=? WHERE runtime_fingerprint='legacy' "
@@ -560,22 +756,25 @@ def _invalidate_ambiguous_companion_boxes(conn):
         (COMPANION_FRAME_RUNTIME,),
     )
     ambiguous = "SELECT id FROM detections WHERE runtime_fingerprint=?"
-    for table in ("detection_subjects", "subject_ranking_analysis", "subject_raw_analysis"):
-        conn.execute(f"DELETE FROM {table} WHERE detection_id IN ({ambiguous})", (COMPANION_FRAME_RUNTIME,))
+    for table in SET_ASIDE_TABLES:
+        set_aside_rows(
+            conn, table, f"detection_id IN ({ambiguous})", (COMPANION_FRAME_RUNTIME,),
+            version=version, reason=reason,
+        )
     affected_mask = (
         "EXISTS (SELECT 1 FROM detections d WHERE d.photo_id=m.photo_id "
         "AND d.runtime_fingerprint=? AND d.detector_model=m.detector_model AND "
         "(d.box_x,d.box_y,d.box_w,d.box_h)=(m.prompt_x,m.prompt_y,m.prompt_w,m.prompt_h))"
     )
-    projected = conn.execute(
-        f"SELECT photo_id FROM photo_subject_state WHERE detection_id IN ({ambiguous}) "
-        "UNION SELECT p.id FROM photos p JOIN photo_masks m ON m.photo_id=p.id AND m.path=p.mask_path "
-        f"WHERE {affected_mask}", (COMPANION_FRAME_RUNTIME, COMPANION_FRAME_RUNTIME),
-    ).fetchall()
+    primary = f"SELECT photo_id FROM photo_subject_state WHERE detection_id IN ({ambiguous})"
+    photo_ids = [row[0] for row in conn.execute(primary, (COMPANION_FRAME_RUNTIME,))]
+    set_aside_masks(
+        conn, f"{affected_mask} OR m.photo_id IN ({primary})",
+        (COMPANION_FRAME_RUNTIME, COMPANION_FRAME_RUNTIME), version=version, reason=reason,
+    )
     subjects = SubjectsRepository(conn)
-    for photo_id, in projected:
+    for photo_id in photo_ids:
         subjects.clear_primary_features(photo_id)
-    conn.execute(f"DELETE FROM photo_masks AS m WHERE {affected_mask}", (COMPANION_FRAME_RUNTIME,))
 
 
 def _clear_orphaned_companion_mask_projections(conn):
@@ -684,6 +883,18 @@ def _reconcile_mask_review_primary_schema(conn):
     _add_mask_review_revision(conn)
 
 
+# ``_merge_species_highlights`` runs in every migration that can meet a catalog
+# still holding per-workspace highlights.
+_HIGHLIGHT_MERGE_DELETES = {
+    "species_highlights": (
+        "dropped after every ranked list is written into species_representatives "
+        "and species_choices"
+    ),
+    "species_choice_losers": (
+        "only comparisons the merge itself wrote, where they contradict an older choice"
+    ),
+}
+
 MIGRATIONS = (
     Migration(
         13, "companion_identities_file_mtime",
@@ -716,7 +927,12 @@ MIGRATIONS = (
     Migration(26, "species_assignment_provenance", _add_species_provenance),
     Migration(27, "same_shot_reviews", create_same_shot_reviews),
     Migration(28, "flag_attribution_history", create_current_flag_attribution),
-    Migration(29, "global_flag_attribution_lifetime", _retain_global_flag_attribution),
+    Migration(
+        29, "global_flag_attribution_lifetime", _retain_global_flag_attribution,
+        deletes={"old_current_flag_attribution": (
+            "the renamed original, dropped after its rows are copied into the rebuilt table"
+        )},
+    ),
     Migration(30, "photo_versions", create_photo_versions),
     Migration(
         31, "job_history_lineage",
@@ -744,29 +960,66 @@ MIGRATIONS = (
     Migration(
         42, "merge_species_highlights",
         _merge_species_highlights, _validate_merged_species_highlights,
+        deletes=_HIGHLIGHT_MERGE_DELETES,
     ),
-    Migration(43, "classifier_input_source", _add_classifier_input_source),
+    Migration(
+        43, "classifier_input_source", _add_classifier_input_source,
+        deletes=_HIGHLIGHT_MERGE_DELETES,
+    ),
     # Main's catalogs at 44 ran reviewed_gps instead; 45 repeats this one for them.
     Migration(44, "subject_detail_full_resolution", _clear_subject_detail_from_other_read_paths),
     Migration(45, "subject_detail_mask_alignment", _clear_subject_detail_from_other_read_paths),
-    Migration(46, "reconcile_highlights_and_detail", _reconcile_highlights_and_detail, _validate_merged_species_highlights),
-    Migration(47, "companion_box_frames", _invalidate_ambiguous_companion_boxes),
-    Migration(48, "repair_alternate_branch_schemas", _repair_alternate_branch_schemas),
+    Migration(
+        46, "reconcile_highlights_and_detail",
+        _reconcile_highlights_and_detail, _validate_merged_species_highlights,
+        deletes=_HIGHLIGHT_MERGE_DELETES,
+    ),
+    Migration(
+        47, "companion_box_frames",
+        partial(_invalidate_ambiguous_companion_boxes, version=47),
+    ),
+    Migration(
+        48, "repair_alternate_branch_schemas", _repair_alternate_branch_schemas,
+        deletes=_HIGHLIGHT_MERGE_DELETES,
+    ),
     Migration(49, "verified_reviewer_frame", _unmeasure_unverified_reviewer_detail),
     # Alternate v47 catalogs used that slot for reviewer frames and can already be at v49.
-    Migration(50, "reconcile_companion_box_frames", _invalidate_ambiguous_companion_boxes),
+    Migration(
+        50, "reconcile_companion_box_frames",
+        partial(_invalidate_ambiguous_companion_boxes, version=50),
+    ),
     Migration(51, "reviewer_history_mask_frames", _retire_reviewer_frame_caches),
-    Migration(52, "reviewed_gps", _add_reviewed_gps),
+    Migration(52, "reviewed_gps", _add_reviewed_gps, deletes=_HIGHLIGHT_MERGE_DELETES),
     Migration(53, "orphaned_companion_masks", _clear_orphaned_companion_mask_projections),
     Migration(54, "detector_decoded_frames", _retire_unbound_detector_caches),
     Migration(55, "primary_comparison_inputs", _add_primary_comparison_inputs),
     Migration(56, "mask_review_revision", _add_mask_review_revision),
     Migration(57, "reconcile_mask_review_primary_schema", _reconcile_mask_review_primary_schema),
+    Migration(58, "set_aside_analysis", _ensure_set_aside_schema, _validate_set_aside_schema),
 )
 
 
 def _latest_version():
     return MIGRATIONS[-1].version if MIGRATIONS else BASELINE_VERSION
+
+
+def _apply_guarded(conn, migration, guard):
+    """Apply and validate ``migration``, failing if the guard refused a delete.
+
+    SQLite reports the refused statement as "not authorized"; the error
+    raised here names the table and the way out. A migration that caught
+    that error itself still fails.
+    """
+    try:
+        migration.apply(conn)
+    except sqlite3.DatabaseError as error:
+        if guard.refused is None:
+            raise
+        raise guard.error(migration) from error
+    if guard.refused is not None:
+        raise guard.error(migration)
+    if migration.validate is not None:
+        migration.validate(conn)
 
 
 def _apply_pending(conn):
@@ -778,21 +1031,27 @@ def _apply_pending(conn):
         conn.execute(f"PRAGMA user_version = {BASELINE_VERSION}")
         current = BASELINE_VERSION
 
-    for migration in MIGRATIONS:
-        if migration.version <= current:
-            continue
-        conn.execute("BEGIN IMMEDIATE")
-        try:
-            migration.apply(conn)
-            if migration.validate is not None:
-                migration.validate(conn)
-            conn.execute(f"PRAGMA user_version = {migration.version}")
-        except BaseException:
-            conn.rollback()
-            raise
-        else:
-            conn.commit()
-        current = migration.version
+    guard = _DeleteGuard()
+    _GUARDS[id(conn)] = guard
+    conn.set_authorizer(guard)
+    try:
+        for migration in MIGRATIONS:
+            if migration.version <= current:
+                continue
+            guard.migration = migration
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                _apply_guarded(conn, migration, guard)
+                conn.execute(f"PRAGMA user_version = {migration.version}")
+            except BaseException:
+                conn.rollback()
+                raise
+            else:
+                conn.commit()
+            current = migration.version
+    finally:
+        conn.set_authorizer(None)
+        del _GUARDS[id(conn)]
 
 
 def _existing_user_version(db_path):
@@ -884,7 +1143,7 @@ def ensure_schema(db_path):
             catalog_backups.snapshot(db_path, latest)
         with Database(db_path) as db:
             _apply_pending(db.conn)
-        if upgrading:
+        if upgrading and os.path.exists(catalog_backups.backup_path(db_path, latest)):
             # Only the catalog's own folder: a backup folder on a NAS is
             # pruned by the after-launch offload, so startup never waits on it.
             catalog_backups.prune(

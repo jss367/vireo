@@ -216,6 +216,8 @@ class _MaskExtractionRun:
         # ``detail_unreadable`` so the job result does not claim
         # completion with planned work pending.
         self.detail_measured = 0
+        # Masks an upgrade set aside that this run proved and reused without SAM.
+        self.set_aside_reused = 0
         self.detail_unreadable = 0
         # Cached mask PNGs that failed to decode this run: see
         # ``_measure_cached_detail`` for how the drop is done and why
@@ -470,6 +472,27 @@ class _MaskExtractionRun:
                 and os.path.isfile(existing["path"])
                 and cached_mask_frame_matches(existing["path"], frame)):
             return False
+        was_set_aside = existing.get("set_aside_by") is not None
+        if was_set_aside:
+            # An upgrade set this mask aside; the checks above are the proof
+            # it needs. Only reactivate when the full cache-hit state check
+            # below would pass — reactivation commits the mask back into
+            # active use, so a regeneration failure must never leave a
+            # migration-distrusted mask active with a stale embedding or
+            # recipe-rendered quality input. One that was not the photo's
+            # active mask, whose stored embedding no longer matches the
+            # configured DINO variant, or whose photo has a recipe-rendered
+            # quality input stays set aside, and SAM replaces it below.
+            if existing.get("set_aside_embedding_variant") != self.dinov2_variant:
+                return False
+            pre_state = thread_db.masks_features.photo_mask_state(item.photo_id)
+            if pre_state is None or pre_state["quality_input_recipe"] is not None:
+                return False
+            if not thread_db.masks_features.reactivate_set_aside(
+                item.photo_id, self.sam2_variant, self.min_detector_conf,
+            ):
+                return False
+            thread_db.commit_with_retry()
         state = thread_db.masks_features.photo_mask_state(item.photo_id)
         if (state is not None
                 and state["active_mask_variant"]
@@ -487,6 +510,8 @@ class _MaskExtractionRun:
             # surfaces the drop and flips ``ok`` to False.
             if not invalidated:
                 self.masked += 1
+                if was_set_aside:
+                    self.set_aside_reused += 1
             self._push_progress(item.index, photo["filename"])
             return True
         # Denormalised subject state is stale: fall
@@ -713,6 +738,7 @@ class _MaskExtractionRun:
         return {"masked": self.masked, "skipped": self.skipped,
                 "failed": failed, "unreadable": unreadable, "total": total,
                 "detail_measured": self.detail_measured,
+                "set_aside_reused": self.set_aside_reused,
                 "detail_unreadable": self.detail_unreadable,
                 "mask_cache_invalidated": self.mask_cache_invalidated,
                 "ok": not job_errors, "errors": job_errors}

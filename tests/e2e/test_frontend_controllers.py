@@ -174,6 +174,235 @@ def test_workspace_menu_discards_responses_after_close_and_reopen(page):
     assert page.evaluate("typeof _wsDropdownOpen") == "undefined"
 
 
+def mount_workspace_search(page, names, pinned=()):
+    """Open the menu on a list of workspaces, with the navbar's search field in the DOM."""
+    page.set_content('''
+        <button id="wsCurrentBtn"></button>
+        <div id="wsDropdown"><div id="wsMenu">
+          <input type="search" id="wsMenuSearch" hidden><div id="wsMenuList"></div>
+        </div></div>
+        <span id="wsCurrentName"></span>
+        <div id="createWsModal"><input id="newWsName"><div id="newWsError"></div></div>
+    ''')
+    page.add_script_tag(path=str(STATIC / "vireo-workspace-switcher.js"))
+    page.evaluate('''async ([names, pinned]) => {
+        window.posts = [];
+        const workspaces = names.map((name, i) => (
+            {id: i + 1, name, pinned_at: pinned.includes(name) ? '2026-01-01' : null}));
+        window.controller = VireoWorkspaceSwitcher.create({
+            fetch: async (url, init) => {
+                if (init && init.method === 'POST') { posts.push(url); return {}; }
+                return url === '/api/workspaces' ? workspaces : {id: 1};
+            },
+            navigate() {},
+            clearWorkspaceCursors() {},
+        });
+        await controller.toggle();
+    }''', [names, list(pinned)])
+
+
+TRIPS = ["USA2026", "Costa Rica 2025", "Kenya 2024", "Backyard", "Texas 2023",
+         "Costa Rica 2019", "Alaska", "Arizona"]
+
+
+def test_workspace_menu_search_filters_by_name_and_enter_switches(page):
+    mount_workspace_search(page, TRIPS, pinned=["Costa Rica 2019"])
+    search = page.locator("#wsMenuSearch")
+    expect(search).to_be_visible()
+    expect(search).to_be_focused()
+    page.keyboard.type("rica costa")
+    # Every word must appear, in any order and case; pinned workspaces stay first.
+    expect(page.locator(".ws-item-name")).to_have_text(["Costa Rica 2019", "Costa Rica 2025"])
+    expect(page.locator(".ws-menu-item.highlighted .ws-item-name")).to_have_text("Costa Rica 2019")
+    page.keyboard.press("ArrowDown")
+    expect(page.locator(".ws-menu-item.highlighted .ws-item-name")).to_have_text("Costa Rica 2025")
+    page.keyboard.press("Enter")
+    expect(page.locator("#wsCurrentName")).to_have_text("Costa Rica 2025")
+    assert page.evaluate("posts") == ["/api/workspaces/2/activate"]
+    expect(page.locator("#wsMenu")).not_to_have_class("open")
+
+
+def test_workspace_menu_search_says_when_nothing_matches_and_escape_resets_it(page):
+    mount_workspace_search(page, TRIPS)
+    page.keyboard.type("Peru")
+    expect(page.locator("#wsMenuList")).to_have_text("No workspace matches \u201cPeru\u201d")
+    page.keyboard.press("Enter")
+    assert page.evaluate("posts") == []
+    page.keyboard.press("Escape")
+    expect(page.locator("#wsMenu")).not_to_have_class("open")
+    expect(page.locator("#wsCurrentBtn")).to_be_focused()
+    page.evaluate("controller.toggle()")
+    expect(page.locator("#wsMenuSearch")).to_have_value("")
+    expect(page.locator(".ws-menu-item")).to_have_count(len(TRIPS))
+    # Nothing is highlighted until the user searches or presses an arrow key.
+    expect(page.locator(".ws-menu-item.highlighted")).to_have_count(0)
+    page.keyboard.press("ArrowUp")
+    expect(page.locator(".ws-menu-item.highlighted .ws-item-name")).to_have_text("Arizona")
+
+
+def test_workspace_menu_has_no_search_field_for_a_short_list(page):
+    mount_workspace_search(page, TRIPS[:7])
+    expect(page.locator(".ws-menu-item")).to_have_count(7)
+    expect(page.locator("#wsMenuSearch")).to_be_hidden()
+
+
+def test_workspace_menu_clears_query_when_the_field_is_hidden(page):
+    """A reload that brings the count below the search threshold hides the field,
+    so any query typed before the reload resolves is dropped — otherwise an
+    invisible filter would leave an apparently truncated list."""
+    page.set_content('''
+        <button id="wsCurrentBtn"></button>
+        <div id="wsDropdown"><div id="wsMenu">
+          <input type="search" id="wsMenuSearch" hidden><div id="wsMenuList"></div>
+        </div></div>
+        <span id="wsCurrentName"></span>
+    ''')
+    page.add_script_tag(path=str(STATIC / "vireo-workspace-switcher.js"))
+    page.evaluate('''([eight, seven]) => {
+        window.pending = [];
+        window.workspaces = eight.map((name, i) => ({id: i + 1, name, pinned_at: null}));
+        window.controller = VireoWorkspaceSwitcher.create({
+            fetch: (url) => new Promise((resolve) => {
+                const reply = url === '/api/workspaces' ? window.workspaces : {id: 1};
+                if (pending.hold) pending.push({ resolve: () => resolve(reply) });
+                else resolve(reply);
+            }),
+            navigate() {},
+            clearWorkspaceCursors() {},
+        });
+    }''', [TRIPS, TRIPS[:7]])
+    page.evaluate("async () => { await controller.toggle(); }")
+    expect(page.locator("#wsMenuSearch")).to_be_visible()
+    # Close and reopen with a reload that returns a shorter list, held pending so
+    # the user can type during the gap between sync focus and completion.
+    page.keyboard.press("Escape")
+    page.evaluate("() => { pending.hold = true; window.workspaces = window.workspaces.slice(0, 7); controller.toggle(); }")
+    page.locator("#wsMenuSearch").fill("Peru")
+    # Field is still visible because the reload is pending; the cached list is filtered.
+    expect(page.locator("#wsMenuList")).to_have_text("No workspace matches “Peru”")
+    page.evaluate("() => { pending.forEach(p => p.resolve()); }")
+    # The reload drops the count below the threshold: the field hides and the filter clears.
+    expect(page.locator("#wsMenuSearch")).to_be_hidden()
+    expect(page.locator("#wsMenuSearch")).to_have_value("")
+    expect(page.locator(".ws-menu-item")).to_have_count(7)
+
+
+def test_workspace_menu_reload_does_not_steal_focus_after_user_moved_it(page):
+    """On a cached reopen the sync focusSearch focuses the field; the reload
+    callback then runs with the fetch result, but must not pull focus back out
+    of a row the user has just tabbed to."""
+    mount_workspace_search(page, TRIPS)
+    page.keyboard.press("Escape")
+    # Start a reopen whose reload will complete asynchronously; move focus
+    # before the completion callback runs.
+    page.evaluate('''async () => {
+        window.loading = controller.toggle();
+        document.getElementById('wsCurrentBtn').focus();
+        await loading;
+    }''')
+    # The cached list is still rendered and the button still owns focus — the
+    # reload's completion callback did not pull focus back into the field.
+    expect(page.locator("#wsCurrentBtn")).to_be_focused()
+    expect(page.locator(".ws-menu-item")).to_have_count(len(TRIPS))
+
+
+def test_workspace_menu_registers_with_the_keymap_escape_stack(page):
+    """Keymap's capture-phase dispatcher pops the top of its Esc stack and stops
+    propagation before the input's keydown runs, so a competing surface
+    (notification history, …) that pushed first would otherwise swallow Escape.
+    Opening the workspace menu pushes its own token on top; closing pops it."""
+    page.set_content('''
+        <button id="wsCurrentBtn"></button>
+        <div id="wsDropdown"><div id="wsMenu">
+          <input type="search" id="wsMenuSearch" hidden><div id="wsMenuList"></div>
+        </div></div>
+        <span id="wsCurrentName"></span>
+    ''')
+    page.add_script_tag(path=str(STATIC / "vireo-workspace-switcher.js"))
+    page.evaluate('''([names]) => {
+        const workspaces = names.map((name, i) => ({id: i + 1, name, pinned_at: null}));
+        window.escStack = [];
+        window.nextToken = 1;
+        window.Keymap = {
+            pushEsc(handler) {
+                const token = nextToken++;
+                escStack.push({token, handler});
+                return token;
+            },
+            popEsc(token) {
+                for (let i = escStack.length - 1; i >= 0; i--) {
+                    if (escStack[i].token === token) { escStack.splice(i, 1); return true; }
+                }
+                return false;
+            },
+        };
+        // A competing surface (e.g. notification history) already has an Esc owner.
+        window.competingClosed = false;
+        Keymap.pushEsc(() => { window.competingClosed = true; });
+        window.controller = VireoWorkspaceSwitcher.create({
+            fetch: async (url) => url === '/api/workspaces' ? workspaces : {id: 1},
+            navigate() {},
+            clearWorkspaceCursors() {},
+        });
+    }''', [TRIPS])
+    page.evaluate("async () => { await controller.toggle(); }")
+    # Menu is on top of the stack now — fire the top handler to simulate Escape.
+    assert page.evaluate("escStack.length") == 2
+    page.evaluate("() => { escStack[escStack.length - 1].handler(); }")
+    expect(page.locator("#wsMenu")).not_to_have_class("open")
+    expect(page.locator("#wsCurrentBtn")).to_be_focused()
+    # Closing popped only the menu's token, leaving the competing surface intact.
+    assert page.evaluate("[escStack.length, competingClosed]") == [1, False]
+    # Reopen + close via outside click also pops the token, so the stack never grows unbounded.
+    page.evaluate("async () => { await controller.toggle(); }")
+    assert page.evaluate("escStack.length") == 2
+    page.evaluate("() => { controller.close(); }")
+    assert page.evaluate("escStack.length") == 1
+
+
+def test_workspace_menu_reopen_clears_stale_filter_before_reload(page):
+    """After a filter and close, reopening re-renders the cached list before the
+    reload resolves, so stale filter rows never flash and survive a failed reload."""
+    page.set_content('''
+        <button id="wsCurrentBtn"></button>
+        <div id="wsDropdown"><div id="wsMenu">
+          <input type="search" id="wsMenuSearch" hidden><div id="wsMenuList"></div>
+        </div></div>
+        <span id="wsCurrentName"></span>
+    ''')
+    page.add_script_tag(path=str(STATIC / "vireo-workspace-switcher.js"))
+    page.evaluate('''([names]) => {
+        window.pending = [];
+        window.autoResolve = true;
+        const workspaces = names.map((name, i) => ({id: i + 1, name, pinned_at: null}));
+        window.controller = VireoWorkspaceSwitcher.create({
+            fetch: (url) => new Promise((resolve, reject) => {
+                const reply = url === '/api/workspaces' ? workspaces : {id: 1};
+                if (window.autoResolve) resolve(reply);
+                else pending.push({ resolve: () => resolve(reply), reject });
+            }),
+            navigate() {},
+            clearWorkspaceCursors() {},
+        });
+    }''', [TRIPS])
+    page.evaluate("async () => { await controller.toggle(); }")
+    # Filter down to one row, close, then block the reload so the test can
+    # inspect the DOM before loadWorkspaceMenu has a chance to re-render.
+    search = page.locator("#wsMenuSearch")
+    search.fill("Peru")
+    expect(page.locator("#wsMenuList")).to_have_text("No workspace matches “Peru”")
+    page.keyboard.press("Escape")
+    page.evaluate("() => { window.autoResolve = false; controller.toggle(); }")
+    # The cached workspaces re-render before the reload resolves; the stale
+    # "No workspace matches" row from the last filter is gone.
+    expect(page.locator(".ws-menu-item")).to_have_count(len(TRIPS))
+    expect(page.locator("#wsMenuList")).not_to_contain_text("Peru")
+    # The reload failing leaves the cached list visible, not stale filter rows.
+    page.evaluate("() => { pending.forEach(p => p.reject(new Error('offline'))); }")
+    expect(page.locator(".ws-menu-item")).to_have_count(len(TRIPS))
+    expect(page.locator("#wsMenuList")).not_to_contain_text("Peru")
+
+
 def test_workspace_modal_closes_menu_and_cancels_deferred_listener(page):
     mount_workspace_switcher(page)
     page.evaluate('''() => {

@@ -746,12 +746,15 @@
       onComplete: async function(event) {
         if (activeJob !== watch) return;
         activeJob = null;
+        // A sync the Trash stopped is explained by the question below, not a toast.
+        var refused = Number(event.result && event.result.trash_failed_total) || 0;
         if (event.status === 'completed') showToast('Local folder update complete', 'success');
-        else if (event.status !== 'cancelled') {
+        else if (!refused && event.status !== 'cancelled') {
           var detail = event.errors?.[event.errors.length - 1] || 'The job did not complete';
           showToast(detail, 'error');
         }
         await load();
+        if (refused && event.result) await offerPermanentDelete(event.result);
       },
       onError: async function() {
         if (activeJob !== watch) return;
@@ -868,6 +871,105 @@
     }
   }
 
+  // A sync removes from source storage every file the local copy no longer
+  // has. The server moves them to the Trash and keeps any the Trash refuses.
+  /** @param {number} deleted */ function sourceDeletionWarning(deleted) {
+    return (deleted === 1 ? '1 file that is' : deleted + ' files that are') +
+      ' no longer in the local copy will be moved to the Trash on source storage. ' +
+      'If the Trash cannot take a file, Vireo keeps it and asks before deleting it permanently.';
+  }
+
+  /** @param {number} deleted */ function syncConfirmLabel(deleted) {
+    if (!deleted) return 'Sync';
+    return 'Sync and move ' + deleted + ' source file' + (deleted === 1 ? '' : 's') + ' to the Trash';
+  }
+
+  // The body that finishes a sync by deleting permanently the files its
+  // result says the Trash refused, or null when the page no longer shows a
+  // session they belong to. Each count repeats what the question listed;
+  // the server refuses to delete more.
+  /** @param {WorkLocalSyncResult} result */ function permanentSyncRequest(result) {
+    if (!data) return null;
+    if (!result.folders) {
+      if (!data.legacy) return null;
+      return {
+        url: '/api/workspaces/active/local-workspace/sync',
+        body: {
+          confirm_deletions: true,
+          confirmed_deletion_count: Number(((data.legacy.changes || {}).deleted) || 0),
+          delete_permanently: true,
+          permanent_deletion_count: Number(result.trash_failed_total) || 0
+        }
+      };
+    }
+    /** @type {Record<string,number>} */ var counts = {};
+    /** @type {Record<string,number>} */ var permanentCounts = {};
+    /** @type {number[]} */ var folderIds = [];
+    var sessions = data.folders || [];
+    result.folders.forEach(function(folder) {
+      var kept = Number(folder.trash_failed_total) || 0;
+      var item = sessions.find(function(candidate) {
+        return candidate.root_folder_id === folder.root_folder_id && candidate.state !== 'remote';
+      });
+      if (!kept || !item) return;
+      counts[String(item.root_folder_id)] = Number(((item.changes || {}).deleted) || 0);
+      permanentCounts[String(item.root_folder_id)] = kept;
+      folderIds.push(item.requested_folder_id);
+    });
+    if (!folderIds.length) return null;
+    return {
+      url: '/api/workspaces/active/local-folders/sync',
+      body: {
+        folder_ids: folderIds,
+        confirmed_deletion_counts: counts,
+        delete_permanently: true,
+        permanent_deletion_counts: permanentCounts
+      }
+    };
+  }
+
+  // Asked when a sync ends with source files the Trash refused. They are
+  // still on source storage and nothing was published; only a yes here
+  // deletes them permanently.
+  /** @param {WorkLocalSyncResult} result */ async function offerPermanentDelete(result) {
+    var total = Number(result.trash_failed_total) || 0;
+    var one = total === 1;
+    var rows = (result.trash_failed || []).slice(0, 5).map(function(item) {
+      return item.path + ' — ' + item.error;
+    });
+    if (total > rows.length) rows.push('… and ' + (total - rows.length) + ' more');
+    var kept = (one ? '1 source file' : total + ' source files') +
+      ' could not be moved to the Trash and ' + (one ? 'was' : 'were') + ' kept.';
+    var accepted = await Vireo.confirm({
+      title: 'Delete permanently instead?',
+      message: kept + ' Your local changes have not been synced yet.\n\n' +
+        'Deleting permanently removes ' + (one ? 'the file' : 'the files') +
+        ' from source storage now and then finishes the sync. ' +
+        (one ? 'It' : 'They') + ' will not be in the Trash and cannot be recovered.',
+      details: rows,
+      confirmLabel: 'Delete permanently',
+      cancelLabel: one ? 'Keep the file' : 'Keep the files',
+      danger: true
+    });
+    var request = accepted ? permanentSyncRequest(result) : null;
+    if (!request || actionInFlight || activeJob) {
+      showToast(kept + ' The sync is not finished. Sync back again to retry the Trash.', 'warning');
+      return;
+    }
+    actionInFlight = true;
+    try {
+      /** @type {WorkLocalStarted} */ var started = await Vireo.api.json(request.url, {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(request.body)
+      });
+      watchJob(started.job_id);
+      if (result.folders) trackStartedJob(started, 'work-locally-folder-sync');
+    } catch (_error) {
+      await load();
+    } finally {
+      actionInFlight = false;
+    }
+  }
+
   /** @param {number[]|null} folderIds */ async function sync(folderIds) {
     if (actionInFlight || activeJob) return;
     await load();
@@ -898,10 +1000,17 @@
       deleted += count;
       (item.workspace_ids || []).forEach(function(id) { affected.add(id); });
     });
-    var message = 'Sync ' + unique.length + ' local folder' + (unique.length === 1 ? '' : 's') + ' back to source storage and remove the local copies?';
+    var message = 'Vireo copies your local changes to source storage, then removes the local copies.';
     if (affected.size > 1) message += '\n\nThis updates the folders for ' + affected.size + ' linked workspaces.';
-    if (deleted) message += '\n\nThis will delete ' + deleted + ' file' + (deleted === 1 ? '' : 's') + ' from source storage.';
-    if (!confirm(message)) return;
+    if (deleted) message += '\n\n' + sourceDeletionWarning(deleted);
+    if (!(await Vireo.confirm({
+      title: 'Sync ' + unique.length + ' local folder' + (unique.length === 1 ? '' : 's') + ' back to source storage?',
+      message: message,
+      confirmLabel: syncConfirmLabel(deleted),
+      danger: deleted > 0
+    }))) return;
+    // The question is asked in the page, so a job may have started while it was open.
+    if (actionInFlight || activeJob) return;
     actionInFlight = true;
     try {
       /** @type {WorkLocalStarted} */ var result = await Vireo.api.json('/api/workspaces/active/local-folders/sync', {
@@ -937,9 +1046,15 @@
     items.forEach(function(item) {
       (item.workspace_ids || []).forEach(function(id) { affected.add(id); });
     });
-    var message = 'Discard all changes in the selected local folder' + (items.length === 1 ? '' : 's') + '?\n\nThis cannot be undone. Source storage will not be modified.';
+    var message = 'Files you created or changed in the local ' + (items.length === 1 ? 'copy' : 'copies') + ' are deleted and cannot be recovered. Source storage will not be modified.';
     if (affected.size > 1) message += '\n\nThe local copies are shared by ' + affected.size + ' linked workspaces.';
-    if (!confirm(message)) return;
+    if (!(await Vireo.confirm({
+      title: 'Discard all changes in the selected local folder' + (items.length === 1 ? '' : 's') + '?',
+      message: message,
+      confirmLabel: 'Discard changes',
+      danger: true
+    }))) return;
+    if (actionInFlight || activeJob) return;
     actionInFlight = true;
     try {
       /** @type {WorkLocalStarted} */ var result = await Vireo.api.json('/api/workspaces/active/local-folders/discard', {
@@ -1008,16 +1123,28 @@
     var body;
     if (action === 'sync') {
       var deleted = Number(((legacy.changes || {}).deleted) || 0);
-      if (!confirm('Sync the older local workspace back to source storage?' + (deleted ? '\n\nThis deletes ' + deleted + ' source file(s).' : ''))) return;
+      if (!(await Vireo.confirm({
+        title: 'Sync the older local workspace back to source storage?',
+        message: 'Vireo copies your local changes to source storage, then removes the local copy.' +
+          (deleted ? '\n\n' + sourceDeletionWarning(deleted) : ''),
+        confirmLabel: syncConfirmLabel(deleted),
+        danger: deleted > 0
+      }))) return;
       body = {confirm_deletions: deleted > 0, confirmed_deletion_count: deleted};
     } else {
-      if (!confirm('Discard the older local workspace? Source storage will not be modified.')) return;
+      if (!(await Vireo.confirm({
+        title: 'Discard the older local workspace?',
+        message: 'Files you created or changed in the local copy are deleted and cannot be recovered. Source storage will not be modified.',
+        confirmLabel: 'Discard changes',
+        danger: true
+      }))) return;
       body = {
         confirm: true,
         expected_state: legacy.state === 'recovery' ? 'recovery' : legacy.state,
         acknowledge_published: legacy.recovery_kind === 'sync'
       };
     }
+    if (actionInFlight || activeJob) return;
     actionInFlight = true;
     try {
       /** @type {WorkLocalStarted} */ var result = await Vireo.api.json('/api/workspaces/active/local-workspace/' + endpoint, {

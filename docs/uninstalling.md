@@ -165,9 +165,16 @@ applications to download its files again.
 
 ## Before removing all Vireo data
 
-Back up the catalog and settings with Vireo stopped. Saved photo metadata lives
+Back up the catalog and settings with Vireo stopped; the
+[backup and restore guide](backup-and-restore.md) lists what to copy. Saved photo metadata lives
 in your photos and XMP sidecars, but a fresh scan is not a backup of every
 setting, workspace, pending operation, or editing state in the catalog.
+
+Vireo also keeps daily catalog backups in the `backups` folder beside the
+catalog (Settings, **Catalog backups**). Each one is about the size of the
+catalog. They live with the catalog, so they do not protect against losing that
+disk: copy the newest `backups/catalog-*` folder elsewhere if you want one that
+does.
 
 Check `staging`, `offline`, `local-folders`, and `local-workspaces`, including
 custom locations, for photo copies that have not reached their intended final

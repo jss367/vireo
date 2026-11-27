@@ -1,0 +1,57 @@
+{
+  "folder_workspaces": [
+    "Default"
+  ],
+  "photos": {
+    "DSC_0001.NEF": {
+      "active_mask": "/vireo-release-fixture/masks/1_sam2-small.png",
+      "flag": "flagged",
+      "keywords": [
+        "Northern Cardinal",
+        "backyard"
+      ],
+      "masks": [
+        {
+          "detector_model": "megadetector-v6",
+          "path": "/vireo-release-fixture/masks/1_sam2-small.png",
+          "variant": "sam2-small"
+        }
+      ],
+      "rating": 5
+    },
+    "DSC_0002.NEF": {
+      "active_mask": "/vireo-release-fixture/masks/2_sam2-small.png",
+      "flag": "rejected",
+      "keywords": [
+        "Northern Cardinal"
+      ],
+      "masks": [
+        {
+          "detector_model": "megadetector-v6",
+          "path": "/vireo-release-fixture/masks/2_sam2-small.png",
+          "variant": "sam2-small"
+        }
+      ],
+      "rating": 1
+    },
+    "DSC_0003.JPG": {
+      "active_mask": null,
+      "flag": "none",
+      "keywords": [
+        "Red-tailed Hawk",
+        "backyard"
+      ],
+      "masks": [],
+      "rating": 3
+    },
+    "DSC_0004.JPG": {
+      "active_mask": null,
+      "flag": "none",
+      "keywords": [],
+      "masks": [],
+      "rating": 0
+    }
+  },
+  "release": "v0.77.0",
+  "schema_version": 57
+}

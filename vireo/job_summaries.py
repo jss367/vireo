@@ -215,6 +215,36 @@ def _batch_delete(result: dict, config: dict) -> tuple[str, list[str]]:
     return summary, details
 
 
+def _work_locally_sync(result: dict, config: dict) -> tuple[str, list[str]]:
+    """A Work Locally sync: what reached source storage and what was kept.
+
+    The folder-scoped job reports one result per folder under ``folders``;
+    the workspace-scoped one is its own single result. A folder whose
+    deletions the Trash refused published nothing, so only the folders that
+    finished are counted, and the kept files are listed with the reason.
+    """
+    folders = result.get("folders")
+    results = [f for f in folders if isinstance(f, dict)] if isinstance(folders, list) else [result]
+    synced = [f for f in results if f.get("ok") is True]
+    parts = [_n(sum(_int(f, "created_or_modified") for f in synced), "file") + " published"]
+    for key, phrase in (
+        ("trashed", "moved to Trash"),
+        ("deleted_permanently", "deleted permanently"),
+    ):
+        count = sum(_int(f, key) for f in synced)
+        if count:
+            parts.append(f"{count:,} {phrase}")
+    kept = _int(result, "trash_failed_total")
+    details: list[str] = []
+    if kept:
+        parts.append(f"{_n(kept, 'source file')} kept because the Trash refused {'it' if kept == 1 else 'them'}")
+        listed = [text for text in map(_item_text, (result.get("trash_failed") or [])[:MAX_DETAIL_ITEMS]) if text]
+        details = [f"{_n(kept, 'source file')} could not be moved to Trash:", *listed]
+        if kept > len(listed):
+            details.append(f"and {kept - len(listed):,} more")
+    return ", ".join(parts), details
+
+
 def _generated(result: dict, config: dict, noun: str = "thumbnail") -> tuple[str, list[str]]:
     generated = _int(result, "generated")
     skipped = _int(result, "skipped")
@@ -946,6 +976,8 @@ _DESCRIBERS: dict[str, Callable[[dict, dict], tuple[str, list[str]]]] = {
     "staging-verify": _staging_verify,
     "card-cleanup-verify": _card_cleanup_verify,
     "card-cleanup-delete": _card_cleanup_delete,
+    "work-locally-sync": _work_locally_sync,
+    "work-locally-folder-sync": _work_locally_sync,
 }
 
 

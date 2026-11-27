@@ -1535,6 +1535,29 @@ function bpActiveProgress(progress) {
   return null;
 }
 
+/**
+ * The status bar's speed suffix, or '' when the job reports none.
+ *
+ * A job's `rate` counts the items it finished, never bytes: standalone jobs
+ * report items per second of the `current` they count, and the pipeline
+ * reports the running stage's files per minute (`rate_unit: 'per_minute'`).
+ * The pipeline's `current`/`total` are weighted stage progress, not files, so
+ * its suffix names the files it counts. A standalone rate is a bare "/min" of
+ * the counts beside it, so it is left out while those counts are a sub-phase's.
+ * @param {NavProgress | null | undefined} progress
+ * @param {boolean} showingPhaseCounts
+ */
+function bpRateText(progress, showingPhaseCounts) {
+  var rate = Number(progress?.rate) || 0;
+  if (rate <= 0) return '';
+  if (progress?.rate_unit === 'per_minute') {
+    return ' · ' + Math.round(rate).toLocaleString() + ' files/min';
+  }
+  if (showingPhaseCounts) return '';
+  var perMinute = rate * 60;
+  return ' · ' + (perMinute < 10 ? perMinute.toFixed(1) : Math.round(perMinute).toLocaleString()) + '/min';
+}
+
 /** @param {{current: number; total: number} | null} info */
 function bpProgressPct(info) {
   if (!info || !info.total) return 0;
@@ -1737,9 +1760,7 @@ function updateSummary() {
     } else {
       text += ' ' + progressInfo.current.toLocaleString() + '/' + progressInfo.total.toLocaleString() + ' (' + pct + '%)';
     }
-    if ((j.progress?.rate || 0) > 0) {
-      text += ' ' + ((j.progress?.rate || 0) / (1024*1024)).toFixed(1) + ' MB/s';
-    }
+    text += bpRateText(j.progress, progressInfo.phase);
   } else if (j.progress && j.progress.current_file) {
     text += ' ' + j.progress.current_file;
   }
@@ -1893,6 +1914,8 @@ export function formatJobType(type) {
   if (type === 'catalog-backups') return 'Move catalog backups';
   if (type === 'retained-cache-cleanup') return 'Generated file and history cleanup';
   if (type === 'retained-cache-maintenance') return 'Storage retention maintenance';
+  if (type === 'catalog-backup') return 'Catalog backup';
+  if (type === 'catalog-restore-prepare') return 'Prepare catalog restore';
   return String(type)
     .split(/[-_]+/)
     .filter(function(w) { return w.length > 0; })

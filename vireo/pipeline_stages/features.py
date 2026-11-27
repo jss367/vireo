@@ -695,6 +695,10 @@ class _MaskPass:
         # not quietly complete the stage with planned work pending.
         self.detail_measured = 0
         self.detail_unreadable = 0
+        # Masks a schema migration set aside that this run proved against
+        # the original and put back in use without SAM. They count as
+        # masked; the tally says how many came back this way.
+        self.set_aside_reused = 0
         # Cached mask PNGs that could not be decoded this run. We drop
         # both the stale file and its ``photo_masks`` row so the next
         # run misses the cache check and rebuilds the mask, and surface
@@ -1031,6 +1035,8 @@ class _MaskPass:
             self.outcomes.record(item.photo_id, tag)
             if not invalidated:
                 self.masked += 1
+                if item.existing is not None and item.existing.get("set_aside_by") is not None:
+                    self.set_aside_reused += 1
             self.processed = i + 1
             return _NEXT_PHOTO
 
@@ -1148,6 +1154,20 @@ class _MaskPass:
                 and os.path.isfile(existing["path"])
                 and cached_mask_frame_matches(existing["path"], frame)):
             return False
+        if existing.get("set_aside_by") is not None:
+            # Only reactivate when the full cache-hit state check below
+            # would pass — reactivation commits the mask back into
+            # active use, so a regeneration failure must never leave a
+            # migration-distrusted mask active with a stale embedding
+            # or recipe-rendered quality input.
+            if (self.run.params.raw_subject_analysis
+                    or existing.get("set_aside_embedding_variant") != self.dinov2_variant):
+                return False
+            pre_state = self.thread_db.masks_features.photo_mask_state(item.photo_id)
+            if pre_state is None or pre_state["quality_input_recipe"] is not None:
+                return False
+            if not self._reactivate_set_aside(item):
+                return False
         # The cheap skip (re-activate only) is correct
         # ONLY when the photos row is already fully
         # consistent for this variant. set_active_mask_
@@ -1188,6 +1208,21 @@ class _MaskPass:
             and state["dino_embedding_variant"]
             == self.dinov2_variant
         )
+
+    def _reactivate_set_aside(self, item: _MaskPhoto) -> bool:
+        """Put a mask an upgrade set aside back in use, now that this run has proven it.
+
+        False when the mask was not the photo's active one or its embedding
+        no longer fits; SAM then makes the mask again and replaces the row.
+        """
+        thread_db = self.thread_db
+        reactivated = thread_db.masks_features.reactivate_set_aside(
+            item.photo_id, self.sam2_variant, self.detector_confidence,
+            weak_rescue_min_conf=self.rescue_floor_by_photo.get(item.photo_id),
+        )
+        if reactivated:
+            thread_db.commit_with_retry()
+        return reactivated
 
     def _count_unreadable_source(self, item: _MaskPhoto) -> None:
         self.em_unreadable += 1
@@ -1544,6 +1579,7 @@ class _MaskPass:
             ),
             "detail_measured": self.detail_measured,
             "detail_unreadable": self.detail_unreadable,
+            "set_aside_reused": self.set_aside_reused,
             "mask_cache_invalidated": self.mask_cache_invalidated,
             "cancelled": True,
             "phase_seconds": self._phase_seconds_result(),
@@ -1560,6 +1596,8 @@ class _MaskPass:
             parts.append(f"{self.detail_measured} detail measured")
         if self.detail_unreadable:
             parts.append(f"{self.detail_unreadable} detail unmeasured")
+        if self.set_aside_reused:
+            parts.append(f"{self.set_aside_reused} reused after an upgrade set them aside")
         if self.mask_cache_invalidated:
             parts.append(f"{self.mask_cache_invalidated} mask cache dropped")
         if self.photos_subthreshold_only > 0:
@@ -1681,6 +1719,7 @@ class _MaskPass:
             "subthreshold": photos_subthreshold_only,
             "detail_measured": self.detail_measured,
             "detail_unreadable": self.detail_unreadable,
+            "set_aside_reused": self.set_aside_reused,
             "mask_cache_invalidated": self.mask_cache_invalidated,
             "phase_seconds": self._phase_seconds_result(),
         }

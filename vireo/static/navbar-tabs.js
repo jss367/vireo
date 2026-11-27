@@ -155,6 +155,47 @@ function saveStripScroll() {
   if (scrollKey && strip?.childElementCount) sessionStorage.setItem(scrollKey, String(strip.scrollLeft));
 }
 
+// Mark the sides of the strip that have tabs scrolled out of view; the
+// stylesheet fades those edges. One pixel of slack absorbs fractional widths.
+function updateStripOverflow() {
+  const strip = STRIP();
+  if (!strip) return;
+  const hidden = strip.scrollWidth - strip.clientWidth;
+  strip.classList.toggle('more-left', strip.scrollLeft > 1);
+  strip.classList.toggle('more-right', hidden - strip.scrollLeft > 1);
+}
+
+// A mouse wheel only scrolls vertically, so over an overflowing strip it
+// moves the tabs sideways instead. A sideways gesture keeps its own scroll.
+// At the boundary in the wheel direction the strip cannot move, so the
+// wheel falls through to the page instead of being swallowed in place.
+// Firefox and some devices report deltaY in lines or pages, not pixels
+// (WheelEvent.deltaMode 1 or 2), so a 1-3 raw delta would advance the
+// strip by 1-3 pixels while preventDefault() swallowed the native scroll.
+/** @param {WheelEvent} event */
+function scrollStripWithWheel(event) {
+  const strip = STRIP();
+  if (event.ctrlKey || Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
+  if (strip.scrollWidth <= strip.clientWidth) return;
+  const hidden = strip.scrollWidth - strip.clientWidth;
+  if (event.deltaY > 0 && hidden - strip.scrollLeft <= 1) return;
+  if (event.deltaY < 0 && strip.scrollLeft <= 1) return;
+  event.preventDefault();
+  const step = event.deltaMode === 1 ? event.deltaY * 16
+             : event.deltaMode === 2 ? event.deltaY * strip.clientWidth
+             : event.deltaY;
+  strip.scrollLeft += step;
+}
+
+function watchStripOverflow() {
+  const strip = STRIP();
+  if (!strip || strip.dataset.overflowWatched) return;
+  strip.dataset.overflowWatched = '1';
+  strip.addEventListener('scroll', updateStripOverflow, {passive: true});
+  strip.addEventListener('wheel', scrollStripWithWheel, {passive: false});
+  new ResizeObserver(updateStripOverflow).observe(strip);
+}
+
 /** @param {string | null} nextScrollKey */
 function renderStrip(nextScrollKey = scrollKey) {
   const strip = STRIP();
@@ -176,6 +217,8 @@ function renderStrip(nextScrollKey = scrollKey) {
     strip.appendChild(buildTabAnchor(pageById[cur], {ephemeral: true}));
   }
   strip.scrollLeft = scrollLeft;
+  watchStripOverflow();
+  updateStripOverflow();
   applyActiveClass();
   rebuildPagesMenu();
   if (vireoSyncNumberedNavigation) vireoSyncNumberedNavigation();

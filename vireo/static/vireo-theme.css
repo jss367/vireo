@@ -3,6 +3,11 @@
 /* Each theme sets color-scheme so the browser draws its own controls
    (scrollbars, <select> menus, date pickers, checkboxes) to match. */
 
+/* accent-color is inherited, so this one rule gives every range slider,
+   checkbox, radio button and progress bar the theme's accent. Without it a
+   control with no rule of its own gets the browser's blue. */
+:root { accent-color: var(--accent); }
+
 /* Vireo Dark — matches the teal/navy logo */
 :root[data-theme="vireo-dark"] {
   color-scheme: dark;

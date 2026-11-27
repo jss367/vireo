@@ -14820,6 +14820,25 @@ def test_api_storage_masks_empty(app_and_db):
     assert data["variants"] == []
     assert data["total_bytes"] == 0
     assert data["stale_count"] == 0
+    assert data["set_aside"] == []
+
+
+def test_api_storage_masks_reports_masks_an_upgrade_set_aside(app_and_db, tmp_path):
+    """A migration that stops trusting masks keeps them; Storage says how many and why."""
+    import schema
+
+    app, db = app_and_db
+    _, p1, _ = _seed_masks(db, tmp_path)
+    schema.set_aside_masks(db.conn, "m.photo_id=?", (p1,), version=54, reason="No frame was recorded")
+    db.commit()
+
+    data = app.test_client().get("/api/storage/masks").get_json()
+
+    assert data["set_aside"] == [
+        {"set_aside_by": 54, "set_aside_reason": "No frame was recorded", "masks": 2, "active": 1},
+    ]
+    # The rows and their files are still counted: nothing was deleted.
+    assert {v["variant"]: v["count"] for v in data["variants"]} == {"sam2-small": 2, "sam2-large": 1}
 
 
 def test_api_storage_masks_delete_variant(app_and_db, tmp_path):

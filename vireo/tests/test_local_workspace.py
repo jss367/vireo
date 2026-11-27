@@ -8,18 +8,23 @@ from pathlib import Path
 import pytest
 import services.local_workspace as local_workspace
 from db import Database
+from fake_trash import FakeTrash
 from repositories.folders import FolderRepository
 from services import photo_ingest, workspace_folders
 from services.local_workspace import (
     LocalWorkspaceCancelled,
     LocalWorkspaceConflict,
     LocalWorkspaceError,
+    LocalWorkspaceTrashRefused,
+    SourceDeletion,
     discard_local,
     stage_workspace,
     status,
     sync_back,
+    sync_summary,
     workspace_dir,
 )
+from services.trash import TrashService
 from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_client
 
@@ -2057,10 +2062,10 @@ def test_status_endpoint_does_not_surface_unrelated_workspace_jobs(tmp_path, mon
         wait_for_job_via_client(client, stage_job_id)
 
 
-def test_sync_recovery_republishes_restored_confirmed_deletion(local_workspace_env, monkeypatch):
+def test_sync_recovery_republishes_restored_confirmed_deletion(local_workspace_env):
     """Recovery must republish a confirmed-deletion file the user restored.
 
-    The first sync attempt already unlinked the source file (it was in the
+    The first sync attempt already removed the source file (it was in the
     user's confirmed deletion set). Restoring the local copy before "Finish
     Sync-back" would otherwise fall through as "unchanged" — restore then
     removes the local copy while the source stays deleted — or, if restored
@@ -2082,24 +2087,8 @@ def test_sync_recovery_republishes_restored_confirmed_deletion(local_workspace_e
     os.unlink(local_child / "bird.jpg")
     os.unlink(local_child / "bird.xmp")
 
-    real_unlink = local_workspace.os.unlink
-    source_unlinks = {"count": 0}
-    source_root_str = str(env["source"])
-
-    def crashing_unlink(path):
-        real_unlink(path)
-        # Only trip on source-side deletions (the sync deletion loop). Temp
-        # files created inside ``_atomic_publish`` are named ``.<basename>``
-        # and are exempt so a restored file's later republish still works.
-        basename = os.path.basename(str(path))
-        if source_root_str in str(path) and not basename.startswith("."):
-            source_unlinks["count"] += 1
-            # Let both deletions run so recovery has both keys to reason
-            # about, then simulate a mid-sync death.
-            if source_unlinks["count"] == 2:
-                raise RuntimeError("simulated crash after source deletions")
-
-    monkeypatch.setattr(local_workspace.os, "unlink", crashing_unlink)
+    # Let both deletions reach the Trash so recovery has both keys to reason
+    # about, then simulate a mid-sync death.
     with pytest.raises(RuntimeError, match="simulated crash"):
         sync_back(
             env["db"],
@@ -2107,8 +2096,8 @@ def test_sync_recovery_republishes_restored_confirmed_deletion(local_workspace_e
             str(env["vireo_dir"]),
             allow_deletions=True,
             confirmed_deletions=2,
+            source_deletion=SourceDeletion(_trash_that_crashes_after_moving()),
         )
-    monkeypatch.setattr(local_workspace.os, "unlink", real_unlink)
 
     assert not (env["child"] / "bird.jpg").exists()
     assert not (env["child"] / "bird.xmp").exists()
@@ -2135,26 +2124,19 @@ def test_sync_recovery_republishes_restored_confirmed_deletion(local_workspace_e
     assert status(env["db"], env["workspace_id"], str(env["vireo_dir"]))["state"] == "remote"
 
 
-def test_sync_recovery_leaves_unrestored_deletions_deleted(local_workspace_env, monkeypatch):
+def test_sync_recovery_leaves_unrestored_deletions_deleted(local_workspace_env):
     """Recovery still deletes confirmed-deletion files the user did not restore.
 
     Complement to the republish test: a confirmed deletion whose local copy
     remains absent on resume must not be resurrected — the user already
-    approved that deletion, the first attempt already ran ``os.unlink`` on
-    the source, and no republish path should touch it.
+    approved that deletion, the first attempt already moved the source file
+    to the Trash, and no republish path should touch it.
     """
     env = local_workspace_env
     stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
     local_child = Path(_folder_path(env["db"], env["child_id"]))
     os.unlink(local_child / "bird.jpg")
 
-    real_unlink = local_workspace.os.unlink
-
-    def crashing_unlink(path):
-        real_unlink(path)
-        raise RuntimeError("simulated crash after source deletion")
-
-    monkeypatch.setattr(local_workspace.os, "unlink", crashing_unlink)
     with pytest.raises(RuntimeError, match="simulated crash"):
         sync_back(
             env["db"],
@@ -2162,14 +2144,247 @@ def test_sync_recovery_leaves_unrestored_deletions_deleted(local_workspace_env, 
             str(env["vireo_dir"]),
             allow_deletions=True,
             confirmed_deletions=1,
+            source_deletion=SourceDeletion(_trash_that_crashes_after_moving()),
         )
-    monkeypatch.setattr(local_workspace.os, "unlink", real_unlink)
 
     # User does not restore the local file. Resume should complete cleanly
     # and leave the source deleted.
-    sync_back(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+    result = sync_back(env["db"], env["workspace_id"], str(env["vireo_dir"]))
     assert not (env["child"] / "bird.jpg").exists()
     assert status(env["db"], env["workspace_id"], str(env["vireo_dir"]))["state"] == "remote"
+    # The resumed run found the deletion already made and moved nothing itself.
+    assert (result["deleted"], result["trashed"]) == (1, 0)
+    assert sync_summary(result) == "0 published, 1 already removed"
+
+
+def _refusing_trash(*refused_names, reason="Trash unavailable"):
+    """A Trash that keeps the files with these names and moves the rest."""
+    trash = FakeTrash()
+    real = TrashService()
+
+    def handler(paths, *args, **kwargs):
+        kept = [path for path in paths if os.path.basename(path) in refused_names]
+        moved, successful, failures = real.trash_paths(
+            [path for path in paths if path not in kept], *args, **kwargs
+        )
+        return moved, successful, failures + [{"path": path, "error": reason} for path in kept]
+
+    trash.handle_trash(handler)
+    return trash
+
+
+def _delete_two_local_files(env):
+    """Stage the workspace, then delete bird.jpg and bird.xmp from the local copy."""
+    stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+    local_child = Path(_folder_path(env["db"], env["child_id"]))
+    os.unlink(local_child / "bird.jpg")
+    os.unlink(local_child / "bird.xmp")
+    (Path(_folder_path(env["db"], env["root_id"])) / "root.jpg").write_bytes(b"local edit")
+    return local_child
+
+
+def _sync(env, trash, **kwargs):
+    return sync_back(
+        env["db"], env["workspace_id"], str(env["vireo_dir"]),
+        allow_deletions=True, source_deletion=SourceDeletion(trash, kwargs.pop("permanent_limit", None)),
+        **kwargs,
+    )
+
+
+def test_sync_moves_deleted_source_files_to_the_trash(local_workspace_env, tmp_path):
+    env = local_workspace_env
+    _delete_two_local_files(env)
+    trash = FakeTrash()
+
+    result = _sync(env, trash, confirmed_deletions=2)
+
+    assert trash.trashed_paths == [[str(env["child"] / "bird.jpg"), str(env["child"] / "bird.xmp")]]
+    assert not (env["child"] / "bird.jpg").exists()
+    # The files are recoverable: the Trash holds them with their contents.
+    trashed = {path.name: path.read_bytes() for path in (tmp_path / "test-trash").rglob("bird.*")}
+    assert trashed == {"bird.jpg": b"bird-original", "bird.xmp": b"original metadata"}
+    assert (result["deleted"], result["trashed"], result["deleted_permanently"]) == (2, 2, 0)
+    assert sync_summary(result) == "1 published, 2 moved to Trash"
+
+
+def test_sync_keeps_a_file_the_trash_refuses_and_offers_it_again(local_workspace_env):
+    """A refused deletion is not recorded as done: nothing is published, the
+    session stays resumable, and the next sync tries the same file again."""
+    env = local_workspace_env
+    _delete_two_local_files(env)
+    trash = _refusing_trash("bird.jpg")
+
+    with pytest.raises(LocalWorkspaceTrashRefused) as raised:
+        _sync(env, trash, confirmed_deletions=2)
+
+    kept = str(env["child"] / "bird.jpg")
+    assert raised.value.failures == [{"path": kept, "error": "Trash unavailable"}]
+    assert "1 source file could not be moved to the Trash and was kept" in str(raised.value)
+    assert (env["child"] / "bird.jpg").read_bytes() == b"bird-original"
+    assert not (env["child"] / "bird.xmp").exists()
+    # The local edit was not published, and the local copy is still there.
+    assert (env["source"] / "root.jpg").read_bytes() == b"root-original"
+    current = status(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+    assert (current["state"], current["recovery_kind"]) == ("recovery", "sync")
+    assert current["changes"]["deleted"] == 2
+
+    # Finishing the sync asks the Trash for the kept file again, and only it.
+    with pytest.raises(LocalWorkspaceTrashRefused):
+        _sync(env, trash)
+    assert trash.trashed_paths[-1] == [kept]
+    assert (env["child"] / "bird.jpg").exists()
+
+    # Once the Trash takes it, the sync finishes.
+    result = _sync(env, FakeTrash())
+    assert not (env["child"] / "bird.jpg").exists()
+    assert (env["source"] / "root.jpg").read_bytes() == b"local edit"
+    assert status(env["db"], env["workspace_id"], str(env["vireo_dir"]))["state"] == "remote"
+    assert sync_summary(result) == "1 published, 1 moved to Trash, 1 already removed"
+
+
+def test_file_restored_between_refused_attempts_is_republished(local_workspace_env):
+    """The first attempt moved bird.xmp to the Trash and kept bird.jpg. The
+    user puts bird.xmp back in the local copy. However many times the Trash
+    then stops the sync, finishing it must write bird.xmp back to source."""
+    env = local_workspace_env
+    local_child = _delete_two_local_files(env)
+    trash = _refusing_trash("bird.jpg")
+    with pytest.raises(LocalWorkspaceTrashRefused):
+        _sync(env, trash, confirmed_deletions=2)
+    assert not (env["child"] / "bird.xmp").exists()
+
+    (local_child / "bird.xmp").write_text("restored locally", encoding="utf-8")
+    # A resumed sync from the page carries a fresh count each time.
+    for _attempt in range(2):
+        with pytest.raises(LocalWorkspaceTrashRefused):
+            _sync(env, trash, confirmed_deletions=1)
+
+    _sync(env, FakeTrash(), confirmed_deletions=1)
+
+    assert (env["child"] / "bird.xmp").read_text(encoding="utf-8") == "restored locally"
+    assert not (env["child"] / "bird.jpg").exists()
+    assert status(env["db"], env["workspace_id"], str(env["vireo_dir"]))["state"] == "remote"
+
+
+def test_refused_files_are_deleted_permanently_only_when_confirmed(local_workspace_env):
+    env = local_workspace_env
+    _delete_two_local_files(env)
+    trash = _refusing_trash("bird.jpg", "bird.xmp")
+    with pytest.raises(LocalWorkspaceTrashRefused):
+        _sync(env, trash, confirmed_deletions=2)
+
+    # A confirmation for fewer files than the Trash refused deletes nothing.
+    with pytest.raises(LocalWorkspaceError, match="more than the 1 you confirmed"):
+        _sync(env, trash, permanent_limit=1)
+    assert (env["child"] / "bird.jpg").exists()
+    assert (env["child"] / "bird.xmp").exists()
+
+    result = _sync(env, trash, confirmed_deletions=2, permanent_limit=2)
+
+    assert not (env["child"] / "bird.jpg").exists()
+    assert not (env["child"] / "bird.xmp").exists()
+    assert (result["trashed"], result["deleted_permanently"]) == (0, 2)
+    assert sync_summary(result) == "1 published, 2 deleted permanently"
+    assert status(env["db"], env["workspace_id"], str(env["vireo_dir"]))["state"] == "remote"
+
+
+def test_permanent_delete_never_covers_a_file_the_trash_was_not_tried_on(local_workspace_env, tmp_path):
+    """The permanent answer applies to the files the question listed. A file
+    with no recorded refusal still goes to the Trash."""
+    env = local_workspace_env
+    _delete_two_local_files(env)
+    trash = FakeTrash()
+
+    result = _sync(env, trash, confirmed_deletions=2, permanent_limit=2)
+
+    assert trash.trashed_paths == [[str(env["child"] / "bird.jpg"), str(env["child"] / "bird.xmp")]]
+    assert (result["trashed"], result["deleted_permanently"]) == (2, 0)
+    assert len(list((tmp_path / "test-trash").rglob("bird.*"))) == 2
+
+
+def test_sync_route_reports_kept_files_and_finishes_only_on_a_confirmed_permanent_delete(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from app import create_app
+
+    source = tmp_path / "nas" / "photos"
+    source.mkdir(parents=True)
+    (source / "bird.jpg").write_bytes(b"original")
+    (source / "culled.jpg").write_bytes(b"culled")
+    vireo_dir = tmp_path / "vireo"
+    thumbs = vireo_dir / "thumbnails"
+    thumbs.mkdir(parents=True)
+    db_path = str(vireo_dir / "vireo.db")
+    db = Database(db_path)
+    folder_id = workspace_folders.add_folder(db, str(source), name="photos")
+    workspace_id = db._active_workspace_id
+    stage_workspace(db, workspace_id, str(vireo_dir))
+    local_root = Path(db.folders.get(folder_id)["path"])
+    db.close()
+    (local_root / "culled.jpg").unlink()
+
+    trash = _refusing_trash("culled.jpg", reason="Network volume Trash operation failed")
+    app = create_app(db_path, thumb_cache_dir=str(thumbs), trash=trash)
+    app.config["TESTING"] = True
+    sync_url = "/api/workspaces/active/local-workspace/sync"
+    confirmed = {"confirm_deletions": True, "confirmed_deletion_count": 1}
+    with app.test_client() as client:
+        response = client.post(sync_url, json=confirmed)
+        assert response.status_code == 202, response.get_json()
+        job = wait_for_job_via_client(client, response.get_json()["job_id"])
+
+        kept = {"path": str(source / "culled.jpg"), "error": "Network volume Trash operation failed"}
+        assert job["status"] == "failed"
+        assert job["result"]["trash_failed"] == [kept]
+        assert job["result"]["trash_failed_total"] == 1
+        assert f"{kept['path']}: {kept['error']}" in job["errors"]
+        publish_step = next(step for step in job["steps"] if step["id"] == "publish")
+        assert publish_step["status"] == "failed"
+        assert publish_step["summary"] == (
+            "1 source file could not be moved to the Trash and was kept; local changes were not synced"
+        )
+        assert (source / "culled.jpg").exists()
+
+        # Only JSON true with the count of listed files deletes permanently.
+        for body in (
+            {"delete_permanently": True},
+            {"delete_permanently": True, "permanent_deletion_count": "1"},
+            {"delete_permanently": True, "permanent_deletion_count": True},
+        ):
+            refused = client.post(sync_url, json={**confirmed, **body})
+            assert refused.status_code == 400, body
+        for flag in ("true", 1):
+            response = client.post(
+                sync_url, json={**confirmed, "delete_permanently": flag, "permanent_deletion_count": 1},
+            )
+            assert response.status_code == 202
+            job = wait_for_job_via_client(client, response.get_json()["job_id"])
+            assert job["status"] == "failed"
+            assert (source / "culled.jpg").exists()
+
+        response = client.post(
+            sync_url, json={**confirmed, "delete_permanently": True, "permanent_deletion_count": 1},
+        )
+        assert response.status_code == 202, response.get_json()
+        job = wait_for_job_via_client(client, response.get_json()["job_id"])
+        assert job["status"] == "completed", job
+        assert not (source / "culled.jpg").exists()
+        publish_step = next(step for step in job["steps"] if step["id"] == "publish")
+        assert publish_step["summary"] == "0 published, 1 deleted permanently"
+
+
+def _trash_that_crashes_after_moving():
+    """A Trash that moves every file, then dies: a sync interrupted mid-publish."""
+    trash = FakeTrash()
+    real = TrashService()
+
+    def handler(paths, *args, **kwargs):
+        real.trash_paths(paths, *args, **kwargs)
+        raise RuntimeError("simulated crash after source deletions")
+
+    trash.handle_trash(handler)
+    return trash
 
 
 def test_scan_endpoint_refuses_while_working_locally(tmp_path, monkeypatch):

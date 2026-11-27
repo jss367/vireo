@@ -267,6 +267,15 @@ def release_repo(tmp_path):
         ),
         "python": (
             '#!/bin/bash\n'
+            'if [[ "$1" == "scripts/release_catalogs.py" ]]; then\n'
+            '    echo "release catalog $2 $3" >> "$GATES_LOG"\n'
+            '    version=$(sed -n \'s/^version = "\\(.*\\)"/\\1/p\' pyproject.toml)\n'
+            '    mkdir -p vireo/tests/fixtures/release_catalogs\n'
+            '    for ext in db.gz json; do\n'
+            '        echo "$version" > "vireo/tests/fixtures/release_catalogs/v$version.$ext"\n'
+            '    done\n'
+            '    exit 0\n'
+            'fi\n'
             'if [[ "$1" == "-m" && "$2" == "pytest" ]]; then\n'
             '    echo "pytest" >> "$GATES_LOG"\n'
             '    if [[ "${ADVANCE_REMOTE:-}" == "1" ]]; then\n'
@@ -316,7 +325,12 @@ def test_release_syncs_remote_source_before_testing_and_publishes_both_refs(rele
 
     assert result.returncode == 0, result.stderr
     assert (repo / "new-source.txt").is_file()
-    assert gates.read_text().splitlines() == ["cargo update --workspace", "cargo check --locked", "pytest"]
+    assert gates.read_text().splitlines() == [
+        "cargo update --workspace", "release catalog make --current",
+        "cargo check --locked", "pytest",
+    ]
+    for ext in ("db.gz", "json"):
+        assert _git(remote, "show", f"v1.2.4:vireo/tests/fixtures/release_catalogs/v1.2.4.{ext}") == "1.2.4"
     assert _git(remote, "rev-parse", "main") == _git(repo, "rev-parse", "HEAD")
     assert _git(remote, "rev-parse", "v1.2.4") == _git(repo, "rev-parse", "HEAD")
     lock = json.loads(_git(remote, "show", "v1.2.4:package-lock.json"))

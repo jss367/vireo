@@ -101,8 +101,10 @@ def undescribable(body: JsonDict) -> str | None:
     scopes = [key for key in ("photo_ids", "folder_ids", "collection_id") if body.get(key) is not None]
     if len(scopes) != 1:
         return "a described run needs exactly one of photo_ids, folder_ids and collection_id"
-    fields = [key for key in ("exclude_paths", "labels_file", "source", "sources", "source_snapshot_id")
+    fields = [key for key in ("labels_file", "source", "sources", "source_snapshot_id")
               if body.get(key)]
+    if body.get("exclude_paths") and body.get("folder_ids") is None:
+        fields.append("exclude_paths")
     fields += [key for key in ("source_paths", "hash_duplicate_paths") if body.get(key) is not None]
     if fields:
         return f"a described run does not take {', '.join(fields)}"

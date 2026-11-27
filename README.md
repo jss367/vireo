@@ -57,6 +57,13 @@ AI models are downloaded automatically on first use.
 [the Windows support guide](docs/WINDOWS_SUPPORT.md) for optional integrations,
 storage coverage, and troubleshooting.
 
+## Backing up and moving to a new Mac
+
+Vireo's catalog and settings live in a data folder apart from your photos, and
+Vireo does not back them up for you. The [backup and restore guide](docs/backup-and-restore.md)
+explains where the catalog lives, what the `vireo.db.pre-v<N>.bak` files are,
+how to restore, and how to move Vireo to a new Mac.
+
 ## Uninstalling
 
 Removing the Vireo application leaves its catalog, settings, downloaded models,

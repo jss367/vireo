@@ -32,6 +32,16 @@ from typing import Any
 
 from repositories import UNSET
 
+# A migration stopped trusting the mask (``photo_masks.set_aside_by``). Only
+# the mask stage, which checks the mask against the original, may use it again.
+SET_ASIDE_MASK_MSG = (
+    "This mask was set aside by an upgrade; run Process to check it against the original"
+)
+_SET_ASIDE_CLEARED = (
+    "set_aside_by=NULL, set_aside_reason=NULL, set_aside_active=0, "
+    "set_aside_embedding=NULL, set_aside_embedding_variant=NULL"
+)
+
 
 @dataclass(frozen=True)
 class MaskQuality:
@@ -337,12 +347,13 @@ class MasksFeaturesRepository:
 
     def set_active_variant(
         self, photo_id: int, variant: str, min_conf: float, *,
-        weak_rescue_min_conf: float | None = None,
+        weak_rescue_min_conf: float | None = None, allow_set_aside: bool = False,
     ) -> None:
         """Activate ``variant`` for ``photo_id`` against the ``min_conf`` floor.
 
         ``min_conf`` is the active workspace's ``detector_confidence``,
-        resolved by the façade.
+        resolved by the façade. A mask a migration set aside is refused
+        unless ``allow_set_aside``, which only ``reactivate_set_aside`` passes.
         """
         # Resolve the effective primary detection the same way both
         # mask-extraction paths do: the top-ordered non-full-image
@@ -375,6 +386,8 @@ class MasksFeaturesRepository:
             raise ValueError(
                 f"No photo_masks row for photo {photo_id} variant {variant!r}"
             )
+        if row["set_aside_by"] is not None and not allow_set_aside:
+            raise ValueError(SET_ASIDE_MASK_MSG)
         if row["primary_model"] is not None:
             # A primary detection sits above the workspace's current floor:
             # it must match the mask exactly, otherwise the mask represents
@@ -406,6 +419,61 @@ class MasksFeaturesRepository:
              row["bg_separation"], row["phash_crop"], row["noise_estimate"],
              row["subject_detail"], row["subject_detail_px"], photo_id),
         )
+
+    def reactivate_set_aside(
+        self, photo_id: int, variant: str, min_conf: float, *,
+        weak_rescue_min_conf: float | None = None,
+    ) -> bool:
+        """Put a mask a migration set aside back in use; True when it is active again.
+
+        The caller has proven the mask as it proves any cached one: its
+        prompt and detector are the primary subject's, its file is on disk
+        and it lies in today's decoded frame. Only a mask that was the
+        photo's active one comes back, with the subject embedding the photo
+        held beside it, and only while the photo has no active mask and its
+        embedding variant is still the one that embedding was made with.
+        Otherwise the row stays set aside and the stage makes the mask
+        again, which replaces it. Does not commit.
+        """
+        row = self.conn.execute(
+            "SELECT pm.set_aside_embedding FROM photo_masks pm JOIN photos p ON p.id=pm.photo_id "
+            "WHERE pm.photo_id=? AND pm.variant=? AND pm.set_aside_by IS NOT NULL "
+            "AND pm.set_aside_active=1 AND p.mask_path IS NULL AND p.active_mask_variant IS NULL "
+            "AND p.dino_embedding_variant IS pm.set_aside_embedding_variant",
+            (photo_id, variant),
+        ).fetchone()
+        if row is None:
+            return False
+        try:
+            self.set_active_variant(
+                photo_id, variant, min_conf,
+                weak_rescue_min_conf=weak_rescue_min_conf, allow_set_aside=True,
+            )
+        except ValueError:
+            # The floor this resolves the primary at names another subject.
+            return False
+        self.conn.execute(
+            f"UPDATE photo_masks SET {_SET_ASIDE_CLEARED} WHERE photo_id=? AND variant=?",
+            (photo_id, variant),
+        )
+        self.conn.execute(
+            "UPDATE photos SET dino_subject_embedding=? WHERE id=?",
+            (row["set_aside_embedding"], photo_id),
+        )
+        return True
+
+    def count_set_aside(self) -> list[dict[str, Any]]:
+        """Masks migrations set aside that nothing has proven or replaced yet.
+
+        One entry per migration and reason, catalog-wide: ``set_aside_by``,
+        ``set_aside_reason``, ``masks`` and how many of them were ``active``.
+        """
+        return [dict(row) for row in self.conn.execute(
+            "SELECT set_aside_by, set_aside_reason, COUNT(*) AS masks, "
+            "COALESCE(SUM(set_aside_active), 0) AS active FROM photo_masks "
+            "WHERE set_aside_by IS NOT NULL GROUP BY set_aside_by, set_aside_reason "
+            "ORDER BY set_aside_by"
+        )]
 
     def set_subject_detail(
         self, photo_id: int, variant: str, subject_detail: float, subject_detail_px: float | None,
@@ -785,7 +853,9 @@ class MasksFeaturesRepository:
                 noise_estimate=excluded.noise_estimate,
                 subject_detail=excluded.subject_detail,
                 subject_detail_px=excluded.subject_detail_px,
-                comparison_inputs=excluded.comparison_inputs
+                comparison_inputs=excluded.comparison_inputs,
+                set_aside_by=NULL, set_aside_reason=NULL, set_aside_active=0,
+                set_aside_embedding=NULL, set_aside_embedding_variant=NULL
             """,
             (photo_id, variant, path, int(time.time()),
              detector_model, prompt_x, prompt_y, prompt_w, prompt_h,

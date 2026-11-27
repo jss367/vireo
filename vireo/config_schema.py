@@ -75,6 +75,12 @@ SCHEMA = {
                 "Empty keeps them next to the catalog. Choose a folder on an external drive or NAS to move them there after Vireo starts; "
                 "while that folder is disconnected, new copies wait next to the catalog and move when it is back.",
     },
+    "catalog_backup_keep": {
+        "type": "int", "min": 0, "max": 30, "category": "Behavior", "scope": "global",
+        "label": "Daily catalog backups kept",
+        "desc": "Vireo copies the catalog once a day into the backups folder beside it and keeps this many copies, deleting the oldest. "
+                "Each copy is about the size of the catalog. 0 turns off the daily backup; Back up now in Settings still keeps the newest copy.",
+    },
     "grouping_history_max_mb": {
         "type": "int", "min": 0, "max": 1048576, "category": "Behavior", "scope": "global",
         "label": "Grouping undo snapshots per workspace (MB)",

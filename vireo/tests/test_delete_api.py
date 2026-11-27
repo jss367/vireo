@@ -3,9 +3,12 @@ import builtins
 import json
 import os
 
+import pytest
 from page_scripts import page_with_scripts
 from PIL import Image
 from services import catalog_deletion, photo_ingest, workspace_folders
+from services.photo_deletion import PhotoDeletion
+from services.trash import TrashService
 from wait import wait_for_job_via_client
 
 
@@ -1381,6 +1384,7 @@ def test_api_batch_delete_ignores_raw_paths(app_and_db, tmp_path):
 
     resp = client.post("/api/batch/delete", json={
         "mode": "disk_permanent",
+        "confirm_permanent": True,
         "paths": [victim],
     })
     assert resp.status_code == 400
@@ -1388,6 +1392,7 @@ def test_api_batch_delete_ignores_raw_paths(app_and_db, tmp_path):
 
     resp = client.post("/api/jobs/batch-delete", json={
         "mode": "disk_permanent",
+        "confirm_permanent": True,
         "paths": [victim],
     })
     assert resp.status_code == 400
@@ -1427,7 +1432,7 @@ def test_api_batch_delete_skips_photos_outside_active_workspace(app_and_db, tmp_
 
     for mode in ("vireo", "disk_permanent"):
         resp = client.post("/api/batch/delete", json={
-            "photo_ids": [pid], "mode": mode,
+            "photo_ids": [pid], "mode": mode, "confirm_permanent": True,
         })
         assert resp.status_code == 200
         data = resp.get_json()
@@ -1478,13 +1483,13 @@ def test_api_batch_delete_rejects_fractional_ids(app_and_db):
 
     for mode in ("vireo", "disk", "disk_permanent"):
         resp = client.post("/api/batch/delete", json={
-            "photo_ids": [1.9], "mode": mode,
+            "photo_ids": [1.9], "mode": mode, "confirm_permanent": True,
         })
         assert resp.status_code == 400
         assert db.photos.get(1) is not None
 
     resp = client.post("/api/jobs/batch-delete", json={
-        "photo_ids": [1.9], "mode": "disk_permanent",
+        "photo_ids": [1.9], "mode": "disk_permanent", "confirm_permanent": True,
     })
     assert resp.status_code == 200
     job = wait_for_job_via_client(client, resp.get_json()["job_id"])
@@ -1607,6 +1612,7 @@ def test_api_batch_delete_disk_permanent_with_photo_ids(app_and_db, tmp_path):
     resp = client.post("/api/batch/delete", json={
         "photo_ids": [pid],
         "mode": "disk_permanent",
+        "confirm_permanent": True,
     })
 
     assert resp.status_code == 200
@@ -1616,6 +1622,176 @@ def test_api_batch_delete_disk_permanent_with_photo_ids(app_and_db, tmp_path):
     assert data["trashed"] == 1
     assert not os.path.exists(real_file)
     assert db.photos.get(pid) is None
+
+
+def _photo_with_real_file(db, tmp_path):
+    """Point the fixture's first photo at a real file; returns ``(id, path)``."""
+    photo = db.photos.list_page()[0]
+    folder_path = str(tmp_path / "disk_photos")
+    db.conn.execute(
+        "UPDATE folders SET path = ? WHERE id = ?",
+        (folder_path, photo["folder_id"]),
+    )
+    db.conn.commit()
+    os.makedirs(folder_path, exist_ok=True)
+    real_file = os.path.join(folder_path, photo["filename"])
+    Image.new("RGB", (10, 10)).save(real_file)
+    return photo["id"], real_file
+
+
+@pytest.mark.parametrize("confirmation", [
+    {}, {"confirm_permanent": False}, {"confirm_permanent": "true"},
+    {"confirm_permanent": 1},
+])
+def test_permanent_delete_is_refused_without_confirmation(
+    app_and_db, tmp_path, confirmation,
+):
+    """A permanent delete leaves no Trash copy, so every route that accepts
+    ``disk_permanent`` refuses it unless the request carries the JSON value
+    ``confirm_permanent: true``. Nothing is deleted and no job is started."""
+    app, db = app_and_db
+    client = app.test_client()
+    pid, real_file = _photo_with_real_file(db, tmp_path)
+    jobs_before = len(app._job_runner.list_jobs())
+
+    for route in ("/api/batch/delete", "/api/jobs/batch-delete"):
+        resp = client.post(route, json={
+            "photo_ids": [pid], "mode": "disk_permanent", **confirmation,
+        })
+        assert resp.status_code == 400, route
+        assert "confirm_permanent" in resp.get_json()["error"]
+        assert os.path.exists(real_file)
+        assert db.photos.get(pid) is not None
+
+    assert len(app._job_runner.list_jobs()) == jobs_before
+
+
+def test_missing_remove_refuses_unconfirmed_permanent_delete(app_and_db, tmp_path):
+    """The Missing Originals removal accepts ``disk_permanent`` too. An
+    unconfirmed request is refused before its sidecar cleanup runs."""
+    app, db = app_and_db
+    client = app.test_client()
+    pid, real_file = _photo_with_real_file(db, tmp_path)
+    os.remove(real_file)
+    sidecar = os.path.splitext(real_file)[0] + ".xmp"
+    with open(sidecar, "w") as handle:
+        handle.write("<x:xmpmeta/>")
+
+    resp = client.post("/api/photos/missing/remove", json={
+        "photo_ids": [pid], "mode": "disk_permanent", "delete_sidecars": True,
+    })
+
+    assert resp.status_code == 400
+    assert "confirm_permanent" in resp.get_json()["error"]
+    assert os.path.exists(sidecar)
+    assert db.photos.get(pid) is not None
+
+
+def _missing_photo_with_sidecar(db, tmp_path):
+    """A photo whose original is gone and whose ``.xmp`` is still on disk."""
+    pid, real_file = _photo_with_real_file(db, tmp_path)
+    os.remove(real_file)
+    sidecar = os.path.splitext(real_file)[0] + ".xmp"
+    with open(sidecar, "w") as handle:
+        handle.write("<x:xmpmeta/>")
+    return pid, sidecar
+
+
+@pytest.mark.parametrize(
+    "mode,extra",
+    [("vireo", {}), ("disk", {}), ("disk_permanent", {"confirm_permanent": True})],
+)
+def test_missing_remove_moves_sidecars_to_the_trash_in_every_mode(
+    app_and_db, tmp_path, fake_trash, mode, extra,
+):
+    """``mode`` says what happens to the photo's own files. Its leftover
+    sidecar goes to the Trash whichever mode is named, never an unlink."""
+    app, db = app_and_db
+    client = app.test_client()
+    pid, sidecar = _missing_photo_with_sidecar(db, tmp_path)
+
+    resp = client.post("/api/photos/missing/remove", json={
+        "photo_ids": [pid], "mode": mode, "delete_sidecars": True, **extra,
+    })
+
+    assert resp.status_code == 200, resp.get_json()
+    data = resp.get_json()
+    assert (data["sidecars_deleted"], data["sidecars_failed_total"]) == (1, 0)
+    assert fake_trash.trashed_paths[0] == [sidecar]
+    assert not os.path.exists(sidecar)
+    trashed = [
+        os.path.join(root, name)
+        for root, _dirs, names in os.walk(tmp_path / "test-trash") for name in names
+    ]
+    assert [os.path.basename(path) for path in trashed] == [os.path.basename(sidecar)]
+    assert db.photos.get(pid) is None
+
+
+def test_missing_remove_keeps_and_reports_a_sidecar_the_trash_refuses(
+    app_and_db, tmp_path, fake_trash,
+):
+    app, db = app_and_db
+    client = app.test_client()
+    pid, sidecar = _missing_photo_with_sidecar(db, tmp_path)
+    fake_trash.handle_trash(
+        lambda paths, *args, **kwargs: (0, set(), [{"path": path, "error": "Trash unavailable"} for path in paths])
+    )
+
+    resp = client.post("/api/photos/missing/remove", json={
+        "photo_ids": [pid], "mode": "vireo", "delete_sidecars": True,
+    })
+
+    assert resp.status_code == 200, resp.get_json()
+    data = resp.get_json()
+    assert (data["sidecars_deleted"], data["sidecars_skipped"]) == (0, 1)
+    assert data["sidecars_failed"] == [{"path": sidecar, "error": "Trash unavailable"}]
+    assert data["sidecars_failed_total"] == 1
+    assert os.path.exists(sidecar)
+    # The photo is still removed from Vireo: its original is gone either way.
+    assert data["deleted"] == 1
+    assert db.photos.get(pid) is None
+
+
+def test_missing_delete_sidecars_route_uses_the_trash(app_and_db, tmp_path, fake_trash):
+    app, db = app_and_db
+    client = app.test_client()
+    pid, sidecar = _missing_photo_with_sidecar(db, tmp_path)
+    refuse = {"on": True}
+
+    def handler(paths, *args, **kwargs):
+        if refuse["on"]:
+            return 0, set(), [{"path": path, "error": "Trash unavailable"} for path in paths]
+        for path in paths:
+            os.remove(path)
+        return len(paths), set(paths), []
+
+    fake_trash.handle_trash(handler)
+
+    kept = client.post("/api/photos/missing/delete-sidecars", json={"photo_ids": [pid]}).get_json()
+    assert (kept["deleted"], kept["skipped"], kept["sidecars_failed_total"]) == (0, 1, 1)
+    assert kept["sidecars_failed"] == [{"path": sidecar, "error": "Trash unavailable"}]
+    assert os.path.exists(sidecar)
+
+    # The photo is still listed as missing, so the same cleanup can be tried again.
+    refuse["on"] = False
+    moved = client.post("/api/photos/missing/delete-sidecars", json={"photo_ids": [pid]}).get_json()
+    assert (moved["deleted"], moved["sidecars_failed_total"]) == (1, 0)
+    assert fake_trash.trashed_paths == [[sidecar], [sidecar]]
+    assert not os.path.exists(sidecar)
+
+
+def test_run_batch_delete_refuses_unconfirmed_permanent_delete(app_and_db, tmp_path):
+    """The gate is in ``run_batch_delete`` itself, so a caller that is not
+    one of the routes cannot delete permanently by naming the mode."""
+    app, db = app_and_db
+    pid, real_file = _photo_with_real_file(db, tmp_path)
+    deletion = PhotoDeletion(app.config, trash=TrashService())
+
+    with pytest.raises(ValueError, match="confirm_permanent"):
+        deletion.run_batch_delete(db, [pid], "disk_permanent")
+
+    assert os.path.exists(real_file)
+    assert db.photos.get(pid) is not None
 
 
 def test_delete_photos_prunes_pipeline_cache(app_and_db):

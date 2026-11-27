@@ -84,6 +84,7 @@ FOUNDATION = frozenset({
     "edit_recipe",
     "exif_orientation",
     "focus_point",
+    "frame_identity",
     "keyword_normalization",
     "process_strategies",
     "settings_source",

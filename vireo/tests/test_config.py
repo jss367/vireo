@@ -773,6 +773,21 @@ def test_load_preserves_corrupt_file_copy(tmp_path):
         assert f.read() == corrupt_body
 
 
+def test_config_recovery_reports_backup_failure(tmp_path, monkeypatch):
+    import config as cfg
+
+    path = tmp_path / "config.json"
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(path))
+    path.write_text("{incomplete")
+
+    def fail_copy(*args):
+        raise PermissionError("read-only directory")
+
+    monkeypatch.setattr(cfg.shutil, "copy2", fail_copy)
+    assert cfg.load() == cfg.DEFAULTS
+    assert "could not save a backup" in cfg.config_recovery_notice()["message"]
+
+
 def test_set_after_corrupt_load_keeps_backup(tmp_path):
     """set() on a corrupt config overwrites the main file with defaults+key,
     but the preserved .corrupt copy keeps the user's original bytes."""

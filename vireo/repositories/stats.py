@@ -899,6 +899,50 @@ class StatsRepository:
         ).fetchone()
         return row["n"] or 0
 
+    def count_set_aside_masks(
+        self, sam2_variant, detector_confidence, scope_sql, scope_params, *, rescue_floors=None,
+    ):
+        """Count photos whose mask a migration set aside and the stage may reuse.
+
+        The photo has no active mask (so it is already in ``pending``), and
+        its selected-variant row was the active one when it was set aside
+        and still matches the primary detection's prompt. The stage checks
+        each against the original before reusing it, so this is how many it
+        will check, not how many will pass.
+        """
+        ws = self.workspace_id_fn()
+        primary_predicate = self._mask_detection_predicate("d2", rescue_floors)
+        from repositories.subject_order import primary_order_sql
+        row = self.conn.execute(
+            f"""SELECT COUNT(DISTINCT pm.photo_id) AS n
+                FROM photo_masks pm
+                JOIN photos p ON p.id = pm.photo_id
+                JOIN photo_workspace_visibility wf
+                  ON wf.photo_id = p.id AND wf.workspace_id = ?
+               WHERE pm.variant = ?
+                 AND pm.set_aside_by IS NOT NULL
+                 AND pm.set_aside_active = 1
+                 AND p.mask_path IS NULL
+                 AND EXISTS (
+                    SELECT 1 FROM detections d
+                     WHERE d.id = (
+                           SELECT d2.id
+                             FROM detections d2
+                            WHERE d2.photo_id = pm.photo_id
+                              AND {primary_predicate}
+                            ORDER BY {primary_order_sql("d2")}
+                            LIMIT 1
+                       )
+                       AND d.detector_model = pm.detector_model
+                       AND d.box_x = pm.prompt_x
+                       AND d.box_y = pm.prompt_y
+                       AND d.box_w = pm.prompt_w
+                       AND d.box_h = pm.prompt_h
+                 ){scope_sql}""",
+            (ws, sam2_variant, detector_confidence, *scope_params),
+        ).fetchone()
+        return row["n"] or 0
+
     def count_eye_keypoint_eligible(self, min_conf, scope_sql, scope_params):
         """Count photos eligible for the eye-keypoint stage."""
         from repositories.subject_order import primary_order_sql

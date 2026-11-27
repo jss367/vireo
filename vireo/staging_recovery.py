@@ -5,13 +5,13 @@ Old import-through-process runs staged photos under
 was cancelled, those folders may be the only remaining copy of files that did
 not make it to the archive. This module never deletes based on catalog state
 alone: every staged file must match an enumerable archive folder entry by
-filename and byte size before cleanup is allowed.
+filename, byte size, and contents before cleanup is allowed.
 """
 
 from __future__ import annotations
 
 import os
-import shutil
+import stat
 from dataclasses import dataclass
 
 
@@ -57,12 +57,13 @@ def _entry_for_pipeline_dir(path: str, pause_callback=None) -> StagingEntry:
             for entry in entries:
                 if pause_callback:
                     pause_callback()
-                if entry.is_dir():
+                if entry.is_dir(follow_symlinks=False):
                     children.append(entry.path)
-                elif entry.is_file():
+                else:
                     direct_files.append(entry.path)
     except OSError:
-        pass
+        # Verification must walk the whole root if its layout is uncertain.
+        return StagingEntry(cleanup_root=path, source_root=path)
     # local_processing.staging_root created pipeline-*/<final-destination-name>.
     # If the parent contains exactly that one leaf and no direct files, use the
     # leaf as the import source so a recovery import preserves the original
@@ -133,8 +134,10 @@ def _catalog_candidates(db, filename: str, size: int, staging_root: str) -> list
 
 def _archive_file_status(
     path: str,
+    staged_path: str,
     expected_size: int,
     listing_cache: dict[str, set[str] | OSError] | None = None,
+    pause_callback=None,
 ) -> tuple[str, str | None]:
     mount_root = _missing_mount_root(path) or _missing_mount_root(os.path.dirname(path))
     if mount_root:
@@ -162,6 +165,20 @@ def _archive_file_status(
         return "size_mismatch", (
             f"archive file size differs: expected {expected_size}, got {st.st_size}"
         )
+    if not stat.S_ISREG(st.st_mode):
+        return "unaccounted", "archive entry is not a regular file"
+    try:
+        with open(staged_path, "rb") as staged, open(path, "rb") as archive:
+            while True:
+                if pause_callback:
+                    pause_callback()
+                chunk = staged.read(1024 * 1024)
+                if archive.read(1024 * 1024) != chunk:
+                    return "content_mismatch", "archive contents differ from the staged file"
+                if not chunk:
+                    break
+    except OSError as exc:
+        return "unreachable", f"could not read files for comparison: {exc}"
     return "verified", None
 
 
@@ -217,22 +234,14 @@ def _walk_staging_files(source_root: str, pause_callback=None):
             pause_callback()
         root = pending.pop()
         files = []
-        try:
-            with os.scandir(root) as entries:
-                for entry in entries:
-                    if pause_callback:
-                        pause_callback()
-                    try:
-                        is_dir = entry.is_dir()
-                    except OSError:
-                        is_dir = False
-                    if is_dir:
-                        if not entry.is_symlink():
-                            pending.append(entry.path)
-                    else:
-                        files.append(entry.path)
-        except OSError:
-            continue
+        with os.scandir(root) as entries:
+            for entry in entries:
+                if pause_callback:
+                    pause_callback()
+                if entry.is_dir(follow_symlinks=False):
+                    pending.append(entry.path)
+                else:
+                    files.append(entry.path)
         yield from sorted(files)
 
 
@@ -242,12 +251,9 @@ def _staged_files(entry, pause_callback) -> list[tuple[str, str, int]]:
     for path in _walk_staging_files(entry.source_root, pause_callback):
         if pause_callback:
             pause_callback()
-        try:
-            st = os.stat(path)
-        except OSError:
-            continue
-        if not os.path.isfile(path):
-            continue
+        st = os.stat(path)
+        if not stat.S_ISREG(st.st_mode):
+            raise ValueError(f"cannot verify non-regular staged file: {path}")
         rel = os.path.relpath(path, entry.source_root)
         files.append((path, rel, st.st_size))
     return files
@@ -256,7 +262,10 @@ def _staged_files(entry, pause_callback) -> list[tuple[str, str, int]]:
 def verify_orphaned_staging(db, vireo_dir: str, cleanup_root: str, pause_callback=None) -> dict:
     """Reconcile a staging folder against the catalog and archive filesystem."""
     entry = _resolve_entry(vireo_dir, cleanup_root, pause_callback=pause_callback)
-    files = _staged_files(entry, pause_callback)
+    try:
+        files = _staged_files(entry, pause_callback)
+    except OSError as exc:
+        raise ValueError(f"could not enumerate all staged files: {exc}") from exc
 
     result = {
         "path": entry.cleanup_root,
@@ -305,8 +314,10 @@ def verify_orphaned_staging(db, vireo_dir: str, cleanup_root: str, pause_callbac
             archive_path = os.path.join(
                 candidate["folder_path"], candidate["filename"],
             )
+            if _is_relative_to(archive_path, entry.cleanup_root):
+                continue
             status, reason = _archive_file_status(
-                archive_path, size, archive_listing_cache,
+                archive_path, staged_path, size, archive_listing_cache, pause_callback,
             )
             if status == "verified":
                 detail.update({
@@ -351,6 +362,19 @@ def delete_verified_staging(db, vireo_dir: str, cleanup_root: str) -> dict:
     result = verify_orphaned_staging(db, vireo_dir, cleanup_root)
     if not result["can_delete"]:
         raise ValueError("staging folder is not fully verified in the archive")
-    shutil.rmtree(result["path"])
+    # A file added after the inventory has no verified archive copy.
+    # Remove only inventoried files, then prune directories only if empty.
+    def _raise_walk_error(exc: OSError) -> None:
+        raise exc
+
+    try:
+        for detail in result["details"]:
+            os.unlink(detail["path"])
+        for directory, _dirs, _files in os.walk(
+            result["path"], topdown=False, onerror=_raise_walk_error,
+        ):
+            os.rmdir(directory)
+    except OSError as exc:
+        raise ValueError(f"staging cleanup could not finish: {exc}") from exc
     result["deleted"] = True
     return result

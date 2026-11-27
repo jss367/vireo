@@ -4561,7 +4561,8 @@ def test_extract_plan_counts_detail_measurements_as_work(tmp_path):
     assert extract["state"] == "will-run"
     assert extract["summary"] == "Will measure subject detail for 1 cached mask (2 eligible)"
     assert extract["detail"] == {
-        "eligible": 2, "pending": 1, "stale": 0, "detail_pending": 1, "fingerprint_outdated": False,
+        "eligible": 2, "pending": 1, "stale": 0, "detail_pending": 1, "set_aside": 0,
+        "fingerprint_outdated": False,
     }
 
     p_missing, _ = _add_photo_with_detection(db, folder_id, "missing.jpg")
