@@ -133,6 +133,19 @@ def test_species_dates_scope_analysis_and_apply_without_touching_other_photos(li
     expect(_card(page, 1)).to_contain_text('Picked by you')
 
 
+def test_species_picker_sorts_by_count_or_name(live_server, page):
+    _open(page, live_server)
+    page.locator('#cullSpeciesSummary').click()
+    options = page.locator('#cullSpeciesOptions label')
+    sort = page.get_by_label('Sort by', exact=True)
+    expect(options).to_have_text(['Great blue heron (12)', 'American robin (3)'])
+    sort.select_option('fewest')
+    expect(options).to_have_text(['American robin (3)', 'Great blue heron (12)'])
+    sort.select_option('most')
+    sort.select_option('name')
+    expect(options).to_have_text(['American robin (3)', 'Great blue heron (12)'])
+
+
 def test_multi_species_selection_keeps_favorites_separate_and_can_expand_again(live_server, page):
     requests = []
     _open(page, live_server, requests=requests)
