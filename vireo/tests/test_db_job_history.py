@@ -184,6 +184,27 @@ def test_terminal_is_newest_first_and_scoped_only_when_asked(history_db):
     assert [r["id"] for r in db.job_history.terminal(None, terminal, 1)] == ["b"]
 
 
+def test_hide_routine_filters_explicit_system_noops_before_limit(history_db):
+    db = history_db
+    for ident, origin, status, result, errors in [
+        ("user", "user", "completed", '{"noop":true}', 0),
+        ("changed", "system", "completed", '{"noop":false}', 0),
+        ("legacy", "system", "completed", 'invalid json', 0),
+        ("warning", "system", "completed", '{"noop":true}', 1),
+        ("failed", "system", "failed", '{"noop":true}', 1),
+        ("routine", "system", "completed", '{"noop":true}', 0),
+    ]:
+        _insert(db, ident, status=status, result=result)
+        db.conn.execute(
+            "UPDATE job_history SET started_at = rowid, origin = ?, error_count = ? WHERE id = ?",
+            (origin, errors, ident),
+        )
+    statuses = ("completed", "failed")
+    visible = db.job_history.terminal(None, statuses, 5, hide_routine=True)
+    assert [row["id"] for row in visible] == ["failed", "warning", "legacy", "changed", "user"]
+    assert db.job_history.terminal(None, statuses, 1)[0]["id"] == "routine"
+
+
 def test_terminal_limit_is_a_total_cap_and_origin_reads_one_window(history_db):
     """``limit`` caps the rows; ``origin`` reads one origin's own window.
 

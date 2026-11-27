@@ -76,3 +76,16 @@ def detector_input(photo_sha256, focus):
 def catalog_detector_input(photo_sha256, detector_model, focus_area):
     focus = json.loads(focus_area) if focus_area and detector_model == "megadetector-v6" else None
     return detector_input(photo_sha256, focus)
+
+
+def detector_run_is_current(input_fingerprint, photo_sha256, detector_model, focus_area, *, reviewed=False):
+    """Whether a stamped detector run still describes this photo.
+
+    It does when the stamp is the photo's current detector input. A reviewed
+    run stamped on the same source bytes without the camera focus area also
+    does: detection keeps a reviewed run until Re-classify, so no later run
+    would bring the focus area in, and the boxes were made on this file.
+    """
+    if input_fingerprint == catalog_detector_input(photo_sha256, detector_model, focus_area)[1]:
+        return True
+    return bool(reviewed) and input_fingerprint == detector_input(photo_sha256, None)[1]

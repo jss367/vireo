@@ -197,18 +197,28 @@ class ModelRunsRepository:
         (photo, detector_model) result.  Auto-created taxonomy-match reviews
         are reproducible cache state and deliberately do not pin it.
         """
-        row = self.conn.execute(
-            """SELECT 1
-               FROM detections d
-               JOIN predictions p ON p.detection_id = d.id
-               JOIN prediction_review pr ON pr.prediction_id = p.id
-               WHERE d.photo_id = ? AND d.detector_model = ?
-                 AND pr.status IN ('accepted', 'rejected')
-                 AND COALESCE(pr.individual, '') != ?
-               LIMIT 1""",
-            (photo_id, detector_model, self.auto_match_review_marker),
-        ).fetchone()
-        return row is not None
+        return photo_id in self.pinned_detector_photo_ids([photo_id], detector_model)
+
+    def pinned_detector_photo_ids(self, photo_ids: Iterable[int], detector_model: str) -> set[int]:
+        """The photos in ``photo_ids`` whose ``detector_model`` output is pinned.
+
+        The batch form of ``detector_run_is_pinned``, for a reader that asks
+        about many photos at once.
+        """
+        pinned: set[int] = set()
+        for chunk in chunked(sorted(set(photo_ids))):
+            pinned.update(row["photo_id"] for row in self.conn.execute(
+                f"""SELECT DISTINCT d.photo_id
+                    FROM detections d
+                    JOIN predictions p ON p.detection_id = d.id
+                    JOIN prediction_review pr ON pr.prediction_id = p.id
+                    WHERE d.photo_id IN ({','.join('?' * len(chunk))})
+                      AND d.detector_model = ?
+                      AND pr.status IN ('accepted', 'rejected')
+                      AND COALESCE(pr.individual, '') != ?""",
+                [*chunk, detector_model, self.auto_match_review_marker],
+            ))
+        return pinned
 
     def reviewed_predictions(self, photo_ids: Iterable[int]) -> list[sqlite3.Row]:
         """Accepted and rejected predictions on ``photo_ids``, in every workspace.
@@ -246,14 +256,14 @@ class ModelRunsRepository:
             FROM detector_runs dr JOIN photos p ON p.id=dr.photo_id
             WHERE dr.detector_model='megadetector-v6' AND length(dr.input_fingerprint)=64
               AND length(p.file_hash)=64 AND dr.photo_id IN ({placeholders})""", photo_ids)
-        stale = set()
+        changed = set()
         for row in rows:
             if not (is_sha256(row["file_hash"]) and is_sha256(row["input_fingerprint"])):
                 continue
             _, expected = catalog_detector_input(row["file_hash"], "megadetector-v6", row["focus_area"])
-            if expected != row["input_fingerprint"] and not self.detector_run_is_pinned(row["photo_id"], "megadetector-v6"):
-                stale.add(row["photo_id"])
-        return stale
+            if expected != row["input_fingerprint"]:
+                changed.add(row["photo_id"])
+        return changed - self.pinned_detector_photo_ids(changed, "megadetector-v6")
 
     def get_detector_run_photo_ids(
         self, detector_model: str, runtime_fingerprint: str | None = None,

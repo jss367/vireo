@@ -1665,18 +1665,28 @@ function renderJobs() {
   container.innerHTML = html;
 }
 
+/** @param {NavJob} job @param {ReturnType<typeof bpActiveProgress>} info */
+function bpCountText(job, info) {
+  if (!info) return '';
+  var bytes = job.type.includes('download') && info.total > 1000000;
+  var counts = bytes
+    ? (info.current / (1024*1024)).toFixed(0) + '/' + (info.total / (1024*1024)).toFixed(0) + ' MB'
+    : info.current.toLocaleString() + '/' + info.total.toLocaleString();
+  if (!info.phase && job.type === 'pipeline') counts += ' weighted points';
+  var text = (info.phase ? 'This phase: ' : 'Overall: ') + counts + ' (' + bpProgressPct(info) + '%)';
+  if (info.phase && job.progress && Number(job.progress.total) > 0) {
+    text += ' · Overall: ' + (job.progress.current || 0).toLocaleString() + '/' + Number(job.progress.total).toLocaleString();
+    if (job.type === 'pipeline') text += ' weighted points';
+  }
+  return text;
+}
+
 /** @param {NavJob[]} jobs */
 function renderJobList(jobs) {
   var html = '';
   jobs.forEach(function(j) {
-    var progressInfo = bpActiveProgress(j.progress);
-    var pct = progressInfo ? bpProgressPct(progressInfo) : 0;
     var phase = j.progress && j.progress.phase ? j.progress.phase : '';
-    var detail = '';
-    if (progressInfo) {
-      detail = progressInfo.current.toLocaleString() + '/' + progressInfo.total.toLocaleString();
-      if (pct > 0) detail += ' (' + pct + '%)';
-    }
+    var detail = bpCountText(j, bpActiveProgress(j.progress));
     // Queued/pending work gets a muted dot so the user can tell it apart
     // from jobs actually consuming the GPU.
     var isWaiting = isWaitingJob(j);
@@ -1756,13 +1766,7 @@ function updateSummary() {
   }
   var progressInfo = bpActiveProgress(j.progress);
   if (progressInfo) {
-    var pct = bpProgressPct(progressInfo);
-    var isBytes = j.type && j.type.indexOf('download') !== -1 && progressInfo.total > 1000000;
-    if (isBytes) {
-      text += ' ' + (progressInfo.current / (1024*1024)).toFixed(0) + '/' + (progressInfo.total / (1024*1024)).toFixed(0) + ' MB (' + pct + '%)';
-    } else {
-      text += ' ' + progressInfo.current.toLocaleString() + '/' + progressInfo.total.toLocaleString() + ' (' + pct + '%)';
-    }
+    text += ' · ' + bpCountText(j, progressInfo);
     text += bpRateText(j.progress, progressInfo.phase);
   } else if (j.progress && j.progress.current_file) {
     text += ' ' + j.progress.current_file;

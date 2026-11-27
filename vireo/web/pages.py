@@ -139,11 +139,18 @@ def create_pages_blueprint(get_db: GetDb) -> Blueprint:
         wording is injected here as ``window.*`` globals. This script is loaded
         first in ``_navbar.html``, before any navbar or page script runs.
         """
+        from models import DEFAULT_MODEL_ID, KNOWN_MODELS
         from move import rsync_install_guidance
 
         labels = _file_manager_labels()
         config = cfg.load()
         preview_max_size = get_db().get_effective_config(config).get("preview_max_size")
+        starter = next(m for m in KNOWN_MODELS if m["id"] == DEFAULT_MODEL_ID)
+        welcome_starter = {
+            "id": starter["id"],
+            "name": starter["name"],
+            "size_mb": starter.get("size_mb", 0),
+        }
         return Response(
             "window.VIREO_CONFIG_DEFAULTS = "
             + json.dumps(cfg.DEFAULTS, separators=(",", ":"))
@@ -163,6 +170,8 @@ def create_pages_blueprint(get_db: GetDb) -> Blueprint:
             + json.dumps(labels["editor_placeholder"])
             + ";\nwindow.VIREO_CONFIG_RECOVERY = "
             + json.dumps(cfg.config_recovery_notice())
+            + ";\nwindow.VIREO_WELCOME_STARTER = "
+            + json.dumps(welcome_starter, separators=(",", ":"))
             + ";\n",
             mimetype="application/javascript",
             headers={"Cache-Control": "no-store"},
@@ -185,6 +194,10 @@ def create_pages_blueprint(get_db: GetDb) -> Blueprint:
             classification_readiness(get_db())["ready"] or cfg.load().get("setup_complete")
         ):
             return redirect("/browse")
+        # The starter model's id, name and size reach the page through
+        # ``window.VIREO_WELCOME_STARTER`` in ``/config-defaults.js`` because
+        # templates stay Jinja-free (see
+        # ``test_templates_jinja_free_except_includes``).
         return render_template("welcome.html")
 
     @blueprint.route("/favicon.ico")

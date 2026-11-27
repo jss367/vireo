@@ -189,8 +189,9 @@ function renderProgress(data) {
   // without this line "200 / 5,523" reads as 200 files safely copied
   // while the batch is still crossing the network.
   if (data.phase_total > 0 && data.phase_label) {
-    phaseText += ' · ' + data.phase_label + ' ' +
+    phaseText += ' · This phase (' + data.phase_label + '): ' +
       (data.phase_current || 0) + ' / ' + data.phase_total;
+    if ((data.total || 0) > 0) phaseText += ' · Overall: ' + (data.current || 0) + ' / ' + data.total;
   }
   /** @type {HTMLElement} */ (document.getElementById('progressPhase')).textContent = phaseText;
   // Once indexing finishes, working-copy generation becomes the active phase.

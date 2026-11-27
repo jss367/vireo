@@ -137,7 +137,9 @@ def create_jobs_blueprint(
         if origin not in (None, "user", "system"):
             return json_error("origin must be user or system")
         try:
-            return jsonify(get_runner().get_history(db, limit=limit, origin=origin))
+            return jsonify(get_runner().get_history(
+                db, limit=limit, origin=origin, hide_routine=request.args.get("hide_routine") == "1",
+            ))
         except JobHistoryUnavailable as exc:
             # The Jobs page shows this text in its history error state.
             return json_error(str(exc), 503, code="job_history_unavailable")

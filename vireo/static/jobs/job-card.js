@@ -110,6 +110,19 @@ function renderProvenance(job) {
   return '<div class="job-provenance">' + parts.join(' &middot; ') + '</div>';
 }
 
+/** @param {JobsRow} job */
+function renderProgressMeta(job) {
+  var visibleProgress = activeProgress(job.progress);
+  if (!visibleProgress) return '';
+  var html = '';
+  if (visibleProgress.phase && job.progress && (job.progress.total || 0) > 0) {
+    html += '<span>Overall: ' + (job.progress.current || 0).toLocaleString() + ' / ' + (job.progress.total || 0).toLocaleString() +
+      (job.type === 'pipeline' ? ' weighted points' : '') + '</span>';
+  }
+  html += '<span>' + escapeHtml(visibleProgress.label) + ': ' + progressPct(visibleProgress) + '%</span>';
+  return html;
+}
+
 /** @param {JobsRow} job @param {{workspaceName?:string, followUp?:boolean}=} options */ export function renderJobCard(job, options) {
   options = options || {};
   // Queued pipelines are "live" for UI purposes: they have a real
@@ -141,10 +154,7 @@ function renderProvenance(job) {
   if (collectionText) {
     html += '<span>' + escapeHtml(collectionText) + '</span>';
   }
-  var visibleProgress = activeProgress(job.progress);
-  if (visibleProgress) {
-    html += '<span>' + escapeHtml(visibleProgress.label) + ': ' + progressPct(visibleProgress) + '%</span>';
-  }
+  html += renderProgressMeta(job);
   html += '</div>';
 
   html += renderMoveRoute(job);
@@ -271,7 +281,8 @@ function renderProvenance(job) {
     if (fallbackProgress) {
       var pct = progressPct(fallbackProgress);
       html += '<div class="tree-step-bar" style="width:200px;margin-bottom:4px;"><div class="tree-step-bar-fill" style="width:' + pct + '%"></div></div>';
-      html += '<div>' + escapeHtml(fallbackProgress.label) + ': ' + fallbackProgress.current.toLocaleString() + ' / ' + fallbackProgress.total.toLocaleString() + '</div>';
+      html += '<div>' + escapeHtml(fallbackProgress.label) + ': ' + fallbackProgress.current.toLocaleString() + ' / ' + fallbackProgress.total.toLocaleString() +
+        (!fallbackProgress.phase && job.type === 'pipeline' ? ' weighted points' : '') + '</div>';
     }
     if (job.progress.current_file) html += '<div style="margin-top:4px;">' + escapeHtml(job.progress.current_file) + '</div>';
     html += '</div></div>';

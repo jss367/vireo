@@ -108,7 +108,7 @@ def test_failed_initial_load_is_not_reported_as_an_empty_list(live_server, page,
     expect(warning).to_be_visible()
     expect(warning).to_contain_text("could not be loaded")
     expect(warning).not_to_contain_text("Showing the last successful list")
-    expect(page.locator("#jobListContent")).not_to_contain_text("No jobs yet")
+    expect(page.locator("#jobListContent")).not_to_contain_text("No jobs match the current history filters")
     if lane == "history":
         page.locator('.jobs-list-divider[data-view="history"]').click()
     expect(page.locator("#jobDetailPane")).to_contain_text("could not be loaded")
@@ -117,5 +117,5 @@ def test_failed_initial_load_is_not_reported_as_an_empty_list(live_server, page,
       pollRequests[0].resolve({ok: true, json: async () => lane === 'active' ? {active: []} : []});
     }""", lane)
     expect(warning).to_be_hidden()
-    expect(page.locator("#jobListContent")).to_contain_text("No jobs yet")
+    expect(page.locator("#jobListContent")).to_contain_text("No jobs match the current history filters")
     expect(page.locator("#jobDetailPane")).to_contain_text("No active jobs" if lane == "active" else "No job history")

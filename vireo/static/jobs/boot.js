@@ -15,6 +15,8 @@ bindSourceCleanupConfirm();
 bindStepRetryButtons();
 bindDetailPaneActions();
 jobsElement('retryJobsPolling', HTMLButtonElement).addEventListener('click', retryJobsPolling);
+jobsElement('includeRoutine', HTMLInputElement).addEventListener('change', () => fetchHistory());
+
 // The type and status filters apply on change.
 jobsElement('filterType', HTMLSelectElement).addEventListener('change', applyFilters);
 jobsElement('filterStatus', HTMLSelectElement).addEventListener('change', applyFilters);
