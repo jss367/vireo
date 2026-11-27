@@ -19,7 +19,7 @@ from .paths import (
     _samefile_or_false,
     _tracked_destination_overlap,
 )
-from .transfer import _copy_and_verify
+from .transfer import CopyNotCompared, _copy_and_verify
 
 # The package's one logger, ``move``, shared by every module in it.
 log = logging.getLogger("move")
@@ -706,6 +706,10 @@ class _PhotoFileTransfer:
         # this photo only; the rest of the batch still moves.
         try:
             copied_ok = _copy_and_verify(item.src_file, item.dst_file)
+        except CopyNotCompared as e:
+            log.warning("Move skipped for %s: %s", photo["filename"], e)
+            self.errors.append(f"{photo['filename']}: {e}")
+            return False
         except OSError as e:
             log.warning("Move skipped for %s: copy failed: %s", photo["filename"], e)
             self.errors.append(f"{photo['filename']}: copy failed: {e}")
@@ -730,6 +734,9 @@ class _PhotoFileTransfer:
                 comp_copied = _copy_and_verify(comp_src, comp_dst)
                 comp_error = ("the copy did not match the original byte for "
                               "byte, so it was removed")
+            except CopyNotCompared as e:
+                comp_copied = False
+                comp_error = str(e)
             except OSError as e:
                 comp_copied = False
                 comp_error = f"companion copy failed: {e}"

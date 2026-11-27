@@ -127,7 +127,9 @@ def test_copy_and_verify_rejects_a_same_size_copy_with_different_bytes(tmp_path,
     assert src.read_bytes() == JPEG + b"\x01" * 4096
 
 
-def test_copy_and_verify_removes_a_copy_it_cannot_read_back(tmp_path, monkeypatch):
+def test_copy_and_verify_keeps_a_copy_it_could_not_compare(tmp_path, monkeypatch):
+    """A read error proves nothing about the copy. On a failing source the
+    copy may hold the only readable bytes, so it stays and the error says so."""
     import move.transfer as transfer
 
     src, dst = tmp_path / "a.jpg", tmp_path / "out" / "a.jpg"
@@ -135,14 +137,37 @@ def test_copy_and_verify_removes_a_copy_it_cannot_read_back(tmp_path, monkeypatc
     dst.parent.mkdir()
 
     def unreadable(source, destination):
-        raise OSError("share dropped")
+        raise OSError(5, "Input/output error")
 
     monkeypatch.setattr(transfer, "files_match", unreadable)
 
-    with pytest.raises(OSError, match="share dropped"):
+    with pytest.raises(transfer.CopyNotCompared) as raised:
         transfer._copy_and_verify(str(src), str(dst))
-    assert not dst.exists()
+    assert "could not be compared with the original" in str(raised.value)
+    assert "the copy was left in place and the original was kept" in str(raised.value)
+    assert dst.read_bytes() == JPEG + b"\x01" * 64
     assert src.exists()
+
+
+def test_move_photos_reports_a_copy_it_could_not_compare(tmp_path, monkeypatch):
+    import move as move_mod
+    import move.transfer as transfer
+
+    db, src, dst, _fid, ids = _folder(tmp_path)
+
+    def unreadable(source, destination):
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(transfer, "files_match", unreadable)
+
+    result = move_mod.move_photos(db=db, photo_ids=[ids["a.jpg"]], destination=str(dst))
+
+    assert result["moved"] == 0
+    assert len(result["errors"]) == 1
+    assert result["errors"][0].startswith("a.jpg: the copy at ")
+    assert "so the copy was left in place and the original was kept" in result["errors"][0]
+    assert (src / "a.jpg").exists()
+    assert (dst / "a.jpg").exists()
 
 
 def test_move_photos_keeps_the_original_when_the_copy_is_corrupted(tmp_path, monkeypatch):

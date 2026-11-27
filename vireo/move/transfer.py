@@ -48,6 +48,16 @@ except ImportError:
 RSYNC_STALL_TIMEOUT = 1800  # 30 minutes
 
 
+class CopyNotCompared(OSError):
+    """A copy landed but could not be read back and compared with its source.
+
+    Its message is a complete sentence for the user. The copy is left where
+    it landed: when a file cannot be read, nothing shows the copy is wrong,
+    and on a failing source it may hold the only bytes that can still be
+    read.
+    """
+
+
 def _copy_and_verify(src, dst):
     """Copy one file and compare the copy with its source, byte for byte.
 
@@ -59,21 +69,23 @@ def _copy_and_verify(src, dst):
     so a failed copy never leaves a truncated file at ``dst`` that would
     block every retry as "already exists" and be cataloged by a rescan.
     ``copy_via_temp`` never overwrites, so a file at ``dst`` after it
-    returns is one this call created; a copy that does not match, or that
-    cannot be read back, is removed again for the same reason. ``OSError``
-    from the copy or the comparison propagates for the caller to record
-    against this one photo.
+    returns is one this call created, and a copy found to differ is removed
+    again for the same reason. ``OSError`` from the copy propagates for the
+    caller to record against this one photo; a comparison that could not be
+    carried out raises ``CopyNotCompared`` and leaves the copy in place.
     """
     copy_via_temp(src, dst)
     try:
-        if os.path.getsize(src) == os.path.getsize(dst) and files_match(src, dst):
-            return True
-    except OSError:
-        with contextlib.suppress(OSError):
-            os.remove(dst)
-        raise
-    os.remove(dst)
-    return False
+        matches = (os.path.getsize(src) == os.path.getsize(dst)
+                   and files_match(src, dst))
+    except OSError as exc:
+        raise CopyNotCompared(
+            f"the copy at {dst} could not be compared with the original "
+            f"({exc}), so the copy was left in place and the original was "
+            "kept") from exc
+    if not matches:
+        os.remove(dst)
+    return matches
 
 
 def _copy_tree_with_progress(src_path, dest_path, skip_existing, total_files,
