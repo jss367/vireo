@@ -263,3 +263,18 @@ def test_empty_photo_needs_full_frame_confirmation(page, live_server, tmp_path):
     page.locator("#rqUnlocalized").click()
     expect(page.locator("#rqConfirmCoverage")).to_be_disabled()
     expect(page.locator("#rqCoverageStatus")).to_contain_text("1 unresolved")
+
+
+def test_review_collection_picker_disables_unresolvable_rules(page, live_server):
+    db = live_server["db"]
+    broken_id = db.collections.add("Broken rules", json.dumps([
+        {"field": "nonexistent_field", "op": "is", "value": 1},
+    ]))
+    valid_id = db.collections.add("Available collection", json.dumps([]))
+    db.commit()
+    page.goto(live_server["url"] + "/review", wait_until="domcontentloaded")
+    picker = page.locator("#collectionFilter")
+    broken = picker.locator(f'option[value="{broken_id}"]')
+    expect(broken).to_be_disabled()
+    expect(broken).to_contain_text("unavailable")
+    expect(picker.locator(f'option[value="{valid_id}"]')).to_be_enabled()
