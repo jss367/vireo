@@ -16,6 +16,7 @@ import sqlite3
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
+import catalog_backups
 import filter_shortcuts
 from app_paths import media_root
 from config import config_value, read_raw_config_file, settings_write_lock
@@ -710,6 +711,7 @@ def create_settings_blueprint(
     config: AppConfig,
     *,
     advance_inat_token_generation: Callable[[], None],
+    start_catalog_backup_offload: Callable[[], object],
 ) -> Blueprint:
     """Build the settings blueprint.
 
@@ -722,8 +724,32 @@ def create_settings_blueprint(
     the token. It is the bound ``advance`` of the app's one
     ``web.inat.InatTokenGeneration``, shared with the iNaturalist routes,
     and is only called while holding ``settings_write_lock``.
+    ``start_catalog_backup_offload`` starts the job that moves pre-upgrade
+    catalog snapshots into ``catalog_backup_dir``; a save that names a new
+    folder runs it at once instead of at the next launch.
     """
     blueprint = Blueprint("settings", __name__)
+
+    def _catalog_backup_dir_side_effect(current: JsonDict, previous: JsonDict) -> str | None:
+        """Start moving catalog backups when the backup folder changes.
+
+        Returns a warning when the new folder cannot take them yet, so the
+        user learns at save time that the backups are still next to the
+        catalog rather than finding out after a failed job.
+        """
+        backup_dir = str(current.get("catalog_backup_dir") or "").strip()
+        if not backup_dir or backup_dir == str(previous.get("catalog_backup_dir") or "").strip():
+            return None
+        problem = catalog_backups.backup_folder_problem(backup_dir)
+        if problem is not None:
+            return f"{problem} Catalog backups stay next to the catalog until it is available."
+        try:
+            start_catalog_backup_offload()
+        except RuntimeError:
+            # The runner refuses new jobs while the app shuts down; the next
+            # launch moves the backups instead.
+            log.warning("Could not start moving catalog backups", exc_info=True)
+        return None
 
     def _working_copy_quota_confirmation_required(
         # A raw or validated setting value (int() rejects a bad one), and the
@@ -840,9 +866,11 @@ def create_settings_blueprint(
         # description: "Turning this off removes the keywords Vireo wrote
         # on the next sync." Sync only visits queued photos, so queue them
         # here for every workspace whose effective value transitioned off.
-        return queue_location_keyword_cleanup_on_global_off(
-            quota_db, previous, current,
-        )
+        warnings = [
+            queue_location_keyword_cleanup_on_global_off(quota_db, previous, current),
+            _catalog_backup_dir_side_effect(current, previous),
+        ]
+        return " ".join(w for w in warnings if w) or None
 
     @blueprint.route("/api/config")
     def api_config_get() -> ResponseReturnValue:

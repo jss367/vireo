@@ -9,18 +9,15 @@ an initialized database and never perform schema work.
 from __future__ import annotations
 
 import contextlib
-import glob
 import logging
-import math
 import os
-import re
-import shutil
 import sqlite3
 import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import partial
 
+import catalog_backups
 from canonical_schema import (
     CURRENT_FLAG_ATTRIBUTION_OBJECTS,
     FORMERLY_LAZY_OBJECTS,
@@ -47,7 +44,6 @@ from canonical_schema import (
     job_history_columns,
 )
 from db import Database, IncompatibleDatabaseError
-from file_replace import replace_file
 from species_preference import Comparison, Preferences, split_contradictions
 
 log = logging.getLogger(__name__)
@@ -1103,170 +1099,6 @@ def _unconverted_legacy_sync_only_folder_grants(db_path):
         ).fetchone()[0]
 
 
-def _backup_path(db_path, target_version):
-    return f"{db_path}.pre-v{target_version}.bak"
-
-
-# Room the backup must leave on the volume beyond its own size: the
-# migrations that follow write a WAL on the same volume, and SQLite needs
-# scratch pages while it vacuums. The larger of the two bounds applies.
-_BACKUP_HEADROOM_FRACTION = 0.05
-_BACKUP_HEADROOM_MIN_BYTES = 64 * 1024 * 1024
-
-
-class MigrationBackupError(RuntimeError):
-    """The pre-migration backup could not be written, so the upgrade stopped.
-
-    Raised before any migration touches the catalog, so the live file is
-    still at its old schema version and opens again with the build that
-    wrote it, or with this build once the backup can be written. The message
-    is shown to the user as the startup failure reason, so it names the
-    catalog, the backup it tried to write and what to free or fix.
-    """
-
-    def __init__(self, db_path: str, backup_path: str, cause: str) -> None:
-        self.db_path = db_path
-        self.backup_path = backup_path
-        self.cause = cause
-        super().__init__(
-            f"Vireo needs to upgrade the catalog at {db_path} and backs it up "
-            f"first, but could not write the backup {backup_path}: {cause}. "
-            "The catalog was not changed. Fix this and relaunch Vireo to "
-            "finish the upgrade."
-        )
-
-
-def _format_gb(size: int) -> str:
-    return f"{size / (1024 ** 3):.1f} GB"
-
-
-def _format_minimum_to_free(size: int) -> str:
-    """Positive amount to free, in a unit that stays non-zero.
-
-    Shown in MB below 1 GB and rounded up, so a near-threshold shortfall
-    prints as a usable instruction ("Free at least 5 MB") instead of
-    rounding to "0.0 GB".
-    """
-    if size >= 1024 ** 3:
-        gb = math.ceil(size * 10 / (1024 ** 3)) / 10
-        return f"{gb:.1f} GB"
-    return f"{max(1, math.ceil(size / (1024 ** 2)))} MB"
-
-
-def _backup_space_needed(db_path: str) -> int:
-    """Bytes the backup and the migrations after it need on the volume.
-
-    ``VACUUM INTO`` drops freelist pages, so a catalog that held many deleted
-    rows produces a backup much smaller than its raw file length, and it
-    folds the current logical state into the output rather than copying the
-    WAL separately. The live page count from SQLite bounds the backup;
-    estimating from ``os.path.getsize`` would refuse upgrades that fit
-    easily. SQLite failing to answer falls back to the raw size —
-    conservative but still safe. The existing ``-wal`` file is already part
-    of the volume's used bytes and need not be added again: a tiny catalog
-    whose WAL is pinned large by another connection would otherwise be
-    refused indefinitely. Scratch for migrations that follow the backup is
-    covered by ``_BACKUP_HEADROOM_FRACTION`` / ``_BACKUP_HEADROOM_MIN_BYTES``.
-    """
-    try:
-        with contextlib.closing(sqlite3.connect(db_path)) as conn:
-            page_size = conn.execute("PRAGMA page_size").fetchone()[0]
-            page_count = conn.execute("PRAGMA page_count").fetchone()[0]
-            freelist_count = conn.execute("PRAGMA freelist_count").fetchone()[0]
-        size = max(0, page_count - freelist_count) * page_size
-    except sqlite3.Error:
-        size = os.path.getsize(db_path)
-    headroom = max(int(size * _BACKUP_HEADROOM_FRACTION), _BACKUP_HEADROOM_MIN_BYTES)
-    return size + headroom
-
-
-def _check_backup_space(db_path: str, backup: str) -> None:
-    folder = os.path.dirname(os.path.abspath(backup))
-    needed = _backup_space_needed(db_path)
-    try:
-        free = shutil.disk_usage(folder).free
-    except OSError as e:
-        raise MigrationBackupError(
-            db_path, backup, f"could not read the free space in {folder} ({e})"
-        ) from e
-    if free < needed:
-        raise MigrationBackupError(
-            db_path,
-            backup,
-            f"the drive holding {folder} has {_format_gb(free)} free and the "
-            f"backup needs about {_format_gb(needed)}. Free at least "
-            f"{_format_minimum_to_free(needed - free)} on that drive",
-        )
-
-
-def _snapshot_before_migrations(db_path, target_version):
-    """Snapshot the database before pending migrations touch it.
-
-    ``VACUUM INTO`` produces a consistent single-file copy even under WAL.
-    A snapshot from an earlier (possibly failed) attempt at the same target
-    version is kept as-is — it reflects an older, safer state than whatever
-    partial progress the failed run left behind.
-
-    No migration runs without this snapshot. The free space is checked
-    first, and a backup that still fails (read-only volume, permission
-    denied, the disk filling up during the copy) raises
-    ``MigrationBackupError`` before the catalog is opened for migration.
-    """
-    backup = _backup_path(db_path, target_version)
-    if os.path.exists(backup):
-        return
-    tmp = backup + ".tmp"
-    with contextlib.suppress(OSError):
-        os.remove(tmp)
-    _check_backup_space(db_path, backup)
-    try:
-        with contextlib.closing(sqlite3.connect(db_path)) as conn:
-            conn.execute("VACUUM INTO ?", (tmp,))
-        replace_file(tmp, backup)
-    except (sqlite3.Error, OSError) as e:
-        log.error(
-            "Could not back up %s before schema migration; not migrating",
-            db_path, exc_info=True,
-        )
-        with contextlib.suppress(OSError):
-            os.remove(tmp)
-        raise MigrationBackupError(db_path, backup, str(e)) from e
-    log.info("Backed up database to %s before schema migration", backup)
-
-
-_BACKUP_SUFFIX_RE = re.compile(r"\.pre-v(\d+)\.bak\Z")
-
-
-def _prune_stale_backups(db_path, keep_version):
-    # Without the target-version snapshot, keep every older `.pre-v*.bak`:
-    # deleting them would leave the upgraded database with no recovery
-    # snapshot at all.
-    keep = _backup_path(db_path, keep_version)
-    if not os.path.exists(keep):
-        return
-    prefix = db_path
-    for path in glob.glob(glob.escape(prefix) + ".pre-v*.bak"):
-        if path == keep:
-            continue
-        # Only prune snapshots for schema versions strictly older than the one
-        # we're keeping. A `.pre-v{N}.bak` where N > keep_version was produced
-        # by a newer build (e.g. after the user restored an older live catalog
-        # while a later-version backup remained on disk) and may hold the
-        # user's only copy of edits made under that later schema.
-        suffix = path[len(prefix):]
-        match = _BACKUP_SUFFIX_RE.match(suffix)
-        if match is None:
-            continue
-        try:
-            version = int(match.group(1))
-        except ValueError:
-            continue
-        if version >= keep_version:
-            continue
-        with contextlib.suppress(OSError):
-            os.remove(path)
-
-
 def ensure_schema(db_path):
     """Initialize and migrate ``db_path`` once before request handling."""
     with _SCHEMA_LOCK:
@@ -1308,8 +1140,14 @@ def ensure_schema(db_path):
             )
         upgrading = current is not None and current < latest
         if upgrading:
-            _snapshot_before_migrations(db_path, latest)
+            catalog_backups.snapshot(db_path, latest)
         with Database(db_path) as db:
             _apply_pending(db.conn)
-        if upgrading:
-            _prune_stale_backups(db_path, latest)
+        if upgrading and os.path.exists(catalog_backups.backup_path(db_path, latest)):
+            # Only the catalog's own folder: a backup folder on a NAS is
+            # pruned by the after-launch offload, so startup never waits on it.
+            catalog_backups.prune(
+                [os.path.dirname(os.path.abspath(db_path))],
+                os.path.basename(db_path),
+                latest,
+            )

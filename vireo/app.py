@@ -19,6 +19,7 @@ from dataclasses import dataclass
 
 import id_conflicts
 from app_paths import default_path, initialize_layout, media_root
+from catalog_backups import MigrationBackupError
 from config import config_value
 from db import (
     Database,
@@ -28,7 +29,7 @@ from flask import (
     Flask,
 )
 from jobs import JobRunner, LogBroadcaster
-from schema import MigrationBackupError, ensure_schema
+from schema import ensure_schema
 from services import scan_work, startup_tasks
 from services.folder_moves import FolderMoves
 from services.gps_locations import BulkGpsLocations
@@ -739,6 +740,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None, *, trash=None):
     _register_v1_aliases(app, _reservation_exempt_endpoints)
     if not os.environ.get("VIREO_DISABLE_STARTUP_BACKFILL_TIMERS"):
         app_hooks.start_after_first_request(app, app._kickoff_preview_cache_maintenance)
+        app_hooks.start_after_first_request(app, app._kickoff_catalog_backup_offload)
 
     return app
 
@@ -826,6 +828,7 @@ def _start_app_runtime(app, db_path):
     app._cleanup_app_resources = _start_catalog_backups(app, db_path, startup)
     app._start_thumbnail_recheck = startup.start_thumbnail_recheck
     app._kickoff_preview_cache_maintenance = startup.kickoff_preview_cache_maintenance
+    app._kickoff_catalog_backup_offload = startup.kickoff_catalog_backup_offload
     if not os.environ.get("VIREO_DISABLE_STARTUP_BACKFILL_TIMERS"):
         startup.schedule_retained_cache_maintenance()
 
@@ -1099,6 +1102,7 @@ def _register_library_blueprints(app, w):
             json_error,
             app.config,
             advance_inat_token_generation=w.inat_token_generation.advance,
+            start_catalog_backup_offload=app._kickoff_catalog_backup_offload,
         )
     )
     app.register_blueprint(

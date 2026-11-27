@@ -366,6 +366,78 @@ class StartupTasks:
             "summary": f"Corrected {reconciled:,} cache records or orphan files; evicted {evicted:,} previews",
         }
 
+    def kickoff_catalog_backup_offload(self) -> str | None:
+        """Move pre-upgrade catalog snapshots to the backup folder and prune.
+
+        Returns the job id, or None when no backup folder is configured, in
+        which case ``ensure_schema`` already pruned the snapshots beside the
+        catalog. Runs after launch because the folder may be on a slow or
+        stalled network volume that startup must not wait on.
+        """
+        import config as cfg
+
+        backup_dir = (cfg.load().get("catalog_backup_dir") or "").strip()
+        if not backup_dir:
+            return None
+        job_id, _joined, _snapshot = self._app._job_runner.start_singleton(
+            "catalog-backups",
+            lambda job: self._offload_catalog_backups(job, backup_dir),
+            singleton_key="catalog-backups", workspace_id=None,
+            config={"backup_dir": backup_dir},
+            lineage=JobLineage.system(
+                "Move catalog backups to the backup folder and keep the newest three"
+            ),
+        )
+        return job_id
+
+    def _offload_catalog_backups(self, job: JobDict, backup_dir: str) -> JsonDict:
+        import catalog_backups
+        from canonical_schema import SCHEMA_VERSION
+
+        runner = self._app._job_runner
+        def progress(name: str, done: int, total: int) -> None:
+            if runner.is_cancelled(job["id"]):
+                raise RuntimeError("Catalog backup move cancelled")
+            job["progress"].update(current=done, total=total)
+            runner.push_event(job["id"], "progress", {
+                "current": done, "total": total,
+                "phase": f"Copying {name} to {backup_dir}",
+            })
+
+        moved = catalog_backups.offload(self._db_path, backup_dir, progress)
+        removed: list[str] = []
+        # Pruning when offload reported a collision could delete the very
+        # snapshot pair the error told the user to compare: both copies carry
+        # the same version, and the retention window counts versions across
+        # both folders, so a collision on a version outside the newest three
+        # removes both files. Leave the next successful run to prune.
+        if not moved.errors and catalog_backups.backup_folder_problem(backup_dir) is None:
+            removed = catalog_backups.prune(
+                [os.path.dirname(os.path.abspath(self._db_path)), backup_dir],
+                os.path.basename(self._db_path),
+                SCHEMA_VERSION,
+            )
+        parts = []
+        if moved.moved:
+            parts.append(
+                f"Moved {len(moved.moved)} catalog backup(s) "
+                f"({moved.bytes_copied / 1e9:.1f} GB) to {backup_dir}"
+            )
+        if removed:
+            parts.append(
+                f"removed {len(removed)} older backup(s), keeping the newest "
+                f"{catalog_backups.KEEP_BACKUPS}"
+            )
+        parts.extend(moved.errors)
+        return {
+            "ok": not moved.errors,
+            "errors": moved.errors,
+            "moved": moved.moved,
+            "removed": removed,
+            "noop": not (moved.moved or removed or moved.errors),
+            "summary": "; ".join(parts) or "Catalog backups are already in place",
+        }
+
     def start_thumbnail_recheck(self) -> JsonDict:
         """Start or join an explicit catalog-wide thumbnail record recheck."""
         job_id, joined, _snapshot = self._app._job_runner.start_singleton(

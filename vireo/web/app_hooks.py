@@ -117,7 +117,7 @@ def _mutation_label() -> str:
     return f"the request {request.method} {request.path}"
 
 
-def start_after_first_request(app: Flask, kickoff: Callable[[], str]) -> None:
+def start_after_first_request(app: Flask, kickoff: Callable[[], object]) -> None:
     """Launch maintenance once requests can run, never during construction."""
     lock = threading.Lock()
     started = False
@@ -134,7 +134,7 @@ def start_after_first_request(app: Flask, kickoff: Callable[[], str]) -> None:
         except RuntimeError:
             # Shutdown may win after the request started. Maintenance must
             # not turn that response into an error or restart stopped workers.
-            log.warning("Could not start deferred preview maintenance", exc_info=True)
+            log.warning("Could not start deferred startup maintenance", exc_info=True)
         return response
 
 

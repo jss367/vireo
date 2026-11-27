@@ -101,6 +101,7 @@ DATA_MODULES = frozenset({
     "db",
     "canonical_schema",
     "schema",
+    "catalog_backups",
     "photo_visibility_schema",
     "metadata_search",
     "new_images_cache",

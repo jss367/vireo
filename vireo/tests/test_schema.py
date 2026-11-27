@@ -1,6 +1,8 @@
+import os
 import sqlite3
 import threading
 
+import catalog_backups
 import pytest
 import schema
 from canonical_schema import SCHEMA_VERSION
@@ -229,49 +231,45 @@ def test_ensure_schema_no_backup_for_fresh_or_current_db(tmp_path):
     assert glob.glob(f"{db_path}*.bak") == []
 
 
-def test_ensure_schema_prunes_older_backups(tmp_path):
-    """Only the most recent pre-migration snapshot is kept."""
+def test_ensure_schema_keeps_the_newest_three_backups(tmp_path):
+    """An upgrade keeps the snapshots from the last three schema upgrades,
+    so a migration bug noticed two releases later still has a backup from
+    before it; anything older is pruned."""
     import os
 
     db_path = str(tmp_path / "vireo.db")
     schema.ensure_schema(db_path)
     latest = schema._latest_version()
-    stale_backup = f"{db_path}.pre-v{latest - 1}.bak"
-    with open(stale_backup, "w") as f:
-        f.write("old snapshot")
+    for version in (latest - 1, latest - 2, latest - 3):
+        with open(f"{db_path}.pre-v{version}.bak", "w") as f:
+            f.write("old snapshot")
     with sqlite3.connect(db_path) as conn:
         conn.execute(f"PRAGMA user_version = {schema.OLDEST_UPGRADABLE_VERSION}")
 
     schema.ensure_schema(db_path)
 
     assert os.path.exists(f"{db_path}.pre-v{latest}.bak")
-    assert not os.path.exists(stale_backup)
+    assert os.path.exists(f"{db_path}.pre-v{latest - 1}.bak")
+    assert os.path.exists(f"{db_path}.pre-v{latest - 2}.bak")
+    assert not os.path.exists(f"{db_path}.pre-v{latest - 3}.bak")
 
 
-def test_ensure_schema_keeps_older_backups_when_snapshot_fails(tmp_path, monkeypatch):
-    """If the pre-migration snapshot can't be written (VACUUM INTO fails,
-    volume full, etc.), an older `.pre-v*.bak` from a previous successful
-    run must survive — otherwise the upgrade completes with no recovery
-    snapshot at all."""
-    import os
-
+def test_ensure_schema_keeps_older_backups_when_snapshot_is_missing(tmp_path, monkeypatch):
+    """If snapshot creation returns without a target backup, do not prune."""
     db_path = str(tmp_path / "vireo.db")
     schema.ensure_schema(db_path)
     latest = schema._latest_version()
-    stale_backup = f"{db_path}.pre-v{latest - 1}.bak"
-    with open(stale_backup, "w") as f:
-        f.write("older snapshot")
+    older = [tmp_path / f"vireo.db.pre-v{latest - offset}.bak" for offset in range(1, 5)]
+    for backup in older:
+        backup.write_text("older snapshot")
     with sqlite3.connect(db_path) as conn:
         conn.execute(f"PRAGMA user_version = {schema.OLDEST_UPGRADABLE_VERSION}")
 
-    # Guard the prune on its own: a snapshot step that returns without
-    # writing the target-version backup must not cost the older ones.
-    monkeypatch.setattr(schema, "_snapshot_before_migrations", lambda *a, **k: None)
-
+    monkeypatch.setattr(catalog_backups, "snapshot", lambda *a, **k: None)
     schema.ensure_schema(db_path)
 
-    assert not os.path.exists(f"{db_path}.pre-v{latest}.bak")
-    assert os.path.exists(stale_backup)
+    assert not os.path.exists(catalog_backups.backup_path(db_path, latest))
+    assert all(backup.exists() for backup in older)
 
 
 def _db_one_upgrade_behind(tmp_path):
@@ -295,9 +293,9 @@ def test_ensure_schema_refuses_to_migrate_without_room_for_backup(tmp_path, monk
 
     db_path = _db_one_upgrade_behind(tmp_path)
     usage = collections.namedtuple("usage", "total used free")
-    monkeypatch.setattr(schema.shutil, "disk_usage", lambda _path: usage(0, 0, 1024))
+    monkeypatch.setattr(catalog_backups.shutil, "disk_usage", lambda _path: usage(0, 0, 1024))
 
-    with pytest.raises(schema.MigrationBackupError) as excinfo:
+    with pytest.raises(catalog_backups.MigrationBackupError) as excinfo:
         schema.ensure_schema(db_path)
 
     message = str(excinfo.value)
@@ -315,13 +313,13 @@ def test_ensure_schema_near_threshold_shortfall_reports_nonzero_amount(tmp_path,
     import collections
 
     db_path = _db_one_upgrade_behind(tmp_path)
-    needed = schema._backup_space_needed(db_path)
+    needed = catalog_backups._backup_space_needed(db_path)
     # Leave the user 5 MB short of what the backup needs.
     free = max(0, needed - 5 * 1024 * 1024)
     usage = collections.namedtuple("usage", "total used free")
-    monkeypatch.setattr(schema.shutil, "disk_usage", lambda _path: usage(0, 0, free))
+    monkeypatch.setattr(catalog_backups.shutil, "disk_usage", lambda _path: usage(0, 0, free))
 
-    with pytest.raises(schema.MigrationBackupError) as excinfo:
+    with pytest.raises(catalog_backups.MigrationBackupError) as excinfo:
         schema.ensure_schema(db_path)
 
     message = str(excinfo.value)
@@ -348,14 +346,14 @@ def test_backup_space_needed_excludes_freelist_pages(tmp_path):
         conn.commit()
     raw_size = _os.path.getsize(db_path)
 
-    needed = schema._backup_space_needed(db_path)
+    needed = catalog_backups._backup_space_needed(db_path)
 
     # The old raw-size estimate stayed at the un-compacted file length plus
     # headroom; the new one must come in below that because freelist pages
     # are dropped by VACUUM INTO.
     old_estimate = raw_size + max(
-        int(raw_size * schema._BACKUP_HEADROOM_FRACTION),
-        schema._BACKUP_HEADROOM_MIN_BYTES,
+        int(raw_size * catalog_backups._BACKUP_HEADROOM_FRACTION),
+        catalog_backups._BACKUP_HEADROOM_MIN_BYTES,
     )
     assert needed < old_estimate, (
         f"needed={needed}, old_estimate={old_estimate}, raw_size={raw_size}"
@@ -373,25 +371,25 @@ def test_backup_space_needed_ignores_pinned_wal(tmp_path):
         conn.execute("CREATE TABLE t (data BLOB)")
         conn.commit()
 
-    baseline = schema._backup_space_needed(db_path)
+    baseline = catalog_backups._backup_space_needed(db_path)
 
     # A WAL left behind by another connection — often many times the live
     # catalog when it has been pinned through repeated updates.
     with open(db_path + "-wal", "wb") as wal:
         wal.write(b"\0" * (128 * 1024 * 1024))
 
-    assert schema._backup_space_needed(db_path) == baseline
+    assert catalog_backups._backup_space_needed(db_path) == baseline
 
 
 def test_format_minimum_to_free_rounds_up_small_deficits():
     """A 1-byte shortfall still asks the user to free at least 1 MB, and
     sub-tenth-of-GB values are rendered in MB instead of rounding to 0.0 GB."""
-    assert schema._format_minimum_to_free(1) == "1 MB"
-    assert schema._format_minimum_to_free(5 * 1024 * 1024) == "5 MB"
+    assert catalog_backups._format_minimum_to_free(1) == "1 MB"
+    assert catalog_backups._format_minimum_to_free(5 * 1024 * 1024) == "5 MB"
     # Exactly 1 GB tips into GB formatting.
-    assert schema._format_minimum_to_free(1024 ** 3) == "1.0 GB"
+    assert catalog_backups._format_minimum_to_free(1024 ** 3) == "1.0 GB"
     # 1 GB + 1 byte rounds up to the next tenth.
-    assert schema._format_minimum_to_free(1024 ** 3 + 1) == "1.1 GB"
+    assert catalog_backups._format_minimum_to_free(1024 ** 3 + 1) == "1.1 GB"
 
 
 def test_ensure_schema_refuses_to_migrate_when_backup_write_fails(tmp_path, monkeypatch):
@@ -406,9 +404,9 @@ def test_ensure_schema_refuses_to_migrate_when_backup_write_fails(tmp_path, monk
     def fail_replace(_src, _dst):
         raise OSError(errno.ENOSPC, "No space left on device")
 
-    monkeypatch.setattr(schema, "replace_file", fail_replace)
+    monkeypatch.setattr(catalog_backups, "replace_file", fail_replace)
 
-    with pytest.raises(schema.MigrationBackupError) as excinfo:
+    with pytest.raises(catalog_backups.MigrationBackupError) as excinfo:
         schema.ensure_schema(db_path)
 
     assert "No space left on device" in str(excinfo.value)
@@ -427,7 +425,7 @@ def test_ensure_schema_existing_backup_skips_space_check(tmp_path, monkeypatch):
     def no_disk_usage(_path):
         raise AssertionError("free space checked although the backup exists")
 
-    monkeypatch.setattr(schema.shutil, "disk_usage", no_disk_usage)
+    monkeypatch.setattr(catalog_backups.shutil, "disk_usage", no_disk_usage)
 
     schema.ensure_schema(db_path)
 
@@ -466,7 +464,7 @@ def test_load_taxonomy_cli_structured_exit_on_backup_failure(tmp_path, monkeypat
 
     db_path = _db_one_upgrade_behind(tmp_path)
     usage = collections.namedtuple("usage", "total used free")
-    monkeypatch.setattr(schema.shutil, "disk_usage", lambda _path: usage(0, 0, 1024))
+    monkeypatch.setattr(catalog_backups.shutil, "disk_usage", lambda _path: usage(0, 0, 1024))
 
     monkeypatch.setattr(
         "sys.argv",
@@ -541,13 +539,17 @@ def test_ensure_schema_keeps_later_version_snapshots(tmp_path):
     """Restoring an older live database while a later-version backup remains
     (e.g. `.pre-v9.bak` beside a v7 file, then launching this v8 build) must
     keep the newer snapshot — it may hold the user's only copy of edits made
-    under that later schema. Only strictly older snapshots may be pruned."""
+    under that later schema. It does not count toward the three kept, and
+    only strictly older snapshots may be pruned."""
     import os
 
     db_path = str(tmp_path / "vireo.db")
     schema.ensure_schema(db_path)
     latest = schema._latest_version()
-    older_backup = f"{db_path}.pre-v{latest - 1}.bak"
+    for version in (latest - 1, latest - 2):
+        with open(f"{db_path}.pre-v{version}.bak", "w") as f:
+            f.write("kept snapshot")
+    older_backup = f"{db_path}.pre-v{latest - 3}.bak"
     newer_backup = f"{db_path}.pre-v{latest + 1}.bak"
     with open(older_backup, "w") as f:
         f.write("older snapshot")
@@ -559,6 +561,7 @@ def test_ensure_schema_keeps_later_version_snapshots(tmp_path):
     schema.ensure_schema(db_path)
 
     assert os.path.exists(f"{db_path}.pre-v{latest}.bak")
+    assert os.path.exists(f"{db_path}.pre-v{latest - 2}.bak")
     assert not os.path.exists(older_backup)
     # The later-version backup must survive — it may be irreplaceable.
     assert os.path.exists(newer_backup)
