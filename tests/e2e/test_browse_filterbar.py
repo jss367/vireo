@@ -1410,3 +1410,22 @@ def test_sidebar_highlights_follow_scope_switches(live_server, page):
         re.compile(r"\bactive\b")
     )
     expect(active_rows).to_have_count(1)
+
+
+def test_short_window_contains_quick_filter_focus_ring(live_server, page):
+    page.set_viewport_size({"width": 900, "height": 700})
+    page.goto(live_server["url"] + "/browse", wait_until="domcontentloaded")
+    pill = page.locator(".vf-shortcuts .vf-quick-pills button").first
+    expect(pill).to_be_visible()
+    page.keyboard.press("Tab")
+    pill.focus()
+    dimensions = pill.evaluate("""el => {
+        const style = getComputedStyle(el);
+        const ring = parseFloat(style.outlineWidth) + parseFloat(style.outlineOffset);
+        const row = el.closest('.vf-shortcuts').getBoundingClientRect();
+        const button = el.getBoundingClientRect();
+        return [el.matches(':focus-visible'), ring, button.top - row.top, row.bottom - button.bottom];
+    }""")
+    focused, ring, above, below = dimensions
+    assert focused and ring > 0
+    assert min(above, below) >= ring
