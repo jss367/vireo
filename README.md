@@ -10,7 +10,9 @@
 
 ---
 
-Vireo helps wildlife photographers triage thousands of photos using machine learning. It detects animals, identifies species, scores image quality, groups photos into encounters, and recommends which to keep — all while storing metadata in standard XMP sidecars so you're never locked in.
+Vireo helps wildlife photographers triage thousands of photos. It detects animals, identifies species, scores image quality, groups photos into encounters, and recommends which to keep. This processing runs on your computer and works offline once you've downloaded the models you need.
+
+Vireo runs on Apple Silicon Macs, 64-bit Windows 11 PCs, and x86-64 Linux PCs running Ubuntu or Debian. It works alongside Lightroom Classic by saving metadata such as ratings and keywords in standard XMP sidecar files that Lightroom can read.
 
 ## Features
 
