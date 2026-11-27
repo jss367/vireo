@@ -108,6 +108,15 @@ class JobHistoryRepository:
             (*params, limit),
         ).fetchall()
 
+    def pipeline_status(self, job_id: str, workspace_id: int | None) -> str | None:
+        """Read the status for Process polling without loading the job result or tree."""
+        row = self.conn.execute(
+            "SELECT status FROM job_history WHERE id = ? AND type = 'pipeline' "
+            "AND (? IS NULL OR workspace_id IS NULL OR workspace_id = ?)",
+            (job_id, workspace_id, workspace_id),
+        ).fetchone()
+        return row[0] if row else None
+
     def analysis_retry_results(self, workspace_id: int) -> list[sqlite3.Row]:
         """Recent bounded selected-analysis attempts, including persisted partial outcomes."""
         return self.conn.execute(
