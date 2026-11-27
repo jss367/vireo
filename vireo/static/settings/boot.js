@@ -12,6 +12,8 @@ loadVersion();
 loadThemePicker();
 loadAllSettings();
 loadComputationCacheStatus();
+setupCatalogBackups();
+loadCatalogBackups();
 loadLocationWriteStatus();
 
 setupSettingsFind();

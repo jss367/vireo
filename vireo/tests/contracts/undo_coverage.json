@@ -210,6 +210,7 @@
   "external": {
     "description": "Filesystem, remote, cache, or generated job effects have no general replay; see the audit for limitations.",
     "routes": [
+      "DELETE /api/catalog-backups/pending-restore",
       "DELETE /api/embedding-cache",
       "DELETE /api/import/orphaned-staging",
       "DELETE /api/labels",
@@ -220,6 +221,8 @@
       "POST /api/batch/delete",
       "POST /api/browse/mkdir",
       "POST /api/card-cleanup/delete",
+      "POST /api/catalog-backups",
+      "POST /api/catalog-backups/<name>/restore",
       "POST /api/computation-cache/import",
       "POST /api/duplicates/delete-loser-files",
       "POST /api/duplicates/scan",

@@ -1913,6 +1913,8 @@ export function formatJobType(type) {
   if (type === 'preview-cache-maintenance') return 'Preview cache maintenance';
   if (type === 'retained-cache-cleanup') return 'Generated file and history cleanup';
   if (type === 'retained-cache-maintenance') return 'Storage retention maintenance';
+  if (type === 'catalog-backup') return 'Catalog backup';
+  if (type === 'catalog-restore-prepare') return 'Prepare catalog restore';
   return String(type)
     .split(/[-_]+/)
     .filter(function(w) { return w.length > 0; })
