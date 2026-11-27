@@ -299,7 +299,9 @@ def _head_response(config: AppConfig, db: Database, photo: JsonDict, effective: 
         bound = aligned and frame_matches(frame, img.info)
         if aligned and not bound:
             raise ValueError("Source rendition differs from the subject analysis; place a manual center")
-        center, used = head_focus_point(features, detection, img.size, size) if bound else (None, "subject")
+        center, used = (head_focus_point(features, detection, img.size, size,
+                                        prefer_eye=request.args.get("anchor") == "eye")
+                        if bound else (None, "subject"))
         if center is None:
             center, used = focus_point({}, boxes, "subject" if boxes else "frame", eye_enabled=False)
         if boxes:
@@ -312,6 +314,10 @@ def _head_response(config: AppConfig, db: Database, photo: JsonDict, effective: 
         response = _focus_response(img, source, {**photo, "eye_x": None, "eye_y": None, **features} if bound else photo, boxes,
                                    center, used, size, effective, mask, bound)
         if bound:
+            if used == "eye" and features.get("eye_tenengrad") is not None:
+                if features.get("eye_measurement_box"):
+                    response.headers["X-Vireo-Focus-Eye-Box"] = ",".join(map(str, features["eye_measurement_box"]))
+                response.headers["X-Vireo-Focus-Eye-Detail"] = str(features["eye_tenengrad"])
             response.headers["X-Vireo-Analysis-Key"] = str(key)
             response.headers["X-Vireo-Detection-Id"] = str(boxes[0]["id"])
         return response

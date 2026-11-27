@@ -454,6 +454,10 @@ def focus_crop_facts(headers):
         "detection_id": int(value("Detection-Id")) if value("Detection-Id") else None,
         "eye_status": value("Eye-Status"),
     }
+    eye_detail = _header_floats(headers, "X-Vireo-Focus-Eye-Detail")
+    if eye_detail:
+        facts["eye_tenengrad"] = eye_detail[0]
+        facts["eye_measurement_box_xywh"] = _header_floats(headers, "X-Vireo-Focus-Eye-Box")
     facts["notes"] = _focus_notes(facts)
     return facts
 
@@ -955,7 +959,7 @@ def _register_burst_tools(server, client):
     @server.tool(annotations=read_only)
     def burst(
         photo_id: int, max_photos: int = DEFAULT_RANKED_FRAMES,
-        offset: int = 0, limit: int = DEFAULT_FRAME_PAGE,
+        offset: int = 0, limit: int = DEFAULT_FRAME_PAGE, order: str = "rank",
     ) -> dict:
         """The burst of frames shot around a photo, ranked by Vireo's
         quality analysis. A provisional ranked candidate still needs manual
@@ -973,12 +977,19 @@ def _register_burst_tools(server, client):
         ``max_photos`` frames around the photo (at most 500), and ``count``
         says how many. Frames past that are not considered, so for a burst
         list_bursts reports with more ``frames``, pass that number.
-        ``frames`` holds ``limit`` of them in rank order, unranked last;
+        Set order="sequence" to inspect adjacent full frames for changes in
+        pose, prey or interaction. Identify the two frames showing the change.
+        The default order is rank, unranked last. Each page holds up to limit;
         ``next_offset`` continues."""
+        if order not in {"rank", "sequence"}:
+            raise VireoError("order must be rank or sequence")
         data = client.get_json(
             f"/api/v1/photos/{photo_id}/burst-evidence", {"max_photos": max_photos},
         )
         cards = data.get("cards") or []
+        if order == "sequence":
+            positions = {pid: i for i, pid in enumerate(data["photo_ids"])}
+            cards = sorted(cards, key=lambda card: positions[card["id"]])
         offset, limit = max(0, offset), max(1, min(limit, MAX_BURST_PAGE))
         page = cards[offset:offset + limit]
         more = offset + len(page) < len(cards)
@@ -998,14 +1009,15 @@ def _register_focus_tools(server, client):
     def focus_crop(
         photo_id: int, center_x: float | None = None, center_y: float | None = None,
         size: int = DEFAULT_FOCUS_SIZE, source: str = "auto", mask: bool = False,
-        detection_id: int | None = None,
+        detection_id: int | None = None, prefer_eye: bool = False,
     ) -> list:
         """Unresized pixels around the animal, for judging focus. Returns
         facts about the crop, then the image. Read ``notes`` first: they say
         when the crop misses the head or shows a downsized copy.
 
         By default the crop centers on the head when the analysis located
-        it, otherwise on the subject box. To aim it, give ``center_x`` and
+        it, otherwise on the subject box. Set prefer_eye to center on a verified
+        eye when available. Check the returned basis for the actual region. To aim it, give ``center_x`` and
         ``center_y`` as fractions (0 to 1) of the unedited frame, which
         view_photo(view="source") shows; the edited preview may be cropped or
         rotated. ``detection_id`` picks another animal in the photo.
@@ -1025,7 +1037,8 @@ def _register_focus_tools(server, client):
             "detection_id": detection_id,
             # The route reads a bare detection_id as a request for saved
             # comparison evidence; the head basis inspects any animal.
-            "basis": "head" if detection_id is not None else None,
+            "basis": "head" if detection_id is not None or prefer_eye else None,
+            "anchor": "eye" if prefer_eye else None,
         })
         return [focus_crop_facts(headers), Image(data=body, format="jpeg")]
 

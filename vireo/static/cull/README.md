@@ -68,3 +68,13 @@ comes with converting the page to modules.
   favorite suggested under one species is shown as that suggestion under the
   others (`shareCullSuggestedFavorites`), and its card says where else it is
   listed.
+
+From a photo card, **Inspect burst** opens the unedited frames and native focus
+windows. The initial comparison uses the other burst frame with the highest
+available whole-animal detail, falling back to a neighbor. **Inspect pair** in
+Compare uses the chosen favorite. Filmstrip buttons compare adjacent frames.
+Click either full frame to place a manual center, or press F to alternate the
+crops at the same point. The yellow rectangle marks the displayed window. A turquoise box outlines the measured eye region when its bounds were recorded.
+Measurements are hidden until requested so the photographer can judge focus
+first. Edge hints refer to the detected animal’s box. The inspector writes no
+flags, subject choices or edits.

@@ -427,3 +427,47 @@ def test_cull_header_leaves_the_first_screen_to_the_photos(live_server, page, pi
         expect(favorites).to_contain_text('No favorites yet')
         expect(favorites.locator('.cull-card')).to_have_count(0)
         assert favorites.bounding_box()['height'] <= 52
+
+
+def test_inspect_pair_sequence_manual_center_and_flip(live_server, page):
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new('RGB', (256, 256), 'green').save(buf, format='JPEG')
+    jpeg = buf.getvalue()
+    page.route('**/photos/*/preview?size=1920&view=source', lambda r: r.fulfill(content_type='image/jpeg', body=jpeg))
+
+    def crop(route):
+        manual = 'center=' in route.request.url
+        route.fulfill(content_type='image/jpeg', body=jpeg, headers={
+            'X-Vireo-Focus-Basis': 'point' if manual else 'eye',
+            'X-Vireo-Focus-Raster-Size': '1000,1000', 'X-Vireo-Focus-Window': '372,372,628,628',
+            'X-Vireo-Focus-Center': '.5,.5', 'X-Vireo-Focus-Original-Scale': '1',
+            **({} if manual else {'X-Vireo-Focus-Eye-Detail': '42', 'X-Vireo-Focus-Eye-Box': '.48,.48,.04,.04'}),
+        })
+    page.route('**/photos/*/focus-crop?*', crop)
+    _open(page, live_server)
+    _card(page, 2).get_by_role('button', name='Select reference:', exact=False).click()
+    _card(page, 8).get_by_role('button', name='Compare:', exact=False).click()
+    page.get_by_role('button', name='Inspect pair').click()
+    panes = page.locator('#cullInspectPair article')
+    expect(panes.first).to_contain_text('heron-2.jpg')
+    expect(page.locator('#cullBlink')).to_be_enabled()
+    page.keyboard.press('f')
+    expect(page.locator('#cullBlinkView')).to_contain_text('heron-2.jpg')
+    page.keyboard.press('f')
+    expect(page.locator('#cullBlinkView')).to_contain_text('heron-8.jpg')
+    page.get_by_label('Show sharpness measurements').check()
+    expect(panes.last.locator('small')).to_contain_text('eye detail 42')
+    expect(panes.last.locator('.inspect-eye')).to_be_visible()
+    panes.last.locator('.inspect-frame img').click()
+    expect(panes.last).to_contain_text('Manual location')
+    expect(panes.last.locator('.inspect-eye')).to_be_hidden()
+    expect(panes.last.locator('small')).not_to_contain_text('eye detail')
+    page.locator('#cullFilm button').last.click()
+    expect(panes.last).to_contain_text('heron-9.jpg')
+    page.keyboard.press('Escape')
+    expect(page.locator('#cullInspection')).not_to_be_visible()
+    expect(page.locator('#browseCompareImgB')).to_have_attribute('data-photo-id', '8')

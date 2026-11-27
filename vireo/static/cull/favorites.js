@@ -359,6 +359,7 @@ function cullCardHtml(photo, si, pi, poseKey, favorite) {
   if (!favorite) html += '<button onclick="setCullAction(' + id + ',\'keep\')">Add favorite</button>';
   else html += '<button onclick="setCullAction(' + id + ',\'review\')">Remove favorite</button>';
   html += photo.action === 'reject' ? '<button onclick="setCullAction(' + id + ',\'review\')">Undecided</button>' : '<button onclick="setCullAction(' + id + ',\'reject\')">Reject</button>';
+  html += '<button onclick="openCullInspection(' + id + ')">Inspect burst</button>';
   html += '<button title="Open photo" onclick="openLightbox(' + id + ', this.closest(\'.cull-card\').dataset.filename, window.' + poseKey + ')">View</button>';
   return html + '</div></div></div>';
 }
@@ -594,6 +595,13 @@ function initializeCullFavorites() {
     button.addEventListener('click', function() { if (entry[0] === 'keep' || entry[0] === 'review' || entry[0] === 'reject') decideCullComparison(entry[0]); });
     actions.appendChild(button);
   });
+  var inspect = document.createElement('button');
+  inspect.className = 'browse-compare-btn';
+  inspect.textContent = 'Inspect pair';
+  inspect.addEventListener('click', function() {
+    if (cullCompareState) openCullInspection(cullCompareState.photoId, cullFavoriteReferences[cullCompareState.species]);
+  });
+  actions.prepend(inspect);
   overlay.querySelectorAll('.browse-compare-pane')[1]?.appendChild(actions);
   var controller = VireoBrowseCompare.create({
     findPhoto: function(id) { return (pipelineResults && pipelineResults.photos || []).find(function(p) { return p.id === id; }); },
