@@ -77,6 +77,26 @@ def error_total(job):
     return count
 
 
+def _pipeline_failure(job, result, steps):
+    """The recorded failure, including for history saved with a success-first summary."""
+    if job.get("type") != "pipeline" or job.get("status") != "failed":
+        return None
+    if isinstance(result, dict):
+        if result.get("interrupted"):
+            return None  # The startup sweep records how far the run got.
+        if result.get("error"):
+            return error_text(result["error"])
+    for step in steps:
+        if isinstance(step, dict) and step.get("status") == "failed":
+            return step.get("error") or f"{step.get('label') or 'Pipeline step'} failed"
+    if isinstance(result, dict):
+        notes = result.get("notes") or []
+        for error in result.get("errors") or []:
+            if error and error not in notes:
+                return error_text(error)
+    return "Pipeline failed"
+
+
 def build_summary(job, result=None):
     """Build a one-line summary from job steps or result.
 
@@ -85,7 +105,11 @@ def build_summary(job, result=None):
     result so failed runs summarize with their error instead of a bare
     "<Type> failed".
     """
-    steps = job.get("steps", [])
+    if result is None:
+        result = job.get("result")
+    steps = job.get("steps") or []
+    if failure := _pipeline_failure(job, result, steps):
+        return failure
     if steps:
         parts = []
         for s in steps:
@@ -94,8 +118,6 @@ def build_summary(job, result=None):
         if parts:
             return ", ".join(parts)
 
-    if result is None:
-        result = job.get("result")
     if result and isinstance(result, dict):
         described = describe_result(job["type"], result, job.get("config"))
         if described["summary"]:
@@ -160,7 +182,9 @@ def attach_result_text(job):
     authored = isinstance(result, dict) and bool(
         result.get("summary") or result.get("interrupted")
     )
-    if described["summary"] and not (from_steps or authored) or not job.get("summary"):
+    if failure := _pipeline_failure(job, result, steps):
+        job["summary"] = failure
+    elif described["summary"] and not (from_steps or authored) or not job.get("summary"):
         job["summary"] = described["summary"]
     job["result_details"] = described["details"]
     if described["error"] and not job.get("error"):
