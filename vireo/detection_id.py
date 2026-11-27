@@ -48,6 +48,10 @@ class PromptFrameError(ValueError):
     """The selected box has no proven mapping to the analysis frame."""
 
 
+class UnverifiedReviewerBox(PromptFrameError):
+    """A saved reviewer box still needs confirmation on the original."""
+
+
 def require_original_box(runtime):
     if runtime == COMPANION_FRAME_RUNTIME:
         raise PromptFrameError(

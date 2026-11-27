@@ -9450,6 +9450,21 @@ def test_extract_masks_overlaps_quality_analysis_with_embedding(tmp_path, monkey
     assert all(seconds >= 0 for seconds in em["phase_seconds"].values())
 
 
+def test_extract_masks_reports_box_to_confirm_and_continues(tmp_path, monkeypatch):
+    from subjects import select_reviewer_box
+
+    db_path, db, ws_id, photo_ids, params = _mask_stage_photos(tmp_path, 2)
+    _stub_extract_masks_heavy_ops(monkeypatch, original_proxy=True)
+    select_reviewer_box(db, photo_ids[0], {"x": .2, "y": .2, "w": .3, "h": .3})
+    db.commit()
+    job = _make_job()
+    with pytest.raises(RuntimeError, match="reviewer boxes need confirmation"):
+        run_pipeline_job(job, FakeRunner(), db_path, ws_id, params)
+    result = job["result"]["stages"]["extract_masks"]
+    assert (result["masked"], result["failed"]) == (1, 1)
+    assert result["outcomes"]["counts"] == {"reviewer_box_needs_confirmation": 1, "completed": 1}
+
+
 def test_extract_masks_analysis_failure_fails_only_that_photo(tmp_path, monkeypatch):
     """An analysis error raised on the helper thread is that photo's failure."""
     import quality

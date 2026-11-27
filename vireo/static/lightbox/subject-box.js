@@ -8,7 +8,7 @@ export function openSubjectBox(photoId, saved, subject) {
   dialog.setAttribute('aria-label', 'Select animal region');
   dialog.innerHTML = '<h2>Select animal region</h2><p>Drag a box around the visible animal on the unedited image. '
     + 'This records your region, without assigning a species.</p>'
-    + (subject ? '<p>Redraw this region or remove it. You can undo either change.</p>' : '<p>The new region becomes primary.</p>')
+    + (subject ? '<p>Check the outlined region on the original. Confirm it, redraw it, or remove it.</p>' : '<p>The new region becomes primary.</p>')
     + '<canvas aria-label="Drag to select animal region"></canvas>'
     + '<p role="status">Loading source image…</p><button type="button" data-save disabled>Save subject box</button> '
     + (subject ? '<button type="button" data-remove>Remove box</button> ' : '')
@@ -35,11 +35,15 @@ export function openSubjectBox(photoId, saved, subject) {
     canvas.width = image.naturalWidth; canvas.height = image.naturalHeight;
     context.drawImage(image, 0, 0);
     if (subject) {
+      box = {x: subject.box_x, y: subject.box_y, w: subject.box_w, h: subject.box_h};
+      save.textContent = 'Confirm existing box';
+      save.disabled = false;
       context.strokeStyle = '#ffdf40'; context.lineWidth = Math.max(2, canvas.width / 500);
       context.strokeRect(subject.box_x * canvas.width, subject.box_y * canvas.height,
         subject.box_w * canvas.width, subject.box_h * canvas.height);
     }
-    status.textContent = 'Drag around the animal. Measurements will apply only to this box.';
+    status.textContent = subject ? 'Confirm if the outline fits the animal, or drag to adjust it.'
+      : 'Drag around the animal. Measurements will apply only to this box.';
   };
   image.onerror = () => { status.textContent = 'Source image unavailable. No region has been saved.'; };
   /** @param {PointerEvent} event */
@@ -51,6 +55,7 @@ export function openSubjectBox(photoId, saved, subject) {
   canvas.addEventListener('pointerdown', event => {
     if (saving || !frameToken || !image.complete || !image.naturalWidth) return;
     event.preventDefault(); start = point(event); box = null; save.disabled = true;
+    save.textContent = 'Save subject box';
     canvas.setPointerCapture(event.pointerId);
   });
   canvas.addEventListener('pointermove', event => {

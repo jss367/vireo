@@ -15,7 +15,7 @@ import threading
 import numpy as np
 import onnx_runtime
 from app_paths import default_path
-from detection_id import PromptFrameError, require_original_box
+from detection_id import PromptFrameError, UnverifiedReviewerBox, require_original_box
 from PIL import Image, ImageFilter
 from resource_ledger import ResourceWaitCancelled
 from services.hf_cache_lock import cache_access
@@ -488,7 +488,7 @@ def require_aligned_detector_prompt(image, detector_runtime, *, detector_model=N
             return
         raise PromptFrameError("Detector coordinates lack original-frame proof; enable Re-classify to rerun detection on the original")
     if detector_runtime in ("reviewer-v1", ALIGNED_REVIEWER_RUNTIME):
-        raise PromptFrameError("This reviewer box uses an unverified original frame. Open Subjects and draw the box again on the original.")
+        raise UnverifiedReviewerBox("Open Subjects → Edit box to confirm or redraw the reviewer box on the original.")
     if not getattr(image, "info", {}).get("vireo_rejected_preview_edge"):
         return
     current = megadetector_runtime_fingerprint()

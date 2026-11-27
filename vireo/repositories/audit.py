@@ -102,6 +102,8 @@ class AuditRepository:
                 WHERE v.workspace_id=? AND f.status IN ('ok','partial')
             )
             SELECT e.id, e.filename, e.detection_id,
+                   d.detector_model IS 'reviewer-selected' AND d.frame_id IS NULL
+                       AND d.runtime_fingerprint IN ('reviewer-v1', 'reviewer-aligned-v1') AS unverified_box,
                    d.id IS NOT NULL AND NOT EXISTS (
                        SELECT 1 FROM predictions pr
                        {prediction_review_join('pr')}
@@ -142,7 +144,7 @@ class AuditRepository:
             FROM evidence e LEFT JOIN detections d ON d.id=e.detection_id
             LEFT JOIN photo_subject_state st ON st.photo_id=e.id
             LEFT JOIN photo_masks pm ON pm.photo_id=e.id AND pm.variant=e.active_mask_variant
-            WHERE unnamed OR stale_mask OR stale_score ORDER BY e.id
+            WHERE unnamed OR stale_mask OR stale_score OR unverified_box ORDER BY e.id
         """, (floor, ws, ws, ws))
         return [dict(row) for row in rows]
 
