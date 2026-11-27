@@ -369,6 +369,34 @@ def test_fresh_move_keeps_destination_when_source_stat_fails_mid_verify(tmp_path
         "SELECT path FROM folders WHERE id = ?", (fid,)).fetchone()["path"] == str(src)
 
 
+def test_a_copy_is_kept_when_a_source_file_vanishes_before_the_comparison(tmp_path, monkeypatch):
+    """The other source files are still there, so the folder lists as
+    present, but the copy now holds the only bytes of the file that went."""
+    import move as move_mod
+
+    db, src, dst, fid, _ids = _folder(tmp_path)
+    real_record = move_mod.folder_transfer.record_source_tree
+    calls = []
+
+    def record_then_lose_a_file(src_path):
+        record = real_record(src_path)
+        if not calls:
+            (src / "a.jpg").unlink()
+        calls.append(src_path)
+        return record
+
+    monkeypatch.setattr(move_mod.folder_transfer, "record_source_tree", record_then_lose_a_file)
+
+    result = move_mod.move_folder(db=db, folder_id=fid, destination=str(dst))
+
+    assert result["moved"] == 0
+    assert result["errors"]
+    assert (dst / "shoot" / "a.jpg").exists()
+    assert (src / "b.jpg").exists()
+    assert db.conn.execute(
+        "SELECT path FROM folders WHERE id = ?", (fid,)).fetchone()["path"] == str(src)
+
+
 def test_a_file_added_after_verification_is_kept_and_reported(tmp_path, monkeypatch):
     import move as move_mod
 

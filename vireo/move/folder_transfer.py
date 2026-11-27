@@ -370,7 +370,8 @@ class _FolderTransfer:
                 f"Verification could not be completed ({exc}). "
                 f"Originals preserved.", copy_disproven=False)
         if error is not None:
-            return self._refuse(error, copy_disproven=bool(record))
+            return self._refuse(
+                error, copy_disproven=bool(record) and self._source_unchanged(record))
         self.source_record = record
         return None
 
@@ -382,15 +383,29 @@ class _FolderTransfer:
         filesystem, so it is left for the next run to resume into.
 
         The new copy is removed only when it was compared with a source that
-        is still there and found wrong (``copy_disproven``). When the source
-        could not be listed or read (a disconnected drive, a dropped mount, a
-        failing disk), the copy just made may be the only one that can still
-        be read, so it is kept even though it was never verified.
+        is still there, unchanged since it was recorded, and found wrong
+        (``copy_disproven``). When the source could not be listed or read, or
+        lost or changed a file during the comparison (a disconnected drive, a
+        dropped mount, a failing disk), the copy just made may be the only
+        one that can still be read, so it is kept even though it was never
+        verified.
         """
         if (copy_disproven and not self.remote and self._owns_destination()
                 and self._source_holds_entries()):
             shutil.rmtree(self.target.transfer_dest, ignore_errors=True)
         return {"moved": 0, "errors": [message]}
+
+    def _source_unchanged(self, record):
+        """Whether the source still holds exactly what was recorded.
+
+        A mismatch found against a source that lost or changed a file while
+        it was being compared does not show the copy is wrong: the copy may
+        now hold the only bytes of that file.
+        """
+        try:
+            return record_source_tree(self.src_path) == record
+        except OSError:
+            return False
 
     def _source_holds_entries(self):
         """Whether the source folder can be listed right now and is not empty."""
