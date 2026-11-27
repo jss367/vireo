@@ -20,7 +20,7 @@
   "vireo/static/move/quick-move-start.js:startQuickMove": 146,
   "vireo/static/photo-editor/context-menu.js:buildPhotoEditorContextMenu": 155,
   "vireo/static/photo-editor/crop-drag.js:initCropDrag": 158,
-  "vireo/static/pipeline-rapid-review/apply.js:applyBurstChanges": 310,
+  "vireo/static/pipeline-rapid-review/apply.js:applyBurstChanges": 306,
   "vireo/static/pipeline-review/events.js:bindPipelineReviewPhotoEvents": 186,
   "vireo/static/pipeline-review/events.js:bindPipelineReviewPhotoEvents.@call:[[\"member\",[\"identifier\",\"document\"],[\"property\",\"Identifier\",\"addEventListener\"],false],\"lightbox:photodeleted\"]": 119,
   "vireo/static/pipeline-review/group-changes.js:grmApply": 164,

@@ -1418,6 +1418,45 @@ def _two_species_state():
     }
 
 
+def test_rapid_review_recovers_applied_decision_without_replaying_writes(live_server, page):
+    results = _two_species_results()
+    state = _two_species_state()
+    species_writes = []
+    _mock_pipeline_rapid_review(page, results=results, state_photos=state,
+                                apply_photos=state, species_payloads=species_writes)
+    writes = []
+    reads = []
+
+    def load_results(route):
+        reads.append(route.request.url)
+        if len(reads) == 2:
+            route.fulfill(status=503, json={"error": "temporarily offline"})
+        else:
+            route.fulfill(json=results)
+
+    def record_write(request):
+        if request.url.endswith(("/group/apply", "/save-cache")):
+            writes.append(request.url.rsplit("/", 1)[-1])
+
+    page.on("request", record_write)
+    page.route("**/api/pipeline/results", load_results)
+    page.route("**/api/pipeline/save-cache", lambda route: route.fulfill(
+        status=409, json={"error": "The photo groups changed. Reload before saving."}))
+    _goto_rapid_review(page, live_server, "?enc=0&burst=0")
+    apply = page.locator("#applyBtn")
+    expect(apply).to_have_text("No changes to save")
+    page.locator(".decision-btn.review").click()
+    apply.click()
+    retry = page.locator("#burstSubtitle").get_by_role("button", name="Retry")
+    expect(retry).to_be_visible()
+    expect(apply).to_be_disabled()
+    retry.click()
+    expect(apply).to_have_text("No changes to save")
+    assert len(reads) == 3
+    assert writes == ["apply", "save-cache"]
+    assert species_writes == []
+
+
 def test_rapid_review_two_species_burst_prefills_both_and_is_not_queued(live_server, page):
     _mock_pipeline_rapid_review(
         page, results=_two_species_results(), state_photos=_two_species_state(),
