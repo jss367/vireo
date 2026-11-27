@@ -225,3 +225,67 @@ def test_process_plan_rejects_retired_import_fields(client):
 
     assert resp.status_code == 400
     assert "import/archive fields" in resp.get_json()["error"]
+
+
+@pytest.mark.parametrize("failure", ["different bytes", "read error"])
+def test_cleanup_keeps_staged_file_without_readable_identical_archive(db, tmp_path, monkeypatch, failure):
+    root = tmp_path / "staging" / "pipeline-1"
+    payload = b"x" * (1024 * 1024) + b"a"
+    staged = _write(root / "USA" / "a.nef", payload)
+    archive = _write(tmp_path / "archive" / "USA" / "a.nef", payload)
+    _catalog_photo(db, archive.parent, archive.name, len(payload))
+    assert verify_orphaned_staging(db, str(tmp_path), str(root))["can_delete"]
+
+    if failure == "different bytes":
+        archive.write_bytes(payload[:-1] + b"b")
+    else:
+        real_open = open
+
+        def open_file(path, *args, **kwargs):
+            if os.fspath(path) == str(archive):
+                raise OSError("archive read failed")
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(staging_recovery, "open", open_file, raising=False)
+
+    with pytest.raises(ValueError, match="not fully verified"):
+        delete_verified_staging(db, str(tmp_path), str(root))
+    assert staged.read_bytes() == payload
+
+
+def test_cleanup_surfaces_walk_errors_rather_than_claiming_deletion(db, tmp_path, monkeypatch):
+    root = tmp_path / "staging" / "pipeline-1"
+    staged = _write(root / "USA" / "a.nef")
+    archive = _write(tmp_path / "archive" / "USA" / "a.nef")
+    _catalog_photo(db, archive.parent, archive.name, archive.stat().st_size)
+
+    real_walk = os.walk
+
+    def failing_walk(path, *args, **kwargs):
+        if os.fspath(path) == str(root):
+            if "onerror" in kwargs and kwargs["onerror"] is not None:
+                kwargs["onerror"](OSError("scan failed"))
+            return iter(())
+        return real_walk(path, *args, **kwargs)
+
+    monkeypatch.setattr(staging_recovery.os, "walk", failing_walk)
+    with pytest.raises(ValueError, match="could not finish"):
+        delete_verified_staging(db, str(tmp_path), str(root))
+
+
+def test_cleanup_preserves_a_file_added_after_verification(db, tmp_path, monkeypatch):
+    root = tmp_path / "staging" / "pipeline-1"
+    staged = _write(root / "USA" / "a.nef")
+    archive = _write(tmp_path / "archive" / "USA" / "a.nef")
+    _catalog_photo(db, archive.parent, archive.name, archive.stat().st_size)
+    late = staged.with_name("new.nef")
+
+    def verify_then_add(*args):
+        result = verify_orphaned_staging(*args)
+        _write(late, b"unique")
+        return result
+
+    monkeypatch.setattr(staging_recovery, "verify_orphaned_staging", verify_then_add)
+    with pytest.raises(ValueError, match="could not finish"):
+        delete_verified_staging(db, str(tmp_path), str(root))
+    assert late.read_bytes() == b"unique"
