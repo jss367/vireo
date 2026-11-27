@@ -6658,8 +6658,6 @@ def test_pending_archive_preflight_failure_is_not_a_sync_failure(app_and_db, tmp
 
 @pytest.mark.parametrize("cleanup_warning", [False, True])
 def test_pending_archive_post_transfer_failure_stays_visible(app_and_db, tmp_path, monkeypatch, cleanup_warning):
-    import shutil
-
     import move
 
     app, db = app_and_db
@@ -6678,14 +6676,14 @@ def test_pending_archive_post_transfer_failure_stays_visible(app_and_db, tmp_pat
 
     monkeypatch.setattr(move.folder_transfer, "_run_rsync_streamed", no_rsync)
     if cleanup_warning:
-        remove = shutil.rmtree
+        remove = os.unlink
 
         def cleanup(path, *args, **kwargs):
-            if os.path.realpath(path) == os.path.realpath(staging):
+            if os.path.realpath(path).startswith(os.path.realpath(staging) + os.sep):
                 raise PermissionError("Local cleanup permission denied")
             return remove(path, *args, **kwargs)
 
-        monkeypatch.setattr(shutil, "rmtree", cleanup)
+        monkeypatch.setattr(move.source_cleanup.os, "unlink", cleanup)
     client = app.test_client()
     job = wait_for_job_via_client(client, client.post(
         f"/api/import/pending-archives/{archive_id}/send").get_json()["job_id"])
