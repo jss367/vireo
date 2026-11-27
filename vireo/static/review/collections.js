@@ -54,6 +54,7 @@ var _switchCollectionEpoch = 0;
   // ``predictions`` array from the previous collection during that gap.
   _predictionsReloading = true;
   renderButtons();
+  reviewLoadStatus().start('Loading photos…');
   if (val === 'all') {
     collectionPhotoIds = null;
   } else {
@@ -81,6 +82,9 @@ var _switchCollectionEpoch = 0;
       if (typeof showToast === 'function') {
         showToast('Could not load photos for this collection — check its rules', 'error');
       }
+      reviewLoadStatus().fail('Could not load photos for this collection. Check its rules.', {
+        retry: function() { switchCollection(val); },
+      });
       renderAll();
       return;
     }

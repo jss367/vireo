@@ -415,6 +415,175 @@ function timeAgo(iso) {
   return Math.floor(secs / 86400) + 'd ago';
 }
 
+/*
+ * The line a page shows while its main request is running.
+ *
+ * A request for a whole workspace can take from seconds to minutes, so the
+ * line counts the seconds once the wait is long (a static "Loading…" reads as
+ * a hung page), adds the page's hint about what is being loaded, and turns
+ * into the error with a retry button when the request fails.
+ *
+ * `content` is the element the request fills. While it is empty the line is
+ * shown in its place. Once it holds results the line floats at the bottom of
+ * the window as a small box and the results are dimmed (`data-vireo-stale`), because they
+ * belong to the previous request; a reload that returns within QUIET_MS shows
+ * neither, so quick filter changes do not flicker.
+ *
+ * The status element carries role="status". The seconds are aria-hidden so a
+ * screen reader announces the message once, not every second.
+ */
+var VireoLoadingStatus = (function() {
+  var SLOW_AFTER_SECONDS = 4;
+  var QUIET_MS = 400;
+
+  /** @param {string} tag @param {string} className @param {string} [text] */
+  function part(tag, className, text) {
+    var node = document.createElement(tag);
+    node.className = className;
+    if (text) node.textContent = text;
+    return node;
+  }
+
+  /** @param {VireoLoadingStatusView} view */
+  function stopTimers(view) {
+    if (view.ticker !== null) clearInterval(view.ticker);
+    if (view.quietTimer !== null) clearTimeout(view.quietTimer);
+    view.ticker = null;
+    view.quietTimer = null;
+  }
+
+  /** @param {VireoLoadingStatusView} view */
+  function overResults(view) {
+    return !!view.content && view.content.childElementCount > 0;
+  }
+
+  // Floating over results, which are dimmed; or in their place when there are
+  // none. The floating box sits at the bottom of the window so it never covers
+  // the page's controls, above the navbar's bottom panel: that panel is fixed
+  // over the status bar, so its top edge is where the page's own area ends.
+  /** @param {VireoLoadingStatusView} view @param {boolean} floating */
+  function place(view, floating) {
+    if (floating) {
+      var panel = document.getElementById('bottomPanel');
+      var reserved = panel ? window.innerHeight - panel.getBoundingClientRect().top : 0;
+      view.el.dataset.overResults = 'true';
+      view.el.style.bottom = (reserved + 16) + 'px';
+    } else {
+      delete view.el.dataset.overResults;
+      view.el.style.bottom = '';
+    }
+    if (!view.content) return;
+    if (floating) view.content.dataset.vireoStale = 'true';
+    else delete view.content.dataset.vireoStale;
+  }
+
+  // The tick only rewrites the seconds and reveals the hint, so a screen
+  // reader hears the message once.
+  /** @param {VireoLoadingStatusView} view */
+  function tick(view) {
+    var seconds = Math.floor((Date.now() - view.startedAt) / 1000);
+    var slow = seconds >= SLOW_AFTER_SECONDS;
+    view.elapsedNode.textContent = slow ? ' ' + seconds + 's' : '';
+    view.hintNode.hidden = !(slow && view.hint);
+  }
+
+  /** @param {VireoLoadingStatusView} view */
+  function describe(view) {
+    if (view.messageNode.textContent !== view.message) view.messageNode.textContent = view.message;
+    if (view.hintNode.textContent !== view.hint) view.hintNode.textContent = view.hint;
+    tick(view);
+  }
+
+  /** @param {VireoLoadingStatusView} view */
+  function show(view) {
+    view.quietTimer = null;
+    view.el.dataset.state = 'loading';
+    place(view, overResults(view));
+    describe(view);
+    view.el.replaceChildren(view.messageNode, view.elapsedNode, view.hintNode);
+    view.el.hidden = false;
+    if (view.ticker === null) view.ticker = setInterval(function() { tick(view); }, 1000);
+  }
+
+  /** @param {VireoLoadingStatusView} view @param {string} message @param {string} hint */
+  function start(view, message, hint) {
+    var waiting = view.el.dataset.state === 'loading' || view.quietTimer !== null;
+    // A start during a wait keeps that wait's clock.
+    if (!waiting) view.startedAt = Date.now();
+    view.message = message;
+    view.hint = hint;
+    if (view.el.dataset.state === 'loading') describe(view);
+    if (waiting) return;
+    // An error stays on screen until its retry shows something in its place.
+    if (overResults(view) && view.el.dataset.state !== 'error') {
+      view.el.hidden = true;
+      view.quietTimer = setTimeout(function() { show(view); }, QUIET_MS);
+      return;
+    }
+    show(view);
+  }
+
+  /** @param {VireoLoadingStatusView} view */
+  function done(view) {
+    stopTimers(view);
+    delete view.el.dataset.state;
+    place(view, false);
+    view.el.hidden = true;
+    view.el.replaceChildren();
+  }
+
+  /** @param {VireoLoadingStatusView} view @param {string} message
+   * @param {{retry?: () => void, retryLabel?: string}} options */
+  function fail(view, message, options) {
+    stopTimers(view);
+    view.el.dataset.state = 'error';
+    // Results that stay on screen no longer match the controls, so they stay dimmed.
+    place(view, overResults(view));
+    var nodes = [part('span', 'vireo-loading-status-message', message)];
+    var retry = options.retry;
+    if (retry) {
+      /** @type {() => void} */
+      var runRetry = retry;
+      var button = part('button', 'vireo-loading-status-retry', options.retryLabel || 'Try again');
+      button.setAttribute('type', 'button');
+      button.addEventListener('click', function() { runRetry(); });
+      nodes.push(button);
+    }
+    view.el.replaceChildren.apply(view.el, nodes);
+    view.el.hidden = false;
+  }
+
+  /**
+   * @param {HTMLElement} el
+   * @param {{content?: HTMLElement | null}} [options]
+   * @returns {VireoLoadingStatusHandle}
+   */
+  function create(el, options) {
+    var elapsedNode = part('span', 'vireo-loading-status-elapsed');
+    elapsedNode.setAttribute('aria-hidden', 'true');
+    /** @type {VireoLoadingStatusView} */
+    var view = {
+      el: el,
+      content: (options && options.content) || null,
+      startedAt: 0,
+      ticker: null,
+      quietTimer: null,
+      message: '',
+      hint: '',
+      messageNode: part('span', 'vireo-loading-status-message'),
+      elapsedNode: elapsedNode,
+      hintNode: part('p', 'vireo-loading-status-hint'),
+    };
+    return {
+      start: function(message, startOptions) { start(view, message, (startOptions && startOptions.hint) || ''); },
+      done: function() { done(view); },
+      fail: function(message, failOptions) { fail(view, message, failOptions || {}); },
+    };
+  }
+
+  return { create: create };
+})();
+
 var VireoTextInputs = (function() {
   var selector = 'input[type="text"], input[type="search"], input:not([type]), textarea';
 

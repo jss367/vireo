@@ -388,14 +388,6 @@
     font-size: 15px;
   }
 
-  /* Loading spinner */
-  .loading {
-    text-align: center;
-    padding: 80px 24px;
-    color: var(--text-faint, #555);
-    font-size: 15px;
-  }
-
   .grouping-hint { margin: 0 24px; font-size: 12px; color: var(--text-muted); }
 
   /* Keyboard shortcut hint */
@@ -936,6 +928,7 @@
 
 <!-- Photo Grid -->
 <p class="grouping-hint">You can save species before grouping. They will be attached to encounters when grouping finishes.</p>
+<div class="vireo-loading-status" id="loading" role="status" aria-live="polite">Loading photos…</div>
 <div class="grid" id="grid"></div>
 <div class="grid-more" id="gridMore" hidden>
   <span id="gridMoreStatus" role="status"></span>
@@ -944,7 +937,6 @@
 <div class="empty" id="empty" style="display:none;">
   Select a collection above to load photos.
 </div>
-<div class="loading" id="loading" style="display:none;">Loading photos...</div>
 
 <script defer src="/static/review/state.js"></script>
 <script defer src="/static/review/detection-boxes.js"></script>

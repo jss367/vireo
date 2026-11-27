@@ -36,6 +36,7 @@ function harness(safeFetch, isUnidentified = false) {
       context.document = {getElementById: id => id === 'perRowSlider'
         ? {value: '20'} : {options: [{textContent: 'Folder'}], selectedIndex: 0}};
       context.render = () => {};
+      context.VireoLoadingStatus = {create: () => ({start() {}, done() {}, fail() {}})};
       state.rejectedFromGrid = new Set();
       return context.loadHighlights();
     },
