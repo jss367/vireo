@@ -406,7 +406,12 @@ class StartupTasks:
 
         moved = catalog_backups.offload(self._db_path, backup_dir, progress)
         removed: list[str] = []
-        if catalog_backups.backup_folder_problem(backup_dir) is None:
+        # Pruning when offload reported a collision could delete the very
+        # snapshot pair the error told the user to compare: both copies carry
+        # the same version, and the retention window counts versions across
+        # both folders, so a collision on a version outside the newest three
+        # removes both files. Leave the next successful run to prune.
+        if not moved.errors and catalog_backups.backup_folder_problem(backup_dir) is None:
             removed = catalog_backups.prune(
                 [os.path.dirname(os.path.abspath(self._db_path)), backup_dir],
                 os.path.basename(self._db_path),

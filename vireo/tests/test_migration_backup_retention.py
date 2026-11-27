@@ -206,6 +206,44 @@ def test_startup_job_moves_backups_and_keeps_the_newest_three(app_and_db, tmp_pa
     assert "removed 1 older backup(s)" in job["result"]["summary"]
 
 
+def test_startup_job_keeps_both_sides_of_a_collision_out_of_pruning(
+    app_and_db, backup_dir,
+):
+    """A collided snapshot pair must stay on disk after the startup job.
+
+    The error tells the user to compare the two copies. Prune counts versions
+    across both folders, so the collided version can fall outside the newest
+    three and pruning would then delete the very files the user needs to look
+    at.
+    """
+    import config as cfg
+    from canonical_schema import SCHEMA_VERSION
+
+    app, _db = app_and_db
+    db_path = app.config["DB_PATH"]
+    latest = SCHEMA_VERSION
+    _write(f"{db_path}.pre-v{latest - 5}.bak", "local content")
+    _write(
+        os.path.join(backup_dir, f"test.db.pre-v{latest - 5}.bak"),
+        "destination content that differs",
+    )
+    for version in (latest - 1, latest - 2, latest - 3):
+        _write(os.path.join(backup_dir, f"test.db.pre-v{version}.bak"))
+    cfg.save({**cfg.load(), "catalog_backup_dir": backup_dir})
+
+    job = wait_for_job_via_runner(
+        app._job_runner, app._kickoff_catalog_backup_offload(), wait_for_history=True,
+    )
+
+    assert job["status"] == "failed", job
+    assert "different contents" in job["result"]["summary"]
+    assert os.path.exists(f"{db_path}.pre-v{latest - 5}.bak")
+    assert os.path.exists(
+        os.path.join(backup_dir, f"test.db.pre-v{latest - 5}.bak")
+    )
+    assert job["result"]["removed"] == []
+
+
 def test_startup_job_fails_visibly_while_the_backup_folder_is_disconnected(app_and_db, tmp_path):
     import config as cfg
 
