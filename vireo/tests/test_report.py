@@ -17,6 +17,7 @@ from services import photo_ingest, workspace_folders
 def app_and_db(tmp_path, monkeypatch):
     """Create a test app with sample data and isolated config."""
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     import config as cfg
     from app import create_app
 
@@ -81,6 +82,27 @@ class TestReportIssue:
         assert "recent_jobs" in diag
         assert "config" in diag
         assert "timestamp" in diag
+
+    @pytest.mark.parametrize("available", [True, False])
+    def test_desktop_log_in_download(self, client, monkeypatch, tmp_path, available):
+        import config as cfg
+        from web import system
+
+        cfg.save({**cfg.load(), "report_url": ""})
+        path = tmp_path / "Vireo.log"
+        monkeypatch.setattr(system, "_desktop_log_path", lambda: path)
+        if available:
+            path.write_bytes(
+                b"x" * 65536 + b"\n" + b"old entry\n" * 200
+                + f"Startup failed at {tmp_path} for /photos/2024/bird.jpg\n".encode()
+            )
+
+        response = client.post("/api/report-issue", json={"description": "startup"})
+        lines = response.get_json()["diagnostics"]["desktop_logs"]
+        if available:
+            assert lines == ["old entry"] * 199 + ["Startup failed at ~ for [PHOTO_PATH]/bird.jpg"]
+        else:
+            assert lines == []
 
     def test_default_config_ships_report_url(self):
         """The shipped default includes a working report URL so issue

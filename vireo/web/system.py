@@ -314,6 +314,35 @@ def _issue_report_private_values(db: Database | None) -> tuple[list[str], Callab
     return private_paths, _sanitize_private_values
 
 
+def _desktop_log_path() -> Path:
+    """Match Tauri's app_log_dir for com.vireo.app."""
+    if sys.platform == "darwin":
+        return Path.home() / "Library/Logs/com.vireo.app/Vireo.log"
+    if sys.platform == "win32":
+        local_data = os.environ.get("LOCALAPPDATA") or Path.home() / "AppData/Local"
+    else:
+        local_data = os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share"
+    return Path(local_data) / "com.vireo.app/logs/Vireo.log"
+
+
+def _recent_desktop_logs() -> list[str]:
+    """Read up to 200 complete lines from the last 32 KiB of the desktop log."""
+    limit = 32 * 1024
+    try:
+        with _desktop_log_path().open("rb") as handle:
+            size = handle.seek(0, os.SEEK_END)
+            start = max(0, size - limit)
+            # Inspect the preceding byte so a line starting at the boundary
+            # survives, but a partial path or message is never included.
+            handle.seek(max(0, start - 1))
+            tail = handle.read(limit + 1)
+    except OSError:
+        return []
+    if start:
+        tail = tail.partition(b"\n")[2]
+    return tail.decode("utf-8", errors="replace").splitlines()[-200:]
+
+
 def _issue_report_platform(private_paths: list[str]) -> tuple[list[str], JsonDict, JsonDict]:
     """``(filesystems, support_info, execution_info)`` for a report."""
     import config as cfg
@@ -949,6 +978,7 @@ def create_system_blueprint(
                 "library_filesystems": filesystems,
             },
             "logs": sanitized_logs,
+            "desktop_logs": _sanitize_private_values(_recent_desktop_logs()),
             "app_state": {
                 "workspace": ws_name,
                 "folders": folder_count,

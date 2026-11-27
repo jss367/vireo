@@ -47,6 +47,10 @@ function doPost(e) {
     JSON.stringify(data.logs || [], null, 2),
   ];
 
+  if (data.desktop_logs && data.desktop_logs.length) {
+    lines.push('', 'RECENT DESKTOP APP LOGS', data.desktop_logs.join('\n'));
+  }
+
   GmailApp.sendEmail('YOUR_EMAIL@gmail.com', subject, lines.join('\n'));
   return ContentService.createTextOutput('ok');
 }
