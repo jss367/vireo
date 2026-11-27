@@ -552,7 +552,10 @@ def _fresh_copy_mismatch(src_path, transfer_dest, progress=None):
     and readlink targets are compared instead.
 
     Returns the mismatch description, or None when the copy is complete.
-    ``progress`` is called as in ``_first_missing_source_file``.
+    ``OSError`` from reading either side to compare it propagates: a file
+    that cannot be read proves nothing about the copy, and the caller must
+    not treat it as a copy found wrong. ``progress`` is called as in
+    ``_first_missing_source_file``.
     """
     src_count = 0
     for root, directories, files in os.walk(src_path):
@@ -595,11 +598,8 @@ def _fresh_copy_mismatch(src_path, transfer_dest, progress=None):
             # device would block or read something that is not a copy.
             if not stat.S_ISREG(src_stat.st_mode):
                 continue
-            try:
-                if not files_match(src_file, dst_file):
-                    return f"'{rel_name}' contents differ at destination"
-            except OSError as exc:
-                return f"'{rel_name}' could not be read back to compare ({exc})"
+            if not files_match(src_file, dst_file):
+                return f"'{rel_name}' contents differ at destination"
     # Extras at destination — a leftover rsync temp file, or anything
     # else the source-driven walk above never looked for — would leave
     # the fresh destination in a state we do not fully understand.

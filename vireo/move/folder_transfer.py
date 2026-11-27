@@ -359,29 +359,45 @@ class _FolderTransfer:
         except OSError as exc:
             return self._refuse(
                 f"Verification failed: the source folder could not be read "
-                f"({exc}). Originals preserved.", source_listed=False)
-        error = (self._verify_remote_copy() if self.remote
-                 else self._verify_local_copy())
+                f"({exc}). Originals preserved.", copy_disproven=False)
+        try:
+            error = (self._verify_remote_copy() if self.remote
+                     else self._verify_local_copy())
+        except OSError as exc:
+            # A file could not be read, so the copy was neither confirmed nor
+            # shown to be wrong.
+            return self._refuse(
+                f"Verification could not be completed ({exc}). "
+                f"Originals preserved.", copy_disproven=False)
         if error is not None:
-            return self._refuse(error, source_listed=bool(record))
+            return self._refuse(error, copy_disproven=bool(record))
         self.source_record = record
         return None
 
-    def _refuse(self, message, *, source_listed):
+    def _refuse(self, message, *, copy_disproven):
         """Fail verification, removing only a local destination this move made.
 
         A destination that was already there may hold the user's own files and
         is never removed. A remote destination is not reachable from this
         filesystem, so it is left for the next run to resume into.
 
-        ``source_listed`` is whether the source could be listed and held
-        anything. When it could not (a disconnected drive, a dropped mount),
-        the copy just made may be the only one that can still be read, so it
-        is kept even though it failed verification.
+        The new copy is removed only when it was compared with a source that
+        is still there and found wrong (``copy_disproven``). When the source
+        could not be listed or read (a disconnected drive, a dropped mount, a
+        failing disk), the copy just made may be the only one that can still
+        be read, so it is kept even though it was never verified.
         """
-        if source_listed and not self.remote and self._owns_destination():
+        if (copy_disproven and not self.remote and self._owns_destination()
+                and self._source_holds_entries()):
             shutil.rmtree(self.target.transfer_dest, ignore_errors=True)
         return {"moved": 0, "errors": [message]}
+
+    def _source_holds_entries(self):
+        """Whether the source folder can be listed right now and is not empty."""
+        try:
+            return bool(os.listdir(self.src_path))
+        except OSError:
+            return False
 
     def _verify_remote_copy(self):
         """Ask rsync on the NAS for checksums; the error message, or None."""

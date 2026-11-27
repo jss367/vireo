@@ -261,6 +261,32 @@ def test_a_copy_is_kept_when_the_source_can_no_longer_be_read(tmp_path, monkeypa
         "SELECT path FROM folders WHERE id = ?", (fid,)).fetchone()["path"] == str(src)
 
 
+@pytest.mark.parametrize("merge", [False, True])
+def test_a_copy_is_kept_when_a_file_cannot_be_read_to_compare(tmp_path, monkeypatch, merge):
+    """A read error proves nothing about the copy. On a failing source disk
+    the copy may hold the only readable bytes, so it is not removed."""
+    import move as move_mod
+
+    db, src, dst, fid, _ids = _folder(tmp_path)
+
+    def failing_disk(source, destination):
+        raise OSError(5, "Input/output error", source)
+
+    monkeypatch.setattr(move_mod.verify, "files_match", failing_disk)
+
+    result = move_mod.move_folder(db=db, folder_id=fid, destination=str(dst), merge=merge)
+
+    assert result["moved"] == 0
+    assert any("Verification could not be completed" in error
+               and "Originals preserved" in error for error in result["errors"])
+    assert (dst / "shoot" / "a.jpg").exists()
+    assert (dst / "shoot" / "b.jpg").exists()
+    assert (src / "a.jpg").exists()
+    assert (src / "b.jpg").exists()
+    assert db.conn.execute(
+        "SELECT path FROM folders WHERE id = ?", (fid,)).fetchone()["path"] == str(src)
+
+
 def test_a_file_added_after_verification_is_kept_and_reported(tmp_path, monkeypatch):
     import move as move_mod
 
