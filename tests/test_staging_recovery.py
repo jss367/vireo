@@ -265,6 +265,55 @@ def test_delete_compares_again_and_keeps_a_file_that_no_longer_matches(db, tmp_p
     assert outcome["folder_removed"] is False
 
 
+def test_archive_file_that_cannot_be_read_keeps_the_staged_copy(db, tmp_path, monkeypatch):
+    """A comparison that could not finish proves nothing, so a read error on
+    the archive side leaves the staged file in place and says why."""
+    payload = b"x" * (staging_recovery.COMPARE_CHUNK_BYTES + 1)
+    vireo_dir, root, staged, archive_file = _staged_with_archive(
+        db, tmp_path, "readerror", staged_bytes=payload,
+    )
+    archive_real = os.path.realpath(archive_file)
+    real_open = open
+
+    class FailsAfterFirstChunk:
+        def __init__(self, handle):
+            self.handle = handle
+            self.reads = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.handle.close()
+
+        def read(self, size):
+            self.reads += 1
+            if self.reads > 1:
+                raise OSError(5, "Input/output error")
+            return self.handle.read(size)
+
+    def open_file(path, *args, **kwargs):
+        handle = real_open(path, *args, **kwargs)
+        if os.path.realpath(path) == archive_real:
+            return FailsAfterFirstChunk(handle)
+        return handle
+
+    monkeypatch.setattr(staging_recovery, "open", open_file, raising=False)
+
+    result = verify_orphaned_staging(db, str(vireo_dir), str(root))
+
+    assert result["verified"] == 0
+    assert result["unreachable"] == 1
+    assert result["can_delete"] is False
+    assert "could not be read" in result["details"][0]["reason"]
+
+    outcome = delete_verified_staging(db, str(vireo_dir), str(root))
+
+    assert staged.read_bytes() == payload
+    assert outcome["deleted"] == 0
+    assert outcome["folder_removed"] is False
+
+
 def test_delete_removes_matching_files_and_keeps_the_rest(db, tmp_path):
     vireo_dir, root, staged, _archive_file = _staged_with_archive(db, tmp_path, "mixed")
     stray = _write(root / "USA" / "notes.txt", b"only copy")
