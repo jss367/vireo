@@ -229,3 +229,11 @@ for (const lateFailure of [false, true]) {
     assert.match(text, /^7 unclassified/);
   });
 }
+
+test('subject counts show boxes to confirm when reported', async () => {
+  const h = countsHarness();
+  const request = h.toggle(true);
+  h.requests[0].resolve({unverified_box: 3, unnamed: 7, stale_mask: 8, stale_score: 9});
+  await request;
+  assert.match(h.result.textContent, /^3 reviewer boxes to confirm · 7 unclassified/);
+});

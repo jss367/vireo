@@ -30,10 +30,11 @@ document.getElementById('subjectCounts')?.addEventListener('toggle', async funct
   if (!result) return;
   result.textContent = 'Checking workspace…';
   try {
-    const counts = /** @type {{unnamed: number, stale_mask: number, stale_score: number, unverified_box: number}} */ (
+    const counts = /** @type {{unnamed: number, stale_mask: number, stale_score: number, unverified_box?: number}} */ (
       await safeFetch('/api/audit/subjects/counts', {}, {toast: false}));
     if (requestId !== subjectCountsRequest) return;
-    result.textContent = counts.unverified_box + ' reviewer boxes to confirm · ' +
+    const boxesToConfirm = counts.unverified_box ?? 0;
+    result.textContent = (boxesToConfirm > 0 ? boxesToConfirm + ' reviewer boxes to confirm · ' : '') +
       counts.unnamed + ' unclassified subjects with whole-frame predictions · ' +
       counts.stale_mask + ' active mask mismatches · ' + counts.stale_score + ' quality score mismatches';
   } catch (error) {
