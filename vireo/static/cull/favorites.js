@@ -21,16 +21,32 @@ function hasCullFilters() {
     !!/** @type {HTMLInputElement} */ (document.getElementById('cullDateTo')).value;
 }
 
+// Reuse the first spelling in this result set, keeping any active selection
+// recognizable when a filtered analysis returns only a different spelling.
+/** @returns {Map<string, string>} */
+function cullSpeciesDisplayNames() {
+  var names = new Map();
+  cullSelectedSpecies.forEach(function(name) { names.set(name.toLowerCase(), name); });
+  return names;
+}
+
 /**
  * Every species a photo is listed under: its own (confirmed, else each
  * subject's top prediction), else its encounter's.
  *
  * @param {CullSourcePhoto} photo @param {CullEncounter | null} [encounter] @param {Record<number, CullSourcePhoto>} [photoMap]
+ * @param {Map<string, string>} [displayNames]
  * @returns {string[]}
  */
-function cullPhotoSpecies(photo, encounter, photoMap) {
+function cullPhotoSpecies(photo, encounter, photoMap, displayNames = new Map()) {
   var names = speciesListForPhoto(photo);
-  return names.length ? names : speciesListForEncounter(encounter || {}, photoMap || {});
+  if (!names.length) names = speciesListForEncounter(encounter || {}, photoMap || {});
+  return Array.from(new Set(names.map(function(name) {
+    var key = name.toLowerCase();
+    var display = displayNames.get(key) || name;
+    displayNames.set(key, display);
+    return display;
+  })));
 }
 
 /** @param {CullSourcePhoto} photo */
@@ -61,6 +77,7 @@ function cullSourcePhotos() {
   /** @type {Record<number, CullSourcePhoto>} */
   var map = {};
   (results.photos || []).forEach(function(p) { map[p.id] = p; });
+  var displayNames = cullSpeciesDisplayNames();
   var seen = new Set();
   /** @type {{photo: CullSourcePhoto, species: string[]}[]} */
   var photos = [];
@@ -69,7 +86,7 @@ function cullSourcePhotos() {
       var photo = map[id];
       if (!photo || seen.has(id)) return;
       seen.add(id);
-      photos.push({photo: photo, species: cullPhotoSpecies(photo, enc, map)});
+      photos.push({photo: photo, species: cullPhotoSpecies(photo, enc, map, displayNames)});
     });
   });
   return photos;

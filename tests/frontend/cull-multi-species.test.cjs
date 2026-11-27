@@ -10,7 +10,7 @@ const vm = require('node:vm');
 const CULL = path.join(__dirname, '../../vireo/static/cull');
 const FILES = ['state', 'decisions', 'keepers', 'data', 'focus', 'actions', 'favorites'];
 
-function page() {
+function page({renderSpecies = false} = {}) {
   const nodes = new Map();
   const node = id => {
     if (!nodes.has(id)) nodes.set(id, {id, value: '', textContent: '', innerHTML: '', style: {}, disabled: false});
@@ -32,7 +32,8 @@ function page() {
     vm.runInContext(readFileSync(path.join(CULL, file + '.js'), 'utf8'), ctx, {filename: file + '.js'});
   }
   // Rendering is covered by the browser tests; these cover the data.
-  vm.runInContext('renderCulling = function() {}; renderCullSpeciesOptions = function() {};', ctx);
+  vm.runInContext('renderCulling = function() {};', ctx);
+  if (!renderSpecies) ctx.renderCullSpeciesOptions = () => {};
   return {ctx, node, posted};
 }
 
@@ -176,6 +177,38 @@ test('the species filter keeps a two-species photo under the chosen species only
   const both = ctx.pipelineToCullData(ctx.cullSourceResults);
   assert.deepEqual(plain(both.species_groups.map(sg => [sg.species, sg.photo_count])), [['Wood Duck', 2], ['Mallard', 1]]);
   assert.equal(both.total_photos, 2);
+});
+
+test('case variants share a dropdown count, filter and group across encounters', () => {
+  const {ctx, node} = page({renderSpecies: true});
+  const options = [];
+  Object.assign(node('cullSpeciesOptions'), {
+    childNodes: options,
+    replaceChildren() { options.length = 0; },
+    appendChild(label) { options.push(label); },
+  });
+  ctx.document.createElement = () => ({
+    append(checkbox, text) { Object.assign(this, {checkbox, text}); },
+    addEventListener(event, callback) { this[event] = callback; },
+  });
+  ctx.document.createTextNode = text => text;
+  const source = results([
+    photo(1, {confirmed_species_list: ['Great blue heron', 'Great Blue Heron']}),
+    photo(2, {species_top5: [['Great Blue Heron', 0.9]]}),
+    photo(3, {confirmed_species: 'Mallard'}),
+  ]);
+  source.encounters = [{photo_ids: [1]}, {photo_ids: [2, 3]}];
+  ctx.cullSourceResults = source;
+  ctx.renderCullSpeciesOptions();
+  assert.deepEqual(options.map(o => o.text), ['Great blue heron (2)', 'Mallard (1)']);
+  ctx.onCullScopeChange = () => {};
+  options[0].checkbox.checked = true;
+  options[0].checkbox.change();
+  assert.deepEqual(plain(ctx.cullScopePhotoIds()), [1, 2]);
+  const data = ctx.pipelineToCullData(source);
+  assert.deepEqual(plain(data.species_groups.map(g => [g.species, g.photo_count])), [['Great blue heron', 2]]);
+  assert.equal(data.multi_species_photos, 0);
+  assert.equal(ctx.pipelineToCullData(results([source.photos[1]])).total_photos, 1);
 });
 
 test('Apply sends a two-species photo once', async () => {

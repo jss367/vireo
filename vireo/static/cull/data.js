@@ -101,14 +101,15 @@ function cullPhotoTallies(speciesGroups) {
  *
  * @param {CullEncounter} enc @param {number[]} encIds @param {Record<number, CullSourcePhoto>} photoMap
  * @param {Record<number, string[]>} speciesById
+ * @param {Map<string, string>} displayNames
  * @returns {Record<string, number[]>}
  */
-function cullEncounterBySpecies(enc, encIds, photoMap, speciesById) {
+function cullEncounterBySpecies(enc, encIds, photoMap, speciesById, displayNames) {
   /** @type {Record<string, number[]>} */
   var bySpecies = Object.create(null);
   encIds.forEach(function(pid) {
     var p = /** @type {CullSourcePhoto} */ (photoMap[pid]);
-    var species = speciesById[pid] = cullPhotoSpecies(p, enc, photoMap);
+    var species = speciesById[pid] = cullPhotoSpecies(p, enc, photoMap, displayNames);
     species.forEach(function(name) {
       if (!cullPhotoMatches(p, [name])) return;
       (bySpecies[name] || (bySpecies[name] = [])).push(pid);
@@ -130,6 +131,7 @@ function pipelineToCullData(results) {
   var counted = new Set();
   /** @type {Record<number, string[]>} */
   var speciesById = {};
+  var displayNames = cullSpeciesDisplayNames();
 
   results.encounters.forEach(function(enc, ei) {
     var encIds = (enc.photo_ids || []).filter(function(pid) {
@@ -137,7 +139,7 @@ function pipelineToCullData(results) {
     });
     if (!encIds.length) return;
 
-    var bySpecies = cullEncounterBySpecies(enc, encIds, photoMap, speciesById);
+    var bySpecies = cullEncounterBySpecies(enc, encIds, photoMap, speciesById, displayNames);
     Object.keys(bySpecies).forEach(function(species) {
       var sg = speciesMap[species] || (speciesMap[species] = /** @type {CullSpeciesGroup} */ ({
         species: species,
