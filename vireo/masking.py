@@ -474,10 +474,11 @@ def require_aligned_detector_prompt(image, detector_runtime, *, detector_model=N
     from computation_cache import megadetector_runtime_fingerprint
     from decoded_frame import DecodedFrame
     from detection_id import ALIGNED_REVIEWER_RUNTIME, prompt_frame_id
+    from frame_identity import frame_matches
 
     frame_id = prompt_frame_id(detector_runtime)
     if frame_id is not None:
-        if frame_id == getattr(image, "info", {}).get("vireo_subject_frame_id"):
+        if frame_matches(frame_id, getattr(image, "info", {})):
             return
         raise PromptFrameError("Original reviewer/detector frame changed or is unavailable; re-detect or confirm the reviewer box on the original.")
     if detector_model == "full-image":

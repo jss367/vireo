@@ -13,6 +13,7 @@ from flask import (
     Response,
     request,
 )
+from frame_identity import frame_matches
 from services import detection_store
 from web.media_common import _comparison_media_subject, _focus_source_image
 from web.media_masks import _read_mask_bytes
@@ -188,7 +189,7 @@ def _validated_focus_source(
         try:
             _, analysis = _comparison_media_subject(db, photo, args, effective)
             frame_id = analysis["features"]["analysis"].get("frame_id")
-            if frame_id and img.info.get("vireo_subject_frame_id") != frame_id:
+            if frame_id and not frame_matches(frame_id, img.info):
                 raise ValueError("Subject analysis uses a different frame. Inspect the original or analyze the subject again.")
         except ValueError:
             img.close()
@@ -295,7 +296,7 @@ def _head_response(config: AppConfig, db: Database, photo: JsonDict, effective: 
         latest, latest_key, _ = _head_selection(db, dict(current), db.get_effective_config(cfg.load()))
         if latest != detection or latest_key != key:
             raise ValueError("Selected subject changed while decoding; refresh the inspection")
-        bound = aligned and img.info.get("vireo_subject_frame_id") == frame
+        bound = aligned and frame_matches(frame, img.info)
         if aligned and not bound:
             raise ValueError("Source rendition differs from the subject analysis; place a manual center")
         center, used = head_focus_point(features, detection, img.size, size) if bound else (None, "subject")

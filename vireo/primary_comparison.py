@@ -82,10 +82,11 @@ def primary_owner(row, candidates):
 
 
 def _load_primary_mask(row, inputs, path, masks_dir):
-    from image_loader import aligned_source_state, source_generation
+    from frame_identity import generation_matches
+    from image_loader import aligned_source_state
 
     try:
-        if inputs["source_generation"] != source_generation(aligned_source_state(path)):
+        if not generation_matches(inputs["source_generation"], aligned_source_state(path)):
             return None, "source_changed", "The original has changed since primary analysis. Analyze this selection."
         mask_path = Path(row["path"]).resolve()
         if not masks_dir or not mask_path.is_relative_to(masks_dir):
