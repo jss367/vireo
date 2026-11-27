@@ -23,7 +23,7 @@ function harness() {
   for (const name of ['state', 'format', 'lineage', 'job-card', 'list']) {
     vm.runInContext(moduleAsScript(readFileSync(`vireo/static/jobs/${name}.js`, 'utf8')), context);
   }
-  for (const name of ['bpActiveProgress', 'bpProgressPct', 'isWaitingJob', 'renderJobList']) {
+  for (const name of ['bpActiveProgress', 'bpProgressPct', 'bpCountText', 'isWaitingJob', 'renderJobList']) {
     vm.runInContext(functionSource('vireo/static/navbar-shared-helpers.js', name), context);
   }
   return {context, state: vm.runInContext('state', context)};
@@ -63,4 +63,12 @@ test('cards label user roots and preserve follow-up context and parent links', (
   assert.match(context.renderProvenance(child), /Following your Import/);
   assert.match(context.renderProvenance(child), /data-show-job="import"/);
   assert.doesNotMatch(context.renderListItem(child, 'history', {followUp: true}), /job-origin-chip/);
+});
+
+test('the status panel distinguishes phase counts from overall progress', () => {
+  const {context} = harness();
+  const progress = {current: 16, total: 104, phase_current: 0, phase_total: 20};
+  assert.match(context.renderJobList([row({progress})]), /This phase: 0\/20 \(0%\) · Overall: 16\/104/);
+  delete progress.phase_total;
+  assert.match(context.renderJobList([row({progress})]), /Overall: 16\/104 \(15%\)/);
 });

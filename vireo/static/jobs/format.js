@@ -35,7 +35,7 @@
     return {
       current: progress.phase_current,
       total: progress.phase_total || 0,
-      label: progress.phase_label || progress.phase || 'Current phase',
+      label: progress.phase_label ? 'This phase (' + progress.phase_label + ')' : 'This phase',
       phase: true,
     };
   }

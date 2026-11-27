@@ -564,7 +564,7 @@ class JobHistory:
     # Reads
     # ------------------------------------------------------------------
 
-    def get_history(self, db, limit=10, origin=None, *, job_id=None):
+    def get_history(self, db, limit=10, origin=None, *, job_id=None, hide_routine=False):
         """Get recent job history from the database.
 
         Only TERMINAL rows (completed/failed/cancelled) are returned —
@@ -584,7 +584,7 @@ class JobHistory:
         """
         try:
             ws_id = db.active_workspace_id
-            rows = db.job_history.terminal(ws_id, TERMINAL_STATUSES, limit, origin, job_id=job_id)
+            rows = db.job_history.terminal(ws_id, TERMINAL_STATUSES, limit, origin, job_id=job_id, hide_routine=hide_routine)
             result = []
             for r in rows:
                 d = dict(r)

@@ -32,6 +32,10 @@ export function selectedOriginFilter() {
   return jobsElement('filterOrigin', HTMLSelectElement).value;
 }
 
+export function includeRoutineHistory() {
+  return jobsElement('includeRoutine', HTMLInputElement).checked;
+}
+
 // Refetch history for the new "Started by" choice, then re-render.
 export function applyOriginFilter() {
   applyFilters();
@@ -84,7 +88,7 @@ export function updateList() {
     // Never an empty History section that reads as "no jobs have run".
     html += '<div style="padding:12px 16px;color:var(--text-ghost);font-size:13px;">Job history could not be loaded.</div>';
   } else if (filtered.length === 0 && running.length === 0) {
-    var emptyMessage = 'No jobs yet';
+    var emptyMessage = 'No jobs match the current history filters.';
     if (!state.jobsPollState.active.loaded || !state.jobsPollState.history.loaded) {
       emptyMessage = state.jobsPollState.active.error || state.jobsPollState.history.error
         ? 'Some job lists could not be loaded.' : 'Loading jobs…';
@@ -112,7 +116,7 @@ export function renderListItem(j, source, options) {
   if (isLiveStatus(j.status) && j.progress && j.progress.phase) {
     detail = escapeHtml(j.progress.phase);
     if (visibleProgress && visibleProgress.phase) {
-      detail += ' ' + visibleProgress.current.toLocaleString() + '/' + visibleProgress.total.toLocaleString();
+      detail += ' · This phase: ' + visibleProgress.current.toLocaleString() + '/' + visibleProgress.total.toLocaleString();
     }
   } else if (j.summary) {
     detail = escapeHtml(j.summary);

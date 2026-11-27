@@ -68,7 +68,7 @@ class JobHistoryRepository:
 
     def terminal(
         self, workspace_id: int | None, statuses: Sequence[str], limit: int,
-        origin: str | None = None, *, job_id: str | None = None,
+        origin: str | None = None, *, job_id: str | None = None, hide_routine: bool = False,
     ) -> list[sqlite3.Row]:
         """Up to ``limit`` newest-first rows in ``statuses``.
 
@@ -92,6 +92,13 @@ class JobHistoryRepository:
         if job_id is not None:
             clauses.append("id = ?")
             params.append(job_id)
+        if hide_routine:
+            # Older rows can have missing or malformed results. Only a worker's
+            # explicit boolean noop identifies a check with nothing to report.
+            clauses.append(
+                "NOT (origin IS 'system' AND status = 'completed' AND COALESCE(error_count, 0) = 0 "
+                "AND CASE WHEN json_valid(result) THEN json_type(result, '$.noop') END IS 'true')"
+            )
         if origin is not None:
             clauses.append("origin = ?")
             params.append(origin)

@@ -54,11 +54,11 @@ function stepProgressHtml(step) {
   if (step.progress && (step.progress.current || 0) > 0) {
     if ((step.progress.total || 0) > 0) {
       var pct = Math.round(((step.progress.current || 0) / (step.progress.total || 1)) * 100);
-      html += '<span class="tree-step-progress-text">' + (step.progress.current || 0).toLocaleString() + ' / ' + (step.progress.total || 0).toLocaleString() + '</span>';
+      html += '<span class="tree-step-progress-text">This phase: ' + (step.progress.current || 0).toLocaleString() + ' / ' + (step.progress.total || 0).toLocaleString() + '</span>';
       html += '<div class="tree-step-bar"><div class="tree-step-bar-fill" style="width:' + pct + '%"></div></div>';
       html += '<span class="tree-step-progress-text">' + pct + '%</span>';
     } else {
-      html += '<span class="tree-step-progress-text">' + (step.progress.current || 0).toLocaleString() + ' / ?</span>';
+      html += '<span class="tree-step-progress-text">This phase: ' + (step.progress.current || 0).toLocaleString() + ' / ?</span>';
       html += '<div class="tree-step-bar"><div class="tree-step-bar-fill indeterminate"></div></div>';
     }
   }

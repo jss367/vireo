@@ -884,7 +884,30 @@ def test_label_preparation_shows_progress_and_one_estimate(live_server, page):
     step = page.locator('[data-step-id="model_loader"]')
     expect(step).to_be_visible()
     expect(step.locator('.tree-step-current-file')).to_have_text(job["steps"][0]["current_file"])
-    expect(step.locator('.tree-step-progress-text').first).to_have_text('100 / 1,419')
+    expect(step.locator('.tree-step-progress-text').first).to_have_text('This phase: 100 / 1,419')
+    expect(page.locator('.job-detail-meta')).to_contain_text('Overall: 16 / 104')
+    expect(page.locator('.job-detail-meta')).to_contain_text('This phase (Species labels): 7%')
     # The browser must not invent a second estimate from total elapsed time,
     # which includes cached labels and time spent paused.
     expect(step.locator('.tree-step-throughput')).to_have_count(0)
+
+
+def test_routine_maintenance_history_toggle(live_server, page):
+    db = live_server["db"]
+    db.conn.executemany(
+        "INSERT INTO job_history (id, type, status, origin, started_at, result) "
+        "VALUES (?, 'retained-cache-maintenance', 'completed', 'system', '2026-08-18', ?)",
+        [("routine-check", '{"noop":true}'), ("cache-changed", '{"noop":false}')],
+    )
+    db.conn.commit()
+    page.goto(f"{live_server['url']}/jobs")
+    routine = page.locator('[data-job-id="routine-check"]')
+    changed = page.locator('[data-job-id="cache-changed"]')
+    toggle = page.get_by_label("Include routine maintenance in history")
+    expect(changed).to_be_visible()
+    expect(routine).to_have_count(0)
+    toggle.check()
+    expect(routine).to_be_visible()
+    toggle.uncheck()
+    expect(routine).to_have_count(0)
+    expect(changed).to_be_visible()
