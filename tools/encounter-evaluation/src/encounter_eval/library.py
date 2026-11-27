@@ -217,11 +217,25 @@ class FeatureReader:
         """``db.model_runs`` as the current loader reads it.
 
         The loader asks ``db.model_runs.get_detector_run_photo_ids(...)``; the
-        reader answers that one read itself. ``get_detector_run_photo_ids``
+        reader answers that read itself. ``get_detector_run_photo_ids``
         stays callable on the reader directly for historical loaders, which
-        called the old ``Database`` wrapper of that name.
+        called the old ``Database`` wrapper of that name. The loader's
+        ``pinned_detector_photo_ids`` read goes to the real repository.
         """
         return self
+
+    def pinned_detector_photo_ids(self, photo_ids, detector_model):
+        """Photos whose detector output a reviewer accepted or rejected.
+
+        The production query, so a session's analysis readiness matches the
+        app's. It reads that a review exists, never the species it names.
+        """
+        from repositories.model_runs import ModelRunsRepository
+        from repositories.prediction_review import AUTO_MATCH_REVIEW_MARKER
+
+        return ModelRunsRepository(
+            self.conn, auto_match_review_marker=AUTO_MATCH_REVIEW_MARKER,
+        ).pinned_detector_photo_ids(photo_ids, detector_model)
 
     @property
     def taxa(self):

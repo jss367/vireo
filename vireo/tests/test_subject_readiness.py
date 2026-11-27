@@ -1,5 +1,6 @@
 """Missing analysis must stay REVIEW through final selection and serialization."""
 
+import json
 from copy import deepcopy
 
 import pytest
@@ -256,6 +257,69 @@ def test_loader_checks_current_mask_inputs_and_settings(db, readiness_photo, cha
         assert photo["analysis_reasons"] == (["detection_stale"] if changed == "source" else
                                              ["no_qualifying_subject"] if changed == "threshold" else
                                              ["segmentation_stale"])
+
+
+_AF_AREA = json.dumps({"MakerNotes": {
+    "AFCoordinatesAvailable": 1, "AFImageWidth": 1000, "AFImageHeight": 1000,
+    "AFAreaXPosition": 300, "AFAreaYPosition": 300, "AFAreaWidth": 60, "AFAreaHeight": 60,
+}})
+
+
+@pytest.mark.parametrize("case,reasons", [
+    ("unreviewed", ["detection_stale"]),
+    ("accepted", []),
+    ("rejected", []),
+    ("auto_match", ["detection_stale"]),
+    ("accepted_then_file_changed", ["detection_stale"]),
+])
+def test_reviewed_run_made_without_the_focus_area_is_current(db, readiness_photo, case, reasons):
+    """Detection keeps a reviewed run until Re-classify, so readiness must not wait for a newer one."""
+    from cache_identity import detector_input
+    from db import AUTO_MATCH_REVIEW_MARKER
+    from services import review_decisions
+
+    pid, _, _ = readiness_photo
+    _seed_detection_and_mask(db, readiness_photo)
+    source = "a" * 64
+    db.conn.execute("UPDATE photos SET file_hash=?, exif_data=? WHERE id=?", (source, _AF_AREA, pid))
+    db.model_runs.record_detector_run(pid, "megadetector-v6", 1, "r", detector_input(source, None)[1])
+    db.commit()
+    if case != "unreviewed":
+        detection_id = db.conn.execute(
+            "SELECT id FROM detections WHERE photo_id=?", (pid,)).fetchone()["id"]
+        db.predictions.add(detection_id, species="Black Phoebe", confidence=.9, model="m",
+                           labels_fingerprint="f")
+        db.commit()
+        prediction_id = db.conn.execute(
+            "SELECT id FROM predictions WHERE detection_id=?", (detection_id,)).fetchone()["id"]
+        review_decisions.set_review_status(
+            db, prediction_id, db._ws_id(), "rejected" if case == "rejected" else "accepted",
+            individual=AUTO_MATCH_REVIEW_MARKER if case == "auto_match" else None)
+        db.commit()
+    if case == "accepted_then_file_changed":
+        db.conn.execute("UPDATE photos SET file_hash=? WHERE id=?", ("b" * 64, pid))
+        db.commit()
+
+    photo = _loaded_photo(db, pid)
+    run_triage([{"photos": [photo]}])
+
+    assert photo["analysis_reasons"] == reasons
+    assert photo["analysis_status"] == ("incomplete" if reasons else "complete")
+
+
+def test_detector_run_is_current_needs_the_focus_area_unless_reviewed():
+    from cache_identity import detector_input, detector_run_is_current
+
+    source, area = "a" * 64, json.dumps([.3, .3, .06, .06])
+    plain = detector_input(source, None)[1]
+    focused = detector_input(source, json.loads(area))[1]
+
+    assert detector_run_is_current(focused, source, "megadetector-v6", area)
+    assert detector_run_is_current(plain, source, "megadetector-v6", None)
+    assert not detector_run_is_current(plain, source, "megadetector-v6", area)
+    assert detector_run_is_current(plain, source, "megadetector-v6", area, reviewed=True)
+    assert not detector_run_is_current(plain, "b" * 64, "megadetector-v6", area, reviewed=True)
+    assert not detector_run_is_current("c" * 64, source, "megadetector-v6", area, reviewed=True)
 
 
 def test_readiness_and_review_reason_survive_serialization(db, readiness_photo):

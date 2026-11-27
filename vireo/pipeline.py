@@ -292,6 +292,16 @@ def _resolve_feature_scope(db, collection_id, photo_ids):
     return scoped_photo_ids
 
 
+def _stamped_without_focus_area(run):
+    """Whether a detector run row is stamped on the photo's source without its focus area."""
+    from cache_identity import detector_input, is_sha256
+
+    if not run or not run.get("focus_area") or run.get("companion_path"):
+        return False
+    source_hash = run.get("file_hash")
+    return is_sha256(source_hash) and run.get("input_fingerprint") == detector_input(source_hash, None)[1]
+
+
 class _FeatureLoad:
     """Run-wide state for one ``load_photo_features`` call.
 
@@ -568,6 +578,13 @@ class _FeatureLoad:
         self.analysis_rows = defaultdict(dict)
         for row in self.db.pipeline_features.analysis_provenance_rows(self.ws_id, scoped=self.scoped):
             self.analysis_rows[row["id"]][row["run_model"]] = dict(row)
+        # Only a run stamped without the focus area can be current through its
+        # review, so only those photos are looked up.
+        self.reviewed_run_ids = self.db.model_runs.pinned_detector_photo_ids(
+            [pid for pid, rows in self.analysis_rows.items()
+             if _stamped_without_focus_area(rows.get("megadetector-v6"))],
+            "megadetector-v6",
+        )
 
     def _analysis_provenance(self, row):
         """Build evidence, without inventing failure or no-subject verdicts."""
@@ -582,14 +599,15 @@ class _FeatureLoad:
         has_run = model in rows
         detection = {"status": "complete" if has_run or primary else "not_run"}
         if has_run and evidence.get("input_fingerprint"):
-            from cache_identity import catalog_detector_input
+            from cache_identity import detector_run_is_current
             source_hash = evidence.get("file_hash")
             if (isinstance(source_hash, str) and len(source_hash) == 64
                     and all(c in "0123456789abcdef" for c in source_hash)
                     and not evidence.get("companion_path")):
-                detection["current"] = evidence["input_fingerprint"] == catalog_detector_input(
-                    source_hash, model, evidence.get("focus_area"),
-                )[1]
+                detection["current"] = detector_run_is_current(
+                    evidence["input_fingerprint"], source_hash, model, evidence.get("focus_area"),
+                    reviewed=model == "megadetector-v6" and pid in self.reviewed_run_ids,
+                )
             else:
                 # A stamped run whose current input cannot be verified is
                 # unavailable for automatic decisions, not a negative verdict.

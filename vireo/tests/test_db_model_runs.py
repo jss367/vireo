@@ -172,6 +172,22 @@ def test_detector_run_is_pinned_only_by_real_manual_reviews(db):
     assert db.model_runs.detector_run_is_pinned(pid, "megadetector-v6") is True
 
 
+def test_pinned_detector_photo_ids_answers_for_many_photos_per_model(db):
+    fid = _folder(db)
+    reviewed = _photo(db, "reviewed.jpg", fid)
+    auto = _photo(db, "auto.jpg", fid)
+    unreviewed = _photo(db, "unreviewed.jpg", fid)
+    _review(db, _pred(db, _det(db, reviewed, "megadetector-v6"), "fp-a"), "accepted")
+    _review(db, _pred(db, _det(db, auto, "megadetector-v6"), "fp-a"), "accepted",
+            individual=AUTO_MATCH_REVIEW_MARKER)
+    _pred(db, _det(db, unreviewed, "megadetector-v6"), "fp-a")
+
+    photos = [reviewed, auto, unreviewed, reviewed]
+    assert db.model_runs.pinned_detector_photo_ids(photos, "megadetector-v6") == {reviewed}
+    assert db.model_runs.pinned_detector_photo_ids(photos, "megadetector-v5") == set()
+    assert db.model_runs.pinned_detector_photo_ids([], "megadetector-v6") == set()
+
+
 def test_get_detector_run_photo_ids_excludes_torn_runs(db):
     fid = _folder(db)
     empty = _photo(db, "empty.jpg", fid)
