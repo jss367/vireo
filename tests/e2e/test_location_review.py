@@ -2099,12 +2099,12 @@ def test_location_review_keeps_its_height_when_a_notice_appears(live_server, pag
     navbar_bottom = page.evaluate("document.querySelector('.navbar').getBoundingClientRect().bottom")
     assert top_before == navbar_bottom
     page.wait_for_function("!_newImagesInFlight")
-    expect(page.locator("#notificationBadge")).to_have_text("0")
+    expect(page.locator("#notificationBadge")).to_be_hidden()
 
     new_images["new_count"] = 7
     page.evaluate("checkNewImages()")
     expect(page.locator("#newImagesMsg")).to_contain_text("7 new images")
-    expect(page.locator("#notificationBadge")).to_have_text("1")
+    expect(page.locator("#notificationBadge")).to_be_visible()
 
     positions = page.evaluate(
         """() => ({

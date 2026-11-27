@@ -2173,6 +2173,7 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 /* Notification history and transient feedback share semantic colors. */
 .notification-toggle { position: relative; background: none; border: 0; color: inherit; }
 #notificationBadge { font-size: 10px; font-weight: 600; background: var(--accent); color: var(--accent-text); border-radius: 8px; padding: 1px 5px; margin-left: 2px; }
+#notificationBadge:empty:not([hidden]) { display: inline-block; width: 7px; height: 7px; padding: 0; vertical-align: super; }
 #notificationBadge[data-level="warning"] { background: var(--warning); color: var(--warning-text); }
 .notification-history { position: fixed; top: 52px; right: 12px; z-index: 100001; width: min(460px, calc(100vw - 24px)); max-height: calc(100vh - 72px); overflow: auto; box-sizing: border-box; padding: 16px; background: var(--bg-panel); color: var(--text-primary); border: 1px solid var(--border-primary); border-radius: 8px; box-shadow: 0 4px 24px #0005; }
 .notification-history[hidden] { display: none; }

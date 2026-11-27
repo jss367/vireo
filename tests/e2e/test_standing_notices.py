@@ -1,5 +1,5 @@
 """Standing notices sit behind the navbar's bell instead of in rows above the
-page: the bell counts them, and the panel lists them with their actions."""
+page: the bell signals them, and the panel lists them with their actions."""
 
 import pytest
 from playwright.sync_api import expect
@@ -31,7 +31,7 @@ def test_sync_start_error_is_visible_with_the_notice_panel_closed(live_server, p
         status=503, json={"error": "Synthetic sync unavailable"},
     ))
     page.goto(f"{live_server['url']}/browse")
-    expect(page.locator("#notificationBadge")).to_have_text("1")
+    expect(page.locator("#notificationBadge")).to_be_visible()
     expect(page.locator("#notificationHistory")).to_be_hidden()
     page.evaluate("void runSync()")
     expect(page.locator("#syncStatus")).to_contain_text("Synthetic sync unavailable")
@@ -74,7 +74,7 @@ def test_pending_import_keeps_its_progress_visible(live_server, page):
             route.abort()
 
 
-def test_notices_are_counted_on_the_bell_and_take_no_row_above_the_photos(live_server, page):
+def test_notices_mark_the_bell_and_take_no_row_above_the_photos(live_server, page):
     page.goto(f"{live_server['url']}/browse")
     first_card = page.locator(".grid-card").first
     first_card.wait_for(state="visible")
@@ -84,7 +84,8 @@ def test_notices_are_counted_on_the_bell_and_take_no_row_above_the_photos(live_s
     page.route("**/api/duplicates/disk-cleanup-summary", _duplicate_copies)
     page.goto(f"{live_server['url']}/browse")
     badge = page.locator("#notificationBadge")
-    expect(badge).to_have_text("2")
+    expect(badge).to_be_visible()
+    expect(badge).to_be_empty()
     first_card.wait_for(state="visible")
     assert first_card.bounding_box()["y"] == top_without_notices
 
@@ -104,14 +105,16 @@ def test_notices_are_counted_on_the_bell_and_take_no_row_above_the_photos(live_s
 
     page.locator("#dupCleanupBanner .banner-dismiss").click()
     expect(page.locator("#dupCleanupBanner")).to_be_hidden()
-    expect(badge).to_have_text("1")
+    expect(badge).to_be_visible()
+    expect(badge).to_be_empty()
     expect(page.locator("#notificationHistory")).to_be_visible()
 
     # An action that opens a dialog gets out of the dialog's way.
     page.locator("#syncBannerReviewButton").click()
     expect(page.locator("#syncPreviewOverlay")).to_be_visible()
     expect(page.locator("#notificationHistory")).to_be_hidden()
-    expect(badge).to_have_text("1")
+    expect(badge).to_be_visible()
+    expect(badge).to_be_empty()
 
 
 # A desktop shell with a downloaded update: update_status reports its version,
@@ -137,7 +140,7 @@ def test_a_downloaded_update_waits_under_the_bell(live_server, page):
     page.add_init_script(_FAKE_SHELL_WITH_READY_UPDATE)
     page.goto(f"{live_server['url']}/browse")
     page.locator(".grid-card").first.wait_for(state="visible")
-    expect(page.locator("#notificationBadge")).to_have_text("1")
+    expect(page.locator("#notificationBadge")).to_be_visible()
     open_notices(page)
     notice = page.locator("#updateReadyNotice")
     expect(notice).to_contain_text("Vireo v0.99.0 has been downloaded.")

@@ -161,21 +161,26 @@ test('notification text is rendered as text and stored details survive page relo
   assert.equal(row.children[2].children[1].textContent, '<script>bad</script>');
 });
 
-test('standing notices count on the bell until they clear, whatever the history says', () => {
-  const h = ui();
+test('loading standing notices leaves the unread badge count stable', () => {
+  const disk = storage();
+  const h = ui(disk);
   h.context.setStandingNotices({count: 2, urgent: false, summary: 'Two things'});
-  assert.equal(h.elements.notificationBadge.textContent, '2');
+  assert.equal(h.elements.notificationBadge.textContent, '');
   assert.equal(h.elements.notificationBadge.hidden, false);
   assert.equal(h.elements.notificationBadge.dataset.level, 'notice');
   assert.equal(h.elements.notificationsToggle.attributes['aria-label'], 'Notifications, 2 need attention');
   assert.equal(h.elements.notificationsToggle.title, 'Two things');
   h.context.showToast('Disk full', 'error');
-  assert.equal(h.elements.notificationBadge.textContent, '3');
+  assert.equal(h.elements.notificationBadge.textContent, '1');
   assert.equal(h.elements.notificationBadge.dataset.level, 'warning');
+  const nextPage = ui(disk);
+  assert.equal(nextPage.elements.notificationBadge.textContent, '1');
+  nextPage.context.setStandingNotices({count: 4, urgent: true, summary: 'More notices loaded'});
+  assert.equal(nextPage.elements.notificationBadge.textContent, '1');
   // Reading or clearing history answers the toast, not the standing conditions.
   h.elements.notificationReadAll.click();
   h.elements.notificationClear.click();
-  assert.equal(h.elements.notificationBadge.textContent, '2');
+  assert.equal(h.elements.notificationBadge.textContent, '');
   h.context.setStandingNotices({count: 1, urgent: true, summary: 'Folder missing'});
   assert.equal(h.elements.notificationBadge.dataset.level, 'warning');
   assert.equal(h.elements.notificationsToggle.attributes['aria-label'], 'Notifications, 1 needs attention');

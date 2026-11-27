@@ -77,7 +77,7 @@ function listPosition(/** @type {number} */ photoId) {
   return { position: idx + 1, total: lbState.photoList.length };
 }
 
-function renderCounter(/** @type {number} */ photoId, /** @type {string} */ filename) {
+function renderCounter(/** @type {number} */ photoId) {
   var counter = document.getElementById('lightboxCounter');
   if (!counter) return false;
   // Resolve the whole-result position before deciding visibility: a loaded
@@ -86,19 +86,12 @@ function renderCounter(/** @type {number} */ photoId, /** @type {string} */ file
   // so.
   var place = listPosition(photoId);
   if (place.total > 1) {
-    counter.textContent = place.position.toLocaleString() + ' / ' + place.total.toLocaleString()
-      + (filename ? ' · ' + filename : '');
-    counter.title = filename;
+    counter.textContent = place.position.toLocaleString() + ' / ' + place.total.toLocaleString();
     counter.style.display = '';
   } else {
-    counter.title = '';
     counter.style.display = 'none';
   }
   return true;
-}
-
-function renderPhotoCounter(/** @type {LightboxOpenContext} */ open) {
-  return renderCounter(open.photoId, open.filename || (open.listed && open.listed.filename) || '');
 }
 
 // Redraw the counter for the photo on screen after the page's list changed
@@ -110,7 +103,7 @@ export function refreshLightboxCounter() {
   if (visibleId == null) visibleId = vireoLightboxSession.requestedPhotoId();
   var listed = lbState.photoList.find(function(p) { return p.id === visibleId; });
   if (visibleId == null || !listed) return;
-  renderCounter(visibleId, listed.filename || '');
+  renderCounter(visibleId);
 }
 
 // The browser keeps painting the outgoing bitmap while a newly assigned
@@ -119,13 +112,13 @@ export function refreshLightboxCounter() {
 // paint. Internal navigation state still advances immediately, so rapid
 // arrow presses continue to target the right photo.
 export function commitVisiblePhotoIdentity(/** @type {LightboxOpenContext} */ open) {
-  open.label.textContent = open.filename || '';
+  open.label.textContent = open.filename || open.listed?.filename || '';
   _lbRenderKeywords(
     open.detail && open.detail.keywords || open.listed && open.listed.keywords || []
   );
   _lbRenderExposure(open.detail || _lbPhotoDataByPhoto[String(open.photoId)]);
   _lbSetFlagStatus(_lbDisplayedFlagFor(open.photoId));
-  if (!renderPhotoCounter(open)) return;
+  if (!renderCounter(open.photoId)) return;
   if (!open.identityCommitted) {
     open.identityCommitted = true;
     vireoLightboxSession.commit(open.token);
