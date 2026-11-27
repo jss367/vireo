@@ -101,15 +101,15 @@ function cullPhotoTallies(speciesGroups) {
  *
  * @param {CullEncounter} enc @param {number[]} encIds @param {Record<number, CullSourcePhoto>} photoMap
  * @param {Record<number, string[]>} speciesById
- * @param {Map<string, string>} displayNames
+ * @param {CullIdentityIndex} index @param {Map<string, string>} displayNames
  * @returns {Record<string, number[]>}
  */
-function cullEncounterBySpecies(enc, encIds, photoMap, speciesById, displayNames) {
+function cullEncounterBySpecies(enc, encIds, photoMap, speciesById, index, displayNames) {
   /** @type {Record<string, number[]>} */
   var bySpecies = Object.create(null);
   encIds.forEach(function(pid) {
     var p = /** @type {CullSourcePhoto} */ (photoMap[pid]);
-    var species = speciesById[pid] = cullPhotoSpecies(p, enc, photoMap, displayNames);
+    var species = speciesById[pid] = cullPhotoSpecies(p, enc, photoMap, index, displayNames);
     species.forEach(function(name) {
       if (!cullPhotoMatches(p, [name])) return;
       (bySpecies[name] || (bySpecies[name] = [])).push(pid);
@@ -131,7 +131,7 @@ function pipelineToCullData(results) {
   var counted = new Set();
   /** @type {Record<number, string[]>} */
   var speciesById = {};
-  var displayNames = cullSpeciesDisplayNames();
+  var displayNames = new Map(cullSelectedSpecies);
 
   results.encounters.forEach(function(enc, ei) {
     var encIds = (enc.photo_ids || []).filter(function(pid) {
@@ -139,10 +139,10 @@ function pipelineToCullData(results) {
     });
     if (!encIds.length) return;
 
-    var bySpecies = cullEncounterBySpecies(enc, encIds, photoMap, speciesById, displayNames);
+    var bySpecies = cullEncounterBySpecies(enc, encIds, photoMap, speciesById, results.species_identities || {}, displayNames);
     Object.keys(bySpecies).forEach(function(species) {
       var sg = speciesMap[species] || (speciesMap[species] = /** @type {CullSpeciesGroup} */ ({
-        species: species,
+        species_key: species, species: displayNames.get(species) || species,
         photo_count: 0,
         keepers: 0,
         reviews: 0,
@@ -161,7 +161,7 @@ function pipelineToCullData(results) {
         }
         var shown = cullGroupPhoto(p, enc, ei, decision);
         var others = (speciesById[pid] || []).filter(function(name) { return name !== species; });
-        if (others.length) shown.also_species = others;
+        if (others.length) shown.also_species = others.map(function(key) { return displayNames.get(key) || key; });
         return shown;
       });
       addCullSceneGroup(sg, enc, ei, groupPhotos);
