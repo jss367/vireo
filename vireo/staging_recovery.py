@@ -253,9 +253,8 @@ class StagedFile:
     path: str
     rel_path: str
     size: int
-    # (device, inode, size, mtime_ns). A file is compared and deleted only
-    # while it still has this identity.
-    identity: tuple[int, int, int, int]
+    # A file is compared and deleted only while it still has this identity.
+    identity: Identity
 
 
 @dataclass
@@ -270,7 +269,11 @@ class StagingScan:
     directories: list[str] = field(default_factory=list)
 
 
-def _identity(st: os.stat_result) -> tuple[int, int, int, int]:
+# (device, inode, size, mtime_ns) of a file at one moment.
+Identity = tuple[int, int, int, int]
+
+
+def _identity(st: os.stat_result) -> Identity:
     return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
 
 
@@ -373,21 +376,28 @@ def _compare_streams(
 
 def _compare_contents(
     staged: StagedFile, archive_path: str, pause: PauseCallback,
-) -> tuple[str, str | None]:
-    """Compare the staged file with the archive file, byte for byte."""
+) -> tuple[str, str | None, Identity | None]:
+    """Compare the staged file with the archive file, byte for byte.
+
+    The third value is the identity of the archive file that was read, when
+    the two compared equal. The delete checks that the archive path still
+    names that file before it removes the staged copy.
+    """
     try:
         with open(staged.path, "rb") as staged_file:
             if _identity(os.fstat(staged_file.fileno())) != staged.identity:
-                return "unchecked", "staged file changed while it was being checked"
+                return "unchecked", "staged file changed while it was being checked", None
             try:
                 with open(archive_path, "rb") as archive_file:
-                    return _compare_streams(staged_file, archive_file, pause)
+                    compared = _identity(os.fstat(archive_file.fileno()))
+                    status, reason = _compare_streams(staged_file, archive_file, pause)
+                    return status, reason, compared if status == "verified" else None
             except OSError as exc:
                 return "unreachable", (
                     f"archive file could not be read: {archive_path} ({exc})"
-                )
+                ), None
     except OSError as exc:
-        return "unchecked", f"staged file could not be read ({exc})"
+        return "unchecked", f"staged file could not be read ({exc})", None
 
 
 def _archive_copy_status(
@@ -395,30 +405,49 @@ def _archive_copy_status(
     archive_path: str,
     listing_cache: dict[str, set[str] | OSError],
     pause: PauseCallback,
-) -> tuple[str, str | None]:
-    """Whether ``archive_path`` holds a second copy of the staged file."""
+) -> tuple[str, str | None, Identity | None]:
+    """Whether ``archive_path`` holds a second copy of the staged file.
+
+    The third value is the compared archive file's identity when it does.
+    """
     status, reason = _archive_file_status(archive_path, staged.size, listing_cache)
     if status != "present":
-        return status, reason
+        return status, reason, None
     try:
         archive_stat = os.stat(archive_path)
     except OSError as exc:
-        return "unreachable", f"archive file could not be stat'ed: {archive_path} ({exc})"
+        return "unreachable", f"archive file could not be stat'ed: {archive_path} ({exc})", None
     if (archive_stat.st_dev, archive_stat.st_ino) == staged.identity[:2]:
         # A catalog row or a link that leads back into staging names the
         # same file twice; deleting it would delete the only copy.
         return "unaccounted", (
             "the cataloged archive path is this staged file itself, not a second copy"
-        )
+        ), None
     return _compare_contents(staged, archive_path, pause)
 
 
-def _delete_compared_file(staged: StagedFile) -> tuple[str, str | None]:
+def _delete_compared_file(
+    staged: StagedFile, archive_path: str, compared: Identity | None,
+) -> tuple[str, str | None]:
     """Remove a file that has just compared equal to its archive copy.
 
     The file is kept when it no longer has the identity it had when it was
-    listed: the comparison then says nothing about what is on disk now.
+    listed: the comparison then says nothing about what is on disk now. It
+    is also kept when ``archive_path`` no longer names the file that was
+    read (``compared``): a copy replaced or removed during the comparison
+    matched through a handle that the path no longer leads to.
     """
+    try:
+        archive_now = _identity(os.stat(archive_path))
+    except OSError as exc:
+        return "unchecked", (
+            f"the archive copy could not be found again after it was compared "
+            f"({exc}), so this file was kept"
+        )
+    if archive_now != compared:
+        return "unchecked", (
+            "the archive copy changed after it was compared, so this file was kept"
+        )
     try:
         if _identity(os.lstat(staged.path)) != staged.identity:
             return "unchecked", "staged file changed after it was compared, so it was kept"
@@ -483,9 +512,11 @@ class _StagingPass:
         total = len(scan.files)
         for index, staged in enumerate(scan.files, 1):
             self.pause()
-            detail = self._check(staged)
+            detail, compared = self._check(staged)
             if self.delete and detail["status"] == "verified":
-                detail["status"], detail["reason"] = _delete_compared_file(staged)
+                detail["status"], detail["reason"] = _delete_compared_file(
+                    staged, detail["archive_path"], compared,
+                )
             self._record(detail)
             if self.progress:
                 self.progress(index, total, staged.rel_path)
@@ -494,8 +525,12 @@ class _StagingPass:
             self._finish_delete(result, scan)
         return result
 
-    def _check(self, staged: StagedFile) -> dict[str, Any]:
-        """Find the archive copy the catalog names and compare it in full."""
+    def _check(self, staged: StagedFile) -> tuple[dict[str, Any], Identity | None]:
+        """Find the archive copy the catalog names and compare it in full.
+
+        Returns the file's detail and, when a copy matched, the identity of
+        the archive file that was read.
+        """
         detail: dict[str, Any] = {
             "path": staged.path,
             "rel_path": staged.rel_path,
@@ -523,26 +558,26 @@ class _StagingPass:
                 )
                 continue
             archive_path = os.path.join(folder_path, candidate["filename"])
-            status, why = _archive_copy_status(
+            status, why, compared = _archive_copy_status(
                 staged, archive_path, self.listing_cache, self.pause,
             )
             if status == "verified":
                 detail.update(status="verified", reason=None, archive_path=archive_path)
                 dest = _infer_destination(self.entry.source_root, staged.path, folder_path)
                 self.inferred[dest] = self.inferred.get(dest, 0) + 1
-                return detail
+                return detail, compared
             if status == "unchecked":
                 # The staged file itself could not be read, so no other
                 # candidate can be compared with it either.
                 detail.update(status="unchecked", reason=why)
-                return detail
+                return detail, None
             saw_unreachable = saw_unreachable or status == "unreachable"
             reason = why
         if saw_unreachable:
             detail["status"] = "unreachable"
         if reason:
             detail["reason"] = reason
-        return detail
+        return detail, None
 
     def _record(self, detail: dict[str, Any]) -> None:
         status = detail["status"]

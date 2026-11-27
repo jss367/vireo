@@ -286,6 +286,9 @@ def test_archive_file_that_cannot_be_read_keeps_the_staged_copy(db, tmp_path, mo
         def __exit__(self, *exc):
             self.handle.close()
 
+        def fileno(self):
+            return self.handle.fileno()
+
         def read(self, size):
             self.reads += 1
             if self.reads > 1:
@@ -464,6 +467,37 @@ def test_file_that_changes_after_its_comparison_is_kept(db, tmp_path, monkeypatc
     assert "changed after it was compared" in outcome["details"][0]["reason"]
 
 
+@pytest.mark.parametrize("change", ["replaced", "removed"])
+def test_archive_copy_that_changes_after_its_comparison_keeps_the_staged_file(
+    db, tmp_path, monkeypatch, change,
+):
+    """The comparison reads through an open handle. If the archive path stops
+    naming that file before the delete, the match no longer vouches for a
+    copy the user can reach, so the staged file stays."""
+    vireo_dir, root, staged, archive_file = _staged_with_archive(db, tmp_path, change)
+    real_compare = staging_recovery._compare_contents
+
+    def compare_then_change(staged_file, archive_path, pause):
+        verdict = real_compare(staged_file, archive_path, pause)
+        if change == "replaced":
+            fresh = archive_file.with_name("a.nef.new")
+            fresh.write_bytes(b"abc")
+            os.replace(fresh, archive_file)
+        else:
+            archive_file.unlink()
+        return verdict
+
+    monkeypatch.setattr(staging_recovery, "_compare_contents", compare_then_change)
+
+    outcome = delete_verified_staging(db, str(vireo_dir), str(root))
+
+    assert staged.read_bytes() == b"abc"
+    assert outcome["deleted"] == 0
+    assert outcome["unchecked"] == 1
+    assert outcome["folder_removed"] is False
+    assert "so this file was kept" in outcome["details"][0]["reason"]
+
+
 def test_file_that_cannot_be_deleted_fails_the_cleanup(db, tmp_path, monkeypatch):
     vireo_dir, root, staged, _archive_file = _staged_with_archive(db, tmp_path, "stuck")
 
@@ -489,8 +523,8 @@ def test_file_added_during_the_delete_keeps_its_folder(db, tmp_path, monkeypatch
     late = root / "USA" / "late.nef"
     real_delete = staging_recovery._delete_compared_file
 
-    def delete_then_add(staged_file):
-        verdict = real_delete(staged_file)
+    def delete_then_add(*args):
+        verdict = real_delete(*args)
         late.write_bytes(b"arrived late")
         return verdict
 
