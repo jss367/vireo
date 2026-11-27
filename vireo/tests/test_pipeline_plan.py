@@ -3064,6 +3064,25 @@ def test_extract_plan_restores_normal_quality_only_in_selected_scope(tmp_path):
     db.close()
 
 
+@pytest.mark.parametrize("raw_analysis", [True, False])
+def test_scoped_plan_estimates_quality_recompute_without_stage_counts(tmp_path, raw_analysis):
+    from pipeline_plan import PipelinePlanParams, compute_plan
+
+    db, folder_id = _make_db(tmp_path)
+    photo_id, _ = _add_photo_with_detection(db, folder_id, "bird.jpg")
+    if not raw_analysis:
+        db.masks_features.update_pipeline_features(
+            photo_id, PipelineFeatures(quality_input_recipe="linear-raw-subject-v1"),
+        )
+        db.commit()
+    params = PipelinePlanParams(photo_ids=[photo_id], skip_classify=True,
+                                raw_subject_analysis=raw_analysis)
+    plan = compute_plan(db, params, str(tmp_path / "test.db"))
+    assert plan["stages"]["Extract"]["state"] == "will-run"
+    assert plan["time_hint"]
+    db.close()
+
+
 def test_api_pipeline_plan_returns_per_stage_state(app_and_db):
     app, _ = app_and_db
     client = app.test_client()

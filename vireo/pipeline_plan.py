@@ -1808,12 +1808,12 @@ def _process_time_hint(stages, photo_count, params):
 
     # Per-item seconds from docs/investigations/subject-feature-extraction-throughput.md.
     # On a first run, downstream counts are unknown until detection finishes.
-    def pending(stage):
+    def pending(stage, uncounted=0):
         entry = stages[stage]
-        return entry["detail"].get("pending", 0) if entry["state"] == "will-run" else 0
+        return entry.get("detail", {}).get("pending", uncounted) if entry["state"] == "will-run" else 0
 
     classify = stages["Classify"]
-    cold = classify["state"] == "will-run" and classify["detail"].get("total_dets") == 0
+    cold = classify["state"] == "will-run" and classify.get("detail", {}).get("total_dets") == 0
     models = max(1, len(params.model_ids))
     classify_units = photo_count * models if cold else pending("Classify")
     seconds = pending("Previews") * 0.23 + classify_units * 0.65
@@ -1821,11 +1821,12 @@ def _process_time_hint(stages, photo_count, params):
         seconds += photo_count * 0.40
     for stage, rate in (("Extract", 4.53), ("EyeKeypoints", 0.11)):
         if stages[stage]["state"] == "will-run":
-            seconds += (photo_count if cold else pending(stage)) * rate
+            seconds += (photo_count if cold else pending(stage, photo_count)) * rate
     if seconds <= 0:
         return None
 
-    if params.raw_subject_analysis or not _has_process_timing_baseline():
+    quality_recompute = stages["Extract"]["state"] == "will-run" and "detail" not in stages["Extract"]
+    if quality_recompute or params.raw_subject_analysis or not _has_process_timing_baseline():
         return ("Processing this selection may take several hours." if seconds >= 3600
                 else "Processing time depends on this computer and the selected stages.")
     # Round outward. These are planning ranges, not statistical error bars.
