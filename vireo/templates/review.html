@@ -422,7 +422,7 @@
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: 4px 24px;
+    gap: 4px 16px;
     padding: 6px 24px;
     font-size: 13px;
   }
@@ -926,7 +926,7 @@
   {% include '_identity_alternatives.html' %}
   {% include '_review_queue.html' %}
   <details class="evidence-explanation">
-    <summary>Scores are relative shares, not probabilities</summary>
+    <summary>How to read species scores</summary>
     <p>Species scores are softmax shares within each model’s candidate list, not calibrated probabilities of correct identification. Scores from different models or label lists are not directly comparable. Inspect the subject before confirming its name.</p>
   </details>
   <span class="kbd-hint" id="kbdHintReview">Keyboard: A = accept, X = reject prediction, S = skip for now</span>
