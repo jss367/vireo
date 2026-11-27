@@ -312,13 +312,13 @@ def _classify_plan(
     pipeline_cfg=None,
 ):
     if params.skip_classify:
-        return _classify_skip_result("Disabled — stage will be skipped")
+        return _classify_skip_result("Disabled — stage will be skipped"), frozenset()
 
     models = _resolve_models(params.model_ids)
     if not models:
         return _classify_skip_result(
             "No models selected — stage will be skipped",
-        )
+        ), frozenset()
 
     label_resolution = _resolve_labels_for_models(models, params.labels_files, db)
 
@@ -338,22 +338,22 @@ def _classify_plan(
     # mid-pipeline at classify_job._load_labels (which is exactly the
     # fresh-install failure this guards against).
     if plan.unblocked_count == 0:
-        return plan.name_label_read_error(plan.all_models_blocked_result())
+        return plan.name_label_read_error(plan.all_models_blocked_result()), frozenset()
 
     plan.count_stale()
 
     if plan.classifiable_units == 0:
-        return plan.name_redetection(plan.name_label_read_error(plan.no_targets_result()))
+        return plan.with_redetection(plan.name_label_read_error(plan.no_targets_result()))
 
     plan.count_pending()
 
     if plan.blocked:
-        return plan.name_label_read_error(plan.some_models_blocked_result())
+        return plan.name_label_read_error(plan.some_models_blocked_result()), frozenset()
 
     if plan.pending_total == 0:
-        return plan.name_redetection(plan.nothing_pending_result())
+        return plan.with_redetection(plan.nothing_pending_result())
 
-    return plan.name_redetection(plan.will_classify_result())
+    return plan.with_redetection(plan.will_classify_result())
 
 
 def _classify_skip_result(summary):
@@ -418,6 +418,11 @@ class _ClassifyPlan:
             runtime_fingerprint=self.detector_runtime,
         )
         self._count_redetection()
+        # A photo detected again gets new targets, so the ones it has now are
+        # neither work to do nor work done.
+        self.target_ids = self.photo_ids
+        if self.redetect_ids:
+            self.target_ids = [pid for pid in self.scope_ids if pid not in self.redetect_ids]
         self.contextual_weak_ids = set()
         self.weak_detection_confidence = config_value(pipeline_cfg, "weak_detection_confidence", section="pipeline")
         if (
@@ -438,13 +443,13 @@ class _ClassifyPlan:
                 detector_confidence=self.detector_confidence,
                 weak_confidence=self.weak_detection_confidence,
                 max_gap=config_value(pipeline_cfg, "burst_time_gap", section="pipeline"),
-            )
+            ) - self.redetect_ids
 
     def count_targets(self):
         """Count the classifiable units and the runnable models' pairs."""
         db = self.db
         det_counts = stage_counts.count_real_detections_in_scope(
-            db, self.photo_ids, min_conf=self.detector_confidence,
+            db, self.target_ids, min_conf=self.detector_confidence,
         )
         weak_det_counts = stage_counts.count_primary_detections_in_scope(
             db, self.contextual_weak_ids, min_conf=self.weak_detection_confidence,
@@ -462,7 +467,7 @@ class _ClassifyPlan:
         # ignore noise-only photos even though classify_stage sends them
         # through the full-image fallback.
         self.fallback_photo_ids = (
-            set(self.scope_ids) - self.contextual_weak_ids
+            set(self.scope_ids) - self.contextual_weak_ids - self.redetect_ids
         ) & self.current_detector_photo_ids
         self.full_image_fallbacks = stage_counts.count_full_image_fallback_photos(
             db, self.fallback_photo_ids, min_conf=self.detector_confidence,
@@ -519,7 +524,7 @@ class _ClassifyPlan:
             self.db,
             classifier_model=model_name,
             labels_fingerprint=fp,
-            photo_ids=self.photo_ids,
+            photo_ids=self.target_ids,
             min_conf=self.detector_confidence,
         )
         n += count_primary(
@@ -591,45 +596,62 @@ class _ClassifyPlan:
     # -- results -----------------------------------------------------
 
     def _count_redetection(self):
-        """Count the detected photos the detect stage will run on again.
+        """Find the detected photos the detect stage will run on again.
 
         ``redetect_count`` photos have a run the stage does not reuse.
         ``redetect_unconfirmed`` more have one it reuses only if the detector
         that made it is the one this run installs: with no detector installed
         the stage downloads one as soon as any photo needs detecting, and
         then keeps only the runs of that detector, legacy runs and reviewed
-        runs. A Re-classify detects everything again and says so itself, and
-        the stage never detects a photo marked not wildlife.
+        runs. ``redetect_ids`` holds both. A Re-classify detects everything
+        again and says so itself, and the stage never detects a photo marked
+        not wildlife.
         """
         self.redetect_count = 0
         self.redetect_unconfirmed = 0
+        self.redetect_ids = set()
         if self.params.reclassify or self.params.raw_subject_analysis:
             return
         model_runs = self.db.model_runs
         scope = set(self.db.photos.filter_out_wildlife_excluded(self.scope_ids))
         runtimes = model_runs.detector_run_runtimes("megadetector-v6", scope)
-        reused = runtimes.keys() & self.current_detector_photo_ids
-        self.redetect_count = len(runtimes) - len(reused)
+        self.redetect_ids = runtimes.keys() - self.current_detector_photo_ids
+        self.redetect_count = len(self.redetect_ids)
         needs_detector = self.new_count > 0 or bool(scope - self.current_detector_photo_ids)
         if self.detector_runtime is not None or not needs_detector:
             return
-        bound_to_detector = {pid for pid in reused if runtimes[pid] != "legacy"}
-        self.redetect_unconfirmed = len(
-            bound_to_detector
-            - model_runs.pinned_detector_photo_ids(bound_to_detector, "megadetector-v6")
+        bound_to_detector = {
+            pid for pid, runtime in runtimes.items()
+            if runtime != "legacy" and pid not in self.redetect_ids
+        }
+        unconfirmed = bound_to_detector - model_runs.pinned_detector_photo_ids(
+            bound_to_detector, "megadetector-v6",
         )
+        self.redetect_unconfirmed = len(unconfirmed)
+        self.redetect_ids |= unconfirmed
+
+    def with_redetection(self, result):
+        """``result`` naming the photos detected again, and those photos for Extract.
+
+        The photos reach Extract only when Classify will run on them.
+        """
+        result = self.name_redetection(result)
+        return result, frozenset(self.redetect_ids if result["state"] == "will-run" else ())
 
     def name_redetection(self, result):
         """Say that detection runs again on photos that were already detected.
 
         Their classifications and masks are remade from the new detection, so
         a plan that counted them as done would describe a run that does more.
+        Their present targets are left out of every other count, so each is
+        one unit of ``pending`` and ``eligible``, as a new photo is.
         ``detail.redetect`` is the photos known to be detected again and
         ``detail.redetect_max`` the most there can be.
         """
-        most = self.redetect_count + self.redetect_unconfirmed
-        result["detail"]["redetect"] = self.redetect_count
-        result["detail"]["redetect_max"] = most
+        most = len(self.redetect_ids)
+        detail = result["detail"]
+        detail["redetect"] = self.redetect_count
+        detail["redetect_max"] = most
         if not most:
             return result
         photos = f"{'up to ' if self.redetect_unconfirmed else ''}{most} photo{_plural(most)}"
@@ -639,15 +661,19 @@ class _ClassifyPlan:
                 ". MegaDetector is not installed, and the version this run "
                 "downloads decides how many earlier detections it reuses"
             )
+        again = f"Will detect {photos} again and classify what it finds, because {reason}"
+        every_other_photo_is_detected = (
+            set(self.scope_ids) - self.redetect_ids <= self.current_detector_photo_ids
+        )
         if result["state"] == "done-prior":
             result["state"] = "will-run"
-            result["summary"] = (
-                f"Will detect {photos} again and classify what it finds, because "
-                f"{reason} ({result['summary']})"
-            )
+            result["summary"] = f"{again} ({result['summary']})"
+        elif self.classifiable_units == 0 and self.new_count == 0 and every_other_photo_is_detected:
+            result["summary"] = again
         else:
             result["summary"] += f" + {photos} to detect again, because {reason}"
-        result["detail"]["pending"] = result["detail"].get("pending", 0) + most
+        detail["pending"] = detail.get("pending", 0) + most
+        detail["eligible"] = detail.get("eligible", 0) + most
         return result
 
     def name_label_read_error(self, result):
@@ -1003,25 +1029,42 @@ def _extract_summary(work, detail_pending, new_count, eligible, set_aside=0):
     )
 
 
-def _name_redetected_masks(extract, classify):
-    """Add to the Extract plan the masks a re-detection in this run replaces.
+def _extract_plan_around_redetection(db, params, photo_ids, effective_cfg, new_count, redetect_ids):
+    """The Extract plan, counting each photo Classify detects again once.
 
-    A mask belongs to the detection it was prompted with, so a photo Classify
-    detects again gets a new mask even when its old one is counted as present.
+    A mask belongs to the detection it was prompted with, so such a photo
+    gets a new mask whether its present one is missing, stale or complete.
+    It is planned as that one mask and left out of the other counts.
     """
-    count = classify.get("detail", {}).get("redetect_max", 0)
-    if not count or classify["state"] != "will-run" or extract["state"] not in ("will-run", "done-prior"):
+    if not redetect_ids:
+        return _extract_plan(db, params, photo_ids, effective_cfg, new_count)
+    scope = db.photos.get_ids() if photo_ids is None else photo_ids
+    kept = [pid for pid in scope if pid not in redetect_ids]
+    return _name_redetected_masks(
+        _extract_plan(db, params, kept, effective_cfg, new_count), len(redetect_ids),
+    )
+
+
+def _name_redetected_masks(extract, count):
+    """Add to an Extract plan the masks of ``count`` photos Classify detects again."""
+    if extract["state"] not in ("will-run", "done-prior"):
         return extract
-    photos = f"up to {count} photo{_plural(count)} that Classify detects again"
-    if extract["state"] == "done-prior":
-        extract["state"] = "will-run"
-        extract["summary"] = f"Will remake masks for {photos} ({extract['summary']})"
-    else:
-        extract["summary"] += f" + {photos}"
     detail = extract.setdefault("detail", {})
     detail["redetect"] = count
-    if "pending" in detail:
-        detail["pending"] += count
+    if "eligible" not in detail:
+        # A recompute of the whole scope already covers them.
+        return extract
+    photos = f"up to {count} photo{_plural(count)} that Classify detects again"
+    if detail["eligible"] == 0:
+        extract["summary"] = f"Will make masks for {photos}"
+        detail.pop("import_no_new", None)
+    elif extract["state"] == "done-prior":
+        extract["summary"] = f"Will make masks for {photos} ({extract['summary']})"
+    else:
+        extract["summary"] += f" + {photos}"
+    extract["state"] = "will-run"
+    detail["eligible"] += count
+    detail["pending"] = detail.get("pending", 0) + count
     return extract
 
 
@@ -1846,13 +1889,13 @@ def _import_scope(db, params):
 def _stage_plans(db, params, db_path, ws_id, photo_ids, new_count,
                  effective_cfg, pipeline_cfg):
     """Per-photo stage plans (Previews through Group) for a resolved scope."""
-    classify = _classify_plan(
+    classify, redetect_ids = _classify_plan(
         db, params, photo_ids, new_count,
         detector_confidence=config_value(effective_cfg, "detector_confidence"),
         pipeline_cfg=pipeline_cfg,
     )
-    extract = _name_redetected_masks(
-        _extract_plan(db, params, photo_ids, effective_cfg, new_count), classify,
+    extract = _extract_plan_around_redetection(
+        db, params, photo_ids, effective_cfg, new_count, redetect_ids,
     )
     eye = _eye_keypoints_plan(db, params, photo_ids, pipeline_cfg, new_count)
     previews = _previews_plan(db, params, photo_ids, new_count, effective_cfg)

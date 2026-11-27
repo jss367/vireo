@@ -1201,14 +1201,42 @@ def test_plan_names_photos_classify_will_detect_again(tmp_path, monkeypatch):
 
     classify, extract = stages["Classify"], stages["Extract"]
     assert classify["state"] == "will-run"
-    assert classify["summary"].startswith("Will detect 1 photo again and classify what it finds")
-    assert "it was detected" in classify["summary"]
-    assert classify["detail"]["redetect"] == 1
-    assert classify["detail"]["pending"] == 1
+    assert classify["summary"] == (
+        "Will detect 1 photo again and classify what it finds, because the camera "
+        "focus point, the file or the detector changed since it was detected"
+    )
+    assert (classify["detail"]["redetect"], classify["detail"]["redetect_max"]) == (1, 1)
+    assert (classify["detail"]["pending"], classify["detail"]["eligible"]) == (1, 1)
     assert extract["state"] == "will-run"
-    assert extract["summary"].startswith("Will remake masks for up to 1 photo that Classify detects again")
+    assert extract["summary"] == "Will make masks for up to 1 photo that Classify detects again"
     assert extract["detail"]["redetect"] == 1
-    assert extract["detail"]["pending"] == 1
+    assert (extract["detail"]["pending"], extract["detail"]["eligible"]) == (1, 1)
+
+
+def test_plan_keeps_done_work_beside_photos_detected_again(tmp_path, monkeypatch):
+    from cache_identity import catalog_detector_input
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    _classified_photo_detected_without_focus_area(db, folder_id, tmp_path, monkeypatch)
+    current, _ = _classified_photo_detected_without_focus_area(
+        db, folder_id, tmp_path, monkeypatch, filename="current.jpg")
+    db.model_runs.record_detector_run(
+        current, "megadetector-v6", 1, "rt",
+        catalog_detector_input("a" * 64, "megadetector-v6", db.conn.execute(
+            "SELECT vireo_focus_area(exif_data) FROM photos WHERE id=?", (current,)).fetchone()[0])[1])
+    db.commit()
+
+    stages = compute_plan(db, _redetection_params(), str(tmp_path / "test.db"))["stages"]
+
+    classify, extract = stages["Classify"], stages["Extract"]
+    assert classify["summary"].startswith("Will detect 1 photo again and classify what it finds, because ")
+    assert classify["summary"].endswith("(Already classified — 1 target across 1 model)")
+    assert (classify["detail"]["pending"], classify["detail"]["eligible"]) == (1, 2)
+    assert extract["summary"] == (
+        "Will make masks for up to 1 photo that Classify detects again "
+        "(Masks present for all 1 eligible photo)"
+    )
+    assert (extract["detail"]["pending"], extract["detail"]["eligible"]) == (1, 2)
 
 
 def test_plan_adds_redetection_to_pending_classify_and_extract_work(tmp_path, monkeypatch):
@@ -1221,10 +1249,33 @@ def test_plan_adds_redetection_to_pending_classify_and_extract_work(tmp_path, mo
 
     assert stages["Classify"]["summary"].startswith("Will classify 1 new pair")
     assert " + 1 photo to detect again, because " in stages["Classify"]["summary"]
-    assert stages["Classify"]["detail"]["pending"] == 2
+    assert (stages["Classify"]["detail"]["pending"], stages["Classify"]["detail"]["eligible"]) == (2, 2)
     assert stages["Extract"]["summary"].startswith("Will extract masks for 1 photo")
     assert stages["Extract"]["summary"].endswith(" + up to 1 photo that Classify detects again")
-    assert stages["Extract"]["detail"]["pending"] == 2
+    assert (stages["Extract"]["detail"]["pending"], stages["Extract"]["detail"]["eligible"]) == (2, 2)
+
+
+def test_plan_counts_a_photo_detected_again_once(tmp_path, monkeypatch):
+    """Its unclassified pair and missing mask belong to a detection the run replaces."""
+    import pipeline_plan
+    from cache_identity import detector_input
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    _stub_models(monkeypatch, tmp_path)
+    monkeypatch.setattr(pipeline_plan, "_detector_runtime", lambda: "rt")
+    pid, _ = _add_photo_with_detection(db, folder_id, "a.jpg")
+    db.conn.execute("UPDATE photos SET file_hash=?, exif_data=? WHERE id=?", ("a" * 64, _AF_AREA, pid))
+    db.model_runs.record_detector_run(pid, "megadetector-v6", 1, "rt", detector_input("a" * 64, None)[1])
+    db.commit()
+
+    stages = compute_plan(db, _redetection_params(), str(tmp_path / "test.db"))["stages"]
+
+    classify, extract = stages["Classify"], stages["Extract"]
+    assert classify["summary"].startswith("Will detect 1 photo again and classify what it finds")
+    assert "new pair" not in classify["summary"]
+    assert (classify["detail"]["pending"], classify["detail"]["eligible"]) == (1, 1)
+    assert extract["summary"] == "Will make masks for up to 1 photo that Classify detects again"
+    assert (extract["detail"]["pending"], extract["detail"]["eligible"]) == (1, 1)
 
 
 def test_plan_does_not_name_redetection_for_a_current_or_reviewed_run(tmp_path, monkeypatch):
