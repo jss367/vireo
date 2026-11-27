@@ -446,10 +446,9 @@ def test_grant_only_folder_read_scopes_keep_siblings_hidden(app_and_db, tmp_path
     assert dashboard_stats.get_folder_coverage_stats(db, folder_id=folder)[0]['total'] == 1
     assert db.collections.query_photo_ids([], folder_id=folder) == [photo]
     assert b in db.workspaces.ids_for_folders([folder])
-    from web.pipeline import _PipelineLaunch
+    from services.pipeline_scope import folder_photo_ids
 
-    launch = _PipelineLaunch({}, lambda: db, lambda *args: pytest.fail(str(args)))
-    assert launch._folder_scope_photo_ids({folder}) == [photo]
+    assert folder_photo_ids(db, [folder]) == [photo]
     client = app.test_client()
     assert client.post(f'/api/workspaces/{b}/activate').status_code == 200
     response = client.post('/api/pipeline/plan', json={'folder_ids': [folder]})

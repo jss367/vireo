@@ -1,6 +1,7 @@
 """Describing a Process run and starting exactly the run described."""
 
 import json
+import os
 from pathlib import Path
 
 import config
@@ -347,8 +348,8 @@ def test_an_unchanged_queued_run_starts(app_and_db, one_model, started):
 
 
 @pytest.mark.parametrize("field, text", [
-    ({"exclude_paths": ["/photos/2024/bird1.jpg"]}, "exclude_paths"), ({"labels_file": "/lists/a.txt"}, "labels_file"),
-    ({"collection_id": 1}, "exactly one"), ({"miss_enabled": "false"}, "miss_enabled"),
+    ({"labels_file": "/lists/a.txt"}, "labels_file"),
+    ({"collection_id": 1}, "cannot be combined"), ({"miss_enabled": "false"}, "miss_enabled"),
     ({"source_paths": []}, "source_paths"), ({"hash_duplicate_paths": []}, "hash_duplicate_paths"),
 ])
 def test_a_described_run_refuses_what_the_launch_would_not_run(app_and_db, one_model, started, field, text):
@@ -428,3 +429,22 @@ def test_an_unknown_collection_cannot_be_the_expected_run(app_and_db, started):
     app, db = app_and_db
     response = app.test_client().post("/api/jobs/pipeline", json={"collection_id": 999, "expected_run": {}})
     assert response.status_code == 404 and started == []
+
+
+def test_folder_plan_and_started_job_agree_after_exclusions(app_and_db, one_model, started):
+    app, db = app_and_db
+    client = app.test_client()
+    photos = {row["filename"]: row["id"] for row in db.conn.execute("SELECT id, filename FROM photos")}
+    body = {
+        "folder_ids": [db.folders.id_by_path("/photos/2024")],
+        "exclude_paths": [os.path.join("/photos/2024/January", "bird2.jpg")],
+        "exclude_photo_ids": [photos["bird1.jpg"]],
+    }
+    expected = [photos["bird3.jpg"]]
+    run = _run_of(client, **body)
+    assert run["photo_digest"] == process_runs.photo_digest(expected)
+    response = _start(client, run, **body)
+    assert response.status_code == 200, response.get_json()
+    assert wait_for_job_via_client(client, response.get_json()["job_id"])["status"] == "completed"
+    assert len(started) == 1
+    assert sorted(p["id"] for p in db.collections.get_photos(started[0].collection_id)) == expected

@@ -41,6 +41,7 @@ from services.pipeline_launch import (
     apply_no_model_auto_skip,
     resolve_remote_archive_target,
 )
+from services.pipeline_scope import folder_photo_ids
 from services.review_group_changes import detach_review_photo
 from web.request_args import coerce_collection_id, parse_selection_photo_ids, reject_visual_collection
 
@@ -138,46 +139,6 @@ def create_pipeline_blueprint(
         if not all(isinstance(p, str) for p in paths):
             return None, json_error(f"{key} entries must be strings", 400)
         return paths, None
-
-    def _plan_folder_scope_photo_ids(folder_ids: list[int]) -> tuple[list[int], ErrorResponse | None]:
-        """Resolve a plan's ``folder_ids`` to ``(photo_ids, error)``; ``[]`` on error."""
-        err = folder_ids_error(folder_ids, json_error)
-        if err is not None:
-            return [], err
-        db = get_db()
-        subtree_ids: set[int] = set()
-        # Mirror the /api/jobs/pipeline folder resolution exactly so the
-        # plan describes the same photos the run will process. Without
-        # the path-based fallback, legacy folders with parent_id=NULL
-        # (whose paths sit under the selected root) are silently omitted
-        # from the plan even though the run walks them via
-        # folders.subtree_ids_by_path.
-        for fid in folder_ids:
-            if not db.workspace_folders.visible_ids(db.active_workspace_id, [fid]):
-                return [], json_error("folder not found", 404)
-            subtree_ids.update(db.folders.subtree_ids(fid))
-            # Intersect the path-based descendants with the workspace's
-            # folder set so nothing leaks in from another workspace that
-            # happens to share a path prefix.
-            subtree_ids.update(db.workspace_folders.visible_ids(db.active_workspace_id, db.folders.subtree_ids_by_path(fid)))
-        return [
-            r["id"]
-            for r in db.photos.in_workspace_folders(
-                list(subtree_ids), db.active_workspace_id,
-            )
-        ], None
-
-    def _plan_scope_photo_ids(body: JsonDict) -> tuple[list[int] | None, ErrorResponse | None]:
-        """A plan's explicit photo scope, or None for a collection or whole-workspace plan."""
-        if "photo_ids" in body:
-            err = photo_scope_error(body, json_error)
-            if err is not None:
-                return None, err
-            return parse_selection_photo_ids(get_db(), body, json_error=json_error, limit=None)
-        folder_ids = body.get("folder_ids")
-        if folder_ids is None:
-            return None, None
-        return _plan_folder_scope_photo_ids(folder_ids)
 
     def _expand_plan_process(body: JsonDict) -> tuple[JsonDict, ErrorResponse | None]:
         """Merge a plan body's saved process under it: ``(body, error)``; ``{}`` on error."""
@@ -321,7 +282,7 @@ def create_pipeline_blueprint(
         # active-workspace subtree photo ids with the same guards as
         # /api/jobs/pipeline, so the plan describes exactly the photos a
         # folder-scoped run would process.
-        scope_photo_ids, err = _plan_scope_photo_ids(body)
+        scope_photo_ids, err = explicit_scope_photo_ids(get_db(), body, json_error)
         if err is not None:
             return err
         # Expand a saved-process id the same way /api/jobs/pipeline does so
@@ -843,22 +804,9 @@ def create_pipeline_blueprint(
                     "folder_id is outside SQLite's signed 64-bit integer range",
                     400,
                 )
-            if not db.workspace_folders.visible_ids(db.active_workspace_id, [folder_id]):
+            photo_ids = folder_photo_ids(db, [folder_id])
+            if photo_ids is None:
                 return json_error("Folder not found in this workspace", 404)
-            # Mirror /api/pipeline/plan and /api/jobs/pipeline folder
-            # resolution so the filter includes the same photos a scoped
-            # Process run would see. ``get_photo_ids`` walks parent_id only,
-            # so legacy folders with parent_id=NULL under the selected root
-            # would be silently omitted and the "N not in saved review"
-            # banner would understate the scope.
-            subtree_ids = set(db.folders.subtree_ids(folder_id))
-            subtree_ids.update(db.workspace_folders.visible_ids(db.active_workspace_id, db.folders.subtree_ids_by_path(folder_id)))
-            photo_ids = [
-                r["id"]
-                for r in db.photos.in_workspace_folders(
-                    list(subtree_ids), db.active_workspace_id,
-                )
-            ]
         else:
             collection_id = coerce_collection_id(raw_collection)
             if collection_id is None or collection_id is False:
@@ -2232,6 +2180,45 @@ def plan_params(
     )
 
 
+def exclusion_error(body: JsonDict, json_error: JsonError) -> ErrorResponse | None:
+    for key, kind, label in (("exclude_paths", str, "strings"), ("exclude_photo_ids", int, "integers")):
+        entries = body.get(key, [])
+        if not isinstance(entries, list):
+            return json_error(f"{key} must be a list, got {type(entries).__name__}")
+        for entry in entries:
+            if isinstance(entry, bool) or not isinstance(entry, kind):
+                return json_error(f"{key} entries must be {label}, got {type(entry).__name__}")
+    return None
+
+
+def explicit_scope_photo_ids(
+    db: Database, body: JsonDict, json_error: JsonError,
+) -> tuple[list[int] | None, ErrorResponse | None]:
+    """Resolve explicit photos or folders. None leaves the collection or workspace scope intact."""
+    err = exclusion_error(body, json_error)
+    if err is not None:
+        return None, err
+    if "photo_ids" in body:
+        err = photo_scope_error(body, json_error)
+        if err is not None:
+            return None, err
+        return parse_selection_photo_ids(db, body, json_error=json_error, limit=None)
+    folders = body.get("folder_ids")
+    if folders is None:
+        return None, None
+    others = [key for key in ("collection_id", "source_snapshot_id") if body.get(key) is not None]
+    others.extend(key for key in ("source", "sources") if body.get(key))
+    if others:
+        return None, json_error("folder_ids cannot be combined with " + ", ".join(others))
+    err = folder_ids_error(folders, json_error)
+    if err is not None:
+        return None, err
+    ids = folder_photo_ids(db, folders, set(body.get("exclude_paths", [])), set(body.get("exclude_photo_ids", [])))
+    if ids is None:
+        return None, json_error("folder not found", 404)
+    return ids, None
+
+
 def photo_scope_error(body: JsonDict, json_error: JsonError) -> ErrorResponse | None:
     """The 400 response for a ``photo_ids`` scope no run could have, or None.
 
@@ -2325,9 +2312,7 @@ class _PipelineLaunch:
         for check in (
             self.apply_saved_process,
             self.read_scope,
-            self.read_exclusions,
-            self.resolve_folder_scope,
-            self.resolve_photo_scope,
+            self.resolve_explicit_scope,
             self.check_required_scope,
             self.check_snapshot,
             self.check_source_dirs,
@@ -2419,231 +2404,23 @@ class _PipelineLaunch:
             self.db, collection_id, json_error=json_error,
         )
 
-    def read_exclusions(self) -> ErrorResponse | None:
-        """Validate ``exclude_paths`` / ``exclude_photo_ids``.
-
-        These are validated up front — before the folder-scope subtree is
-        resolved — so a folder-scoped request that includes preview
-        deselections can honor them at collection-materialization time.
-        run_pipeline_job's ``_filter_excluded`` only checks
-        ``exclude_photo_ids``; without applying ``exclude_paths`` at the
-        ad-hoc collection boundary, a deselected path is still thumbnailed,
-        classified, and regrouped once the folder collection materializes.
-        Early validation also matches the coercion the PipelineParams
-        constructor would otherwise perform via ``set(body.get(field, []))``,
-        where a JSON ``null`` or unhashable list entry would raise TypeError
-        and leave a stray "Process …" collection behind. Key-presence (not
-        truthiness) matters: missing keys fall through to the default, but
-        ``{"exclude_paths": null}`` must 400.
-        """
-        json_error = self.json_error
+    def resolve_explicit_scope(self) -> ErrorResponse | None:
+        """Prepare exact membership; create the collection only after validation."""
         body = self.body
-        if "exclude_paths" in body:
-            _paths_value = body["exclude_paths"]
-            if not isinstance(_paths_value, list):
-                return json_error(
-                    "exclude_paths must be a list, got "
-                    f"{type(_paths_value).__name__}"
-                )
-            for _entry in _paths_value:
-                if not isinstance(_entry, str):
-                    return json_error(
-                        "exclude_paths entries must be strings, got "
-                        f"{type(_entry).__name__}"
-                    )
-            self.excluded_paths_set = set(_paths_value)
-        if "exclude_photo_ids" in body:
-            _ids_value = body["exclude_photo_ids"]
-            if not isinstance(_ids_value, list):
-                return json_error(
-                    "exclude_photo_ids must be a list, got "
-                    f"{type(_ids_value).__name__}"
-                )
-            for _entry in _ids_value:
-                # bool is a subclass of int; exclude it explicitly so the
-                # accepted values stay honest integers.
-                if isinstance(_entry, bool) or not isinstance(_entry, int):
-                    return json_error(
-                        "exclude_photo_ids entries must be integers, got "
-                        f"{type(_entry).__name__}"
-                    )
-            self.excluded_photo_ids_set = set(_ids_value)
-        return None
-
-    def resolve_folder_scope(self) -> ErrorResponse | None:
-        """Resolve ``folder_ids`` into a pending ad-hoc collection.
-
-        Folder scope: resolve folder_ids to their active-workspace subtrees
-        and materialize an ad-hoc collection, then proceed as a collection
-        run — the same pattern import runs use (see pipeline_job's
-        collection_stage). The rest of the app treats a folder scope as
-        its subtree, so a workspace root must include every descendant's
-        photos, not just the ones hanging directly off the root.
-
-        The ad-hoc collection is *not* inserted here: it is deferred
-        until after every other request check has passed AND after
-        ``PipelineParams`` has been fully constructed (see
-        ``materialize_collection``). If we inserted up front, a later 400
-        (relative destination, remote_target_id mismatch, local_processing
-        conflict, folder_template with '..', or a coercion-time exception
-        inside PipelineParams) would leave a stray "Process …" collection
-        in the workspace even though no job was queued.
-        """
-        self.folder_ids = folder_ids = self.body.get("folder_ids")
-        if folder_ids is None:
+        photo_ids, err = explicit_scope_photo_ids(self.db, body, self.json_error)
+        if err is not None:
+            return err
+        self.excluded_paths_set = set(body.get("exclude_paths", []))
+        self.excluded_photo_ids_set = set(body.get("exclude_photo_ids", []))
+        self.folder_ids = body.get("folder_ids")
+        if photo_ids is None:
             return None
-        err = self._folder_ids_error()
-        if err is not None:
-            return err
-        subtree_ids, err = self._folder_subtree_ids()
-        if err is not None:
-            return err
-        photo_ids = self._folder_scope_photo_ids(subtree_ids)
-        first = self.db.folders.get(folder_ids[0])
-        leaf = os.path.basename(
-            (first["path"] or "").rstrip("/\\")
-        ) or "folders"
-        self.pending_folder_collection = {
-            "leaf": leaf, "photo_ids": photo_ids,
-        }
-        return None
-
-    def _folder_ids_error(self) -> ErrorResponse | None:
-        """Reject ``folder_ids`` combined with another scope or malformed."""
-        json_error = self.json_error
-        folder_ids = self.folder_ids
-        source = self.source
-        sources = self.sources
-        # A folder scope is itself a scope — combining it with any other
-        # scope selector is ambiguous. Reject *all* other scopes, not
-        # just ``collection_id``: with ``source``/``sources``, later
-        # ``skip_scan`` handling would silently ignore them; with
-        # ``source_snapshot_id``, run_pipeline_job would clear the
-        # folder-derived ``collection_id`` and run the snapshot scope
-        # instead — the job would process a different scope than the
-        # request implies.
-        #
-        # ``source``/``sources`` are checked for truthiness (not just
-        # ``is not None``) because the rest of this endpoint treats
-        # empty string / empty list as omitted (see the required-scope
-        # check below and the ``if sources:`` / ``elif source:``
-        # dispatch above). Otherwise a generic pipeline form that
-        # always emits ``source: ""`` / ``sources: []`` would falsely
-        # 400 every folder-scoped run.
-        other_scopes = []
-        if self.collection_id is not None:
-            other_scopes.append("collection_id")
-        if source:
-            other_scopes.append("source")
-        if sources:
-            other_scopes.append("sources")
-        if self.source_snapshot_id is not None:
-            other_scopes.append("source_snapshot_id")
-        if other_scopes:
-            return json_error(
-                "folder_ids cannot be combined with "
-                + ", ".join(other_scopes)
-            )
-        return folder_ids_error(folder_ids, json_error)
-
-    def _folder_subtree_ids(self) -> tuple[set[int], ErrorResponse | None]:
-        """Every workspace folder under ``folder_ids``, or ``set()`` and a 404 response.
-
-        Reject folders the active workspace has no claim on (mirrors
-        the rescan guard): a stale UI or crafted request must not
-        pollute this workspace with another workspace's scan output.
-        folder_subtree_ids itself refuses to walk out of the
-        active workspace, so unrelated descendants can never leak in.
-        """
-        db = self.db
-        subtree_ids: set[int] = set()
-        # _folder_ids_error validated them.
-        for fid in cast("list[int]", self.folder_ids):
-            if not db.workspace_folders.visible_ids(db.active_workspace_id, [fid]):
-                return set(), self.json_error("folder not found", 404)
-            # Union — a workspace can link both a root and a nested
-            # folder, so the same descendant can appear twice.
-            subtree_ids.update(db.folders.subtree_ids(fid))
-            # folder_subtree_ids walks folders.parent_id only, so
-            # legacy rows whose parent_id is NULL — but whose paths sit
-            # under the requested folder — never appear. Every other
-            # subtree consumer in db.py (folder deletion, rescan,
-            # missing-originals, workspace linking) already reads through
-            # folders.subtree_ids_by_path for exactly this reason;
-            # without the same fallback here, processing a workspace root
-            # would silently skip legacy descendant photos the rest of
-            # the app still treats as part of that folder. Intersect the
-            # path-based descendants with the workspace's folder set so
-            # nothing leaks in from another workspace that happens to
-            # share a path prefix. The repository splits large legacy
-            # subtrees across multiple IN(...) statements.
-            subtree_ids.update(db.workspace_folders.visible_ids(db.active_workspace_id, db.folders.subtree_ids_by_path(fid)))
-        return subtree_ids, None
-
-    def _folder_scope_photo_ids(self, subtree_ids: set[int]) -> list[int]:
-        """The subtree's photo ids, minus the requested exclusions."""
-        db = self.db
-        excluded_paths_set = self.excluded_paths_set
-        excluded_photo_ids_set = self.excluded_photo_ids_set
-        # A large workspace root can expand into thousands of descendant
-        # folder ids — more than SQLite's per-statement bound-parameter
-        # cap on legacy builds (SQLITE_MAX_VARIABLE_NUMBER = 999). The
-        # repository reads chunk the IN(...) lookup so a wide folder
-        # subtree doesn't blow up as an OperationalError before the job is
-        # even queued.
-        subtree_id_list = list(subtree_ids)
-        # Fetch the folder paths for the whole subtree so we can compose
-        # per-photo full paths and honor ``exclude_paths`` at the
-        # collection boundary. Skip the lookup entirely when the user
-        # sent no path exclusions — a workspace-root scope can span
-        # thousands of folders and the join is pointless when nothing
-        # would be filtered.
-        folder_path_by_id: dict[int, str] = {}
-        if excluded_paths_set:
-            folder_path_by_id = {
-                fid: path or ""
-                for fid, path in db.folders.paths_by_id(subtree_id_list).items()
-            }
-        photo_ids = []
-        # Read (id, folder_id, filename) so we can compose each photo's
-        # full path in-Python to compare against ``exclude_paths``.
-        # Matching the same os.path.join shape scanner/ingest use for their
-        # ``skip_paths`` sets keeps deselections consistent across import
-        # and process runs. Filter ``exclude_photo_ids`` here too so the
-        # ad-hoc collection reflects exactly what the user asked to
-        # process; ``_filter_excluded`` would drop them again later but
-        # there is no reason to bake them into the collection membership.
-        for r in db.photos.in_workspace_folders(
-            subtree_id_list, db.active_workspace_id,
-        ):
-            if r["id"] in excluded_photo_ids_set:
-                continue
-            if excluded_paths_set:
-                full = os.path.join(
-                    folder_path_by_id.get(r["folder_id"], ""),
-                    r["filename"] or "",
-                )
-                if full in excluded_paths_set:
-                    continue
-            photo_ids.append(r["id"])
-        return photo_ids
-
-    def resolve_photo_scope(self) -> ErrorResponse | None:
-        """Resolve ``photo_ids`` into a pending ad-hoc collection, like ``folder_ids``."""
-        if "photo_ids" not in self.body:
-            return None
-        err = photo_scope_error(self.body, self.json_error)
-        if err is not None:
-            return err
-        photo_ids, err = parse_selection_photo_ids(
-            self.db, self.body, json_error=self.json_error, limit=None,
-        )
-        if err is not None:
-            return err
-        self.pending_folder_collection = {
-            "leaf": f"{len(photo_ids)} photo{'' if len(photo_ids) == 1 else 's'}",
-            "photo_ids": photo_ids,
-        }
+        if self.folder_ids is None:
+            leaf = f"{len(photo_ids)} photo{'' if len(photo_ids) == 1 else 's'}"
+        else:
+            first = self.db.folders.get(self.folder_ids[0])
+            leaf = os.path.basename((first["path"] or "").rstrip("/\\")) or "folders"
+        self.pending_folder_collection = {"leaf": leaf, "photo_ids": photo_ids}
         return None
 
     def check_expected_run(self) -> ErrorResponse | None:
