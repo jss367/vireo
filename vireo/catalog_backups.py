@@ -283,7 +283,7 @@ def _copy_verified(
                 progress(written)
             writer.flush()
             os.fsync(writer.fileno())
-        if _file_hash(tmp, lambda: progress(written)) != source_hash.digest():
+        if _file_hash(tmp, lambda _size: progress(written)) != source_hash.digest():
             raise OSError(f"the copy of {src} read back different from the original")
         replace_file(tmp, dest)
     finally:
@@ -323,13 +323,13 @@ def offload(
     return result
 
 
-def _file_hash(path: str, checkpoint: Callable[[], None] | None = None) -> bytes:
+def _file_hash(path: str, checkpoint: Callable[[int], None] | None = None) -> bytes:
     digest = hashlib.sha256()
     with open(path, "rb") as reader:
         while chunk := reader.read(_COPY_CHUNK):
             digest.update(chunk)
             if checkpoint is not None:
-                checkpoint()
+                checkpoint(len(chunk))
     return digest.digest()
 
 
@@ -352,9 +352,9 @@ def _move_one(
             scanned = 0
             total = os.path.getsize(dest) + os.path.getsize(src)
 
-            def checkpoint() -> None:
+            def checkpoint(size: int) -> None:
                 nonlocal scanned
-                scanned = min(scanned + _COPY_CHUNK, total)
+                scanned = min(scanned + size, total)
                 report(name, scanned, total)
 
             if _file_hash(dest, checkpoint) != _file_hash(src, checkpoint):

@@ -168,6 +168,18 @@ def test_offload_observes_cancellation_while_hashing_an_existing_destination(cat
         assert f.read() == "another catalog"
 
 
+def test_offload_reports_actual_bytes_while_hashing_an_existing_destination(catalog, backup_dir):
+    name = "vireo.db.pre-v10.bak"
+    _write(f"{catalog}.pre-v10.bak", "source")
+    _write(os.path.join(backup_dir, name), "other")
+    calls = []
+
+    result = catalog_backups.offload(catalog, backup_dir, lambda *args: calls.append(args))
+
+    assert result.errors
+    assert calls == [(name, 5, 11), (name, 11, 11)]
+
+
 def test_startup_job_moves_backups_and_keeps_the_newest_three(app_and_db, tmp_path, backup_dir):
     import config as cfg
     from canonical_schema import SCHEMA_VERSION
