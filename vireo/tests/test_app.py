@@ -15610,17 +15610,14 @@ def test_pipeline_picker_disables_degraded_collections(app_and_db):
 
 
 def test_collection_pickers_disable_degraded_collections(app_and_db):
-    """Every page that renders a collection picker from /api/collections must
-    honor count_error. Before this fix only the pipeline picker did — the
-    review, cull, id-conflicts, pipeline-review, and browse pickers still appended
-    every collection as selectable, so picking a broken one 400'd the
-    downstream request. Regression guard: the same count_error /
-    'unavailable' branch that exists on the pipeline page must exist on each
-    of these pages too.
+    """Collection pickers using count_error must label broken rules as unavailable.
+
+    Review uses the lightweight options API. Its picker behavior is exercised
+    in test_review_queue with an unresolvable collection rule.
     """
     app, _db = app_and_db
     client = app.test_client()
-    for route in ("/review", "/cull", "/id-conflicts", "/pipeline/review", "/browse"):
+    for route in ("/cull", "/id-conflicts", "/pipeline/review", "/browse"):
         html = _page_with_scripts(client, route)
         assert "count_error" in html, (
             f"{route} does not check count_error on its collection picker"
@@ -17369,6 +17366,44 @@ def test_predictions_api_accepts_photo_ids_filter(app_and_db):
     }
     assert {"Bald Eagle", "Great Blue Heron"} <= all_species
     assert photo_b is not None
+
+
+def test_saved_review_preview_only_links_workspace_photos(app_and_db, monkeypatch):
+    app, db = app_and_db
+    visible_id, _ = _seed_prediction_photo(db, "visible.jpg", "Mallard", 0.8)
+    monkeypatch.setattr("pipeline.load_results_raw", lambda *_: {"photos": [
+        {"id": visible_id, "filename": "visible.jpg", "flag": "rejected"},
+        {"id": -1, "filename": "removed.jpg"},
+    ]})
+    response = app.test_client().get("/api/pipeline/review-preview")
+    assert response.get_json() == {"photos": [{"id": visible_id, "label": "visible.jpg"}]}
+
+
+def test_workspace_prediction_pages_match_full_queue(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    for status in ("pending", "accepted", "rejected"):
+        _seed_prediction_photo(db, f"page-{status}.jpg", "Mallard", 0.8, status=status)
+    complete = client.get("/api/predictions?evidence=1").get_json()["predictions"]
+    rows = []
+    cursor = 0
+    while cursor is not None:
+        page = client.get("/api/predictions", query_string={
+            "after_photo": cursor, "page_size": 1, "evidence": 1,
+            "workspace_id": db.require_workspace_id(),
+        }).get_json()
+        rows.extend((row["id"], row["status"]) for row in page["predictions"])
+        after = page["next_photo"]
+        assert after is None or after > cursor
+        cursor = after
+    assert {status for _, status in rows} == {"pending", "accepted", "rejected"}
+    assert sorted(rows) == sorted((row["id"], row["status"]) for row in complete)
+    assert client.get("/api/predictions?after_photo=1&workspace_id=-1").status_code == 409
+    for invalid_size in ("bad", "", "0", "513"):
+        assert client.get("/api/predictions", query_string={
+            "after_photo": 0, "page_size": invalid_size,
+        }).status_code == 400
+    assert client.get("/api/predictions?after_photo=0").status_code == 200
 
 
 def test_predictions_api_photo_ids_rejects_foreign_photo(app_and_db):

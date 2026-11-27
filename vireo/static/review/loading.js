@@ -62,12 +62,18 @@ function reviewLoadHint(params) {
   return narrowed ? '' : REVIEW_WORKSPACE_LOAD_HINT;
 }
 
-/** @param {URLSearchParams} params */
-async function fetchReviewScope(params) {
+/** @param {URLSearchParams} params @param {number} epoch */
+async function fetchReviewScope(params, epoch) {
   var photoId = currentPhotoIdFilter;
+  var paged = !!reviewLoadHint(params);
+  if (paged) params.set('after_photo', '0');
   var qs = params.toString();
-  /** @type {{predictions?:ReviewPrediction[];visual?:unknown}} */
+  /** @type {{predictions?:ReviewPrediction[];visual?:unknown;next_photo?:number|null;workspace_id?:number}} */
   var predData = await safeFetch('/api/predictions' + (qs ? '?' + qs : ''), {}, {toast: false});
+  if (paged && reviewQueue.workspace != null && predData.workspace_id !== reviewQueue.workspace) {
+    throw new Error('Workspace changed. Reload Review.');
+  }
+  if (paged && predData.next_photo != null) await readRemainingWorkspacePages(params, epoch, predData);
   var linkedPhoto = null;
   if (!predData.predictions?.length && photoId && currentCollection === 'all' && !params.has('rules') && !params.has('visual')) {
     // Browse can open a photo with no predictions to inspect.
@@ -78,8 +84,55 @@ async function fetchReviewScope(params) {
   return {predData, linkedPhoto};
 }
 
+/** @type {ReviewPrediction[]|null} */
+var reviewPreviewRows = null;
+
+function showReviewPreview() {
+  if (!reviewPreviewRows) return;
+  var photos = new Map();
+  for (var row of filterReviewRows(reviewPreviewRows, currentTab)) {
+    photos.set(row.photo_id, {id: row.photo_id, label: row.filename});
+    if (photos.size === 8) break;
+  }
+  window.loadingPhotos.clear();
+  window.loadingPhotos.show('Open a photo while the review queue loads', Array.from(photos.values()), '/review');
+}
+
+/** @param {URLSearchParams} params @param {number} epoch
+ * @param {{predictions?:ReviewPrediction[];next_photo?:number|null;workspace_id?:number}} data */
+async function readRemainingWorkspacePages(params, epoch, data) {
+  var rows = data.predictions || [];
+  var cursor = data.next_photo;
+  params.set('workspace_id', String(data.workspace_id));
+  params.set('page_size', '512');
+  while (cursor != null && !_predictionEpochStale(epoch)) {
+    if (!reviewPreviewRows && rows.length) {
+      reviewPreviewRows = rows.slice(0, 512);
+      showReviewPreview();
+    }
+    params.set('after_photo', String(cursor));
+    /** @type {typeof data} */
+    var page = await safeFetch('/api/predictions?' + params, {}, {toast: false});
+    if (_predictionEpochStale(epoch)) return;
+    if (page.workspace_id !== data.workspace_id) throw new Error('Workspace changed. Reload Review.');
+    if (page.next_photo != null && page.next_photo <= cursor) throw new Error('Prediction page did not advance.');
+    for (var prediction of page.predictions || []) rows.push(prediction);
+    cursor = page.next_photo;
+  }
+  if (_predictionEpochStale(epoch)) return;
+  rows.sort((a, b) => b.confidence - a.confidence || a.id - b.id);
+  joinPagedReviewCards(rows);
+  data.predictions = rows;
+}
+
+function clearReviewPreview() {
+  reviewPreviewRows = null;
+  window.loadingPhotos.clear();
+}
+
 async function loadPredictions() {
   var myEpoch = ++_loadPredictionsEpoch;
+  clearReviewPreview();
   skippedPredictionOrder.clear();
   rqBeginReload();
   // Disable the header Accept All immediately so it cannot iterate the
@@ -115,8 +168,9 @@ async function loadPredictions() {
     }
     if (currentPhotoIdFilter != null) params.set('photo_ids', String(currentPhotoIdFilter));
     reviewLoadStatus().start('Loading photos…', { hint: reviewLoadHint(params) });
-    const {predData, linkedPhoto} = await fetchReviewScope(params);
+    const {predData, linkedPhoto} = await fetchReviewScope(params, myEpoch);
     if (myEpoch !== _loadPredictionsEpoch) return;
+    clearReviewPreview();
     reviewQueue.linkedPhoto = linkedPhoto;
     allPredictions = predData.predictions || [];
     if (window.VireoFilter && VireoFilter.setResultTotal) {
@@ -139,23 +193,7 @@ async function loadPredictions() {
       predictions = allPredictions.slice();
     }
 
-    // Extract unique models
-    /** @type {Record<string,boolean>} */ var modelSet = {};
-    allPredictions.forEach(function(p) {
-      if (p.model && !modelSet[p.model]) modelSet[p.model] = true;
-    });
-    availableModels = Object.keys(modelSet);
-    // Reset a stale ``currentModel`` when the new response no longer
-    // contains it. Without this, a filter change (or collection switch)
-    // that narrows the model universe leaves ``currentModel`` pinned to a
-    // model that's not present: ``renderModelFilter()`` hides the selector
-    // (0 or 1 models remain), while ``getVisibleItems()`` still filters by
-    // the stale model — leaving an empty grid with no visible way to
-    // clear the filter.
-    if (currentModel !== 'all' && !modelSet[currentModel]) {
-      currentModel = 'all';
-    }
-
+    updateAvailableReviewModels();
     var pending = reviewCardCounts().pending || 0;
     mode = allPredictions.length > 0 ? 'review' : 'browse';
 
@@ -169,6 +207,7 @@ async function loadPredictions() {
   } catch(err) {
     if (myEpoch !== _loadPredictionsEpoch) return;  // superseded — drop
     _predictionsReloading = false;
+    clearReviewPreview();
     showReviewLoadFailure(err);
     // Clear the stale ``predictions`` array before re-rendering so Accept
     // All and per-card handlers can't fire against the previous filter
@@ -179,5 +218,24 @@ async function loadPredictions() {
     allPredictions = [];
     predictions = [];
     renderAll();
+  }
+}
+
+function updateAvailableReviewModels() {
+  // Extract unique models
+  /** @type {Record<string,boolean>} */ var modelSet = {};
+  allPredictions.forEach(function(p) {
+    if (p.model && !modelSet[p.model]) modelSet[p.model] = true;
+  });
+  availableModels = Object.keys(modelSet);
+  // Reset a stale ``currentModel`` when the new response no longer
+  // contains it. Without this, a filter change (or collection switch)
+  // that narrows the model universe leaves ``currentModel`` pinned to a
+  // model that's not present: ``renderModelFilter()`` hides the selector
+  // (0 or 1 models remain), while ``getVisibleItems()`` still filters by
+  // the stale model — leaving an empty grid with no visible way to
+  // clear the filter.
+  if (currentModel !== 'all' && !modelSet[currentModel]) {
+    currentModel = 'all';
   }
 }

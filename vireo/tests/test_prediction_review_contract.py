@@ -98,6 +98,9 @@ RAW_READS = {
     'repositories/predictions.py:PredictionRepository.reconcile_match_review_state': 1,
     'repositories/predictions.py:PredictionRepository.require_identifiable_subjects': 1,
     'repositories/predictions.py:PredictionRepository.retain_candidates': 2,
+    # The page cursor enumerates visible photo IDs with any classifier output.
+    # get_rows applies the workspace's review decisions when loading each page.
+    'repositories/predictions.py:PredictionRepository.review_photo_page': 1,
     'repositories/predictions.py:PredictionRepository.superseded_ids': 1,
     'repositories/predictions.py:PredictionRepository.update_status_by_photo': 1,
     'repositories/species_identity_repairs.py:SpeciesIdentityRepairRepository._unstamped': 1,

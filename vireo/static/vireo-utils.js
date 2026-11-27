@@ -859,3 +859,42 @@ var VireoPipelineConfig = (function() {
     buildSliderDefaults: buildSliderDefaults,
   };
 })();
+
+
+// A temporary, navigable photo strip. Clearing it invalidates late preview responses.
+window.loadingPhotos = (function() {
+  var generation = 0;
+  function clear() {
+    generation++;
+    var host = document.getElementById('loadingPhotos');
+    if (host) { host.hidden = true; host.replaceChildren(); }
+  }
+  /** @param {string} title @param {{id:number,label:string}[]} photos @param {string} path */
+  function show(title, photos, path) {
+    var host = document.getElementById('loadingPhotos');
+    if (!host || !photos.length) return;
+    var heading = document.createElement('h2');
+    heading.textContent = title;
+    host.replaceChildren(heading);
+    for (var photo of photos) {
+      var link = document.createElement('a');
+      link.href = path + '?photo_id=' + photo.id;
+      var img = document.createElement('img');
+      img.src = window.vireoThumbnailUrl ? window.vireoThumbnailUrl(photo) : '/thumbnails/' + photo.id + '.jpg';
+      img.alt = '';
+      link.append(img, document.createTextNode(photo.label));
+      host.append(link);
+    }
+    host.hidden = false;
+  }
+  /** @param {string} url @param {string} title */
+  async function load(url, title) {
+    var request = generation;
+    try {
+      /** @type {{photos?:{id:number,label:string}[]}} */
+      var result = await safeFetch(url, {}, {toast: false});
+      if (request === generation) show(title, result.photos || [], '/browse');
+    } catch (_) { /* The primary request owns the page's error state. */ }
+  }
+  return {clear, show, load};
+})();

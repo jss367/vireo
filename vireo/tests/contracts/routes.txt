@@ -74,6 +74,7 @@ GET          /api/folders/missing
 GET          /api/health
 GET          /api/highlights
 GET          /api/highlights/bucket
+GET          /api/highlights/preview
 GET          /api/identity-alternatives
 GET          /api/import/<job_id>/recovery-options
 GET          /api/import/folder-preview/thumbnail
@@ -139,6 +140,7 @@ GET          /api/pipeline/legacy-detections
 GET          /api/pipeline/page-init
 GET          /api/pipeline/photo/<int:photo_id>
 GET          /api/pipeline/results
+GET          /api/pipeline/review-preview
 GET          /api/pipeline/scope-photos
 GET          /api/pipeline/slots
 GET          /api/places/reverse-geocode

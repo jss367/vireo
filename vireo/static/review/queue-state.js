@@ -85,7 +85,7 @@ function rqSave() {
 }
 
 async function initializeReviewQueue() {
-  /** @type {{id:number}} */ var workspace = await safeFetch('/api/workspaces/active', {}, {toast: false});
+  /** @type {{id:number}} */ var workspace = await safeFetch('/api/workspaces/active?include_folders=0', {}, {toast: false});
   reviewQueue.workspace = workspace.id;
   var view = /** @type {Partial<ReturnType<typeof rqViewSettings>>|null} */ (rqRead('vireo:review-view:' + workspace.id));
   if (!view) return;

@@ -683,6 +683,21 @@ def create_pipeline_blueprint(
         """Upgrade nudge scoped to the active workspace's visible folders."""
         return jsonify({"folders": get_db().predictions.legacy_detection_folders()})
 
+    @blueprint.get("/api/pipeline/review-preview")
+    def pipeline_review_preview() -> ResponseReturnValue:
+        """Show saved members while current scores and decisions are prepared."""
+        from pipeline import load_results_raw
+
+        db = get_db()
+        workspace_id = db.require_workspace_id()
+        saved = load_results_raw(os.path.dirname(db_path), workspace_id) or {}
+        photos = saved.get("photos", [])[:24]
+        visible = db.pipeline_features.present_workspace_photo_ids(workspace_id, [p["id"] for p in photos])
+        return jsonify(photos=[
+            {"id": p["id"], "label": p.get("filename") or str(p["id"])}
+            for p in photos if p["id"] in visible
+        ][:8])
+
     @blueprint.route("/api/pipeline/page-init")
     def api_pipeline_page_init() -> ResponseReturnValue:
         """Initial data for the Process, Process Review and Cull pages.
@@ -1860,7 +1875,6 @@ def _overlay_live_photo_state(db: Database, results: JsonDict) -> None:
     # own table. Enrich them before Process Review positions overlays
     # against rendered previews so geometric edits can disable stale
     # source-coordinate markers.
-    attach_nested_edit_recipes(db, results)
     photo_ids = [p["id"] for p in results["photos"]]
     # Chunked in the repository: cached pipeline results can span the
     # whole workspace, exceeding SQLite's bound-parameter cap in one
@@ -1875,17 +1889,10 @@ def _overlay_live_photo_state(db: Database, results: JsonDict) -> None:
             p["eye_y"] = live["eye_y"]
             p["eye_conf"] = live["eye_conf"]
             p["eye_tenengrad"] = live["eye_tenengrad"]
-    # Overlay representative state onto the cached results so
-    # pipeline cards render the badge after a page reload. The
-    # cache is written before eligibility runs (and by pipeline
-    # runs that predate the badge), so is_species_representative
-    # is otherwise absent and every card renders unbadged even
-    # when the DB says the photo is the species rep. The flag
-    # live overlay above is what makes this call correct — the shared
-    # attacher short-circuits rejected photos, and the overlay
-    # ensures p["flag"] reflects the live DB, not a stale cache.
     _attach_live_flag_confirmations(db, results)
-    attach_species_representatives(db, results["photos"])
+    attach_nested_edit_recipes(db, results)
+    # Legacy cache entries can lack filenames and are skipped by the nested attacher.
+    attach_species_representatives(db, [p for p in results["photos"] if "filename" not in p])
 
 
 # The parts of /api/pipeline/page-init a page can ask for. Each one costs

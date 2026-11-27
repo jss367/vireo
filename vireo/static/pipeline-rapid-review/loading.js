@@ -20,7 +20,7 @@ function rapidBeforeHistoryChange() {
   return true;
 }
 
-async function rapidAfterHistoryChange() {
+async function refreshRapidReviewFromServer() {
   rapid.loadError = false;
   rapid.historyRefreshFailed = false;
   var previous = rapid.sessions[rapid.sessionIndex];
@@ -73,7 +73,7 @@ function registerRapidHistoryHooks() {
       return true;
     },
     beforeHistoryChange: rapidBeforeHistoryChange,
-    afterHistoryChange: rapidAfterHistoryChange,
+    afterHistoryChange: refreshRapidReviewFromServer,
   });
 }
 
@@ -81,7 +81,7 @@ function registerRapidHistoryHooks() {
 async function retryRapidReview() {
   if (rapid.applying) return;
   try {
-    if (rapid.historyRefreshFailed) await rapidAfterHistoryChange();
+    if (rapid.historyRefreshFailed) await refreshRapidReviewFromServer();
     else await openSession(rapid.sessionIndex);
   } catch (error) {
     showToast('Rapid Review could not refresh. Use Retry to try again.', 'error');

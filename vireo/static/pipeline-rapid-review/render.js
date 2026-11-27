@@ -47,19 +47,6 @@ function renderCurrent() {
   var img = /** @type {HTMLImageElement} */ (document.getElementById('currentPhoto'));
   var empty = /** @type {HTMLElement} */ (document.getElementById('stageEmpty'));
   var pill = /** @type {HTMLElement} */ (document.getElementById('statusPill'));
-  if (p && !rapid.seeded && !rapid.loadError) {
-    img.removeAttribute('src');
-    img.style.display = 'none';
-    empty.style.display = '';
-    empty.textContent = 'Loading burst state...';
-    pill.style.display = 'none';
-    /** @type {HTMLElement} */ (document.getElementById('filename')).textContent = 'Loading burst state...';
-    /** @type {HTMLElement} */ (document.getElementById('metricQuality')).textContent = '-';
-    /** @type {HTMLElement} */ (document.getElementById('metricSharpness')).textContent = '-';
-    /** @type {HTMLElement} */ (document.getElementById('metricLabel')).textContent = '-';
-    /** @type {HTMLElement} */ (document.getElementById('metricReviewed')).textContent = rapid.reviewed.size + '/' + rapid.items.length;
-    return;
-  }
   if (!p) {
     resetRapidZoom();
     img.removeAttribute('src');
@@ -82,7 +69,7 @@ function renderCurrent() {
   applyRapidZoomLayout();
   empty.style.display = 'none';
   var zone = zoneFor(p.id);
-  pill.style.display = '';
+  pill.style.display = rapid.seeded ? '' : 'none';
   pill.className = 'status-pill ' + zone;
   pill.textContent = zone === 'pick' ? 'Pick' : zone === 'reject' ? 'Reject' : 'Review';
   /** @type {HTMLElement} */ (document.getElementById('filename')).textContent = p.filename || ('Photo ' + p.id);

@@ -2294,3 +2294,9 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 .update-restart-banner button { padding: 4px 10px; font-size: 13px; color: var(--text-primary); background: var(--bg-secondary); border: 1px solid var(--border-secondary); border-radius: 4px; cursor: pointer; }
 .update-restart-banner .update-restart-primary { font-weight: 500; color: var(--accent-text); background: var(--accent); border-color: var(--accent); }
 .update-restart-banner button:disabled { opacity: 0.6; cursor: default; }
+
+.loading-photos { padding: 8px 16px; display: flex; flex-wrap: wrap; gap: 10px; }
+.loading-photos[hidden] { display: none; }
+.loading-photos h2 { width: 100%; margin: 0; font-size: 15px; }
+.loading-photos a { width: 112px; color: var(--text-primary); font-size: 12px; overflow-wrap: anywhere; }
+.loading-photos img { display: block; width: 100%; height: 80px; object-fit: contain; background: var(--bg-secondary); }

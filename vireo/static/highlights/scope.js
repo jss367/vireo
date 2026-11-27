@@ -2,7 +2,7 @@
 // and the filter controls.
 // ES module.
 
-import { VireoTextSearch } from './shared.js';
+import { VireoTextSearch, VireoViewPreferences } from './shared.js';
 import { WORKSPACE_SCOPE } from './state.js';
 
 /** @param {number | null | undefined} v */
@@ -17,7 +17,12 @@ export function formatPercent(v) {
 
 /** @returns {{folder_id?: number, collection_id?: number}} */
 export function selectedScope() {
-  var value = /** @type {HTMLSelectElement} */ (document.getElementById('folderSelect')).value;
+  var picker = /** @type {HTMLSelectElement} */ (document.getElementById('folderSelect'));
+  var value = picker.value;
+  if (!picker.options.length) {
+    var saved = VireoViewPreferences.read('vireo.highlights.folder');
+    if (typeof saved === 'string' && /^(?:collection:)?[1-9]\d*$/.test(saved)) value = saved;
+  }
   if (!value || value === WORKSPACE_SCOPE) return {};
   if (value.startsWith('collection:')) return { collection_id: Number(value.slice('collection:'.length)) };
   return { folder_id: Number(value) };

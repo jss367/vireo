@@ -2,7 +2,7 @@
 // and the advanced-mode sort options.
 // ES module.
 
-import { VireoLoadingStatus, VireoViewPreferences, isAdvancedMode, safeFetch, showToast } from './shared.js';
+import { VireoLoadingStatus, VireoViewPreferences, isAdvancedMode, loadingPhotos, safeFetch, showToast } from './shared.js';
 import { hideHighlightUndo, updateHighlightsLightboxControls } from './lightbox.js';
 import { removeRejectedPhotoFromModel } from './rejects.js';
 import { render } from './render.js';
@@ -85,12 +85,18 @@ export async function loadHighlights(refreshCollections = false) {
   // includes and we must not strip.
   var refetchSeqAtLoad = { ...state.bucketRefetchSeq };
   var loadSeq = ++state.highlightsLoadSeq;
+  loadingPhotos.clear();
+  if (!state.currentData && params.get('scope') === 'workspace'
+      && !params.has('species') && !params.has('q') && params.get('highlight_selection') === 'all') {
+    void loadingPhotos.load('/api/highlights/preview?' + params, 'Recently added photos');
+  }
   /** @type {HighlightsData} */
   var data;
   try {
     // The page reports the failure itself, so safeFetch does not also toast it.
     data = await safeFetch('/api/highlights?' + params, undefined, { toast: false });
   } catch (error) {
+    if (loadSeq === state.highlightsLoadSeq) loadingPhotos.clear();
     if (loadSeq === state.highlightsLoadSeq && params.has('collection_id')) {
       // Say why the selection changes, then return the selector and grid to a usable scope.
       showToast('Could not load that collection' + failureReason(error) + '. Showing all folders.', 'error');
@@ -102,6 +108,7 @@ export async function loadHighlights(refreshCollections = false) {
     throw error;
   }
   if (loadSeq !== state.highlightsLoadSeq) return;
+  loadingPhotos.clear();
   // A Pick/Unpick after this request began can make its prefix stale against
   // the backend tail. Fetch again before replacing buckets or settling their
   // guards; that bucket refetch still targets the currently displayed data.
@@ -137,7 +144,7 @@ export async function loadHighlights(refreshCollections = false) {
   if (data.collections) {
     var firstLoad = !folderSelect.options.length;
     populateScopePicker(folderSelect, data.folders, data.collections);
-    if (firstLoad && folderSelect.value !== WORKSPACE_SCOPE) return loadHighlights();
+    if (firstLoad && highlightsScopeParams().toString() !== scope) return loadHighlights();
   }
   var selectedOption = folderSelect.options[folderSelect.selectedIndex];
   state.currentScopeName = selectedOption

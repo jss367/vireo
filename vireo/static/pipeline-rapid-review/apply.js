@@ -15,9 +15,35 @@ function updateSummaryFromPhotos() {
   /** @type {RapidResults} */ (rapid.results).summary = summary;
 }
 
+// The flags and species endpoints have already committed. save-cache checks
+// the grouping signature. On a mismatch or a lost reply, read server truth.
+async function verifyAppliedRapidResults() {
+  try {
+    await safeFetch('/api/pipeline/save-cache', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(/** @type {RapidResults} */ (rapid.results)),
+    }, { toast: false });
+    return true;
+  } catch {
+    showToast('Your decisions were applied. Refreshing the review to verify its current state.', 'warning');
+    await refreshRapidReviewFromServer();
+    return false;
+  }
+}
+
 /** @param {boolean} openNext */
 async function applyCurrent(openNext) {
   if (!rapid.seeded || rapid.applying || rapid.sessionIndex < 0) return false;
+  if (!rapidApplyLabelParts(rapidComputeApplyDiff()).length) {
+    if (openNext && rapid.sessionIndex + 1 < rapid.sessions.length) await openSession(rapid.sessionIndex + 1);
+    return true;
+  }
+  return applyBurstChanges(openNext);
+}
+
+/** @param {boolean} openNext */
+async function applyBurstChanges(openNext) {
   rapid.applying = true;
   renderApplyState();
   var targetList = parseSpeciesList(/** @type {HTMLInputElement} */ (document.getElementById('speciesInput')).value);
@@ -287,11 +313,7 @@ async function applyCurrent(openNext) {
       }
     }
     updateSummaryFromPhotos();
-    await safeFetch('/api/pipeline/save-cache', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(/** @type {RapidResults} */ (rapid.results)),
-    }, { toast: false });
+    if (!await verifyAppliedRapidResults()) return false;
     rapid.applying = false;
     var currentKey = sessionKey(session);
     var activeKey = sessionKey(rapid.sessions[rapid.sessionIndex]);

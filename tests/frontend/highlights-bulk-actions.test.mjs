@@ -15,6 +15,7 @@ function harness(safeFetch, isUnidentified = false) {
   const toasts = [];
   const context = vm.createContext({
     state,
+    loadingPhotos: {clear() {}},
     safeFetch,
     showToast: (message, kind) => toasts.push({message, kind}),
     highlightsScopeParams: () => new URLSearchParams({folder_id: folderId}),

@@ -503,10 +503,24 @@ def create_local_folder_blueprint(
                 paths.append(raw)
         return paths
 
+    def _transition_jobs() -> list[JobDict]:
+        # Paused jobs keep their original path assumptions when they resume.
+        # Downloads and other catalog-independent jobs explicitly opt out.
+        return [
+            job for job in get_runner().list_jobs()
+            if job.get("blocks_local_transitions") is not False
+            and job.get("status") in {"queued", "running", "pausing", "paused"}
+        ]
+
     def _busy_job(
         db: Database, root_ids: list[int] | set[int], initiating_workspace_id: int, *,
-        extra_stage_paths: list[str] | None = None,
+        extra_stage_paths: list[str] | None = None, jobs: list[JobDict] | None = None,
     ) -> JobDict | None:
+        if jobs is not None:
+            if not jobs:
+                return None
+            if jobs[0].get("workspace_id") == initiating_workspace_id:
+                return jobs[0]
         workspace_ids = {int(initiating_workspace_id)}
         for root_id in root_ids:
             workspace_ids.update(affected_workspace_ids(db, root_id))
@@ -524,23 +538,7 @@ def create_local_folder_blueprint(
         stage_source_physicals = [
             (source, _resolve_physical(source)) for source in stage_source_paths
         ]
-        for job in get_runner().list_jobs():
-            # Jobs that carry no pre-rebase photo/folder paths opt out —
-            # model/label downloads and embedding precomputes, which touch
-            # only ~/.vireo, plus observational jobs such as the automatic
-            # new-images walk, whose cache generation is bumped when the
-            # transition rebases paths so a result from the old layout is
-            # dropped instead of leaking back into the UI. See
-            # jobs.CATALOG_INDEPENDENT_JOB_TYPES.
-            if job.get("blocks_local_transitions") is False:
-                continue
-            # ``pausing``/``paused`` jobs still hold their original workspace
-            # and root assumptions in the worker's memory. A stage/sync/discard
-            # starting under them would race the paused work when it resumes,
-            # leaving catalog rows written against paths the folder manifest
-            # does not cover.
-            if job.get("status") not in {"queued", "running", "pausing", "paused"}:
-                continue
+        for job in (_transition_jobs() if jobs is None else jobs):
             config = job.get("config") or {}
             job_roots = set(config.get("root_folder_ids") or []) if isinstance(config, dict) else set()
             if job.get("workspace_id") in workspace_ids or job_roots.intersection(root_ids):
@@ -709,12 +707,13 @@ def create_local_folder_blueprint(
         )
         # Source conflicts prevent opening the dialog. Destination conflicts
         # are checked by its preflight after the user can choose a safe base.
+        jobs = _transition_jobs()
         folder_blocking_jobs = {}
         for root_id in selectable_root_ids:
-            blocking_job = _busy_job(db, [root_id], workspace_id)
+            blocking_job = _busy_job(db, [root_id], workspace_id, jobs=jobs)
             if blocking_job is not None:
                 folder_blocking_jobs[str(root_id)] = _job_payload(blocking_job)
-        overall = _busy_job(db, selectable_root_ids, workspace_id)
+        overall = _busy_job(db, selectable_root_ids, workspace_id, jobs=jobs)
         return {
             "blocking_job": _job_payload(overall),
             "folder_blocking_jobs": folder_blocking_jobs,

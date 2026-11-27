@@ -2919,7 +2919,9 @@ def test_local_folder_blocker_endpoint_avoids_source_walk(tmp_path, monkeypatch)
             f"/api/workspaces/{workspace_id}/activate", json={}
         ).status_code == 200
         # No blocker → empty payload, without walking storage.
-        response = client.get("/api/workspaces/active/local-folders/blocker")
+        with monkeypatch.context() as patch:
+            patch.setattr(local_folder_web, "affected_workspace_ids", unexpected_status)
+            response = client.get("/api/workspaces/active/local-folders/blocker")
         assert response.status_code == 200
         assert response.get_json() == {
             "blocking_job": None,
