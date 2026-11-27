@@ -169,9 +169,9 @@ struct HealthResponse {
 /// NOTE: There is an inherent TOCTOU race between releasing this port and the
 /// sidecar binding to it. If another process grabs it first, the sidecar will
 /// fail to start and the health-check will surface the error.
-fn find_free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.local_addr().unwrap().port()
+fn find_free_port() -> std::io::Result<u16> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    Ok(listener.local_addr()?.port())
 }
 
 /// Wait for the sidecar to respond to /api/health, racing against an
@@ -470,7 +470,9 @@ pub fn start_sidecar(app: &AppHandle) -> Result<SidecarState, SidecarStartError>
         std::thread::sleep(RUNTIME_BOOT_WAIT_INTERVAL);
     }
 
-    let port = find_free_port();
+    let port = find_free_port().map_err(|error| {
+        SidecarStartError::Generic(format!("Could not reserve a local port: {error}"))
+    })?;
 
     // macOS GUI apps get a minimal PATH that excludes Homebrew directories,
     // so tools like exiftool won't be found. Prepend common Homebrew paths.

@@ -271,9 +271,10 @@ pub fn is_browser_mode(app: &AppHandle) -> bool {
 }
 
 /// Query the Flask backend for jobs known to the in-memory runner.
-fn fetch_jobs(port: u16, token: Option<&str>) -> Vec<JobInfo> {
+fn fetch_jobs(port: u16, token: Option<&str>) -> Result<Vec<JobInfo>, ureq::Error> {
     let url = format!("http://127.0.0.1:{}/api/jobs", port);
     let agent: ureq::Agent = ureq::Agent::config_builder()
+        .proxy(None)
         .timeout_connect(Some(Duration::from_secs(2)))
         .timeout_recv_response(Some(Duration::from_secs(5)))
         .build()
@@ -282,23 +283,12 @@ fn fetch_jobs(port: u16, token: Option<&str>) -> Vec<JobInfo> {
     if let Some(token) = token {
         request = request.header("X-Vireo-Token", token);
     }
-    match request.call() {
-        Ok(mut resp) => match resp.body_mut().read_to_string() {
-            Ok(body) => match serde_json::from_str::<JobsResponse>(&body) {
-                Ok(data) => data.active,
-                Err(e) => {
-                    log::warn!("Failed to parse /api/jobs response: {}", e);
-                    Vec::new()
-                }
-            },
-            Err(e) => {
-                log::warn!("Failed to read /api/jobs body: {}", e);
-                Vec::new()
-            }
-        },
-        Err(e) => {
-            log::debug!("Failed to reach /api/jobs: {}", e);
-            Vec::new()
+    let body = request.call()?.body_mut().read_to_string()?;
+    match serde_json::from_str::<JobsResponse>(&body) {
+        Ok(data) => Ok(data.active),
+        Err(error) => {
+            log::warn!("Failed to parse /api/jobs response: {error}");
+            Ok(Vec::new())
         }
     }
 }
@@ -403,8 +393,32 @@ pub fn start_job_polling(app: AppHandle, port: u16, token: Option<String>, stop:
     std::thread::spawn(move || {
         let mut last_count: Option<usize> = None;
         let mut last_dock_progress: Option<DockProgress> = None;
+        let mut previously_refused = false;
         while !stop.load(Ordering::Relaxed) {
-            let jobs = fetch_jobs(port, token.as_deref());
+            let result = fetch_jobs(port, token.as_deref());
+            let refused = matches!(&result, Err(ureq::Error::Io(error))
+                if error.kind() == std::io::ErrorKind::ConnectionRefused);
+            // Both owned and shared sidecars have a token. A slow request or
+            // a Jobs error is not evidence that the backend process is gone.
+            if token.is_some() && refused && previously_refused {
+                if !stop.load(Ordering::Relaxed) {
+                    if let Some(window) = app.get_webview_window("main") {
+                        log::error!("Vireo backend stopped accepting connections on port {port}");
+                        crate::show_backend_error(
+                            &window,
+                            "Vireo Backend Stopped",
+                            "Vireo lost its connection to the local backend. Quit and reopen Vireo to reconnect to your catalog.".into(),
+                            1,
+                        );
+                    }
+                }
+                break;
+            }
+            previously_refused = refused;
+            let jobs = result.unwrap_or_else(|error| {
+                log::debug!("Failed to reach /api/jobs: {error}");
+                Vec::new()
+            });
             let running: Vec<&JobInfo> = jobs
                 .iter()
                 .filter(|j| j.status == "running" && j.counts_for_badge)
@@ -452,4 +466,32 @@ pub fn start_job_polling(app: AppHandle, port: u16, token: Option<String>, stop:
         }
         log::info!("Tray job polling thread stopped");
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    #[test]
+    fn polling_distinguishes_an_idle_backend_from_one_that_has_exited() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let backend = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            assert!(stream.read(&mut request).unwrap() > 0);
+            stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\nConnection: close\r\n\r\n{\"active\":[]}",
+            ).unwrap();
+        });
+
+        assert!(fetch_jobs(port, Some("test")).unwrap().is_empty());
+        backend.join().unwrap();
+        assert!(
+            matches!(fetch_jobs(port, Some("test")), Err(ureq::Error::Io(error))
+            if error.kind() == std::io::ErrorKind::ConnectionRefused)
+        );
+    }
 }
