@@ -254,24 +254,28 @@ fn runtime_health_is_vireo(port: u16, token: &str, timeout: Duration) -> bool {
     health.service.as_deref() == Some("vireo")
 }
 
-fn runtime_lock_is_held(path: &std::path::Path) -> bool {
-    if !path.exists() {
-        return false;
-    }
-    let Ok(file) = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path)
-    else {
-        return false;
-    };
-    match file.try_lock_exclusive() {
-        Ok(()) => {
-            let _ = FileExt::unlock(&file);
-            false
+// The backend holds an exclusive OS lock for its lifetime. Only a successful
+// probe confirms release. A missing or inaccessible file is inconclusive.
+fn runtime_lock_is_held(path: &std::path::Path) -> std::io::Result<bool> {
+    let file = std::fs::File::open(path)?;
+    match FileExt::try_lock_shared(&file) {
+        Ok(()) => Ok(false),
+        Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
+            Ok(true)
         }
-        Err(_) => true,
+        Err(error) => Err(error),
     }
+}
+
+pub fn backend_has_stopped(token: &str) -> bool {
+    // Another instance may have already taken the lock after this one died.
+    if runtime_json_path()
+        .and_then(|path| read_runtime_json(&path))
+        .is_some_and(|runtime| runtime.token != token)
+    {
+        return true;
+    }
+    runtime_lock_path().is_some_and(|path| matches!(runtime_lock_is_held(&path), Ok(false)))
 }
 
 fn existing_runtime() -> Option<RuntimeInfo> {
@@ -286,7 +290,7 @@ fn existing_runtime() -> Option<RuntimeInfo> {
             }
         }
 
-        let lock_held = runtime_lock_is_held(&lock_path);
+        let lock_held = runtime_lock_is_held(&lock_path).unwrap_or(false);
         let runtime_present = path.exists();
         if !runtime_present && !lock_held {
             return None;
@@ -634,6 +638,18 @@ pub fn stop_sidecar(state: &SidecarState) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_lock_confirms_exit_only_after_the_backend_releases_it() {
+        let path = std::env::temp_dir().join(format!("vireo-liveness-{}", std::process::id()));
+        let owner = std::fs::File::create(&path).unwrap();
+        owner.lock_exclusive().unwrap();
+        assert!(runtime_lock_is_held(&path).unwrap());
+        drop(owner);
+        assert!(!runtime_lock_is_held(&path).unwrap());
+        std::fs::remove_file(&path).unwrap();
+        assert!(runtime_lock_is_held(&path).is_err());
+    }
 
     #[test]
     fn read_runtime_json_accepts_valid_payload() {

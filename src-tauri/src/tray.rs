@@ -270,26 +270,6 @@ pub fn is_browser_mode(app: &AppHandle) -> bool {
         .unwrap_or(false)
 }
 
-/// Whether a [`fetch_jobs`] error indicates that nothing is listening on the
-/// backend port. Windows can surface the same condition as any of these
-/// `io::ErrorKind` values (ConnectionRefused on a clean refusal, or
-/// ConnectionReset/ConnectionAborted when the OS tears the half-open socket
-/// down), and ureq itself falls back to `ConnectionFailed` when a connector
-/// gives no reason. A timeout or parse error is deliberately not treated as
-/// "gone" because a slow or buggy backend is still running.
-fn backend_appears_gone(result: &Result<Vec<JobInfo>, ureq::Error>) -> bool {
-    match result {
-        Err(ureq::Error::Io(error)) => matches!(
-            error.kind(),
-            std::io::ErrorKind::ConnectionRefused
-                | std::io::ErrorKind::ConnectionReset
-                | std::io::ErrorKind::ConnectionAborted
-        ),
-        Err(ureq::Error::ConnectionFailed) => true,
-        _ => false,
-    }
-}
-
 /// Query the Flask backend for jobs known to the in-memory runner.
 fn fetch_jobs(port: u16, token: Option<&str>) -> Result<Vec<JobInfo>, ureq::Error> {
     let url = format!("http://127.0.0.1:{}/api/jobs", port);
@@ -413,13 +393,13 @@ pub fn start_job_polling(app: AppHandle, port: u16, token: Option<String>, stop:
     std::thread::spawn(move || {
         let mut last_count: Option<usize> = None;
         let mut last_dock_progress: Option<DockProgress> = None;
-        let mut previously_refused = false;
         while !stop.load(Ordering::Relaxed) {
             let result = fetch_jobs(port, token.as_deref());
-            let refused = backend_appears_gone(&result);
-            // Both owned and shared sidecars have a token. A slow request or
-            // a Jobs error is not evidence that the backend process is gone.
-            if token.is_some() && refused && previously_refused {
+            if result.is_err()
+                && token
+                    .as_deref()
+                    .is_some_and(crate::sidecar::backend_has_stopped)
+            {
                 if !stop.load(Ordering::Relaxed) {
                     if let Some(window) = app.get_webview_window("main") {
                         log::error!("Vireo backend stopped accepting connections on port {port}");
@@ -433,7 +413,6 @@ pub fn start_job_polling(app: AppHandle, port: u16, token: Option<String>, stop:
                 }
                 break;
             }
-            previously_refused = refused;
             let jobs = result.unwrap_or_else(|error| {
                 log::debug!("Failed to reach /api/jobs: {error}");
                 Vec::new()
@@ -508,14 +487,7 @@ mod tests {
 
         assert!(fetch_jobs(port, Some("test")).unwrap().is_empty());
         backend.join().unwrap();
-        let result = fetch_jobs(port, Some("test"));
-        let detail = match &result {
-            Ok(_) => "an Ok response".to_string(),
-            Err(error) => format!("{error:?}"),
-        };
-        assert!(
-            backend_appears_gone(&result),
-            "expected a gone-backend error after the listener was dropped, got {detail}",
-        );
+        // The transport error varies by OS, including connect timeout on Windows.
+        assert!(fetch_jobs(port, Some("test")).is_err());
     }
 }
