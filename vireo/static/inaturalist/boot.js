@@ -148,19 +148,34 @@ function render() {
   const covered = new Set(snapshot.taxon_ids);
   const comparable = entries.filter(entry => entry.taxon_rank === 'species' && entry.inat_id);
   const unmatched = entries.filter(entry => !entry.inat_id || entry.taxon_rank !== 'species');
-  const missing = (view.value === 'unmatched' ? unmatched : comparable.filter(entry =>
-    view.value === 'places' ? covered.has(entry.inat_id) && !nearby.has(entry.inat_id) : !covered.has(entry.inat_id)))
-    .sort((a, b) => (a.common_name || a.species).localeCompare(b.common_name || b.species));
-  const description = view.value === 'places' ? ' species already posted elsewhere with no public record within 10 km of this location.'
-    : view.value === 'unmatched' ? ' labels to review.' : ' of ' + comparable.length + ' linked species missing.';
+  let visible;
+  let description;
+  switch (view.value) {
+    case 'observed':
+      visible = comparable.filter(entry => covered.has(entry.inat_id));
+      description = ' of ' + comparable.length + ' linked species already observed.';
+      break;
+    case 'places':
+      visible = comparable.filter(entry => covered.has(entry.inat_id) && !nearby.has(entry.inat_id));
+      description = ' species already posted elsewhere with no public record within 10 km of this location.';
+      break;
+    case 'unmatched':
+      visible = unmatched;
+      description = ' labels to review.';
+      break;
+    default:
+      visible = comparable.filter(entry => !covered.has(entry.inat_id));
+      description = ' of ' + comparable.length + ' linked species missing.';
+  }
+  visible.sort((a, b) => (a.common_name || a.species).localeCompare(b.common_name || b.species));
   summary.textContent = snapshot.login + ' · Last refreshed ' +
-    new Date(snapshot.refreshed_at).toLocaleString() + ' · ' + missing.length + description;
+    new Date(snapshot.refreshed_at).toLocaleString() + ' · ' + visible.length + description;
   if (view.value !== 'unmatched' && unmatched.length) summary.append(' ', button('Review ' + unmatched.length + ' unmatched labels', () => {
     view.value = 'unmatched';
     load(false);
   }));
   const login = snapshot.login;
-  queue.replaceChildren(...missing.map(entry => candidate(entry, login)));
+  queue.replaceChildren(...visible.map(entry => candidate(entry, login)));
 }
 
 /** @param {boolean} refresh */
