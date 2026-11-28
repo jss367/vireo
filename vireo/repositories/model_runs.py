@@ -684,7 +684,7 @@ class ModelRunsRepository:
         weak_confidence: float | None = None,
         fresh_detections_by_photo: Mapping[int, Sequence[Mapping[str, Any]]] | None = None,
         fresh_processed_photo_ids: Iterable[int] | None = None,
-        expected_classifier_runtime_by_detector_runtime: Mapping[str, str | None] | None = None,
+        expected_classifier_runtime_by_detector_runtime: Mapping[str | None, str | None] | None = None,
     ) -> set[int]:
         """Return the photo ids the classify preflight counts as cached."""
         query = _CacheHitQuery(
@@ -1109,7 +1109,7 @@ class ModelRunsRepository:
 
 
 def _runtime_predicate(
-    alias, strict_pairs, permissive_det_rts, auto_match_review_marker,
+    alias, rt_map, auto_match_review_marker,
 ):
     """Return the runtime-fingerprint predicate for classifier_runs ``alias``.
 
@@ -1129,11 +1129,29 @@ def _runtime_predicate(
 
     # Bind the runtime sets as data so both expression depth and parameter
     # count stay constant even when each photo has a distinct fingerprint.
+    strict_pairs = {
+        det_rt: cls_rt for det_rt, cls_rt in rt_map.items()
+        if det_rt is not None and cls_rt is not None
+    }
+    permissive_det_rts = [
+        det_rt for det_rt, cls_rt in rt_map.items()
+        if det_rt is not None and cls_rt is None
+    ]
+    params = [json.dumps(strict_pairs), json.dumps(permissive_det_rts)]
     detector_match_terms = (
         f"(d_src.runtime_fingerprint, {alias}.runtime_fingerprint) IN "
         "(SELECT key, value FROM json_each(?))"
         " OR d_src.runtime_fingerprint IN (SELECT value FROM json_each(?))"
     )
+    # SQL IN cannot match NULL, and JSON object keys are always strings.
+    if None in rt_map:
+        if rt_map[None] is None:
+            detector_match_terms += " OR d_src.runtime_fingerprint IS NULL"
+        else:
+            detector_match_terms += (
+                f" OR (d_src.runtime_fingerprint IS NULL AND {alias}.runtime_fingerprint IS ?)"
+            )
+            params.append(rt_map[None])
     pred_sql = (
         f" AND ({alias}.runtime_fingerprint = 'legacy'"
         f" OR EXISTS (SELECT 1 FROM detections d_src"
@@ -1148,8 +1166,7 @@ def _runtime_predicate(
         f"              AND pr_ov.status IN ('accepted', 'rejected')"
         f"              AND COALESCE(pr_ov.individual, '') != ?))"
     )
-    params = [json.dumps(strict_pairs), json.dumps(permissive_det_rts),
-              auto_match_review_marker]
+    params.append(auto_match_review_marker)
     return pred_sql, params
 
 
@@ -1167,18 +1184,8 @@ def _classifier_run_predicate(rt_map, auto_match_review_marker):
     rt_predicate_sql = ""
     rt_predicate_params: list = []
     if rt_map is not None and rt_map:
-        strict_pairs = {
-            det_rt: cls_rt
-            for det_rt, cls_rt in rt_map.items()
-            if cls_rt is not None
-        }
-        permissive_det_rts = [
-            det_rt
-            for det_rt, cls_rt in rt_map.items()
-            if cls_rt is None
-        ]
         rt_predicate_sql, rt_predicate_params = _runtime_predicate(
-            "cr", strict_pairs, permissive_det_rts, auto_match_review_marker,
+            "cr", rt_map, auto_match_review_marker,
         )
 
     # RAW outputs cannot satisfy a normal-image run, even when reviewed.
