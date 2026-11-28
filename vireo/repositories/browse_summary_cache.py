@@ -23,10 +23,16 @@ class BrowseSummaryCache:
         self._file: tuple[int, int] | None = None
         self._entries: OrderedDict[tuple[int, int | None, float], JsonDict] = OrderedDict()
         self._version = -1
+        self._closed = False
 
-    def __del__(self) -> None:
-        if self._observer is not None:
-            self._observer.close()
+    def close(self) -> None:
+        """Release the catalog and prevent in-flight reads from reopening it."""
+        with self._lock:
+            self._closed = True
+            self._entries.clear()
+            if self._observer is not None:
+                self._observer.close()
+                self._observer = None
 
     def _revision(self, path: Path) -> tuple[int, int, int]:
         # data_version is comparable only on the same connection. This
@@ -47,6 +53,8 @@ class BrowseSummaryCache:
         return (*identity, version)
 
     def _available_revision(self, path: Path) -> tuple[int, int, int] | None:
+        if self._closed:
+            return None
         try:
             return self._revision(path)
         except (OSError, sqlite3.Error):

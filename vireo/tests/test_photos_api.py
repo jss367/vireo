@@ -13999,6 +13999,18 @@ def test_browse_summary_reuses_unchanged_folder_after_detail(app_and_db, monkeyp
     assert len(calls) == 2
 
 
+def test_app_cleanup_closes_browse_summary_observer(app_and_db):
+    import sqlite3
+
+    app, _ = app_and_db
+    assert app.test_client().get("/api/browse/summary").status_code == 200
+    observer = app._browse_summary_cache._observer
+    assert observer is not None
+    app._cleanup_app_resources()
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        observer.execute("SELECT 1")
+
+
 def test_browse_summary_drops_cache_fill_when_catalog_changes(app_and_db, monkeypatch):
     from repositories.photos import PhotoRepository
 
