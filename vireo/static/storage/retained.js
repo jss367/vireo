@@ -3,12 +3,12 @@
 import { state } from './state.js';
 import { storageFormatBytes } from './format.js';
 import { openStorageFolder, refreshStoragePage } from './panel.js';
-import { formatDateTime, safeFetch, showToast } from './shared.js';
+import { formatDateTime, safeFetch, storageVisitOptions, showToast } from './shared.js';
 
-export async function loadRetainedStorage() {
+export async function loadRetainedStorage(allowRecent = false) {
   var panel = /** @type {HTMLElement} */ (document.getElementById('retainedStorageItems'));
   try {
-    /** @type {RetainedStorageResponse} */ var data = await safeFetch('/api/storage/retained', {}, {toast: false});
+    /** @type {RetainedStorageResponse} */ var data = await safeFetch('/api/storage/retained', storageVisitOptions(allowRecent), {toast: false});
     state.retainedStorageData = data;
     if (data.maintenance) {
       /** @type {HTMLElement} */ (document.getElementById('retainedStorageStatus')).textContent = 'Latest storage maintenance: ' +

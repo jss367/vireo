@@ -11,7 +11,7 @@ import { hfCacheCardNote } from './hf-cache.js';
 import { loadMasksCard } from './masks.js';
 import { renderStorageCards, showStorageLoadError } from './overview.js';
 import { loadRetainedStorage } from './retained.js';
-import { confirmInPage, formatTime, safeFetch, showToast } from './shared.js';
+import { confirmInPage, formatTime, safeFetch, storageVisitOptions, showToast } from './shared.js';
 
 /** @param {string} id */
 export function storageEl(id) {
@@ -135,11 +135,11 @@ export function renderStorageBreakdown(auxiliaryCategories) {
   storageEl('storageBreakdown').innerHTML = breakdownHtml;
 }
 
-export async function loadStoragePanel() {
+export async function loadStoragePanel(allowRecent = false) {
   /** @type {StorageReport | undefined} */
   var s;
   try {
-    s = /** @type {StorageReport} */ (await safeFetch('/api/storage', {}, { toast: false }));
+    s = /** @type {StorageReport} */ (await safeFetch('/api/storage', storageVisitOptions(allowRecent), { toast: false }));
     storageEl('storageTotalSize').textContent = storageFormatBytes(s.total);
     storageEl('storageReclaimableSize').textContent = storageFormatBytes(s.reclaimable);
     renderStorageVolumes(s);
@@ -153,25 +153,27 @@ export async function loadStoragePanel() {
     var categories = storageCategories(s);
     renderStorageBreakdown(s.other.categories || []);
     renderStorageCards(categories);
+    var measuredAt = s.measured_at ? new Date(s.measured_at * 1000) : new Date();
+    storageEl('storageUpdatedAt').textContent =
+      'Updated ' + formatTime(measuredAt, {hour: 'numeric', minute: '2-digit', second: '2-digit'});
   } catch(e) {
     // Usage is unknown until the next successful scan; keep Apply disabled
     // so a stale zero can't skip the eviction confirmation.
     state.workingCopySizeBytes = null;
     updateWorkingCopyLimitState();
+    storageEl('storageUpdatedAt').textContent = 'Update failed';
     showStorageLoadError();
   }
   await loadMasksCard(s && s.masks);
 }
 
-export async function refreshStoragePage() {
+export async function refreshStoragePage(allowRecent = false) {
   var btn = /** @type {HTMLButtonElement} */ (document.getElementById('refreshStorageBtn'));
   if (btn) btn.disabled = true;
   await Promise.all([
-    loadStoragePanel(), loadPreviewCacheStatus(), loadDetectionCacheStats(),
-    loadEmbeddingMatrix(), loadEmbeddingCache(), loadRetainedStorage(),
+    loadStoragePanel(allowRecent), loadPreviewCacheStatus(), loadDetectionCacheStats(),
+    loadEmbeddingMatrix(), loadEmbeddingCache(), loadRetainedStorage(allowRecent),
   ]);
-  /** @type {HTMLElement} */ (document.getElementById('storageUpdatedAt')).textContent =
-    'Updated ' + formatTime(new Date(), {hour: 'numeric', minute: '2-digit', second: '2-digit'});
   if (btn) btn.disabled = false;
 }
 

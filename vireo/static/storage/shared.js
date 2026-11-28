@@ -57,3 +57,8 @@ export function formatTime(date, options) {
 export function registerPageHooks(hooks) {
   window.Vireo.registerPageHooks(hooks);
 }
+
+/** Only page entry may reuse a recent measurement. @param {boolean} allowRecent @returns {RequestInit} */
+export function storageVisitOptions(allowRecent) {
+  return allowRecent ? {headers: {'X-Vireo-Storage-Visit': '1'}} : {};
+}
