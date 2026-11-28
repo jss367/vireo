@@ -410,9 +410,6 @@ async function _postConfigSnapshot(gen) {
       throw e;
     }
     _rememberSavedSecrets(secrets);
-    delete changed.hf_token;
-    delete changed.inat_token;
-    delete changed.google_maps_api_key;
     commitSettingsChanges('config', changed);
     applyDisplayConfig(form);
     _saveStatusMark('config', 'ok', gen);

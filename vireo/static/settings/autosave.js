@@ -206,7 +206,9 @@ function commitSettingsChanges(scope,values) {
     const layer = scope === 'workspace' ? layers.workspace : layers.global;
     for (const [key,value] of Object.entries(values)) {
       if (!ALL_SETTINGS_CACHE.schema?.[key]) continue;
-      if (scope === 'workspace' && value === null) delete layer[key];
+      const inherits = scope === 'workspace' ? value === null :
+        JSON.stringify(value) === JSON.stringify(layers.default[key]);
+      if (inherits) delete layer[key];
       else layer[key] = /** @type {SettingsValue} */ (value);
       rerenderSettingRow(key);
     }

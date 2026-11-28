@@ -1122,3 +1122,18 @@ def test_settings_search_covers_schema_and_curated_controls(live_server, page):
         return errors;
     }""")
     assert problems == [], problems
+
+
+def test_curated_credential_updates_advanced_value_and_reset(live_server, page):
+    page.goto(live_server["url"] + "/settings?category=integrations")
+    _wait_for_settings_idle(page)
+    credential = page.locator("#cfgHfToken")
+    advanced = page.locator("#setting-hf_token")
+    for value in ("hf_test_settings_sync", ""):
+        with page.expect_response(lambda r: r.url.endswith("/api/config") and r.request.method == "POST"):
+            credential.fill(value)
+            credential.blur()
+        page.locator('[data-category-link="advanced"]').click()
+        expect(advanced.locator('input[type="password"]')).to_have_value(value)
+        expect(advanced.get_by_role("button", name="Reset", include_hidden=True)).to_have_count(int(bool(value)))
+        page.locator('[data-category-link="integrations"]').click()
