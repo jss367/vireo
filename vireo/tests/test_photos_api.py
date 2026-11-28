@@ -236,6 +236,15 @@ def test_dashboard_and_browse_share_collection_date_scope(app_and_db):
     assert stats.status_code == 200
     assert stats.get_json()["total_photos"] == 1
 
+    headline = client.get(f"/api/stats?section=headline&{query}")
+    assert headline.status_code == 200
+    assert headline.get_json() == {
+        key: stats.get_json()[key] for key in (
+            "total_photos", "folder_count", "keyword_count", "accessible_photos",
+            "missing_folder_count", "pending_changes",
+        )
+    }
+
     coverage = client.get(f"/api/coverage?{query}")
     assert coverage.status_code == 200
     assert coverage.get_json()["overall"]["total"] == 1

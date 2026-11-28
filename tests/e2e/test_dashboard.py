@@ -5,6 +5,17 @@ from urllib.parse import parse_qs, urlparse
 from playwright.sync_api import expect
 
 
+def test_dashboard_headline_precedes_charts(live_server, page):
+    held = []
+    page.route(re.compile(r"/api/stats$"), lambda route: held.append(route))
+    page.goto(f"{live_server['url']}/dashboard")
+    expect(page.locator("#photoCount")).to_have_text("5")
+    expect(page.locator("#attentionGrid .attention-card")).to_have_count(0)
+    assert len(held) == 1
+    held[0].continue_()
+    expect(page.locator("#attentionGrid .attention-card")).to_have_count(5)
+
+
 def test_dashboard_scope_and_chart_drill_down(live_server, page):
     """Folder scope updates every card and follows charts into filtered Browse."""
     page_errors = []

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from flask import Blueprint, jsonify
+from flask import Blueprint, jsonify, request
 from services import dashboard_stats
 from services.visual_scope import collection_rules_state
 from web.request_args import dashboard_scope_args, reject_visual_collection
@@ -71,6 +71,8 @@ def create_dashboard_blueprint(get_db: GetDb, json_error: JsonError) -> Blueprin
         if err is not None:
             return err
         try:
+            if request.args.get("section") == "headline":
+                return jsonify(dashboard_stats.get_dashboard_headline(db, **scope))
             stats = dashboard_stats.get_dashboard_stats(db, **scope)
         except ValueError as exc:
             return json_error(str(exc), 400)

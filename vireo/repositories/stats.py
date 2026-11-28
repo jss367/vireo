@@ -1117,6 +1117,22 @@ class StatsRepository:
             (ws, *scope_params),
         ).fetchone()
 
+    def get_dashboard_headline(self, ws, scope_sql, scope_params):
+        """Counts for the four overview cards and the offline-folder note."""
+        overview = dict(self._dashboard_overview(ws, scope_sql, scope_params))
+        pending_changes = self.conn.execute(
+            f"""SELECT COUNT(*)
+                FROM pending_changes pc
+                JOIN photos p ON p.id = pc.photo_id
+                JOIN photo_workspace_visibility wf
+                  ON wf.photo_id = p.id AND wf.workspace_id = ?
+                WHERE pc.workspace_id = ?{scope_sql}""",
+            (ws, ws, *scope_params),
+        ).fetchone()[0]
+
+        overview["pending_changes"] = pending_changes
+        return overview
+
     def _dashboard_metadata_charts(self, ws, scope_sql, scope_params):
         """Top keywords and the month, rating and flag distributions."""
         # The four pure-metadata aggregates below (top_keywords,
@@ -1196,14 +1212,16 @@ class StatsRepository:
         # most recent labels_fingerprint per (detection, classifier_model)
         # so stale-label predictions from a prior label set don't drift the
         # totals away from the active labeling context.
-        prediction_status = self.conn.execute(
-            f"""SELECT {prediction_review_status()} AS status,
-                      COUNT(*) AS count
+        rows = self.conn.execute(
+            f"""WITH eligible AS MATERIALIZED (
+               SELECT d.photo_id, {prediction_review_status()} AS status,
+                      f.status IN ('ok', 'partial') AS accessible
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
                JOIN photos p ON p.id = d.photo_id
                JOIN photo_workspace_visibility wf
                  ON wf.photo_id = p.id AND wf.workspace_id = ?
+               LEFT JOIN folders f ON f.id = p.folder_id
                {prediction_review_join('pr')}
                WHERE d.detector_confidence >= ? AND d.subject_verdict IS NULL
                  AND pr.labels_fingerprint = (
@@ -1213,56 +1231,19 @@ class StatsRepository:
                     ORDER BY pr2.created_at DESC, pr2.id DESC
                     LIMIT 1
                  ){scope_sql}
-               GROUP BY {prediction_review_status()}""",
+               )
+               SELECT NULL AS status, COUNT(DISTINCT photo_id) AS count,
+                      COUNT(DISTINCT CASE WHEN accessible THEN photo_id END) AS accessible_count
+               FROM eligible
+               UNION ALL
+               SELECT status, COUNT(*), NULL FROM eligible GROUP BY status
+               ORDER BY status""",
             (ws, ws, min_conf, *scope_params),
         ).fetchall()
-
-        # Same threshold + fingerprint rules as prediction_status above, so
-        # classified_count can't drift above detected_count as the threshold
-        # moves.
-        classified_count = self.conn.execute(
-            f"""SELECT COUNT(DISTINCT d.photo_id)
-               FROM predictions pr
-               JOIN detections d ON d.id = pr.detection_id
-               JOIN photos p ON p.id = d.photo_id
-               JOIN photo_workspace_visibility wf
-                 ON wf.photo_id = p.id AND wf.workspace_id = ?
-               WHERE d.detector_confidence >= ? AND d.subject_verdict IS NULL
-                 AND pr.labels_fingerprint = (
-                    SELECT pr2.labels_fingerprint FROM predictions pr2
-                    WHERE pr2.detection_id = pr.detection_id
-                      AND pr2.classifier_model = pr.classifier_model
-                    ORDER BY pr2.created_at DESC, pr2.id DESC
-                    LIMIT 1
-                 ){scope_sql}""",
-            (ws, min_conf, *scope_params),
-        ).fetchone()[0]
-
-        # Needs Attention links only open photos that are currently
-        # accessible. Keep the headline classification aggregate metadata-
-        # complete above, but use this reachable subset for operational work.
-        accessible_classified_count = self.conn.execute(
-            f"""SELECT COUNT(DISTINCT d.photo_id)
-               FROM predictions pr
-               JOIN detections d ON d.id = pr.detection_id
-               JOIN photos p ON p.id = d.photo_id
-               JOIN photo_workspace_visibility wf
-                 ON wf.photo_id = p.id AND wf.workspace_id = ?
-               JOIN folders f
-                 ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
-               WHERE d.detector_confidence >= ? AND d.subject_verdict IS NULL
-                 AND pr.labels_fingerprint = (
-                    SELECT pr2.labels_fingerprint FROM predictions pr2
-                    WHERE pr2.detection_id = pr.detection_id
-                      AND pr2.classifier_model = pr.classifier_model
-                    ORDER BY pr2.created_at DESC, pr2.id DESC
-                    LIMIT 1
-                 ){scope_sql}""",
-            (ws, min_conf, *scope_params),
-        ).fetchone()[0]
-        return (
-            prediction_status, classified_count, accessible_classified_count,
-        )
+        # NULL sorts first. The totals row also exists for an empty scope.
+        totals = rows[0]
+        statuses = [{"status": row["status"], "count": row["count"]} for row in rows[1:]]
+        return statuses, totals["count"], totals["accessible_count"]
 
     def _dashboard_hour_and_quality(self, ws, scope_sql, scope_params):
         """The capture-hour and quality-score distributions."""
@@ -1328,16 +1309,6 @@ class StatsRepository:
             (ws, *scope_params),
         ).fetchone()[0]
 
-        pending_changes = self.conn.execute(
-            f"""SELECT COUNT(*)
-                FROM pending_changes pc
-                JOIN photos p ON p.id = pc.photo_id
-                JOIN photo_workspace_visibility wf
-                  ON wf.photo_id = p.id AND wf.workspace_id = ?
-                WHERE pc.workspace_id = ?{scope_sql}""",
-            (ws, ws, *scope_params),
-        ).fetchone()[0]
-
         if preview_size:
             missing_previews = self.conn.execute(
                 f"""SELECT COUNT(DISTINCT p.id)
@@ -1371,7 +1342,7 @@ class StatsRepository:
             (ws, *scope_params),
         ).fetchone()[0]
         return (
-            detected_count, missing_location, pending_changes,
+            detected_count, missing_location,
             missing_previews, duplicate_groups,
         )
 
@@ -1386,7 +1357,7 @@ class StatsRepository:
         """
         ws = self.workspace_id_fn()
 
-        overview = self._dashboard_overview(ws, scope_sql, scope_params)
+        overview = self.get_dashboard_headline(ws, scope_sql, scope_params)
         top_keywords, photos_by_month, rating_dist, flag_dist = (
             self._dashboard_metadata_charts(ws, scope_sql, scope_params)
         )
@@ -1399,42 +1370,34 @@ class StatsRepository:
             ws, scope_sql, scope_params,
         )
         (
-            detected_count, missing_location, pending_changes,
+            detected_count, missing_location,
             missing_previews, duplicate_groups,
         ) = self._dashboard_gap_counts(
             ws, min_conf, preview_size, scope_sql, scope_params,
             location_conditions,
         )
 
-        total_photos = overview["total_photos"] or 0
-
         return {
             "top_keywords": [dict(r) for r in top_keywords],
             "photos_by_month": [dict(r) for r in photos_by_month],
             "rating_distribution": [dict(r) for r in rating_dist],
             "flag_distribution": [dict(r) for r in flag_dist],
-            "prediction_status": [dict(r) for r in prediction_status],
+            "prediction_status": prediction_status,
             "classified_count": classified_count,
             "photos_by_hour": [dict(r) for r in photos_by_hour],
             "quality_distribution": [dict(r) for r in quality_dist],
             "detected_count": detected_count,
-            "total_photos": total_photos,
-            "accessible_photos": overview["accessible_photos"] or 0,
-            "missing_folder_count": overview["missing_folder_count"] or 0,
-            "folder_count": overview["folder_count"] or 0,
-            "keyword_count": overview["keyword_count"] or 0,
-            "pending_changes": pending_changes,
+            **overview,
             "attention": {
                 "unclassified": max(
                     0,
-                    (overview["accessible_photos"] or 0)
-                    - accessible_classified_count,
+                    overview["accessible_photos"] - accessible_classified_count,
                 ),
                 "missing_location": missing_location,
                 "missing_previews": missing_previews,
                 "preview_size": preview_size,
                 "preview_enabled": bool(preview_size),
-                "pending_sync": pending_changes,
+                "pending_sync": overview["pending_changes"],
                 "duplicate_groups": duplicate_groups,
             },
         }

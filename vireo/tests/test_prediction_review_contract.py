@@ -49,8 +49,6 @@ RAW_READS = {
     # Upgrade discovery reads the immutable migration sentinel, not species
     # decisions: accepting/rejecting a prediction does not regenerate raw boxes.
     'repositories/predictions.py:PredictionRepository.legacy_detection_folders': 1,
-    # Classified-photo and unscored-output counts are independent of decisions.
-    'repositories/stats.py:StatsRepository._dashboard_classification_counts': 2,
     'repositories/collections.py:CollectionRepository._suggest_field_sql': 1,
     'repositories/companion_pairing.py:CompanionPairingRepository.carry_prediction_reviews_to_survivors': 1,
     'repositories/computation_cache.py:ComputationCacheRepository.delete_run_predictions': 1,
