@@ -454,3 +454,66 @@ def test_classifier_refresh_preserves_burst_label_undo_redo(app_and_db, tmp_path
     replayed = load_results(str(tmp_path), db.active_workspace_id, db=db)
     assert replayed['encounters'][0]['bursts'][0]['species_override'] is None
     assert replayed['encounters'][0]['species'] == ['Current Species', .8]
+
+
+def test_cull_reuses_only_current_saved_decisions(db, tmp_path, monkeypatch):
+    from services import saved_review
+    from services.photo_review import PhotoReviewService
+    from services.review_refresh import pending_refresh, queue_refresh
+
+    pid = _photo(db, tmp_path)
+    _analyze(db, tmp_path, pid)
+    ws = db.require_workspace_id()
+    saved = _old_review([pid])
+    save_results_raw(saved, str(tmp_path), ws)
+    app = create_app(db._db_path, str(tmp_path / "thumbs"))
+    client = app.test_client()
+    refreshes = []
+    refresh = saved_review.refresh_saved_suggestions
+
+    def recorded(*args, **kwargs):
+        refreshes.append(1)
+        return refresh(*args, **kwargs)
+
+    monkeypatch.setattr(saved_review, "refresh_saved_suggestions", recorded)
+
+    def read():
+        response = client.get("/api/pipeline/cull-results")
+        assert response.status_code == 200
+        return response.get_json()["results"]
+
+    first = read()
+    assert first["photos"][0]["label"] != "REJECT"
+    assert "analysis_provenance" not in first["photos"][0]
+    assert first["encounters"][0]["bursts"] == [[pid]]
+    assert read() == first and len(refreshes) == 1
+
+    # A mask artifact can vanish independently of any database mutation.
+    mask = tmp_path / f"{pid}-mask.png"
+    mask.unlink()
+    read()
+    mask.touch()
+    read()
+    assert len(refreshes) == 3
+    PhotoReviewService(db).set_flag(pid, "rejected")
+    assert read()["photos"][0]["flag_confirmation_status"] == "confirmed"
+    assert read()["photos"][0]["label"] == "REJECT"
+    assert len(refreshes) == 4
+    cfg.save({"pipeline": {"sam2_variant": "sam2-large"}})
+    read()
+    assert len(refreshes) == 5
+    saved["encounters"][0]["confirmed_species"] = "Edited species"
+    save_results_raw(saved, str(tmp_path), ws)
+    assert read()["encounters"][0]["confirmed_species"] == "Edited species"
+    queue_refresh(str(tmp_path), ws, [pid])
+    read()
+    assert pending_refresh(str(tmp_path), ws) == {}
+
+    # Old snapshots can retain a deleted frame and use raw arrays for bursts.
+    missing = pid + 100
+    legacy = _old_review([pid, missing])
+    legacy["encounters"][0]["bursts"] = [[pid, missing]]
+    save_results_raw(legacy, str(tmp_path), ws)
+    repaired = read()
+    assert [p["id"] for p in repaired["photos"]] == [pid]
+    assert repaired["encounters"][0]["bursts"] == [[pid]]

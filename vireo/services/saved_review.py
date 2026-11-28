@@ -7,6 +7,8 @@ labels are never evidence for a new suggestion.
 
 from __future__ import annotations
 
+import os
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -14,7 +16,8 @@ if TYPE_CHECKING:
     from services.service_types import JsonDict
 
 
-def refresh_saved_suggestions(db: Database, data: JsonDict, *, effective_config: JsonDict | None = None) -> None:
+def refresh_saved_suggestions(db: Database, data: JsonDict, *, effective_config: JsonDict | None = None,
+                              mask_isfile: Callable[[str], bool] = os.path.isfile) -> None:
     """Re-score the saved members without inference or catalog/sidecar writes."""
     import config as cfg
     from pipeline import (
@@ -31,7 +34,7 @@ def refresh_saved_suggestions(db: Database, data: JsonDict, *, effective_config:
     effective = effective_config if effective_config is not None else db.get_effective_config(cfg.load())
     ids = [p["id"] for p in data.get("photos", [])]
     current = load_photo_features(
-        db, photo_ids=ids, config=effective, effective_config=effective,
+        db, photo_ids=ids, config=effective, effective_config=effective, mask_isfile=mask_isfile,
     )
     photos = {p["id"]: p for p in current}
     encounters = _current_groups(data, photos)

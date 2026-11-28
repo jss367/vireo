@@ -10,7 +10,7 @@ def run(session):
     session.goto("/cull")
 
     # The cull page auto-loads previous pipeline results via
-    # /api/pipeline/page-init. Older builds used /api/culling/results and
+    # /api/pipeline/cull-results. Older builds used /api/culling/results and
     # returned an expected 404 when no analysis existed; keep that finding
     # filter for compatibility with archived traces.
     session.page.wait_for_timeout(500)

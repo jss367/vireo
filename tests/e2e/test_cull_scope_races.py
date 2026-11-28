@@ -8,7 +8,7 @@ from e2e.test_cull_favorites import _open, _results
 
 
 def test_filter_change_during_collection_load_restarts_collection_source(live_server, page):
-    page.route('**/api/collections', lambda route: route.fulfill(json=[{'id': 123, 'name': 'New collection'}]))
+    page.route('**/api/dashboard/options', lambda route: route.fulfill(json={'collections': [{'id': 123, 'name': 'New collection'}]}))
     _open(page, live_server)
     held = []
     requests = []
@@ -43,7 +43,7 @@ def test_filter_change_during_collection_load_restarts_collection_source(live_se
 
 
 def test_failed_initial_scoped_follow_up_blocks_apply(live_server, page):
-    page.route('**/api/pipeline/page-init*', lambda route: route.fulfill(json={'results': None}))
+    page.route('**/api/pipeline/cull-results', lambda route: route.fulfill(json={'results': None}))
     requests = []
     def analyze(route):
         requests.append(route.request.post_data_json)
@@ -58,3 +58,22 @@ def test_failed_initial_scoped_follow_up_blocks_apply(live_server, page):
     expect(page.locator('#cullStatus')).to_contain_text('Scoped analysis failed')
     page.wait_for_function('cullAnalysisPending === 0')
     expect(page.locator('#applyBtn')).to_be_disabled()
+
+
+def test_saved_cards_render_while_collection_options_are_pending(live_server, page):
+    held = []
+    page.route("**/api/dashboard/options", lambda route: held.append(route))
+    page.route("**/api/pipeline/cull-results", lambda route: route.fulfill(json={"results": _results()}))
+    page.goto(live_server["url"] + "/cull", wait_until="domcontentloaded")
+    expect(page.locator(".cull-card").first).to_be_visible()
+    assert held
+    for route in held:
+        route.fulfill(json={"collections": [
+            {"id": 1, "name": "Broken", "degraded": True},
+            {"id": 2, "name": "Visual", "has_visual": True},
+            {"id": 3, "name": "Usable"},
+        ], "folders": []})
+    picker = page.locator("#cullCollection")
+    expect(picker.locator("option[value='1']")).to_be_disabled()
+    expect(picker.locator("option[value='2']")).to_be_disabled()
+    expect(picker.locator("option[value='3']")).to_be_enabled()

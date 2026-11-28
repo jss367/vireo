@@ -1264,6 +1264,7 @@ def _register_job_blueprints(app, w):
             lambda: app._job_runner,
             db_path,
             app.config,
+            catalog_revision=app._browse_summary_cache.revision,
             invalidate_missing_originals=missing_originals.invalidate,
         )
     )

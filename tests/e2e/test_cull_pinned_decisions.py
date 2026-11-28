@@ -47,7 +47,7 @@ def _results(photo_overrides=None):
 
 def _open_cull(page, live_server, results):
     page.route(
-        "**/api/pipeline/page-init*",
+        "**/api/pipeline/cull-results",
         lambda route: route.fulfill(json={"results": results}),
     )
     page.goto(f"{live_server['url']}/cull")

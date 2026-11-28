@@ -13,7 +13,9 @@ import json
 import logging
 import os
 from collections.abc import Callable
+from dataclasses import dataclass
 from functools import wraps
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from config import config_value, read_raw_config_file, settings_write_lock
@@ -59,6 +61,18 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class _CullResponse:
+    revision: tuple
+    mask_files: dict[str, bool]
+    body: bytes
+
+    def current(self, revision: tuple | None) -> bool:
+        return self.revision == revision and all(
+            os.path.isfile(path) == present for path, present in self.mask_files.items()
+        )
+
+
 def create_pipeline_blueprint(
     get_db: GetDb,
     json_error: JsonError,
@@ -66,6 +80,7 @@ def create_pipeline_blueprint(
     db_path: str,
     config: AppConfig,
     *,
+    catalog_revision: Callable[[Path], tuple[int, int, int] | None],
     invalidate_missing_originals: InvalidateMissingOriginals,
 ) -> Blueprint:
     """Build the pipeline-launch blueprint.
@@ -700,7 +715,7 @@ def create_pipeline_blueprint(
 
     @blueprint.route("/api/pipeline/page-init")
     def api_pipeline_page_init() -> ResponseReturnValue:
-        """Initial data for the Process, Process Review and Cull pages.
+        """Initial data for the Process and Process Review pages.
 
         ``include`` names the parts the page uses, comma-separated (see
         ``PAGE_INIT_PARTS``); without it the response carries every part. The
@@ -875,10 +890,62 @@ def create_pipeline_blueprint(
         from species_identity import SpeciesResolver
         attach_species_identities(results, SpeciesResolver(db=db))
 
+    # One immutable response per app, bounded independently of workspace count.
+    cached_cull: _CullResponse | None = None
+
+    @blueprint.get("/api/pipeline/cull-results")
+    def api_cull_results() -> ResponseReturnValue:
+        from config import load
+        from pipeline import _results_cache_path, load_results
+        from services.review_refresh import pending_refresh
+
+        nonlocal cached_cull
+        db = get_db()
+        ws = db.require_workspace_id()
+        directory = os.path.dirname(db_path)
+        path = Path(_results_cache_path(directory, ws))
+        effective = db.get_effective_config(load())
+        config_key = json.dumps(effective, sort_keys=True)
+
+        def revision() -> tuple | None:
+            catalog = catalog_revision(Path(db_path))
+            if catalog is None or pending_refresh(directory, ws):
+                return None
+            try:
+                stat = path.stat()
+            except FileNotFoundError:
+                return None
+            return ws, catalog, stat.st_dev, stat.st_ino, stat.st_ctime_ns, stat.st_mtime_ns, stat.st_size, config_key
+
+        before = revision()
+        previous = cached_cull
+        if previous is not None and previous.current(before):
+            return previous.body, 200, {"Content-Type": "application/json"}
+
+        # Mask files can disappear or be restored without a catalog commit.
+        # Remember exactly the existence checks used by the refreshed scores.
+        mask_files: dict[str, bool] = {}
+
+        def mask_isfile(path: str) -> bool:
+            if path not in mask_files:
+                mask_files[path] = os.path.isfile(path)
+            return mask_files[path]
+
+        results = load_results(directory, ws, db=db, prune_missing=True, persist_refresh=False, effective_config=effective,
+                               mask_isfile=mask_isfile)
+        if results:
+            _overlay_live_photo_state(db, results, include_recipes=False)
+            results = _cull_projection(results)
+            attach_edit_recipes(db, results["photos"])
+        response = jsonify(results=results)
+        if before is not None and before == revision():
+            cached_cull = _CullResponse(before, mask_files, response.get_data())
+        return response
+
     @blueprint.route("/api/pipeline/results")
     def api_pipeline_results() -> ResponseReturnValue:
         """Return the most recent pipeline triage results for the active workspace."""
-        from pipeline import load_results, prune_missing_photos
+        from pipeline import load_results
 
         db = get_db()
         cache_dir = os.path.dirname(db_path)
@@ -887,8 +954,7 @@ def create_pipeline_blueprint(
         # that were deleted afterwards through other paths. Reconcile
         # against the DB at read time so the review page never renders
         # orphan cards that 404 on /thumbnails/<id>.jpg.
-        prune_missing_photos(cache_dir, db.active_workspace_id, db)
-        results = load_results(cache_dir, db.active_workspace_id, db=db)
+        results = load_results(cache_dir, db.active_workspace_id, db=db, prune_missing=True)
         if results is None:
             return json_error("No pipeline results found. Run regroup first.", 404)
         attach_live_pipeline_decisions(db, results)
@@ -1869,7 +1935,31 @@ def _attach_live_flag_confirmations(db: Database, results: JsonDict) -> None:
     refresh_serialized_summary(results)
 
 
-def _overlay_live_photo_state(db: Database, results: JsonDict) -> None:
+def _cull_projection(results: JsonDict) -> JsonDict:
+    """Fields consumed by Cull cards, species filters, comparison and Apply."""
+    photo_fields = ("id", "filename", "timestamp", "width", "height", "rating", "flag", "sharpness",
+                    "flag_confirmation_status", "automatic_keep_eligible", "label", "quality_composite",
+                    "subject_sharpness", "comparable_quality", "focus_evidence", "reject_keeper",
+                    "confirmed_species", "confirmed_species_list", "confirmed_species_identities", "species_top5",
+                    "orientation", "eye_x", "eye_y", "eye_conf", "eye_tenengrad")
+    group_fields = ("photo_ids", "burst_count", "photo_count", "time_range", "species", "species_predictions",
+                    "confirmed_species", "confirmed_species_list", "confirmed_species_identities")
+    photos = []
+    for row in results.get("photos", []):
+        photo = {k: row[k] for k in photo_fields if k in row}
+        if row.get("subjects"):
+            photo["subjects"] = [{"predictions": s.get("predictions", [])} for s in row["subjects"]]
+        photos.append(photo)
+    encounters = []
+    for row in results.get("encounters", []):
+        group = {k: row[k] for k in group_fields if k in row}
+        group["bursts"] = [b.get("photo_ids", []) if isinstance(b, dict) else b for b in row.get("bursts", [])]
+        encounters.append(group)
+    return {**{k: results[k] for k in ("summary", "species_identities") if k in results},
+            "photos": photos, "encounters": encounters}
+
+
+def _overlay_live_photo_state(db: Database, results: JsonDict, *, include_recipes: bool = True) -> None:
     """Overlay live flags, ratings, eyes and edit recipes on cached results."""
     # Cached pipeline rows predate edit recipes, which live in their
     # own table. Enrich them before Process Review positions overlays
@@ -1890,14 +1980,16 @@ def _overlay_live_photo_state(db: Database, results: JsonDict) -> None:
             p["eye_conf"] = live["eye_conf"]
             p["eye_tenengrad"] = live["eye_tenengrad"]
     _attach_live_flag_confirmations(db, results)
+    if not include_recipes:
+        return
     attach_nested_edit_recipes(db, results)
     # Legacy cache entries can lack filenames and are skipped by the nested attacher.
     attach_species_representatives(db, [p for p in results["photos"] if "filename" not in p])
 
 
 # The parts of /api/pipeline/page-init a page can ask for. Each one costs
-# whole-workspace queries, so a page names only what it renders: Cull reads
-# the saved results, Process the mask coverage, and Process Review the results
+# whole-workspace queries, so a page names only what it renders: Process reads
+# the mask coverage, and Process Review the results
 # and, in a second request that does not hold up the photos, the readiness.
 PAGE_INIT_PARTS = ("results", "readiness", "masks")
 
@@ -1918,10 +2010,9 @@ def _page_init_parts(include: str | None) -> frozenset[str] | str:
 
 def _page_init_results(db: Database, cache_dir: str) -> JsonDict | None:
     """The saved review with live photo state overlaid, or None without one."""
-    from pipeline import load_results, prune_missing_photos
+    from pipeline import load_results
 
-    prune_missing_photos(cache_dir, db.active_workspace_id, db)
-    results = load_results(cache_dir, db.active_workspace_id, db=db)
+    results = load_results(cache_dir, db.active_workspace_id, db=db, prune_missing=True)
     if results and results.get("photos"):
         _overlay_live_photo_state(db, results)
     return results
