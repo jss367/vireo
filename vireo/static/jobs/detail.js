@@ -1,10 +1,9 @@
 // The detail pane: one job, step toggling, and the Active/History overviews.
 
 import { jobsElement, state } from './state.js';
-import { isLiveStatus } from './format.js';
 import { renderJobCard } from './job-card.js';
 import { groupOperations } from './lineage.js';
-import { filteredHistory } from './list.js';
+import { filteredActiveJobs, filteredHistory } from './list.js';
 import { escapeHtml } from './shared.js';
 
 /**
@@ -61,12 +60,10 @@ export function renderActiveOverview() {
       (state.jobsPollState.active.error ? 'Active jobs could not be loaded. Retrying automatically.' : 'Loading active jobs…') + '</div>';
     return;
   }
-  var running = state.activeJobs.filter(function(j) {
-    return isLiveStatus(j.status);
-  });
+  var running = filteredActiveJobs();
 
   if (running.length === 0) {
-    pane.innerHTML = '<div class="jobs-overview-empty">No active jobs.<br><span style="font-size:12px;margin-top:8px;display:inline-block;">Import new photos from Import, process workspace photos from Process, or run individual jobs from Browse.</span></div>';
+    pane.innerHTML = '<div class="jobs-overview-empty">No active jobs match the current filter.<br><span style="font-size:12px;margin-top:8px;display:inline-block;">Import new photos from Import, process workspace photos from Process, or run individual jobs from Browse.</span></div>';
     return;
   }
 
