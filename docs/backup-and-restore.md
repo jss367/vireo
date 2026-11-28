@@ -1,6 +1,7 @@
-# Backing up Vireo, restoring it, and moving to a new Mac
+# Backing up Vireo, restoring it, and moving to a new computer
 
-Vireo works with two separate things, and it backs up neither of them for you.
+Vireo automatically backs up its catalog. To recover from a disk failure,
+keep a separate copy of both your photo folders and Vireo’s data folder.
 
 - **Your photos** stay in the folders where you put them. Vireo reads them
   there and writes small `.xmp` sidecar files next to them when you sync.
@@ -11,23 +12,22 @@ Vireo works with two separate things, and it backs up neither of them for you.
 A copy of your photo folders does not include the catalog, and a copy of the
 catalog does not include a single photo. You need a backup of both.
 
-This page describes macOS. Windows and Linux use the same files in different
-folders, listed in the [storage locations guide](uninstalling.md#windows-and-linux).
+For Linux paths, see the [storage locations guide](uninstalling.md#windows-and-linux).
 
 ## Find where the catalog lives
 
-The catalog is a file named `vireo.db` in Vireo's data folder. The data folder
-is in one of two places, depending on when you first installed Vireo:
+Open **Storage** in Vireo and click **Open folder** next to **Catalog and masks**
+to find the active catalog (normally `vireo.db`). The default locations are:
 
 | Installation | Data folder | Cache folder |
 | --- | --- | --- |
-| An installation that already had `~/.vireo` | `~/.vireo` | Inside `~/.vireo` |
-| A fresh installation | `~/Library/Application Support/Vireo` | `~/Library/Caches/Vireo` |
+| macOS, fresh installation | `~/Library/Application Support/Vireo` | `~/Library/Caches/Vireo` |
+| macOS, legacy layout | `~/.vireo` | Inside `~/.vireo` |
+| Windows, fresh installation | `%LOCALAPPDATA%\Vireo` | `%LOCALAPPDATA%\Vireo\Cache` |
+| Windows, legacy layout | `%USERPROFILE%\.vireo` | Inside `%USERPROFILE%\.vireo` |
 
-`~` is your home folder. Both data folders are hidden in Finder. To see which
-one your installation uses, open **Storage** in Vireo and click **Open folder**
-next to **Catalog and masks**. To open a hidden folder yourself, choose
-**Go → Go to Folder** in Finder (`Shift-Command-G`) and paste the path.
+In Finder, press **Shift-Command-G** and paste the path. In Windows File
+Explorer, click the address bar, paste the path, and press **Enter**.
 
 If you started Vireo with a custom `--db` path, the catalog is at that path
 instead of the folder above, and it may be outside the data folder entirely.
@@ -44,7 +44,7 @@ The data folder holds more than `vireo.db`:
 | `masks` | The subject outlines made by Process. Making them again takes hours on a large library. |
 | `pipeline_results_ws*.json`, `culling_results_ws*.json` | The encounter, burst, and culling results for each workspace. |
 | `labels`, `labels_active.json`, `taxonomy`, `taxonomy.json`, `models.json` | Species lists, species reference data, and the list of models you registered. |
-| `staging`, `offline`, `local-folders`, `local-workspaces` | Copies of original photos: imports that have not reached the archive, and photos kept on this Mac by **Work Locally**. Some can be the only copy of a photo. |
+| `staging`, `offline`, `local-folders`, `local-workspaces` | Copies of original photos: imports that have not reached the archive, and photos kept on this computer by **Work Locally**. Some can be the only copy of a photo. |
 | `external-edits`, `external-dng`, `edit-masks` | Files sent to and returned from an external editor, and the masks your edits use. |
 | `working`, `previews`, `originals` | Images Vireo made from your photos. Vireo can make them again, which takes time. |
 | `ssh` | The keys Vireo uses to reach a storage server. |
@@ -71,30 +71,39 @@ them with your other files.
 Back up the whole data folder. Backing up `vireo.db` alone leaves out your
 settings, the masks, and the workspace results.
 
-## Know what the `.bak` files are
+## Daily and on-demand catalog backups
 
-A file such as `vireo.db.pre-v57.bak`, next to `vireo.db`, is a snapshot Vireo
-took of the catalog before an update changed it.
+While Vireo is running, it backs up the catalog about once a day. Open
+**Settings → Storage & Maintenance → Catalog backups** to see the dates,
+sizes, and location of available copies. Choose **Back up now** to make one
+before a large import or edit. **Daily catalog backups kept** sets the total
+number of daily and manual copies to keep (default 3, maximum 30). Set it to
+0 to turn off daily backups. **Back up now** still keeps the newest copy.
 
-Some updates change the catalog's format. The first time such a version
-starts, it copies the whole catalog to `vireo.db.pre-v<N>.bak` and then makes
-its changes. `<N>` is the format number the update moves the catalog to. The
-snapshot is a complete catalog in one file, as it was at that moment, and it
-needs no `-wal` or `-shm` file.
+Each dated folder under `backups` beside the active catalog contains a checked
+copy of the database, matching workspace results, and available edit-mask
+snapshots referenced by the catalog. Photos, global settings, and Process
+subject masks still need a separate backup. A disk failure can take both the
+catalog and these local copies.
 
-A snapshot is a way back from a bad update. It is not a backup:
+## Snapshots before a catalog upgrade
 
-- It sits on the same disk as the catalog, so a failed disk takes both.
-- Vireo keeps one. After a later format update succeeds, Vireo deletes the
-  snapshots from earlier updates.
-- It holds the catalog only. Settings, masks, and photos are not in it.
-- It can be months old. Nothing you did after that update is in it.
-- If the disk is too full to write the snapshot, Vireo records a warning in
-  its log and updates the catalog without one.
+Before an update changes the catalog format, Vireo saves a complete catalog
+file beside the database. For example, `vireo.db.pre-v57.bak` holds the catalog
+as it was **before** upgrading to format 57. It needs no `-wal` or `-shm`
+file. Vireo keeps snapshots for the three most recent upgrade versions.
+Snapshots from a newer Vireo are also preserved when running an older build.
 
-A snapshot is about as large as the catalog. **Storage** lists it under
-**Catalog backups**. Once you have used the new version for a while and your
-catalog looks right, you can delete the file in Finder to get the space back.
+If Vireo cannot write the snapshot, it stops before changing the catalog.
+The startup message names the files and explains the failure. Free the
+requested space on the catalog drive or fix the folder’s write permissions,
+then relaunch Vireo.
+
+To keep upgrade snapshots on another disk, set **Catalog backup folder** to
+an existing folder on an external drive or network share. After startup,
+Vireo verifies each copy before removing the local file. If the destination
+is unavailable, snapshots wait beside the catalog. The daily and manual
+backups stay in their own `backups` folder.
 
 Two other leftover files have a similar purpose:
 
@@ -105,30 +114,31 @@ Two other leftover files have a similar purpose:
 
 ## Back up Vireo
 
-1. **Back up your photo folders together with their `.xmp` sidecars**, using
-   whatever you already use for files: Time Machine, a second drive, or a
-   storage server.
-2. **Sync to XMP before you back up.** Syncing writes your keywords, ratings,
-   flags, locations, and edits into the sidecars next to your photos, so they
-   exist in a second place. Workspaces, collections, species review decisions,
+1. **Sync to XMP** to write pending keywords, ratings, flags, locations, and
+   edits to the sidecars. Workspaces, collections, species review decisions,
    highlights, and history exist only in the catalog.
-3. **Back up the data folder.** Time Machine includes it unless you excluded
-   it. Time Machine skips `~/Library/Caches`, which holds nothing you need to
-   keep.
+2. **Back up your photo folders**, including their `.xmp` sidecars, to another
+   drive or storage server.
+3. **Back up the data folder and other persistent locations listed in Storage.**
+   On macOS, check that Time Machine includes those paths. It normally skips
+   `~/Library/Caches`, so copy any custom model weights there separately.
+   On Windows, quit Vireo, open the active data folder in File Explorer, and
+   copy the whole folder and any additional locations to your backup drive.
+   Include a custom catalog path if you use one.
 
-To copy the data folder by hand, quit Vireo first and then copy the whole
-folder to another disk. A copy made while Vireo is writing can pair a
-`vireo.db` with a `vireo.db-wal` from a different moment.
+On either platform, quit Vireo before copying its data folder by hand so the
+catalog and its `-wal` file come from the same moment. For a catalog backup
+while Vireo is open, use **Back up now** and wait for it to finish before
+copying the completed backup folder to a separate disk.
 
-To copy only the catalog while Vireo is running, use SQLite's own backup
-command in Terminal. It produces one consistent file:
+If you need a single database file while Vireo is running, SQLite’s backup
+command also works. For example, on macOS with a legacy catalog:
 
 ```bash
 sqlite3 ~/.vireo/vireo.db ".backup '/Volumes/Backup/vireo-catalog.db'"
 ```
 
-Use `~/Library/Application\ Support/Vireo/vireo.db` as the first path if that
-is where your catalog lives.
+Substitute your active catalog path and backup drive.
 
 **Settings → All settings → Export…** downloads your global settings as
 `vireo-config-<date>.json`, and **Import…** loads such a file. The export
@@ -149,15 +159,31 @@ Use this after a disk failure, or when the data folder is damaged or gone.
 4. Start Vireo. Use the version that made the backup or a newer one. An older
    version refuses to open a newer catalog and asks you to update.
 
-Put the folder back before you start Vireo. If Vireo starts while `~/.vireo`
-is absent, it sets up a fresh installation in
-`~/Library/Application Support/Vireo`. From then on it ignores a `~/.vireo`
-you restore later, until you quit Vireo and move that new folder to the Trash.
+Restore any additional persistent locations to their recorded paths before
+launching Vireo. On Windows, use the File Explorer address bar to reach the
+parent folder (for example, `%LOCALAPPDATA%` for a fresh installation) and
+copy the saved Vireo folder back there. If you already launched Vireo and
+it created a fresh data folder, quit and move that folder aside first. A
+fresh layout with a storage marker takes precedence over a legacy folder.
 
 The restored catalog is as old as the backup. Photos you added since then are
 not in it; add their folders again on the **Import** page. Photos you moved or
 deleted since then show up as missing. Vireo reports them in a notice; click
 **Review** on it to deal with them.
+
+## Restore a daily or manual backup in Vireo
+
+1. Open **Settings → Storage & Maintenance → Catalog backups**. Find the last
+   copy made before the change you want to undo and click **Restore…**.
+2. Check the date and click **Prepare restore**. Vireo copies and checks the
+   backup while you work. Wait for **Restore waiting**. You can still choose
+   **Cancel restore** at this point.
+3. Quit and reopen Vireo to apply the restore. Check the outcome in **Catalog
+   backups**. The restored catalog shows your work as of the selected date.
+   Photos imported later are still on disk. Rescan their folders to add them.
+4. To undo the restore, use **Restore…** on the **Before restore** copy. It
+   includes catalog changes made up to the restart. Vireo keeps the two
+   newest such copies separately from daily and manual backups.
 
 ## Go back to a `.bak` snapshot
 
@@ -165,7 +191,7 @@ Use this when an update left the catalog in a state you do not want and you
 have no better backup.
 
 1. Quit Vireo.
-2. In the data folder, rename `vireo.db` to `vireo.db.before-restore`.
+2. In the active catalog folder, rename `vireo.db` to `vireo.db.before-restore`.
 3. Move `vireo.db-wal` and `vireo.db-shm` out of the folder if they are there.
    They belong to the catalog you just renamed and must not be combined with
    another one.
@@ -174,8 +200,9 @@ have no better backup.
    catalog id, and the snapshot can hold a different photo under the same id,
    so leaving them in place would show the old result for the wrong image.
    Vireo makes them again the next time Process or Cull runs.
-5. Duplicate the `.bak` file and name the duplicate `vireo.db`. Keep the
-   original `.bak` file.
+5. Copy the chosen `.bak` into place as `vireo.db` in the active catalog
+   folder. Keep the original snapshot. In File Explorer, enable **File name
+   extensions** so you can check the restored filename.
 6. Start Vireo.
 
 Before you do this, know what it costs:
@@ -193,59 +220,32 @@ Before you do this, know what it costs:
   because they refer to photos by catalog id, and Vireo rebuilds them on the
   next Process or Cull run.
 
-## Move Vireo to a new Mac
+## Move Vireo to a new Mac or Windows PC
 
-Apple's Migration Assistant is the least work. When it transfers your user
-account, it brings your home folder, which contains Vireo's data folder, and
-it keeps your account name, so the paths in the catalog still match. Afterward,
-install Vireo if it was not transferred, connect the drives that hold your
-photos, and continue at step 6.
+On a Mac, Migration Assistant can transfer your user account and Vireo data
+together. Reconnect your photo drives and check the catalog as in step 6.
+To move by hand on either platform:
 
-To move by hand:
-
-1. **Finish up on the old Mac.** Let running jobs finish. Sync pending changes
-   to XMP. If you use **Work Locally**, sync or discard the local copies. Open
-   **Storage** and write down the listed locations, then quit Vireo.
-2. **Copy the data folder** to an external drive. Copy the whole folder.
-3. **Bring your photos to the same paths.** The catalog records each photo
-   folder by its full path. An external drive keeps its path
-   (`/Volumes/<drive name>`) on any Mac. A storage server keeps its path if you
-   mount the same share. Photos inside your home folder keep their path only
-   if your account name is the same on both Macs.
-4. **Put the data folder at the same path on the new Mac before you open Vireo
-   there.** That is `~/.vireo` or `~/Library/Application Support/Vireo`,
-   whichever the old Mac used.
-5. **Install Vireo.** Use the version the old Mac had or a newer one. An
-   older version refuses to open a newer catalog.
-6. **Open Vireo and check it.** **Storage** shows the catalog location. If a
-   notice says folders can't be found on disk, click **Review** and then
-   **Relocate** for each folder that moved; its missing subfolders move with
-   it. Vireo downloads a missing model the first time a job needs it, or you
-   can download it ahead of time in **Settings → Models**. Vireo rebuilds
-   missing thumbnails as you browse.
-7. **Keep the old Mac's data folder until the new one looks right.** After
-   that, use one of them. Vireo cannot merge two catalogs that have both
-   changed.
-
-If you already opened Vireo on the new Mac, it created a fresh, empty data
-folder in `~/Library/Application Support/Vireo`. Quit Vireo and move that
-folder to the Trash before step 4. While it exists, Vireo uses it and ignores
-`~/.vireo`.
-
-When `~/.vireo` is the data folder, the models and thumbnails are inside it
-and come along with the copy. A fresh installation keeps them in
-`~/Library/Caches/Vireo`. Copying that folder too saves the downloads, and
-leaving it behind loses nothing.
-
-Programs Vireo calls, such as darktable or Adobe DNG Converter, are not part
-of Vireo. Install them on the new Mac. If one ends up at a different path,
-correct the path in **Settings**.
-
-### When the account name is different
-
-If your home folder has a different name on the new Mac, every path that
-starts with `/Users/<old name>` stops matching. Photo folders inside your home
-folder show up as missing, and you can relocate them as in step 6. The catalog
-also records each subject mask by its full path, so Vireo does not find the
-masks that were made on the old Mac, and Process has to make them again. Using
-the same account name on both Macs avoids both problems.
+1. On the old computer, finish running jobs, sync pending changes to XMP,
+   and sync **Work Locally** copies back to their permanent folders. Record
+   the paths on the **Storage** page and quit Vireo.
+2. Copy the whole data folder and any additional persistent locations to
+   an external drive. Bring custom model weights and any photo folders
+   stored on the old computer.
+3. Connect the photo drives or network shares on the new computer. Match the
+   original drive letters or network paths on Windows, or volume names on
+   macOS, so the catalog can find the photos.
+4. Before opening Vireo, copy the data folder to the corresponding location
+   in the table above, keeping the old installation’s fresh or legacy layout.
+   Restore other persistent locations to their original paths where possible.
+   If Vireo has already created an empty data folder, quit and move it aside
+   first.
+5. Install the same Vireo version or a newer one. Reinstall external programs
+   you use, such as darktable, and update their paths in **Settings** if needed.
+6. Open Vireo and verify the catalog path in **Storage**. Check familiar
+   photos, ratings, and collections. If Vireo reports missing folders, click
+   **Review → Relocate** for each moved parent folder. Its subfolders follow.
+   Subject masks also use absolute paths. If the user profile or data path
+   changed, you may need to run Process again to rebuild them.
+7. Keep the old data folder until you have verified the move. Continue editing
+   on one computer because Vireo cannot merge two catalogs that have both changed.
