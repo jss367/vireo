@@ -8881,6 +8881,80 @@ def test_update_stages_emits_weighted_current_total():
     assert data["current"] == 6
 
 
+def test_update_stages_names_the_stage_of_its_phase():
+    """Progress payloads merge, so a transition event must replace the
+    stage_id of the previous emit; otherwise 'Loading models' would be
+    shown beside the still-running scan's counts."""
+    from pipeline_job import _update_stages
+
+    stages = _empty_stages()
+    stages["scan"]["status"] = "running"
+    stages["model_loader"]["status"] = "running"
+
+    runner = FakeRunner()
+    _update_stages(runner, "job-x", stages)
+    _, _, data = runner.events[-1]
+    assert data["phase"] == stages["model_loader"].get("label", "model_loader")
+    assert data["stage_id"] == "model_loader"
+
+    stages["scan"]["status"] = "completed"
+    stages["model_loader"]["status"] = "completed"
+    _update_stages(runner, "job-x", stages)
+    _, _, data = runner.events[-1]
+    assert data["phase"] == "Pipeline"
+    assert data["stage_id"] is None
+
+
+def test_a_runs_notes_reach_the_live_job_view():
+    """A benign skip is recorded in the job's errors and in its notes, and both
+    lists are the job's own, so a poll of a running job can leave the notes
+    out of its error count instead of showing a healthy run as failing."""
+    from job_runner.views import snapshot_job
+    from pipeline_job import PipelineRun, _stamp_job_start
+
+    job = {"id": "job-x", "errors": []}
+    _stamp_job_start(job, None)
+    run = PipelineRun(
+        job=job, runner=None, db_path="", workspace_id=1, params=None,
+        abort=threading.Event(), stages={}, result={}, errors=job["errors"],
+        notes=job["notes"], collection_id=None, database_factory=None,
+        emit_progress=None, update_stages=None, control=None,
+    )
+    run.note("[extract_masks] Skipped: no detections qualify")
+    run.errors.append("[detect] Fatal: model failed to load")
+
+    view = snapshot_job(job)
+    assert view["notes"] == ["[extract_masks] Skipped: no detections qualify"]
+    assert view["errors"] == view["notes"] + ["[detect] Fatal: model failed to load"]
+    assert view["notes"] is not job["notes"]
+
+
+def test_update_stages_labels_the_stage_it_names_when_another_starts(monkeypatch):
+    """Stage threads set their status without the progress lock, so a stage
+    can start while a transition event is being built. The event chooses its
+    stage once; choosing again for the label could pair the thumbnails label
+    with the scan's stage_id, and the UI would show scan counts beside it."""
+    import pipeline_job
+    from pipeline_job import _update_stages
+
+    stages = _empty_stages()
+    stages["scan"]["status"] = "running"
+    stages["scan"]["label"] = "Checking metadata"
+    stages["thumbnails"]["label"] = "Generating thumbnails"
+    choices = iter(["scan"])
+
+    def choose_stage(_stages):
+        # Every choice after the first sees the thumbnails stage running.
+        return next(choices, "thumbnails")
+
+    monkeypatch.setattr(pipeline_job, "_current_stage_id", choose_stage)
+    runner = FakeRunner()
+    _update_stages(runner, "job-x", stages)
+    _, _, data = runner.events[-1]
+    assert data["stage_id"] == "scan"
+    assert data["phase"] == "Checking metadata"
+
+
 def test_progress_event_defaults_phase_triple_to_none():
     """Every progress payload must carry an explicit phase_current /
     phase_total / phase_label triple. JobRunner.push_event merges progress
@@ -9042,6 +9116,51 @@ def test_update_stages_clears_stale_rate_in_merged_job_progress():
     transition_prog = seen_progress.get_nowait()
     assert transition_prog["rate"] is None
     assert transition_prog["rate_unit"] is None
+
+
+def test_update_stages_clears_stale_sub_phase_in_merged_job_progress():
+    """A stage transition pushed through _update_stages must clear the
+    outgoing stage's sub-phase triple, or the UI pairs the new phase label
+    with the previous stage's sub-phase counts."""
+    import queue as _queue
+    import sys as _sys
+
+    _sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
+    from jobs import JobRunner
+    from pipeline_job import _emit_progress, _update_stages
+    from wait import wait_for_job_via_runner
+
+    runner = JobRunner()
+    seen_progress = _queue.Queue()
+
+    def work(job):
+        stages = _empty_stages()
+        stages["scan"]["status"] = "running"
+        _emit_progress(
+            runner, job["id"], stages, "scan", "Scanning photos",
+            phase_current=5, phase_total=20,
+            phase_label="Extracting metadata",
+        )
+        seen_progress.put(dict(job["progress"]))
+
+        stages["scan"]["status"] = "completed"
+        stages["model_loader"]["status"] = "running"
+        _update_stages(runner, job["id"], stages)
+        seen_progress.put(dict(job["progress"]))
+
+        return {"ok": True}
+
+    job_id = runner.start("scan", work)
+    wait_for_job_via_runner(runner, job_id)
+
+    scan_prog = seen_progress.get_nowait()
+    assert scan_prog["phase_label"] == "Extracting metadata"
+
+    transition_prog = seen_progress.get_nowait()
+    assert transition_prog["stage_id"] == "model_loader"
+    assert transition_prog["phase_current"] is None
+    assert transition_prog["phase_total"] is None
+    assert transition_prog["phase_label"] is None
 
 
 def test_emit_progress_clears_stale_phase_in_merged_job_progress():

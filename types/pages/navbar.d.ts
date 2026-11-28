@@ -79,6 +79,17 @@ interface NavProgress {
   /** Items finished per second, or per minute when rate_unit is "per_minute". */
   rate?: number;
   rate_unit?: 'per_minute';
+  /** The Process stage of the latest progress event; its step has the same id. */
+  stage_id?: string;
+  /** The step a stage reports on when it has one per model ("classify:<model>"). */
+  step_id?: string;
+}
+interface NavJobStep {
+  id: string;
+  status?: string;
+  progress?: {current?: number; total?: number} | null;
+  error?: string | null;
+  error_count?: number;
 }
 interface NavJob {
   id: string;
@@ -95,6 +106,9 @@ interface NavJob {
   created_at?: string;
   progress?: NavProgress | null;
   errors?: string[];
+  /** Entries of `errors` that explain a benign skip rather than a failure. */
+  notes?: string[];
+  steps?: NavJobStep[];
   result?: Record<string,unknown> | null;
   config?: Record<string,unknown>;
   runtime_warning?: NavRuntimeWarning | null;

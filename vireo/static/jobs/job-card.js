@@ -110,14 +110,27 @@ function renderProvenance(job) {
   return '<div class="job-provenance">' + parts.join(' &middot; ') + '</div>';
 }
 
+// A Process run's overall current/total are stage weights, not photos, so its
+// overall figure is a percent; every other job counts real items.
+/** @param {JobsRow} job */
+function overallText(job) {
+  var overall = {current: (job.progress && job.progress.current) || 0, total: (job.progress && job.progress.total) || 0};
+  if (job.type === 'pipeline') return progressPct(overall) + '%';
+  return overall.current.toLocaleString() + ' / ' + overall.total.toLocaleString();
+}
+
+/** @param {JobsRow} job @param {{current:number,total:number,phase:boolean}} info */
+function progressCountsText(job, info) {
+  return info.phase ? info.current.toLocaleString() + ' / ' + info.total.toLocaleString() : overallText(job);
+}
+
 /** @param {JobsRow} job */
 function renderProgressMeta(job) {
   var visibleProgress = activeProgress(job.progress);
   if (!visibleProgress) return '';
   var html = '';
   if (visibleProgress.phase && job.progress && (job.progress.total || 0) > 0) {
-    html += '<span>Overall: ' + (job.progress.current || 0).toLocaleString() + ' / ' + (job.progress.total || 0).toLocaleString() +
-      (job.type === 'pipeline' ? ' weighted points' : '') + '</span>';
+    html += '<span>Overall: ' + overallText(job) + '</span>';
   }
   html += '<span>' + escapeHtml(visibleProgress.label) + ': ' + progressPct(visibleProgress) + '%</span>';
   return html;
@@ -281,8 +294,7 @@ function renderProgressMeta(job) {
     if (fallbackProgress) {
       var pct = progressPct(fallbackProgress);
       html += '<div class="tree-step-bar" style="width:200px;margin-bottom:4px;"><div class="tree-step-bar-fill" style="width:' + pct + '%"></div></div>';
-      html += '<div>' + escapeHtml(fallbackProgress.label) + ': ' + fallbackProgress.current.toLocaleString() + ' / ' + fallbackProgress.total.toLocaleString() +
-        (!fallbackProgress.phase && job.type === 'pipeline' ? ' weighted points' : '') + '</div>';
+      html += '<div>' + escapeHtml(fallbackProgress.label) + ': ' + progressCountsText(job, fallbackProgress) + '</div>';
     }
     if (job.progress.current_file) html += '<div style="margin-top:4px;">' + escapeHtml(job.progress.current_file) + '</div>';
     html += '</div></div>';

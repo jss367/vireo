@@ -1499,11 +1499,25 @@ def _update_stages(runner, job_id, stages):
     of order."""
     with _progress_lock:
         current, total = _weighted_progress(stages)
+        stage_id = _current_stage_id(stages)
         runner.push_event(job_id, "progress", {
-            "phase": _current_phase(stages),
+            # The label of that one stage: other stage threads set their
+            # status without this lock, so choosing the stage a second time
+            # could name a different one than `stage_id`.
+            "phase": _stage_phase(stages, stage_id),
+            # Name the stage behind `phase`. Progress payloads merge, so
+            # without this the previous emit's stage_id would linger and the
+            # UI would pair the new phase label with another stage's counts.
+            "stage_id": stage_id,
             "current": current,
             "total": total,
             "stages": {k: dict(v) for k, v in stages.items()},
+            # Clear any stale sub-phase (e.g. scan's "Extracting metadata"
+            # counts) for the same merge reason: otherwise the UI pairs the
+            # new phase label with the outgoing stage's sub-phase counts.
+            "phase_current": None,
+            "phase_total": None,
+            "phase_label": None,
             # Clear any stale rate the previous emit_progress left in the
             # merged job["progress"]. This path is used at stage
             # transitions, where the outgoing phase's throughput no longer
@@ -1513,14 +1527,25 @@ def _update_stages(runner, job_id, stages):
         })
 
 
-def _current_phase(stages):
-    """Determine the primary phase label from stage statuses."""
+def _current_stage_id(stages):
+    """The running stage whose label is the primary phase, or None."""
     for name in ["misses", "regroup", "eye_keypoints", "extract_masks", "classify", "detect",
                  "model_loader", "previews", "thumbnails", "scan", "ingest"]:
-        info = stages.get(name, {})
-        if info.get("status") == "running":
-            return info.get("label", name)
-    return "Pipeline"
+        if stages.get(name, {}).get("status") == "running":
+            return name
+    return None
+
+
+def _stage_phase(stages, stage_id):
+    """The phase label of one stage, or "Pipeline" when none is running."""
+    if stage_id is None:
+        return "Pipeline"
+    return stages.get(stage_id, {}).get("label", stage_id)
+
+
+def _current_phase(stages):
+    """Determine the primary phase label from stage statuses."""
+    return _stage_phase(stages, _current_stage_id(stages))
 
 
 def _collapse_scan_roots(paths):
@@ -2313,8 +2338,11 @@ def _raise_if_stages_failed(job, result, stages, errors, cancellation_requested)
 
 
 def _stamp_job_start(job, computation_cache_dir):
-    """Record the run's start time and configured computation-cache root."""
+    """Record the run's start time, its notes list and its computation-cache root."""
     job["_start_time"] = time.time()
+    # The run's notes are the job's own list, as its errors are, so a live
+    # job view can tell a benign skip from a failure while the run is going.
+    job.setdefault("notes", [])
     # Stash the job's configured cache root so downstream helpers
     # (``publish_detection_artifact`` inside ``_detect_batch``,
     # ``promote_and_publish_classifier_run`` inside the per-model publish
@@ -2470,7 +2498,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         run = PipelineRun(
             job=job, runner=runner, db_path=db_path,
             workspace_id=workspace_id, params=params, abort=control.abort,
-            stages=stages, result=result, errors=errors,
+            stages=stages, result=result, errors=errors, notes=job["notes"],
             collection_id=collection_id, database_factory=Database,
             emit_progress=_emit_progress, update_stages=_update_stages,
             control=control.pipeline_control(), effective_vireo_dir=effective_vireo_dir,
