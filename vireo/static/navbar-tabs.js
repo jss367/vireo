@@ -155,15 +155,13 @@ function saveStripScroll() {
   if (scrollKey && strip?.childElementCount) sessionStorage.setItem(scrollKey, String(strip.scrollLeft));
 }
 
-// Mark the sides of the strip that have tabs scrolled out of view; the
-// stylesheet fades those edges. One pixel of slack absorbs fractional widths.
-function updateStripOverflow() {
-  const strip = STRIP();
-  if (!strip) return;
-  const hidden = strip.scrollWidth - strip.clientWidth;
-  strip.classList.toggle('more-left', strip.scrollLeft > 1);
-  strip.classList.toggle('more-right', hidden - strip.scrollLeft > 1);
-}
+// Keep clipped tabs in the scroll layout so wheel and keyboard navigation
+// can reveal them. Observe the anchors because their widths can also change
+// after rendering (hotkey hints, job count, or a font finishing loading).
+/** @type {IntersectionObserver | undefined} */
+let tabVisibility;
+// Allow subpixel rounding at the scroll limit (inside the tab padding).
+const wholeTabRatio = 0.99;
 
 // A mouse wheel only scrolls vertically, so over an overflowing strip it
 // moves the tabs sideways instead. A sideways gesture keeps its own scroll.
@@ -189,11 +187,22 @@ function scrollStripWithWheel(event) {
 
 function watchStripOverflow() {
   const strip = STRIP();
-  if (!strip || strip.dataset.overflowWatched) return;
-  strip.dataset.overflowWatched = '1';
-  strip.addEventListener('scroll', updateStripOverflow, {passive: true});
-  strip.addEventListener('wheel', scrollStripWithWheel, {passive: false});
-  new ResizeObserver(updateStripOverflow).observe(strip);
+  if (!tabVisibility) {
+    tabVisibility = new IntersectionObserver(entries => {
+      for (const entry of entries) {
+        entry.target.classList.toggle('is-clipped', entry.intersectionRatio < wholeTabRatio);
+      }
+    }, {root: strip, threshold: wholeTabRatio});
+    strip.addEventListener('wheel', scrollStripWithWheel, {passive: false});
+    strip.addEventListener('focusin', event => {
+      if (event.target instanceof HTMLAnchorElement && event.target.matches(':focus-visible')) {
+        event.target.scrollIntoView({block: 'nearest', inline: 'nearest'});
+      }
+    });
+  }
+  tabVisibility.disconnect();
+  const observer = tabVisibility;
+  strip.querySelectorAll('.nav-tab').forEach(tab => observer.observe(tab));
 }
 
 /** @param {string | null} nextScrollKey */
@@ -218,7 +227,6 @@ function renderStrip(nextScrollKey = scrollKey) {
   }
   strip.scrollLeft = scrollLeft;
   watchStripOverflow();
-  updateStripOverflow();
   applyActiveClass();
   rebuildPagesMenu();
   if (vireoSyncNumberedNavigation) vireoSyncNumberedNavigation();
