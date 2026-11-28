@@ -140,6 +140,57 @@ if $PUBLISH; then
     fi
 fi
 
+# Save the release inputs, including any local edits in a non-publish build.
+# sync_version.py validates semver, but paths used for rollback must already
+# be confined to the fixture directory before that script runs.
+if [[ "$NEW_VERSION" == */* ]]; then
+    echo "ERROR: Invalid release version: $NEW_VERSION" >&2
+    exit 1
+fi
+release_files=(
+    pyproject.toml package.json package-lock.json
+    src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock
+    "vireo/tests/fixtures/release_catalogs/v$NEW_VERSION.db.gz"
+    "vireo/tests/fixtures/release_catalogs/v$NEW_VERSION.json"
+)
+backup=$(mktemp -d)
+trap 'rm -rf "$backup"' EXIT
+snapshot_release_files() {
+    local destination=$1 path
+    for path in "${release_files[@]}"; do
+        if [[ -e "$path" ]]; then
+            mkdir -p "$destination/$(dirname "$path")"
+            cp -p "$path" "$destination/$path"
+        fi
+    done
+}
+snapshot_release_files "$backup/original"
+
+rollback_release() {
+    local status=$?
+    echo "==> Restoring files after failed release..." >&2
+    for path in "${release_files[@]}"; do
+        if [[ -f "$backup/generated/$path" ]] && ! cmp -s "$backup/generated/$path" "$path"; then
+            echo "Keeping $path because it changed during the build." >&2
+            continue
+        fi
+        if [[ -e "$backup/original/$path" ]]; then
+            cp -p "$backup/original/$path" "$path"
+        else
+            rm -f "$path"
+        fi
+    done
+    if [[ -f "$backup/index" ]]; then
+        git update-index --force-remove -- "${release_files[@]}"
+        git update-index -z --index-info < "$backup/index"
+    fi
+    rm -rf "$backup"
+    exit "$status"
+}
+trap rollback_release EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 # --- Sync version across all manifests ---
 echo "==> Syncing version..."
 python scripts/sync_version.py "$NEW_VERSION"
@@ -162,6 +213,7 @@ echo ""
 # the release commit.
 echo "==> Saving the v$NEW_VERSION release catalog..."
 python scripts/release_catalogs.py make --current
+snapshot_release_files "$backup/generated"
 echo ""
 
 # --- Verify the Rust dependency graph compiles (publish path only) ---
@@ -263,9 +315,13 @@ fi
 
 # --- Commit version bump ---
 echo "==> Committing version bump..."
-git add pyproject.toml package.json package-lock.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock \
-    "vireo/tests/fixtures/release_catalogs/v$NEW_VERSION.db.gz" "vireo/tests/fixtures/release_catalogs/v$NEW_VERSION.json"
+# Save just these index entries in case staging or the commit fails.
+git ls-files --stage -z -- "${release_files[@]}" > "$backup/index.tmp"
+mv "$backup/index.tmp" "$backup/index"
+git add -- "${release_files[@]}"
 git commit -m "release: v$NEW_VERSION"
+trap - EXIT INT TERM
+rm -rf "$backup"
 echo ""
 
 # --- Tag and publish ---

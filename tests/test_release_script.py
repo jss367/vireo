@@ -520,6 +520,34 @@ def test_release_does_not_tag_or_push_when_version_commit_fails(release_repo):
     result = _run_release(release_repo, FAIL_COMMIT="1")
 
     assert result.returncode != 0
+    assert _git(repo, "status", "--porcelain") == ""
     assert _git(repo, "tag", "--list") == ""
     assert _git(remote, "show-ref") == remote_before
     assert "Tag pushed." not in result.stdout
+
+
+def test_failed_local_build_restores_existing_edits_and_catalog(release_repo):
+    repo, _, _, _, env = release_repo
+    manifest = repo / "package.json"
+    manifest.write_text('{"version":"1.2.3","staged":true}\n')
+    _git(repo, "add", "package.json")
+    local_content = '{"version":"1.2.3","working":true}\n'
+    manifest.write_text(local_content)
+    catalog = repo / "vireo/tests/fixtures/release_catalogs/v1.2.4.json"
+    catalog.parent.mkdir(parents=True)
+    catalog.write_text("existing local fixture\n")
+    status = _git(repo, "status", "--porcelain", "-uall")
+
+    # The fixture has no raw decoder script, so the local build fails after
+    # generating both catalogs and before running the expensive build gates.
+    result = subprocess.run(
+        ["bash", "scripts/release.sh", "patch"], cwd=repo, env=env,
+        capture_output=True, text=True, timeout=15,
+    )
+
+    assert result.returncode != 0
+    assert "custom rawpy build is required" in result.stderr
+    assert _git(repo, "status", "--porcelain", "-uall") == status
+    assert manifest.read_text() == local_content
+    assert _git(repo, "show", ":package.json") == '{"version":"1.2.3","staged":true}'
+    assert catalog.read_text() == "existing local fixture\n"
