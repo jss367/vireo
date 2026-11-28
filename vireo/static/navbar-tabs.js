@@ -158,10 +158,18 @@ function saveStripScroll() {
 // Keep clipped tabs in the scroll layout so wheel and keyboard navigation
 // can reveal them. Observe the anchors because their widths can also change
 // after rendering (hotkey hints, job count, or a font finishing loading).
-/** @type {IntersectionObserver | undefined} */
-let tabVisibility;
-// Allow subpixel rounding at the scroll limit (inside the tab padding).
-const wholeTabRatio = 0.99;
+/** @type {ResizeObserver | undefined} */
+let tabSizeObserver;
+
+function updateTabVisibility() {
+  const strip = STRIP();
+  const bounds = strip.getBoundingClientRect();
+  for (const tab of Array.from(strip.children)) {
+    const rect = tab.getBoundingClientRect();
+    // One pixel of slack accommodates rounding at the scroll limit.
+    tab.classList.toggle('is-clipped', rect.left < bounds.left - 1 || rect.right > bounds.right + 1);
+  }
+}
 
 // A mouse wheel only scrolls vertically, so over an overflowing strip it
 // moves the tabs sideways instead. A sideways gesture keeps its own scroll.
@@ -187,12 +195,9 @@ function scrollStripWithWheel(event) {
 
 function watchStripOverflow() {
   const strip = STRIP();
-  if (!tabVisibility) {
-    tabVisibility = new IntersectionObserver(entries => {
-      for (const entry of entries) {
-        entry.target.classList.toggle('is-clipped', entry.intersectionRatio < wholeTabRatio);
-      }
-    }, {root: strip, threshold: wholeTabRatio});
+  if (!tabSizeObserver) {
+    tabSizeObserver = new ResizeObserver(updateTabVisibility);
+    strip.addEventListener('scroll', updateTabVisibility, {passive: true});
     strip.addEventListener('wheel', scrollStripWithWheel, {passive: false});
     strip.addEventListener('focusin', event => {
       if (event.target instanceof HTMLAnchorElement && event.target.matches(':focus-visible')) {
@@ -200,9 +205,11 @@ function watchStripOverflow() {
       }
     });
   }
-  tabVisibility.disconnect();
-  const observer = tabVisibility;
+  const observer = tabSizeObserver;
+  observer.disconnect();
+  observer.observe(strip);
   strip.querySelectorAll('.nav-tab').forEach(tab => observer.observe(tab));
+  updateTabVisibility();
 }
 
 /** @param {string | null} nextScrollKey */
