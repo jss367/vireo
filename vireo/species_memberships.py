@@ -174,9 +174,10 @@ def candidate_subjects(row):
     """
     subjects = row.get("subject_predictions")
     if subjects is not None:
-        return sorted(
-            (s for s in subjects if s.get("species")), key=subject_evidence_order,
-        )
+        named = [s for s in subjects if s.get("species")]
+        if len(named) > 1:
+            named.sort(key=subject_evidence_order)
+        return named
     if not row.get("predicted_species"):
         return []
     return [{

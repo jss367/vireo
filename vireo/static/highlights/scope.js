@@ -58,7 +58,10 @@ export function requestScopeParams() {
   var scope = selectedScope();
   if (scope.collection_id != null) params.set('collection_id', String(scope.collection_id));
   else if (scope.folder_id != null) params.set('folder_id', String(scope.folder_id));
-  else params.set('scope', 'workspace');
+  else {
+    params.set('scope', 'workspace');
+    params.set('view', 'cards');
+  }
   params.set('min_quality', (parseInt(/** @type {HTMLInputElement} */ (document.getElementById('qualitySlider')).value) / 100).toFixed(2));
   params.set('confidence_threshold', (parseInt(/** @type {HTMLInputElement} */ (document.getElementById('confidenceSlider')).value) / 100).toFixed(2));
   params.set('confirmation', /** @type {HTMLSelectElement} */ (document.getElementById('confirmationFilter')).value || 'all');

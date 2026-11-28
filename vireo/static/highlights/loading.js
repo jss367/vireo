@@ -68,6 +68,20 @@ function showLoadFailure(error, refreshCollections) {
   });
 }
 
+/** Restore the shared card field names once the compact workspace page arrives.
+ * @param {HighlightsData} data */
+function unpackWorkspaceCards(data) {
+  const fields = data.card_fields;
+  if (!fields) return;
+  for (var section of [...(data.buckets || []), data.unidentified]) {
+    if (!section?.card_rows) continue;
+    section.photos = section.card_rows.map(row =>
+      /** @type {HighlightsPhoto} */ (Object.fromEntries(fields.map((key, i) => [key, row[i]])))
+    );
+    delete section.card_rows;
+  }
+}
+
 /** @param {boolean} [refreshCollections] */
 export async function loadHighlights(refreshCollections = false) {
   var params = highlightsScopeParams();
@@ -115,6 +129,7 @@ export async function loadHighlights(refreshCollections = false) {
   if (Object.keys(state.bucketRefetchSeq).some(function(key) {
     return state.bucketRefetchSeq[key] !== refetchSeqAtLoad[key];
   })) return loadHighlights(refreshCollections);
+  unpackWorkspaceCards(data);
   state.currentData = data;
   state.loadedHighlightsScope = scope;
   // No refetch began after this reload was issued, so its replacement buckets
