@@ -513,17 +513,31 @@ def test_failed_job_leads_with_error_and_keeps_partial_progress():
 def test_failed_pipeline_history_leads_with_failure_even_for_existing_rows():
     from job_runner.outcome import attach_result_text, build_summary
 
-    reason = "64 of 2355 photos failed mask extraction"
+    reason = "[extract_masks] 64 of 2355 photos failed mask extraction"
+    expected = "Could not create subject masks for 64 of 2,355 photos"
     steps = [
         {"status": "completed", "summary": "Skipped (using collection), 2447 already cached"},
         {"status": "failed", "label": "Extract features", "error": reason},
     ]
     job = {"type": "pipeline", "status": "failed", "steps": steps}
     for result in ({"error": reason}, {}):
-        assert build_summary(job, result) == reason
+        assert build_summary(job, result) == expected
         row = {"type": "pipeline", "status": "failed", "result": result,
                "summary": steps[0]["summary"], "tree": steps}
-        assert attach_result_text(row)["summary"] == reason
+        assert attach_result_text(row)["summary"] == expected
+
+
+def test_completed_pipeline_history_summarizes_work_after_skipped_scan():
+    from job_runner.outcome import attach_result_text, build_summary
+
+    steps = [{"summary": "Skipped (using collection)"}]
+    job = {"type": "pipeline", "status": "completed"}
+    assert build_summary({**job, "steps": steps}) == "Processing complete"
+    steps.append({"summary": "16 photos classified"})
+    expected = "Processing complete · 16 photos classified"
+    assert build_summary({**job, "steps": steps}) == expected
+    stored = {"summary": "Skipped (using collection), 16 photos classified", "tree": steps}
+    assert attach_result_text({**job, **stored})["summary"] == expected
 
 
 def test_non_dict_results():

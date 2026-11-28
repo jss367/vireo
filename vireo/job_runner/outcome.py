@@ -6,6 +6,7 @@ count and the one-line summary that the history row and the Jobs page show.
 """
 
 import json
+import re
 
 from job_summaries import describe_result, error_text
 
@@ -79,7 +80,7 @@ def error_total(job):
 
 def _pipeline_failure(job, result, steps):
     """The recorded failure, including for history saved with a success-first summary."""
-    if job.get("type") != "pipeline" or job.get("status") != "failed":
+    if job.get("status") != "failed":
         return None
     if isinstance(result, dict):
         if result.get("interrupted"):
@@ -88,13 +89,36 @@ def _pipeline_failure(job, result, steps):
             return error_text(result["error"])
     for step in steps:
         if isinstance(step, dict) and step.get("status") == "failed":
-            return step.get("error") or f"{step.get('label') or 'Pipeline step'} failed"
+            return error_text(step["error"]) if step.get("error") else f"{step.get('label') or 'Pipeline step'} failed"
     if isinstance(result, dict):
         notes = result.get("notes") or []
         for error in result.get("errors") or []:
             if error and error not in notes:
                 return error_text(error)
     return "Pipeline failed"
+
+
+def _pipeline_row_summary(job, result, steps):
+    if job.get("type") != "pipeline":
+        return None
+    if failure := _pipeline_failure(job, result, steps):
+        # Stage tags group diagnostics on the Process page. The history
+        # row only needs the explanation, while details keep the original.
+        reason = re.sub(r"^\[[a-z][a-z0-9_:-]*\]\s+", "", failure)
+        mask_counts = re.fullmatch(r"(\d+) of (\d+) photos failed mask extraction", reason)
+        if mask_counts:
+            failed, total = map(int, mask_counts.groups())
+            noun = "photo" if total == 1 else "photos"
+            return f"Could not create subject masks for {failed:,} of {total:,} {noun}"
+        return reason
+    if job.get("status") == "completed":
+        for step in steps:
+            summary = step.get("summary") if isinstance(step, dict) else None
+            if isinstance(summary, str) and summary and not summary.startswith("Skipped"):
+                return f"Processing complete · {summary}"
+        if steps or (job.get("summary") or "").startswith("Skipped"):
+            return "Processing complete"
+    return None
 
 
 def build_summary(job, result=None):
@@ -108,8 +132,8 @@ def build_summary(job, result=None):
     if result is None:
         result = job.get("result")
     steps = job.get("steps") or []
-    if failure := _pipeline_failure(job, result, steps):
-        return failure
+    if summary := _pipeline_row_summary(job, result, steps):
+        return summary
     if steps:
         parts = []
         for s in steps:
@@ -182,8 +206,8 @@ def attach_result_text(job):
     authored = isinstance(result, dict) and bool(
         result.get("summary") or result.get("interrupted")
     )
-    if failure := _pipeline_failure(job, result, steps):
-        job["summary"] = failure
+    if summary := _pipeline_row_summary(job, result, steps):
+        job["summary"] = summary
     elif described["summary"] and not (from_steps or authored) or not job.get("summary"):
         job["summary"] = described["summary"]
     job["result_details"] = described["details"]
