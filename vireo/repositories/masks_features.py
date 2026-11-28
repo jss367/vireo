@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import sqlite3
+import stat
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, fields
@@ -551,15 +552,8 @@ class MasksFeaturesRepository:
             )
         return len(rows)
 
-    def find_stale(self, detector_confidence: float | None = None) -> list[dict[str, Any]]:
-        """Return masks whose prompts differ from the selected primary.
-
-        Selection uses the same primary-subject ordering as extraction
-        (``repositories.subject_order.primary_order_sql``). When supplied, ``detector_confidence`` hides
-        boxes below the workspace floor before selection. A mask matching a
-        secondary or now-hidden detection is stale even if its row remains
-        cached for later reuse.
-        """
+    @staticmethod
+    def _stale_query(detector_confidence: float | None) -> tuple[str, tuple[float, ...]]:
         from repositories.subject_order import primary_order_sql
         if detector_confidence is None:
             conf_pred = ""
@@ -567,7 +561,7 @@ class MasksFeaturesRepository:
         else:
             conf_pred = " AND d2.detector_confidence >= ? AND d2.subject_verdict IS NULL"
             params = (detector_confidence,)
-        rows = self.conn.execute(
+        return (
             f"""
             SELECT pm.photo_id, pm.variant, pm.path,
                    pm.detector_model, pm.prompt_x, pm.prompt_y,
@@ -592,8 +586,23 @@ class MasksFeaturesRepository:
              )
             """,
             params,
-        ).fetchall()
-        return [dict(r) for r in rows]
+        )
+
+    def find_stale(self, detector_confidence: float | None = None) -> list[dict[str, Any]]:
+        """Return masks whose prompts differ from the selected primary.
+
+        Selection uses the same primary-subject ordering as extraction
+        (``repositories.subject_order.primary_order_sql``). When supplied, ``detector_confidence`` hides
+        boxes below the workspace floor before selection. A mask matching a
+        secondary or now-hidden detection is stale even if its row remains
+        cached for later reuse.
+        """
+        sql, params = self._stale_query(detector_confidence)
+        return [dict(row) for row in self.conn.execute(sql, params)]
+
+    def count_stale(self, detector_confidence: float | None = None) -> int:
+        sql, params = self._stale_query(detector_confidence)
+        return self.conn.execute(f"SELECT COUNT(*) FROM ({sql})", params).fetchone()[0]
 
     def delete_stale(self, stale: Iterable[dict[str, Any]]) -> int:
         """Remove rows + files for the ``stale`` masks (a ``find_stale``
@@ -758,12 +767,14 @@ class MasksFeaturesRepository:
         for r in rows:
             paths = self.conn.execute(
                 "SELECT path FROM photo_masks WHERE variant=?", (r["variant"],),
-            ).fetchall()
+            )
             total = 0
             for pr in paths:
                 try:
-                    if pr["path"] and os.path.isfile(pr["path"]):
-                        total += os.path.getsize(pr["path"])
+                    if pr["path"]:
+                        info = os.stat(pr["path"])
+                        if stat.S_ISREG(info.st_mode):
+                            total += info.st_size
                 except OSError:
                     pass
             out.append({
