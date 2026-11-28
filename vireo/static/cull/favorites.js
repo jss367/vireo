@@ -152,7 +152,7 @@ function renderCullScope() {
   var to = /** @type {HTMLInputElement} */ (document.getElementById('cullDateTo')).value;
   var dates = from && to ? from + ' through ' + to : from ? 'From ' + from : to ? 'Through ' + to : 'All dates';
   /** @type {HTMLElement} */ (document.getElementById('cullScope')).textContent = names + ' · ' + dates + ' · ' +
-    (cullData ? cullData.total_photos : 0) + ' photos with pipeline results';
+    cullCount(cullData ? cullData.total_photos : 0, 'photo') + ' with pipeline results';
 }
 
 function clearCullSpecies() {
@@ -547,7 +547,7 @@ function reviewCullRejected() {
     card.append(img, name, why, restore); list.appendChild(card);
   });
   /** @type {HTMLButtonElement} */ (document.getElementById('cullDeleteRejected')).disabled = !rejected.length;
-  /** @type {HTMLElement} */ (document.getElementById('cullRejectedCount')).textContent = rejected.length + ' rejected photos in this selection';
+  /** @type {HTMLElement} */ (document.getElementById('cullRejectedCount')).textContent = cullCount(rejected.length, 'rejected photo') + ' in this selection';
   if (!/** @type {HTMLDialogElement} */ (document.getElementById('cullRejectedDialog')).open) /** @type {HTMLDialogElement} */ (document.getElementById('cullRejectedDialog')).showModal();
 }
 

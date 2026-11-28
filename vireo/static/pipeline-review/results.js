@@ -269,12 +269,14 @@ function renderResults() {
 function encounterScopeMeta(enc, scopeIds, burstInScope) {
   var photoTotal = enc.photo_count;
   var burstTotal = enc.burst_count;
+  var photoLabel = photoTotal + (photoTotal === 1 ? ' photo' : ' photos');
+  var burstLabel = burstTotal + (burstTotal === 1 ? ' burst' : ' bursts');
   var photosShown = scopeIds
     ? (enc.photo_ids || []).filter(function(pid) { return scopeIds.has(pid); }).length
     : photoTotal;
   if (!scopeIds || photosShown >= photoTotal) {
-    return '<span>' + photoTotal + ' photos</span>'
-      + (burstTotal ? '<span>' + burstTotal + ' bursts</span>' : '');
+    return '<span>' + photoLabel + '</span>'
+      + (burstTotal ? '<span>' + burstLabel + '</span>' : '');
   }
   var burstsShown = (enc.bursts || []).filter(burstInScope).length;
   var outside = photoTotal - photosShown;
@@ -282,8 +284,8 @@ function encounterScopeMeta(enc, scopeIds, burstInScope) {
     + ' outside the current scope and hidden. Species confirmation applies to the whole '
     + (burstTotal ? 'encounter or burst' : 'encounter') + ', including hidden photos.';
   var html = '<span class="encounter-scope-partial" title="' + escapeAttr(title) + '">'
-    + photosShown + ' of ' + photoTotal + ' photos in scope</span>';
-  if (burstTotal) html += '<span>' + burstsShown + ' of ' + burstTotal + ' bursts</span>';
+    + photosShown + ' of ' + photoLabel + ' in scope</span>';
+  if (burstTotal) html += '<span>' + burstsShown + ' of ' + burstLabel + '</span>';
   return html;
 }
 

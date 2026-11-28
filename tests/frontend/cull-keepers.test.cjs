@@ -303,7 +303,7 @@ test('the Apply record carries the detail comparison for a cross-encounter keepe
 test('cards show the detail and the cross-encounter quality once measured', () => {
   const {ctx} = page();
   ctx.setPipelineResults(resultsWithDetail());
-  assert.deepEqual(plain(ctx.cullDetailLine(1)).text, 'Detail 18,200 · quality 81% across encounters');
+  assert.deepEqual(plain(ctx.cullDetailLine(1)).text, 'Subject detail 18,200 (higher means sharper edges) · quality 81% across encounters');
   assert.equal(ctx.cullDetailLine(4), null);
   const first = ctx.cullData.species_groups[0].scene_groups[0].photos[0];
   assert.equal(first.comparable, 0.81);

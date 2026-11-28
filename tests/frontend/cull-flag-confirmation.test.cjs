@@ -14,6 +14,13 @@ function page() {
   }
   return context;
 }
+test('encounter labels use the photo and burst totals independently', () => {
+  const ctx = page();
+  assert.equal(ctx.encounterLabel({burst_count: 1}, 0, 1), 'Encounter 1 (1 photo) / 1 burst');
+  assert.equal(ctx.encounterLabel({burst_count: 1}, 0, 3), 'Encounter 1 (3 photos) / 1 burst');
+  assert.equal(ctx.encounterLabel({burst_count: 2}, 0, 4), 'Encounter 1 (4 photos) / 2 bursts');
+});
+
 test('bare flags and ranking labels never become photographer decisions', () => {
   const ctx = page();
   for (const flag of ['flagged', 'picked', 'rejected', 'none']) {
@@ -96,8 +103,8 @@ test('Apply status distinguishes photos actually cleared from already-none Revie
   });
   await ctx.applyCulling();
   assert.equal(prompts.length, 1);
-  assert.match(prompts[0], /1 photos cleared back to no flag/);
-  assert.match(prompts[0], /1 photos saved as Review/);
+  assert.match(prompts[0], /1 photo cleared back to no flag/);
+  assert.match(prompts[0], /1 photo saved as Review/);
   assert.match(statusEl.textContent, /1 cleared/);
   assert.match(statusEl.textContent, /1 saved as Review/);
 });

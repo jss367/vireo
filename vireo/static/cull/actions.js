@@ -197,12 +197,12 @@ async function applyCulling() {
   var split = splitUnflagByCurrentState(unflag);
 
   var changes = [
-    keepers.length + ' photos flagged as keepers',
-    rejects.length + ' photos flagged as rejected' +
+    cullCount(keepers.length, 'photo') + ' marked to keep',
+    cullCount(rejects.length, 'photo') + ' flagged as rejected' +
       (rejects.length ? ' (' + describeRejections(rejects, rejections) + ')' : ''),
   ];
-  if (split.clearing) changes.push(split.clearing + ' photos cleared back to no flag (moved to Review)');
-  if (split.reviewOnly) changes.push(split.reviewOnly + ' photos saved as Review');
+  if (split.clearing) changes.push(cullCount(split.clearing, 'photo') + ' cleared back to no flag (moved to Review)');
+  if (split.reviewOnly) changes.push(cullCount(split.reviewOnly, 'photo') + ' saved as Review');
   if (!(await Vireo.confirm({
     title: 'Apply culling decisions?',
     message: 'This sets the flag on each photo. Use Undo below to restore the previous flags.',
