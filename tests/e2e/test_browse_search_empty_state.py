@@ -1382,6 +1382,14 @@ def test_folder_count_is_visible_before_summary_analysis(live_server, page):
     expect(page.locator("#summaryClassified")).to_have_text("Loading…")
     assert held
     for route in held:
+        route.fulfill(status=500, body="fail")
+    expect(page.locator("#summaryClassified")).to_have_text("Summary unavailable")
+    held.clear()
+    with page.expect_request("**/api/browse/summary?folder_id=**"):
+        page.evaluate("pageModules.detail.closeDetail()")
+    expect(page.locator("#summaryClassified")).to_have_text("Loading…")
+    expect(page.locator("#summaryPhotoCount")).to_have_text("3")
+    for route in held:
         route.continue_()
     expect(page.locator("#summaryClassified")).to_have_text("3 classified")
 

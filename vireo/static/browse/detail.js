@@ -506,6 +506,8 @@ async function fetchSummary() {
   var gen = ++state.summaryLoadGen;
   var params = buildSummaryParams();
   prepareSummaryScope(params.toString());
+  var classified = document.getElementById('summaryClassified');
+  if (classified?.textContent === 'Summary unavailable') classified.textContent = 'Loading…';
   state.summaryLoadStates[gen] = {
     status: 'pending',
     key: params.toString()
@@ -527,7 +529,6 @@ async function fetchSummary() {
     if (failedState) {
       failedState.status = 'failure';
       reconcileSummaryLoadRenders();
-      var classified = document.getElementById('summaryClassified');
       if (gen === state.summaryLoadGen && classified?.textContent === 'Loading…') {
         classified.textContent = 'Summary unavailable';
       }
