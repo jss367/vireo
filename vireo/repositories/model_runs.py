@@ -329,6 +329,22 @@ class ModelRunsRepository:
                 ids.difference_update(self.stale_detector_input_ids(candidates))
         return ids
 
+    def detector_run_runtimes(self, detector_model: str, photo_ids: Collection[int]) -> dict[int, str | None]:
+        """The runtime fingerprint of ``detector_model``'s run on each of ``photo_ids`` that has one.
+
+        Current or not: less ``get_detector_run_photo_ids``, the keys are the
+        photos detection runs on again.
+        """
+        runtimes: dict[int, str | None] = {}
+        for chunk in chunked(sorted(set(photo_ids))):
+            runtimes.update((row["photo_id"], row["runtime_fingerprint"]) for row in self.conn.execute(
+                f"""SELECT photo_id, runtime_fingerprint FROM detector_runs
+                    WHERE detector_model = ?
+                      AND photo_id IN ({','.join('?' * len(chunk))})""",
+                [detector_model, *chunk],
+            ))
+        return runtimes
+
     def record_classifier_run(
         self,
         detection_id: int,

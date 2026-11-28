@@ -535,6 +535,18 @@ class DetectionsRepository:
         q += " ORDER BY confidence DESC"
         return self.conn.execute(q, params).fetchall()
 
+    def photo_ids_with_detections(self, photo_ids: Collection[int], detector_model: str) -> set[int]:
+        """Return scoped photos with any stored region from this detector."""
+        found = set()
+        for chunk in self._chunks(list(photo_ids)):
+            rows = self.conn.execute(
+                f"""SELECT DISTINCT photo_id FROM detections
+                    WHERE detector_model = ? AND photo_id IN ({','.join('?' * len(chunk))})""",
+                [detector_model, *chunk],
+            )
+            found.update(row["photo_id"] for row in rows)
+        return found
+
     def get_ids_for_photos(
         self, photo_ids: Collection[int], *, exclude_model: str | None = None,
     ) -> dict[int, set[int]]:
