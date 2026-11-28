@@ -1665,20 +1665,90 @@ function renderJobs() {
   container.innerHTML = html;
 }
 
-/** @param {NavJob} job @param {ReturnType<typeof bpActiveProgress>} info */
+/**
+ * The step whose counts belong beside the phase a job is showing, or null.
+ *
+ * A Process run names the stage of its latest progress event in `stage_id`
+ * (and the model's own step in `step_id` while it classifies), and each stage
+ * counts its photos on the step of the same id. `step_id` is trusted only
+ * while it belongs to that stage: progress payloads merge, so one from an
+ * earlier stage can still be there.
+ * @param {NavJob} job
+ */
+function bpPhaseStep(job) {
+  var stageId = job.progress && job.progress.stage_id;
+  if (!stageId) return null;
+  var ownStepId = job.progress && job.progress.step_id;
+  var ids = ownStepId && ownStepId.startsWith(stageId + ':') ? [ownStepId, stageId] : [stageId];
+  for (const id of ids) {
+    var step = (job.steps || []).find(function(s) { return s.id === id && s.status === 'running'; });
+    if (step && step.progress && Number(step.progress.total) > 0) return step;
+  }
+  return null;
+}
+
+/**
+ * The counts of the phase a job is in, when it reports any: its own sub-phase
+ * counts, else the counts of the Process stage that is running.
+ * @param {NavJob} job
+ * @param {ReturnType<typeof bpActiveProgress>} info
+ */
+function bpPhaseCounts(job, info) {
+  if (info && info.phase) return {current: info.current, total: info.total};
+  var step = bpPhaseStep(job);
+  if (!step || !step.progress) return null;
+  return {current: step.progress.current || 0, total: Number(step.progress.total)};
+}
+
+/**
+ * A job's progress as its status line says it.
+ *
+ * A Process run's overall `current`/`total` are stage weights, not photos, so
+ * its overall figure is a percent and its counts are the running stage's.
+ * Every other job counts real items overall.
+ * @param {NavJob} job
+ * @param {ReturnType<typeof bpActiveProgress>} info
+ */
 function bpCountText(job, info) {
   if (!info) return '';
-  var bytes = job.type.includes('download') && info.total > 1000000;
+  var weighted = job.type === 'pipeline';
+  var phase = bpPhaseCounts(job, info);
+  var shown = phase || info;
+  var bytes = job.type.includes('download') && shown.total > 1000000;
   var counts = bytes
-    ? (info.current / (1024*1024)).toFixed(0) + '/' + (info.total / (1024*1024)).toFixed(0) + ' MB'
-    : info.current.toLocaleString() + '/' + info.total.toLocaleString();
-  if (!info.phase && job.type === 'pipeline') counts += ' weighted points';
-  var text = (info.phase ? 'This phase: ' : 'Overall: ') + counts + ' (' + bpProgressPct(info) + '%)';
-  if (info.phase && job.progress && Number(job.progress.total) > 0) {
-    text += ' · Overall: ' + (job.progress.current || 0).toLocaleString() + '/' + Number(job.progress.total).toLocaleString();
-    if (job.type === 'pipeline') text += ' weighted points';
+    ? (shown.current / (1024*1024)).toFixed(0) + '/' + (shown.total / (1024*1024)).toFixed(0) + ' MB'
+    : shown.current.toLocaleString() + '/' + shown.total.toLocaleString();
+  var overall = {current: (job.progress && job.progress.current) || 0, total: Number(job.progress && job.progress.total) || 0};
+  if (!phase) {
+    return 'Overall: ' + (weighted ? bpProgressPct(overall) + '%' : counts + ' (' + bpProgressPct(overall) + '%)');
+  }
+  var text = 'This phase: ' + counts + ' (' + bpProgressPct(phase) + '%)';
+  if (overall.total > 0) {
+    text += ' · Overall: ' + (weighted
+      ? bpProgressPct(overall) + '%'
+      : overall.current.toLocaleString() + '/' + overall.total.toLocaleString());
   }
   return text;
+}
+
+/**
+ * How many errors a live job has recorded so far: the per-step counts the
+ * Jobs page shows when the job has steps, else its error list.
+ * @param {NavJob} job
+ */
+function bpErrorCount(job) {
+  var steps = job.steps || [];
+  if (steps.length === 0) return (job.errors || []).length;
+  return steps.reduce(function(sum, step) {
+    return sum + Math.max(Number(step.error_count) || 0, step.error ? 1 : 0);
+  }, 0);
+}
+
+/** @param {NavJob} job */
+function bpErrorText(job) {
+  var count = bpErrorCount(job);
+  if (count <= 0) return '';
+  return count.toLocaleString() + (count === 1 ? ' error' : ' errors');
 }
 
 /** @param {NavJob[]} jobs */
@@ -1707,6 +1777,8 @@ function renderJobList(jobs) {
     if (isWaiting || isPaused) html += '<span style="color:var(--text-muted);">(' + waitingLabel + ')</span>';
     if (phase) html += '<span style="color:var(--text-muted);">\u2014 ' + bpEscape(phase) + '</span>';
     if (detail) html += '<span style="color:var(--text-muted);font-variant-numeric:tabular-nums;">' + detail + '</span>';
+    var errorText = bpErrorText(j);
+    if (errorText) html += '<span class="bp-job-errors" style="color:var(--danger);font-variant-numeric:tabular-nums;">' + errorText + '</span>';
     html += '<a href="/jobs" style="margin-left:auto;color:var(--accent);text-decoration:none;font-size:11px;white-space:nowrap;">View \u2192</a>';
     html += '</div>';
   });
@@ -1764,20 +1836,31 @@ function updateSummary() {
   if (j.progress && j.progress.phase) {
     text += ' — ' + j.progress.phase;
   }
+  // Errors come before the speed and the "+ N more" backlog: the line is cut
+  // with an ellipsis in a narrow window, and a run that is failing photos must
+  // not read like one that is going well. They keep the danger color.
+  var tail = '';
   var progressInfo = bpActiveProgress(j.progress);
   if (progressInfo) {
     text += ' · ' + bpCountText(j, progressInfo);
-    text += bpRateText(j.progress, progressInfo.phase);
+    tail += bpRateText(j.progress, bpPhaseCounts(j, progressInfo) !== null);
   } else if (j.progress && j.progress.current_file) {
     text += ' ' + j.progress.current_file;
   }
   // The "+ N more" suffix counts running siblings AND any waiting jobs
   // so the user sees their total backlog at a glance.
   var extras = (running.length - 1) + waiting.length;
-  if (extras > 0) {
-    text += ' + ' + extras + ' more';
+  if (extras > 0) tail += ' + ' + extras + ' more';
+  var errorText = bpErrorText(j);
+  if (!errorText) {
+    summary.textContent = text + tail;
+    return;
   }
-  summary.textContent = text;
+  var errors = document.createElement('span');
+  errors.className = 'job-summary-errors';
+  errors.style.color = 'var(--danger)';
+  errors.textContent = errorText;
+  summary.replaceChildren(text + ' · ', errors, tail);
 }
 
 function updateActivityDot() {

@@ -911,6 +911,49 @@ def test_move_folder_job_counts_against_the_plan_the_worker_used(
     expect(note).not_to_contain_text("of 499")
 
 
+def test_status_bar_shows_stage_photos_overall_percent_and_errors(live_server, page):
+    """The bottom status line reads a Process run in photos, a percent and errors.
+
+    The run's overall current/total are stage weights (74 of 104), which mean
+    nothing to a user, and the failures used to show only on the Jobs page."""
+    from datetime import datetime, timedelta
+
+    started_at = (datetime.now() - timedelta(minutes=10)).isoformat()
+    job = {
+        "id": "pipeline-status-bar",
+        "type": "pipeline", "status": "running", "started_at": started_at,
+        "workspace_id": live_server["db"]._active_workspace_id,
+        "config": {}, "errors": [],
+        "progress": {
+            "phase": "Extracting features (SAM2 + DINOv2)", "stage_id": "extract_masks",
+            "current": 74, "total": 104, "rate": 87.2, "rate_unit": "per_minute",
+        },
+        "steps": [
+            {"id": "scan", "label": "Check metadata", "status": "completed",
+             "progress": {"current": 1965, "total": 1965}, "error_count": 0},
+            {"id": "extract_masks", "label": "Extract features", "status": "running",
+             "started_at": started_at,
+             "progress": {"current": 641, "total": 1965}, "error_count": 193},
+        ],
+    }
+    page.route("**/api/jobs", lambda route: route.fulfill(json={"active": [job], "history": []}))
+    page.route("**/api/jobs/history?*", lambda route: route.fulfill(json=[]))
+    page.goto(f"{live_server['url']}/jobs")
+
+    summary = page.locator("#jobSummary")
+    expect(summary).to_have_text(
+        "Pipeline — Extracting features (SAM2 + DINOv2) · This phase: 641/1,965 (33%)"
+        " · Overall: 71% · 193 errors · 87 files/min"
+    )
+    expect(summary.locator(".job-summary-errors")).to_have_text("193 errors")
+    expect(page.locator("body")).not_to_contain_text("weighted points")
+
+    page.locator("#bpArrow").click()
+    row = page.locator("#bpJobsList .bp-compact-job")
+    expect(row).to_contain_text("This phase: 641/1,965 (33%) · Overall: 71%")
+    expect(row.locator(".bp-job-errors")).to_have_text("193 errors")
+
+
 def test_label_preparation_shows_progress_and_one_estimate(live_server, page):
     from datetime import datetime, timedelta
 
@@ -939,7 +982,9 @@ def test_label_preparation_shows_progress_and_one_estimate(live_server, page):
     expect(step).to_be_visible()
     expect(step.locator('.tree-step-current-file')).to_have_text(job["steps"][0]["current_file"])
     expect(step.locator('.tree-step-progress-text').first).to_have_text('This phase: 100 / 1,419')
-    expect(page.locator('.job-detail-meta')).to_contain_text('Overall: 16 / 104')
+    # The run's overall 16 / 104 are stage weights, not photos or labels.
+    expect(page.locator('.job-detail-meta')).to_contain_text('Overall: 15%')
+    expect(page.locator('.job-detail-meta')).not_to_contain_text('16 / 104')
     expect(page.locator('.job-detail-meta')).to_contain_text('This phase (Species labels): 7%')
     # The browser must not invent a second estimate from total elapsed time,
     # which includes cached labels and time spent paused.

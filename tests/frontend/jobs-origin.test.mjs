@@ -23,7 +23,7 @@ function harness() {
   for (const name of ['state', 'format', 'lineage', 'job-card', 'list']) {
     vm.runInContext(moduleAsScript(readFileSync(`vireo/static/jobs/${name}.js`, 'utf8')), context);
   }
-  for (const name of ['bpActiveProgress', 'bpProgressPct', 'bpCountText', 'isWaitingJob', 'renderJobList']) {
+  for (const name of ['bpActiveProgress', 'bpProgressPct', 'bpPhaseStep', 'bpPhaseCounts', 'bpCountText', 'bpErrorCount', 'bpErrorText', 'isWaitingJob', 'renderJobList']) {
     vm.runInContext(functionSource('vireo/static/navbar-shared-helpers.js', name), context);
   }
   return {context, state: vm.runInContext('state', context)};
@@ -71,4 +71,31 @@ test('the status panel distinguishes phase counts from overall progress', () => 
   assert.match(context.renderJobList([row({progress})]), /This phase: 0\/20 \(0%\) · Overall: 16\/104/);
   delete progress.phase_total;
   assert.match(context.renderJobList([row({progress})]), /Overall: 16\/104 \(15%\)/);
+});
+
+test('the status panel shows a Process run in photos, a percent and its errors', () => {
+  const {context} = harness();
+  const html = context.renderJobList([row({
+    type: 'pipeline', status: 'running',
+    progress: {phase: 'Extracting features', stage_id: 'extract_masks', current: 74, total: 104},
+    steps: [{id: 'extract_masks', status: 'running', progress: {current: 641, total: 1965}, error_count: 193}],
+  })]);
+  assert.match(html, />This phase: 641\/1,965 \(33%\) · Overall: 71%</);
+  assert.match(html, /class="bp-job-errors"[^>]*>193 errors</);
+  assert.doesNotMatch(html, /weighted/);
+});
+
+test('the job card gives a Process run\'s overall progress as a percent', () => {
+  const {context} = harness();
+  const progress = {current: 16, total: 104, phase_current: 100, phase_total: 1419, phase_label: 'Species labels'};
+  assert.equal(
+    context.renderProgressMeta(row({type: 'pipeline', progress})),
+    '<span>Overall: 15%</span><span>This phase (Species labels): 7%</span>',
+  );
+  assert.match(context.renderProgressMeta(row({progress})), /^<span>Overall: 16 \/ 104<\/span>/);
+  assert.equal(context.overallText(row({type: 'pipeline', progress: {current: 74, total: 104}})), '71%');
+  assert.equal(context.overallText(row({progress: {current: 1200, total: 5000}})), '1,200 / 5,000');
+  const pipeline = row({type: 'pipeline', progress: {current: 74, total: 104}});
+  assert.equal(context.progressCountsText(pipeline, {current: 74, total: 104, phase: false}), '71%');
+  assert.equal(context.progressCountsText(pipeline, {current: 100, total: 1419, phase: true}), '100 / 1,419');
 });
