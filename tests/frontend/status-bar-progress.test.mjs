@@ -40,7 +40,7 @@ function harness(jobs) {
   });
   for (const name of [
     'isLiveJob', 'countsForBadge', 'isWaitingJob', 'bpActiveProgress', 'bpRateText', 'bpProgressPct',
-    'bpPhaseStep', 'bpPhaseCounts', 'bpCountText', 'bpErrorCount', 'bpErrorText', 'updateSummary',
+    'bpPhaseStep', 'bpPhaseCounts', 'bpCountText', 'bpIssueCounts', 'bpIssueText', 'bpIssueParts', 'updateSummary',
   ]) {
     vm.runInContext(functionSource(name), context);
   }
@@ -99,14 +99,41 @@ test('a run with no errors says nothing about errors', () => {
   );
 });
 
-test('errors count every step, and one error is singular', () => {
+test('errors count every running or failed step, and one error is singular', () => {
   const job = processRun();
+  job.steps[0].status = 'failed';
   job.steps[0].error_count = 2;
   assert.match(statusLine(job).textContent, / · 195 errors · /);
   job.steps[0].error_count = 0;
   job.steps[1].error_count = 0;
   job.steps[1].error = 'SAM2 failed to load';
   assert.match(statusLine(job).textContent, / · 1 error · /);
+});
+
+test('a step that completed with gaps shows warnings, not errors', () => {
+  // Thumbnails that need attention leave the stage completed and the run
+  // successful, so a later stage must not show them as failures.
+  const job = processRun();
+  job.steps[1].error_count = 0;
+  job.steps.unshift(step('thumbnails', 'completed', 1965, 1965, {
+    error_count: 3, error: '3 of 1965 thumbnails need attention',
+  }));
+  const summary = statusLine(job);
+  assert.equal(
+    summary.textContent,
+    'Pipeline — Extracting features (SAM2 + DINOv2) · This phase: 641/1,965 (33%) · Overall: 71% · 3 warnings · 87 files/min',
+  );
+  const [warnings] = summary.spans();
+  assert.equal(warnings.className, 'job-summary-warnings');
+  assert.equal(warnings.style.color, 'var(--warning, #d99a24)');
+
+  job.steps[2].error_count = 193;
+  const both = statusLine(job);
+  assert.match(both.textContent, / · 193 errors · 3 warnings · 87 files\/min$/);
+  assert.deepEqual(both.spans().map(span => span.className), ['job-summary-errors', 'job-summary-warnings']);
+  job.steps[0].error_count = 1;
+  job.steps[0].error = null;
+  assert.match(statusLine(job).textContent, / · 1 warning · /);
 });
 
 test('a running step\'s errors count before the step reports them', () => {

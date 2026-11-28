@@ -23,7 +23,7 @@ function harness() {
   for (const name of ['state', 'format', 'lineage', 'job-card', 'list']) {
     vm.runInContext(moduleAsScript(readFileSync(`vireo/static/jobs/${name}.js`, 'utf8')), context);
   }
-  for (const name of ['bpActiveProgress', 'bpProgressPct', 'bpPhaseStep', 'bpPhaseCounts', 'bpCountText', 'bpErrorCount', 'bpErrorText', 'isWaitingJob', 'renderJobList']) {
+  for (const name of ['bpActiveProgress', 'bpProgressPct', 'bpPhaseStep', 'bpPhaseCounts', 'bpCountText', 'bpIssueCounts', 'bpIssueText', 'bpIssueParts', 'isWaitingJob', 'renderJobList']) {
     vm.runInContext(functionSource('vireo/static/navbar-shared-helpers.js', name), context);
   }
   return {context, state: vm.runInContext('state', context)};
@@ -78,10 +78,14 @@ test('the status panel shows a Process run in photos, a percent and its errors',
   const html = context.renderJobList([row({
     type: 'pipeline', status: 'running',
     progress: {phase: 'Extracting features', stage_id: 'extract_masks', current: 74, total: 104},
-    steps: [{id: 'extract_masks', status: 'running', progress: {current: 641, total: 1965}, error_count: 193}],
+    steps: [
+      {id: 'thumbnails', status: 'completed', progress: {current: 1965, total: 1965}, error_count: 3},
+      {id: 'extract_masks', status: 'running', progress: {current: 641, total: 1965}, error_count: 193},
+    ],
   })]);
   assert.match(html, />This phase: 641\/1,965 \(33%\) · Overall: 71%</);
   assert.match(html, /class="bp-job-errors"[^>]*>193 errors</);
+  assert.match(html, /class="bp-job-warnings"[^>]*>3 warnings</);
   assert.doesNotMatch(html, /weighted/);
 });
 

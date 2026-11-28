@@ -1732,22 +1732,24 @@ function bpCountText(job, info) {
 }
 
 /**
- * How many errors a live job has recorded so far: the per-step counts the
- * Jobs page shows when the job has steps, else its error list.
+ * The errors and warnings a live job has recorded so far.
  *
- * A running step reports its count only when it finishes, while failures it
- * hits along the way (a scan's unreadable sidecars, refused folders) land in
- * the error list at once, so a stepped job never shows fewer errors than its
- * list holds. The larger of the two is used rather than their sum, since a
- * finished step's count and the list can name the same failures.
+ * Steps follow the Jobs page: a step that completed with a count had gaps it
+ * could carry on past (thumbnails that need attention), which are warnings and
+ * do not fail the run; the count of a running or failed step is errors.
+ *
+ * A running step may report its count only when it finishes, while failures
+ * it hits along the way (a scan's unreadable sidecars, refused folders) land
+ * in the error list at once, so a stepped job never shows fewer errors than
+ * its list holds. The larger of the two is used rather than their sum, since
+ * a failed step's count and the list can name the same failures.
  *
  * A Process run's `notes` are entries of its error list that explain a benign
  * skip (no detections to mask, an optional download that failed); they do not
  * fail the run, so they are not counted, nor is a step error that repeats one.
  * @param {NavJob} job
  */
-function bpErrorCount(job) {
-  var steps = job.steps || [];
+function bpIssueCounts(job) {
   var notes = job.notes || [];
   var isNote = function(/** @type {string} */ text) {
     return notes.some(function(note) {
@@ -1757,19 +1759,35 @@ function bpErrorCount(job) {
   var listed = (job.errors || []).filter(function(error) {
     return notes.indexOf(error) === -1;
   }).length;
-  if (steps.length === 0) return listed;
-  var stepped = steps.reduce(function(sum, step) {
+  var counts = {errors: 0, warnings: 0};
+  (job.steps || []).forEach(function(step) {
     var stepError = step.error && !isNote(step.error) ? 1 : 0;
-    return sum + Math.max(Number(step.error_count) || 0, stepError);
-  }, 0);
-  return Math.max(stepped, listed);
+    var count = Math.max(Number(step.error_count) || 0, stepError);
+    if (step.status === 'completed') counts.warnings += count;
+    else counts.errors += count;
+  });
+  counts.errors = Math.max(counts.errors, listed);
+  return counts;
 }
 
-/** @param {NavJob} job */
-function bpErrorText(job) {
-  var count = bpErrorCount(job);
+/** @param {number} count @param {string} noun */
+function bpIssueText(count, noun) {
   if (count <= 0) return '';
-  return count.toLocaleString() + (count === 1 ? ' error' : ' errors');
+  return count.toLocaleString() + ' ' + noun + (count === 1 ? '' : 's');
+}
+
+/**
+ * A live job's errors and warnings as the status line shows them, each in its
+ * own color, errors first.
+ * @param {NavJob} job
+ * @returns {{text: string; className: string; color: string}[]}
+ */
+function bpIssueParts(job) {
+  var counts = bpIssueCounts(job);
+  return [
+    {text: bpIssueText(counts.errors, 'error'), className: 'errors', color: 'var(--danger)'},
+    {text: bpIssueText(counts.warnings, 'warning'), className: 'warnings', color: 'var(--warning, #d99a24)'},
+  ].filter(function(part) { return part.text !== ''; });
 }
 
 /** @param {NavJob[]} jobs */
@@ -1798,8 +1816,9 @@ function renderJobList(jobs) {
     if (isWaiting || isPaused) html += '<span style="color:var(--text-muted);">(' + waitingLabel + ')</span>';
     if (phase) html += '<span style="color:var(--text-muted);">\u2014 ' + bpEscape(phase) + '</span>';
     if (detail) html += '<span style="color:var(--text-muted);font-variant-numeric:tabular-nums;">' + detail + '</span>';
-    var errorText = bpErrorText(j);
-    if (errorText) html += '<span class="bp-job-errors" style="color:var(--danger);font-variant-numeric:tabular-nums;">' + errorText + '</span>';
+    bpIssueParts(j).forEach(function(part) {
+      html += '<span class="bp-job-' + part.className + '" style="color:' + part.color + ';font-variant-numeric:tabular-nums;">' + part.text + '</span>';
+    });
     html += '<a href="/jobs" style="margin-left:auto;color:var(--accent);text-decoration:none;font-size:11px;white-space:nowrap;">View \u2192</a>';
     html += '</div>';
   });
@@ -1857,9 +1876,9 @@ function updateSummary() {
   if (j.progress && j.progress.phase) {
     text += ' — ' + j.progress.phase;
   }
-  // Errors come before the speed and the "+ N more" backlog: the line is cut
-  // with an ellipsis in a narrow window, and a run that is failing photos must
-  // not read like one that is going well. They keep the danger color.
+  // Errors and warnings come before the speed and the "+ N more" backlog: the
+  // line is cut with an ellipsis in a narrow window, and a run that is failing
+  // photos must not read like one that is going well. Each keeps its color.
   var tail = '';
   var progressInfo = bpActiveProgress(j.progress);
   if (progressInfo) {
@@ -1872,16 +1891,16 @@ function updateSummary() {
   // so the user sees their total backlog at a glance.
   var extras = (running.length - 1) + waiting.length;
   if (extras > 0) tail += ' + ' + extras + ' more';
-  var errorText = bpErrorText(j);
-  if (!errorText) {
-    summary.textContent = text + tail;
-    return;
-  }
-  var errors = document.createElement('span');
-  errors.className = 'job-summary-errors';
-  errors.style.color = 'var(--danger)';
-  errors.textContent = errorText;
-  summary.replaceChildren(text + ' · ', errors, tail);
+  /** @type {(string | HTMLElement)[]} */ var nodes = [text];
+  bpIssueParts(j).forEach(function(part) {
+    var issue = document.createElement('span');
+    issue.className = 'job-summary-' + part.className;
+    issue.style.color = part.color;
+    issue.textContent = part.text;
+    nodes.push(' · ', issue);
+  });
+  nodes.push(tail);
+  summary.replaceChildren(...nodes);
 }
 
 function updateActivityDot() {
