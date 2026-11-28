@@ -34,7 +34,7 @@ function legacyReclassifyRequest() {
     document.querySelectorAll('.model-checkbox:checked')), function(cb) { return cb.value; });
   var labels = Array.from(/** @type {NodeListOf<HTMLInputElement>} */ (
     document.querySelectorAll('.labels-run-cb:checked')), function(cb) { return cb.value; });
-  if (models.length === 0) throw new Error('Select a model in Classify below, then try again.');
+  if (models.length === 0) throw new Error('Select a model in Classify, then try again.');
   return {
     folder_ids: _legacyDetectionFolders.map(function(folder) { return folder.id; }),
     model_ids: models,

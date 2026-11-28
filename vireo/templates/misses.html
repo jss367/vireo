@@ -313,24 +313,20 @@
     color: var(--text-secondary);
   }
   .misses-scope-reset a { color: var(--accent); }
-  .misses-tuning-head {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin-bottom: 10px;
-  }
-  .misses-tuning-title {
+  .misses-tuning > summary {
+    cursor: pointer;
     font-size: 13px;
     font-weight: 600;
     color: var(--text-primary);
   }
   .misses-tuning-status {
-    margin-left: auto;
+    margin-inline-start: 8px;
     font-size: 11px;
     color: var(--text-secondary);
     font-variant-numeric: tabular-nums;
   }
   .misses-tuning-grid {
+    margin-top: 10px;
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
     gap: 10px 14px;
@@ -425,11 +421,10 @@
     Showing only the current pipeline run. <a href="/misses">Show all misses</a>
   </div>
 
-  <div class="misses-tuning" id="missesTuning">
-    <div class="misses-tuning-head">
-      <span class="misses-tuning-title">Miss thresholds</span>
+  <details class="misses-tuning" id="missesTuning">
+    <summary>Adjust thresholds
       <span class="misses-tuning-status" id="missTuningStatus">Loading thresholds...</span>
-    </div>
+    </summary>
     <div class="misses-tuning-grid">
       <div class="misses-tuning-control">
         <label for="missCfgDetectorFloor">
@@ -479,7 +474,7 @@
         <span>Save as workspace defaults</span>
       </label>
     </div>
-  </div>
+  </details>
 
   <div id="missesRoot">
     <!-- Sections rendered here -->
