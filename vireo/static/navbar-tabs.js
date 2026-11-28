@@ -155,14 +155,20 @@ function saveStripScroll() {
   if (scrollKey && strip?.childElementCount) sessionStorage.setItem(scrollKey, String(strip.scrollLeft));
 }
 
-// Mark the sides of the strip that have tabs scrolled out of view; the
-// stylesheet fades those edges. One pixel of slack absorbs fractional widths.
-function updateStripOverflow() {
+// Keep clipped tabs in the scroll layout so wheel and keyboard navigation
+// can reveal them. Observe the anchors because their widths can also change
+// after rendering (hotkey hints, job count, or a font finishing loading).
+/** @type {ResizeObserver | undefined} */
+let tabSizeObserver;
+
+function updateTabVisibility() {
   const strip = STRIP();
-  if (!strip) return;
-  const hidden = strip.scrollWidth - strip.clientWidth;
-  strip.classList.toggle('more-left', strip.scrollLeft > 1);
-  strip.classList.toggle('more-right', hidden - strip.scrollLeft > 1);
+  const bounds = strip.getBoundingClientRect();
+  for (const tab of Array.from(strip.children)) {
+    const rect = tab.getBoundingClientRect();
+    // One pixel of slack accommodates rounding at the scroll limit.
+    tab.classList.toggle('is-clipped', rect.left < bounds.left - 1 || rect.right > bounds.right + 1);
+  }
 }
 
 // A mouse wheel only scrolls vertically, so over an overflowing strip it
@@ -189,11 +195,21 @@ function scrollStripWithWheel(event) {
 
 function watchStripOverflow() {
   const strip = STRIP();
-  if (!strip || strip.dataset.overflowWatched) return;
-  strip.dataset.overflowWatched = '1';
-  strip.addEventListener('scroll', updateStripOverflow, {passive: true});
-  strip.addEventListener('wheel', scrollStripWithWheel, {passive: false});
-  new ResizeObserver(updateStripOverflow).observe(strip);
+  if (!tabSizeObserver) {
+    tabSizeObserver = new ResizeObserver(updateTabVisibility);
+    strip.addEventListener('scroll', updateTabVisibility, {passive: true});
+    strip.addEventListener('wheel', scrollStripWithWheel, {passive: false});
+    strip.addEventListener('focusin', event => {
+      if (event.target instanceof HTMLAnchorElement && event.target.matches(':focus-visible')) {
+        event.target.scrollIntoView({block: 'nearest', inline: 'nearest'});
+      }
+    });
+  }
+  const observer = tabSizeObserver;
+  observer.disconnect();
+  observer.observe(strip);
+  strip.querySelectorAll('.nav-tab').forEach(tab => observer.observe(tab));
+  updateTabVisibility();
 }
 
 /** @param {string | null} nextScrollKey */
@@ -218,7 +234,6 @@ function renderStrip(nextScrollKey = scrollKey) {
   }
   strip.scrollLeft = scrollLeft;
   watchStripOverflow();
-  updateStripOverflow();
   applyActiveClass();
   rebuildPagesMenu();
   if (vireoSyncNumberedNavigation) vireoSyncNumberedNavigation();

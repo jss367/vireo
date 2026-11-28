@@ -104,14 +104,14 @@ export function storageCategories(s) {
     {name: 'Database', size: s.database.size, type: null, kind: 'keep', kindLabel: 'Keep'},
     {name: 'Thumbnails', size: s.thumbnails.size, count: s.thumbnails.count, type: 'thumbnails', kind: 'safe', kindLabel: 'Safe to clear'},
     {name: 'Previews', size: s.previews.size, count: s.previews.count, type: 'previews', kind: 'safe', kindLabel: 'Safe to clear'},
-    {name: 'Working Copies', size: s.working_copies.size, count: s.working_copies.count, type: null, kind: 'managed', kindLabel: 'Quota managed'},
+    {name: 'Working Copies', size: s.working_copies.size, count: s.working_copies.count, workingCopyLimit: true, type: null, kind: 'managed', kindLabel: 'Quota managed'},
     {name: 'Label Embeddings', size: s.embeddings.size, count: s.embeddings.count, type: 'embeddings', kind: 'safe', kindLabel: 'Safe to clear'},
     {name: 'Models', size: s.models.size, type: null, kind: 'download', kindLabel: 'Download again', settings: true},
     {name: 'Hugging Face Cache', size: s.hf_cache.size, type: null, kind: 'download', kindLabel: 'Download again', hfCache: true, note: hfCacheCardNote(s.hf_cache)},
     {name: 'Offline Originals', size: s.offline_originals.size, count: s.offline_originals.count, release: true, type: null, kind: 'keep', kindLabel: 'Release when done'},
   ];
   (s.other.categories || []).forEach(function(c) {
-    categories.push({name: c.name, size: c.size, kind: 'keep', kindLabel: 'Review before removing'});
+    categories.push({name: c.name, size: c.size, review: true, kind: 'keep', kindLabel: 'Review before removing'});
   });
   return categories;
 }
@@ -122,7 +122,9 @@ export function renderStorageBreakdown(auxiliaryCategories) {
     ? '<p class="storage-legend">Files and folders below are sorted by size within each category. Sizes exclude data already counted in the main cache categories.</p>'
     : '';
   auxiliaryCategories.forEach(function(c) {
-    breakdownHtml += '<details><summary>' + storageEscapeHtml(c.name) +
+    var root = c.entries.length === 1 ? c.entries[0]?.path : '';
+    breakdownHtml += '<details id="storage-breakdown-' + storageEscapeHtml(encodeURIComponent(c.name)) +
+      '" data-category-root="' + storageEscapeAttr(root) + '" data-category-bytes="' + c.size + '"><summary>' + storageEscapeHtml(c.name) +
       ' · ' + storageFormatBytes(c.size) + ' · View files and folders</summary>';
     c.entries.forEach(function(entry) {
       breakdownHtml += '<div class="storage-breakdown-row"><strong>' +

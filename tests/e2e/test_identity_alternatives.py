@@ -7,6 +7,23 @@ from playwright.sync_api import expect
 from services import keyword_tagging, workspace_folders
 
 
+def test_workspace_count_waits_for_review_grid(live_server, page):
+    page.add_init_script("""{
+      const fetch = window.fetch;
+      const ready = new Promise(resolve => { window.releasePredictions = resolve; });
+      window.fetch = async (...args) => {
+        if (String(args[0]).includes('/api/predictions?')) await ready;
+        return fetch(...args);
+      };
+    }""")
+    page.goto(live_server['url'] + '/review')
+    count = page.locator('#identityAlternativesCount')
+    expect(count).to_have_text('(0 photos in this workspace)')
+    expect(count).to_be_hidden()
+    page.evaluate('window.releasePredictions()')
+    expect(count).to_be_visible()
+
+
 def open_panel(live_server, page):
     page.goto(live_server['url'] + '/review')
     expect(page.locator('#grid .card').first).to_be_visible()
@@ -67,7 +84,7 @@ def test_resolve_selected_frames_leaves_others_unresolved(live_server, page):
         group.get_by_role('button', name='Resolve as Tropical Kingbird', exact=True).click()
     assert request.value.post_data_json['photo_ids'] == [ids[0]]
     expect(group).to_have_count(1)
-    expect(group).to_contain_text('1 photos.')
+    expect(group).to_contain_text('1 photo.')
     db = live_server['db']
     assert db.identity_alternatives.photo_ids() == {ids[1]}
     assert 'Tropical Kingbird' in db.photo_species.get_species_for_photos(ids)[ids[0]]

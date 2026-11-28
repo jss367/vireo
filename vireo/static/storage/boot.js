@@ -112,8 +112,31 @@ function bindStorageRenderedMarkup() {
   delegateStorageClick('storageLocations', '[data-storage-location]', function(button) {
     openStorageFolder(button.dataset.storageLocation || '');
   });
+  delegateStorageClick('storageGrid', '[data-storage-review]', function(button) {
+    var category = encodeURIComponent(button.dataset.storageReview || '');
+    var breakdown = document.getElementById('storage-breakdown-' + category);
+    if (!(breakdown instanceof HTMLDetailsElement)) return;
+    var retained = document.getElementById('storage-retained-' + category);
+    var details = breakdown;
+    if (retained instanceof HTMLDetailsElement && retained.dataset.listedRoot === breakdown.dataset.categoryRoot &&
+        retained.dataset.listedBytes === breakdown.dataset.categoryBytes) {
+      details = retained;
+    }
+    details.open = true;
+    var summary = details.querySelector('summary');
+    if (summary) {
+      summary.focus({preventScroll: true});
+      summary.scrollIntoView({block: 'center'});
+    }
+  });
   delegateStorageClick('storageGrid', '[data-storage-manage]', function(button) {
     var target = button.dataset.storageManage || '';
+    if (target === 'working-copy-limit') {
+      var limit = storageEl('cfgWorkingCopyCacheMaxGb');
+      limit.focus({preventScroll: true});
+      limit.scrollIntoView({block: 'center'});
+      return;
+    }
     if (target === 'hf-cache') openHfCacheModal();
     else if (target === 'settings') window.location.href = '/settings?category=identification#manage-models';
     else openStorageModal(target);

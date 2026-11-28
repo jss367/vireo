@@ -1,10 +1,11 @@
-"""Reuse a Browse summary while its catalog and detector threshold are unchanged."""
+"""Reuse derived catalog reads across requests until another connection commits."""
 
 from __future__ import annotations
 
 import sqlite3
 import threading
 from collections import OrderedDict
+from collections.abc import Hashable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -14,14 +15,15 @@ if TYPE_CHECKING:
     from services.service_types import JsonDict
 
 
-class BrowseSummaryCache:
-    """Per-app cache for folder and workspace scopes, independent of filters."""
+class CatalogReadCache:
+    """Bounded per-app cache invalidated by any committed catalog write."""
 
-    def __init__(self) -> None:
+    def __init__(self, capacity: int = 8) -> None:
+        self._capacity = capacity
         self._lock = threading.Lock()
         self._observer: sqlite3.Connection | None = None
         self._file: tuple[int, int] | None = None
-        self._entries: OrderedDict[tuple[int, int | None, float], JsonDict] = OrderedDict()
+        self._entries: OrderedDict[Hashable, JsonDict] = OrderedDict()
         self._version = -1
         self._closed = False
 
@@ -67,7 +69,7 @@ class BrowseSummaryCache:
         with self._lock:
             return self._available_revision(path)
 
-    def read(self, path: Path, key: tuple[int, int | None, float], compute: Callable[[], JsonDict]) -> JsonDict:
+    def read(self, path: Path, key: Hashable, compute: Callable[[], JsonDict]) -> JsonDict:
         with self._lock:
             revision = self._available_revision(path)
             if revision is not None and key in self._entries:
@@ -79,6 +81,6 @@ class BrowseSummaryCache:
         with self._lock:
             if revision is not None and revision == self._available_revision(path):
                 self._entries[key] = result
-                if len(self._entries) > 8:
+                if len(self._entries) > self._capacity:
                     self._entries.popitem(last=False)
         return result

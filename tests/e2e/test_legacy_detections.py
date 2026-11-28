@@ -35,8 +35,10 @@ def test_legacy_nudge_queues_reclassify(live_server, page, outcome):
     page.goto(f'{live_server["url"]}/pipeline')
     card = page.locator("#legacyDetectionsCard")
     expect(card).to_be_visible()
-    expect(card.locator("strong")).to_have_text("2 folders have legacy detections.")
-    card.locator("summary").click()
+    expect(card.locator("#legacyDetectionsTitle")).to_have_text("2 folders have legacy detections.")
+    expect(card.locator("#btnReclassifyLegacy")).to_be_hidden()
+    card.locator(":scope > summary").click()
+    card.get_by_text("Affected folders", exact=True).click()
     expect(card.locator("li")).to_have_text([
         "/photos/park — 3 photos", "/photos/yard — 2 photos",
     ])
@@ -72,7 +74,7 @@ def test_legacy_nudge_blocks_missing_classification_setup(live_server, page):
     }}))
     page.goto(f'{live_server["url"]}/pipeline')
     expect(page.locator(".model-checkbox:checked")).to_have_count(1)
-    expect(page.locator("#legacyDetectionsCard")).to_be_visible()
+    page.locator("#legacyDetectionsCard > summary").click()
     page.locator("#btnReclassifyLegacy").click()
     expect(page.locator("#legacyDetectionsStatus")).to_have_text("Select a species list in Settings.")
     expect(page.locator("#btnReclassifyLegacy")).to_be_enabled()
@@ -99,8 +101,10 @@ def test_legacy_nudge_includes_unclassified_detector_outputs(live_server, page):
     page.goto(f'{live_server["url"]}/pipeline')
     card = page.locator("#legacyDetectionsCard")
     expect(card).to_be_visible()
-    expect(card.locator("strong")).to_have_text("2 folders have legacy detections.")
-    card.locator("summary").click()
+    expect(card.locator("#legacyDetectionsTitle")).to_have_text("2 folders have legacy detections.")
+    expect(card.locator("#btnReclassifyLegacy")).to_be_hidden()
+    card.locator(":scope > summary").click()
+    card.get_by_text("Affected folders", exact=True).click()
     expect(card.locator("li")).to_have_text([
         "/photos/park — 1 photo", "/photos/yard — 1 photo",
     ])
@@ -122,7 +126,7 @@ def test_legacy_retry_waits_for_fresh_folder_state(live_server, page, refresh):
         body='event: complete\ndata: {"status":"completed"}\n\n',
     ))
     page.goto(f'{live_server["url"]}/pipeline')
-    expect(page.locator("#legacyDetectionsCard")).to_be_visible()
+    page.locator("#legacyDetectionsCard > summary").click()
     expect(page.locator(".model-checkbox:checked")).to_have_count(1)
     # Hold the completion refresh independently of the successful queue/stream.
     page.route("**/api/pipeline/legacy-detections", lambda route: held.append(route))

@@ -421,6 +421,7 @@ def test_ephemeral_tab_pin_button_persists_tab(live_server, page):
     # /keywords is unpinned by default → renders ephemeral on visit.
     page.goto(f"{url}/keywords")
     page.wait_for_selector(".nav-tab[data-nav-id='keywords'].is-ephemeral", timeout=3000)
+    page.locator(".nav-tab.is-ephemeral").scroll_into_view_if_needed()
     page.click("[data-testid='nav-tab-pin-keywords']")
     # After pin, the same tab loses .is-ephemeral and the API persisted it.
     page.wait_for_selector(
@@ -447,6 +448,7 @@ def test_map_tab_can_be_pinned_before_leaflet_cdn_finishes(live_server, page):
     page.route("https://unpkg.com/**", hold_unpkg)
     page.goto(f"{url}/map", wait_until="commit")
     page.wait_for_selector(".nav-tab[data-nav-id='map'].is-ephemeral", timeout=3000)
+    page.locator(".nav-tab.is-ephemeral").scroll_into_view_if_needed()
     page.click("[data-testid='nav-tab-pin-map']")
     page.wait_for_selector(
         ".nav-tab[data-nav-id='map']:not(.is-ephemeral)", timeout=3000
@@ -465,6 +467,7 @@ def test_rapid_review_ephemeral_tab_pin_button_persists_tab(live_server, page):
         ".nav-tab[data-nav-id='pipeline_rapid_review'].is-ephemeral",
         timeout=3000,
     )
+    page.locator(".nav-tab.is-ephemeral").scroll_into_view_if_needed()
     page.click("[data-testid='nav-tab-pin-pipeline_rapid_review']")
     page.wait_for_selector(
         ".nav-tab[data-nav-id='pipeline_rapid_review']:not(.is-ephemeral)",
@@ -500,13 +503,14 @@ def test_pinned_navigation_stays_in_order_across_pages(live_server, page):
         else:
             assert strip.evaluate("el => el.scrollLeft") == 120
 
+    page.locator(".nav-tab.is-ephemeral").scroll_into_view_if_needed()
     page.locator(".nav-tab.is-ephemeral .nav-tab-close").click()
     expect(page.locator(".nav-tab.active")).to_have_attribute("data-nav-id", expected[-1])
 
 
 def test_only_the_tab_strip_gives_way_in_a_narrow_window(live_server, page):
     """The wordmark stays on one line beside its icon, and a side of the strip
-    with tabs scrolled out of view is marked so its edge fades; a mouse wheel
+    with tabs scrolled out of view shows whole labels; a mouse wheel
     over the strip scrolls the tabs, not the page."""
     page.set_viewport_size({"width": 900, "height": 800})
     page.goto(f"{live_server['url']}/browse")
@@ -531,14 +535,14 @@ def test_only_the_tab_strip_gives_way_in_a_narrow_window(live_server, page):
     assert box["x"] + box["width"] <= pages["x"], (box, pages)
 
     assert strip.evaluate("el => el.scrollWidth > el.clientWidth")
-    expect(strip).to_have_class("nav-tab-strip more-right")
+    expect(strip.locator(".nav-tab").last).to_have_css("opacity", "0")
     page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
     page.mouse.wheel(0, 90)
     page.wait_for_function("document.getElementById('navTabStrip').scrollLeft >= 90")
     assert page.evaluate("window.scrollY") == 0
-    expect(strip).to_have_class("nav-tab-strip more-right more-left")
+    expect(strip.locator(".nav-tab").first).to_have_css("opacity", "0")
     strip.evaluate("el => { el.scrollLeft = el.scrollWidth; }")
-    expect(strip).to_have_class("nav-tab-strip more-left")
+    expect(strip.locator(".nav-tab").last).to_have_css("opacity", "1")
 
     # At the right boundary a downward wheel cannot move the strip, so it
     # must fall through to the page instead of being swallowed in place.
@@ -596,9 +600,33 @@ def test_only_the_tab_strip_gives_way_in_a_narrow_window(live_server, page):
     )
     assert scrolled == client_width
 
-    # Wide enough for every tab, neither edge fades.
+    # Wide enough for every tab, both ends appear.
     page.set_viewport_size({"width": 2400, "height": 800})
-    expect(strip).to_have_class("nav-tab-strip")
+    expect(strip.locator(".nav-tab.is-clipped")).to_have_count(0)
+
+
+def test_settings_label_at_the_pages_boundary(live_server, page):
+    page.set_viewport_size({"width": 1440, "height": 800})
+    page.goto(f"{live_server['url']}/browse")
+    settings = page.get_by_test_id("nav-settings")
+    settings.wait_for()
+    # Workspace names and font metrics vary. Place the strip edge halfway
+    # through Settings to reproduce the reported layout on every platform.
+    settings.evaluate("""tab => {
+      const strip = tab.parentElement;
+      tab.scrollIntoView({inline: 'end', block: 'nearest'});
+      const width = strip.getBoundingClientRect().width - tab.offsetWidth / 2;
+      const offset = strip.scrollLeft;
+      strip.style.maxWidth = width + 'px';
+      strip.scrollLeft = offset;
+    }""")
+    expect(settings).to_have_css("opacity", "0")
+    page.get_by_role("button", name="Pages").click()
+    expect(page.locator("#navOverflowMenu").get_by_role("button", name="Settings")).to_be_visible()
+    page.keyboard.press("Escape")
+    settings.focus()
+    expect(settings).to_be_focused()
+    expect(settings).to_have_css("opacity", "1")
 
 
 def test_tab_scroll_position_is_scoped_to_workspace(live_server, page):

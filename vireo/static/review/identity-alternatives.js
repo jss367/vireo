@@ -16,8 +16,10 @@
   function photos() { return /** @type {HTMLSelectElement} */ (element('identityPhotos')); }
   /** @param {string} message */
   function status(message) { element('identityAlternativesStatus').textContent = message; }
+  /** @param {number} count */
+  function photoCount(count) { return count + (count === 1 ? ' photo' : ' photos'); }
   function selectedCount() {
-    element('identityPhotoCount').textContent = photos().selectedOptions.length + ' photos selected';
+    element('identityPhotoCount').textContent = photoCount(photos().selectedOptions.length) + ' selected';
   }
   function reset() {
     editing = null;
@@ -46,7 +48,7 @@
       seen.add(p.photo_id);
       addPhotoOption(p.photo_id, p.filename || 'Photo ' + p.photo_id, false);
     });
-    status(seen.size + ' photos listed. Select the frames that share the uncertain identity.');
+    status(photoCount(seen.size) + ' listed. Select the frames that share the uncertain identity.');
   }
   /** @param {IdentityGroup} group */
   function editGroup(group) {
@@ -98,7 +100,7 @@
     });
     function update() {
       var selected = selection.selectedOptions.length;
-      count.textContent = selected + ' of ' + group.photo_ids.length + ' photos selected to resolve. Other frames remain unresolved.';
+      count.textContent = selected + ' of ' + photoCount(group.photo_ids.length) + ' selected to resolve. Other frames remain unresolved.';
       actions.forEach(function(action) { action.disabled = busy || workspaceChanged || selected === 0; });
     }
     selection.addEventListener('change', update);
@@ -120,7 +122,7 @@
       heading.textContent = group.candidates.join(' or ') + ' — unresolved';
       article.appendChild(heading);
       var note = document.createElement('p');
-      note.textContent = group.photo_ids.length + ' photos. ' +
+      note.textContent = photoCount(group.photo_ids.length) + '. ' +
         (group.candidates.length === 1 ? 'One candidate remains; identification still needs explicit confirmation. ' : '') + group.reason +
         (group.missing_evidence ? ' Missing evidence: ' + group.missing_evidence : '');
       article.appendChild(note);
@@ -142,6 +144,7 @@
   }
   async function load() {
     var requestEpoch = ++epoch;
+    element('identityAlternativesCount').textContent = '';
     try {
       var result = /** @type {{groups:IdentityGroup[],photo_count:number,workspace_id:number}} */ (await safeFetch('/api/identity-alternatives', {}, {toast: false}));
       if (requestEpoch !== epoch) return;
@@ -154,7 +157,7 @@
       }
       workspaceId = result.workspace_id;
       groups = result.groups;
-      element('identityAlternativesCount').textContent = '(' + result.photo_count + ' photos in workspace)';
+      element('identityAlternativesCount').textContent = '(' + photoCount(result.photo_count) + ' in this workspace)';
       render();
     } catch (error) {
       if (requestEpoch === epoch) status('Could not load unresolved species groups. Reopen this panel to retry.');

@@ -96,8 +96,8 @@ function renderCulling() {
     html += '<div class="species-section">';
     html += '<div class="species-header" onclick="toggleSpecies(' + si + ')">';
     html += '<span class="species-name">' + escapeHtml(sg.species) + '</span>';
-    html += '<span class="species-stats">' + sg.photo_count + ' photos &middot; ';
-    html += '<span class="species-keep">' + keepCount + ' favorites</span> &middot; ';
+    html += '<span class="species-stats">' + cullCount(sg.photo_count, 'photo') + ' &middot; ';
+    html += '<span class="species-keep">' + cullCount(keepCount, 'favorite') + '</span> &middot; ';
     html += '<span style="color:var(--warning);">' + reviewCount + ' undecided</span> &middot; ';
     html += '<span class="species-reject">' + rejectCount + ' reject</span>';
     html += '</span></div>';
@@ -111,7 +111,7 @@ function renderCulling() {
     groups.forEach(function(pg, /** @type {number} */ pi) {
       var groupFocused = focusedCullGroup.speciesIdx === si && focusedCullGroup.groupIdx === pi;
       html += '<div class="pose-group' + (groupFocused ? ' focused' : '') + '" data-species-index="' + si + '" data-group-index="' + pi + '">';
-      var groupLabel = pg.label || ('Scene ' + (pi + 1) + ' (' + pg.photos.length + ' photos)');
+      var groupLabel = pg.label || ('Scene ' + (pi + 1) + ' (' + cullCount(pg.photos.length, 'photo') + ')');
       html += '<div class="pose-label">' + escapeHtml(groupLabel) + '</div>';
 
       // Store photo list for lightbox navigation

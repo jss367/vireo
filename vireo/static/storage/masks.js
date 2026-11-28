@@ -19,12 +19,11 @@ export async function loadMasksCard(storageData) {
     inner += '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px;">';
     inner += '<div style="font-size:13px;font-weight:600;color:var(--text-primary);">Masks ' +
       '<span style="font-size:11px;font-weight:400;color:var(--text-dim);margin-left:6px;">' +
-      storageFormatBytes(totalBytes) + '</span> ' +
-      '<span class="stat-kind keep" style="margin-left:6px;">Review before clearing</span></div>';
+      storageFormatBytes(totalBytes) + '</span></div>';
     inner += '<div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;">';
     inner += '<button class="btn-manage" data-masks-action="manage"' +
       (variants.length === 0 ? ' disabled style="opacity:0.5;cursor:default;"' : '') +
-      '>Manage</button>';
+      '>Review masks</button>';
     inner += '<button class="btn-secondary" data-masks-action="delete-inactive"' +
       (variants.length === 0 ? ' disabled style="opacity:0.5;cursor:default;"' : '') +
       '>Delete inactive</button>';

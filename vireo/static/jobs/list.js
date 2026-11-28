@@ -123,7 +123,7 @@ export function renderListItem(j, source, options) {
   } else if (j.summary) {
     detail = escapeHtml(j.summary);
   } else if (j.status === 'failed' && j.errors && j.errors.length > 0) {
-    detail = '<span style="color:var(--danger);">' + escapeHtml(j.errors[0]).substring(0, 60) + '</span>';
+    detail = '<span style="color:var(--danger);">' + escapeHtml(j.errors[0]) + '</span>';
   } else if (j.duration) {
     detail = formatElapsed(j.duration);
   }

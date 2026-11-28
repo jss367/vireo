@@ -29,6 +29,7 @@ interface HighlightsPhoto {
 }
 /** A species bucket or the unidentified section: the photos loaded so far. */
 interface HighlightsSection {
+  card_rows?: unknown[][];
   species?: string; photos: HighlightsPhoto[]; photo_count: number; has_more?: boolean; loaded_count?: number;
   best_score?: number | null; best_timestamp?: string | null;
   [key: string]: unknown;
@@ -48,6 +49,7 @@ interface HighlightsBestDecision {
 /** A page of one bucket from /api/highlights/bucket. */
 interface HighlightsBucketPage extends HighlightsSection {loaded_count: number; has_more: boolean; best_decision?: HighlightsBestDecision | null}
 interface HighlightsData {
+  card_fields?: string[];
   buckets?: HighlightsBucket[]; unidentified?: HighlightsSection | null;
   collections?: {id: number; name: string; degraded: boolean}[];
   folders: {id: number; name: string; path?: string; photo_count?: number}[];

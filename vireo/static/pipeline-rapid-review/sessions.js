@@ -19,7 +19,7 @@ function buildSessions(results) {
         speciesList: burstSpeciesList(enc, burst),
         hasBurstOverride: hasBurstSpeciesOverride(burst),
         title: 'Encounter ' + (encIdx + 1) + ', Burst ' + (burstIdx + 1),
-        subtitle: ids.length + ' photos' + (burstSpecies(enc, burst) ? ' - ' + burstSpecies(enc, burst) : ''),
+        subtitle: ids.length + (ids.length === 1 ? ' photo' : ' photos') + (burstSpecies(enc, burst) ? ' - ' + burstSpecies(enc, burst) : ''),
       });
     });
   });

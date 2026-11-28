@@ -12,6 +12,7 @@ import math
 import re
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
+from operator import itemgetter
 
 from db import text_search_match
 from photo_payload import attach_edit_recipes
@@ -84,7 +85,7 @@ def _pick_counts(photo):
     return photo.get("flag") == "flagged" and _species_is_subject(photo)
 
 
-def _highlight_score_bucket(photos, picked_first=False):
+def _highlight_score_bucket(photos, picked_first=False, *, include_score_parts=True):
     """Attach highlight scores and compact reason labels to one species bucket.
 
     picked_first promotes flagged photos above unflagged ones regardless of
@@ -163,13 +164,14 @@ def _highlight_score_bucket(photos, picked_first=False):
         p["highlight_base_score"] = round(
             max(0.0, min(1.0, base_score_pre_pick)), 4
         )
-        p["score_parts"] = {
-            "focus": round(focus, 3),
-            "exposure": round(exposure, 3),
-            "composition": round(composition, 3),
-            "subject": round(area, 3),
-            "noise": round(noise, 3),
-        }
+        if include_score_parts:
+            p["score_parts"] = {
+                "focus": round(focus, 3),
+                "exposure": round(exposure, 3),
+                "composition": round(composition, 3),
+                "subject": round(area, 3),
+                "noise": round(noise, 3),
+            }
         p["reasons"] = reasons[:3]
 
     _sort_highlight_bucket(photos, picked_first)
@@ -577,6 +579,7 @@ def collect_highlight_buckets(
     confirmation_filter="all",
     canonicalize_species=None,
     seen_species=None,
+    *, include_score_parts=True,
 ):
     """Group candidate rows into species buckets plus the unidentified photos.
 
@@ -593,7 +596,7 @@ def collect_highlight_buckets(
     unidentified_photos = []
 
     for row in candidates:
-        r = dict(row)
+        r = row if isinstance(row, dict) else dict(row)
         memberships = photo_species_memberships(
             r, canonicalize_species, confidence_threshold,
         )
@@ -635,9 +638,9 @@ def collect_highlight_buckets(
 
     buckets = []
     for species, entry in bucket_map.items():
-        buckets.append(_highlight_bucket_entry(species, entry))
+        buckets.append(_highlight_bucket_entry(species, entry, include_score_parts))
 
-    _highlight_score_bucket(unidentified_photos, picked_first=True)
+    _highlight_score_bucket(unidentified_photos, picked_first=True, include_score_parts=include_score_parts)
     # Buckets made only of whole-frame guesses sort after every bucket with
     # a detected animal behind it, whatever their scores.
     buckets.sort(
@@ -726,10 +729,10 @@ def _highlight_candidate_photo(
     }
 
 
-def _highlight_bucket_entry(species, entry):
+def _highlight_bucket_entry(species, entry, include_score_parts):
     """Score one species bucket and summarize it for the page."""
     photos = entry["photos"]
-    _highlight_score_bucket(photos, picked_first=True)
+    _highlight_score_bucket(photos, picked_first=True, include_score_parts=include_score_parts)
     avg_confidence, whole_frame_count = _bucket_confidence(photos)
     top = photos[0] if photos else {}
     return {
@@ -816,8 +819,6 @@ def filter_highlight_sections(
 ):
     query = (query or "").strip()
     if not query:
-        for bucket in buckets:
-            _refresh_highlight_bucket_metadata(bucket)
         return buckets, unidentified_photos
 
     filtered_buckets = []
@@ -871,7 +872,7 @@ def _life_list_alphabetical_key(name):
     return _LIFE_LIST_LEADING_APOSTROPHE_RE.sub("", str(name or "")).lower()
 
 
-def _filter_highlights_by_species(
+def filter_highlights_by_species(
     buckets, unidentified_photos, species_filter, species_match_case,
     species_whole_word,
 ):
@@ -968,21 +969,12 @@ class HighlightsQuery:
         )
 
 
-def build_highlights_payload(db, query=None):
-    """The Highlights payload for ``query`` (a ``HighlightsQuery``; None
-    for the page defaults)."""
-    if query is None:
-        query = HighlightsQuery()
+def ranked_highlights(db, query, *, include_score_parts=True):
+    """Full ranked sections. Pagination and card hydration run after ranking."""
     folders = db.folders.with_quality_data()
     folder_id = query.resolved_folder(folders)
-    limit_per_bucket = max(1, min(int(query.limit_per_bucket), 100))
-    species_filter = (query.species.text or "").strip()
-    confirmation_filter = normalize_highlight_confirmation_filter(
-        query.confirmation_filter
-    )
+    confirmation_filter = normalize_highlight_confirmation_filter(query.confirmation_filter)
     highlight_filter = _normalize_highlight_presence_filter(query.highlight_filter)
-
-    candidates = query.candidates(db, folder_id)
     if query.collection_id is None:
         scope_name = "workspace" if folder_id is None else "folder"
         total_in_scope = db.photos.count_filtered(folder_id=folder_id)
@@ -993,16 +985,16 @@ def build_highlights_payload(db, query=None):
         )
 
     buckets, unidentified_photos = collect_highlight_buckets(
-        candidates, query.confidence_threshold, confirmation_filter,
-        canonicalize_species=species_canonicalizer(db),
+        query.candidates(db, folder_id), query.confidence_threshold, confirmation_filter,
+        canonicalize_species=species_canonicalizer(db), include_score_parts=include_score_parts,
     )
     # Distinct photos: a two-species photo sits in two buckets.
     eligible_count = len(
         {p["id"] for b in buckets for p in b["photos"]}
         | {p["id"] for p in unidentified_photos}
     )
-    buckets, unidentified_photos = _filter_highlights_by_species(
-        buckets, unidentified_photos, species_filter, query.species.match_case,
+    buckets, unidentified_photos = filter_highlights_by_species(
+        buckets, unidentified_photos, (query.species.text or "").strip(), query.species.match_case,
         query.species.whole_word,
     )
 
@@ -1020,17 +1012,11 @@ def build_highlights_payload(db, query=None):
         highlight_filter,
     )
 
-    limited_buckets, unidentified_limited = _limit_highlight_buckets(
-        db, buckets, unidentified_photos, limit_per_bucket,
-    )
-
     return {
-        "buckets": limited_buckets,
+        "buckets": buckets,
         "unidentified": {
             "photo_count": len(unidentified_photos),
-            "photos": unidentified_limited,
-            "loaded_count": len(unidentified_limited),
-            "has_more": len(unidentified_photos) > len(unidentified_limited),
+            "photos": unidentified_photos,
             "unanalyzed_count": _bucket_unanalyzed_count(unidentified_photos),
         },
         "folders": [
@@ -1040,12 +1026,99 @@ def build_highlights_payload(db, query=None):
         "meta": {
             "total_in_scope": total_in_scope,
             "eligible": eligible_count,
-            "limit_per_bucket": limit_per_bucket,
             "confirmation": confirmation_filter,
             "highlight_selection": highlight_filter,
             "search": (query.search.text or "").strip(),
         },
         "scope": scope_name,
+    }
+
+
+def build_highlights_payload(db, query=None):
+    query = query or HighlightsQuery()
+    ranked = ranked_highlights(db, query)
+    limit = max(1, min(int(query.limit_per_bucket), 100))
+    unidentified = ranked["unidentified"]
+    buckets, photos = _limit_highlight_buckets(db, ranked["buckets"], unidentified["photos"], limit)
+    return {
+        **ranked, "meta": {**ranked["meta"], "limit_per_bucket": limit},
+        "buckets": buckets,
+        "unidentified": {
+            **unidentified, "photos": photos, "loaded_count": len(photos),
+            "has_more": len(photos) < unidentified["photo_count"],
+        },
+    }
+
+
+# Cards and their lightbox navigation share these fields. The API's ordinary
+# photo dictionaries (also used by site export) retain all quality metrics.
+_CARD_FIELDS = (
+    "id", "filename", "timestamp", "flag", "species", "bucket_species",
+    "confirmed_species_list", "bucket_species_list", "species_presence",
+    "subject_species_list", "predicted_species", "predicted_confidence",
+    "predicted_detector_confidence", "whole_frame", "background_like",
+    "has_accepted_species", "is_confirmable_prediction", "is_analyzed",
+    "highlight_score", "highlight_base_score", "reasons",
+)
+_card_values = itemgetter(*_CARD_FIELDS)
+_CURATION_FIELDS = ("is_highlighted", "highlight_rank", "is_species_representative")
+_RANKED_FIELDS = _CARD_FIELDS + _CURATION_FIELDS
+
+
+def ranked_highlight_cards(db, query):
+    """Compact the derived ranking before retaining it across page requests."""
+    ranked = ranked_highlights(db, query, include_score_parts=False)
+    for section in [*ranked["buckets"], ranked["unidentified"]]:
+        photos = section["photos"]
+        if "species" not in section:
+            section["best_score"] = bucket_best_score(photos)
+            section["best_timestamp"] = photos[0]["timestamp"] if photos else None
+        section["photos"] = [
+            (*_card_values(p), p.get("is_highlighted"), p.get("highlight_rank"),
+             p.get("is_species_representative")) for p in photos
+        ]
+    return ranked
+
+
+def highlight_card_page(section, offset, limit):
+    rows = section["photos"][offset:offset + limit]
+    loaded = min(section["photo_count"], offset + len(rows))
+    return {
+        **section, "photos": [dict(zip(_RANKED_FIELDS, row, strict=True)) for row in rows],
+        "loaded_count": loaded, "has_more": loaded < section["photo_count"],
+    }
+
+
+def workspace_card_payload(db, query, ranked):
+    """Share field names across the initial page and hydrate its edit recipes."""
+    buckets, unidentified = filter_highlights_by_species(
+        ranked["buckets"], ranked["unidentified"]["photos"], query.species.text.strip(),
+        query.species.match_case, query.species.whole_word,
+    )
+    limit = max(1, min(query.limit_per_bucket, 100))
+    other = {**ranked["unidentified"], "photos": unidentified, "photo_count": len(unidentified)}
+    if not unidentified:
+        other["unanalyzed_count"] = 0
+        other["best_score"] = other["best_timestamp"] = None
+    sections = []
+    recipes = {}
+    for section in [*buckets, other]:
+        rows = section["photos"][:limit]
+        recipes.update((row[0], {"id": row[0]}) for row in rows)
+        page = {**section, "card_rows": rows, "loaded_count": len(rows),
+                "has_more": section["photo_count"] > len(rows)}
+        del page["photos"]
+        sections.append(page)
+    attach_edit_recipes(db, list(recipes.values()))
+    for page in sections:
+        page["card_rows"] = [
+            (*row, recipes[row[0]]["edit_recipe"], recipes[row[0]]["render_key"])
+            for row in page["card_rows"]
+        ]
+    return {
+        **ranked, "card_fields": (*_RANKED_FIELDS, "edit_recipe", "render_key"),
+        "buckets": sections[:-1], "unidentified": sections[-1],
+        "meta": {**ranked["meta"], "limit_per_bucket": limit},
     }
 
 

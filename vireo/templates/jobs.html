@@ -55,6 +55,11 @@
   background: var(--bg-input); color: var(--text-primary);
   border: 1px solid var(--border-secondary);
 }
+.jobs-filter-bar label {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; color: var(--text-secondary); cursor: pointer;
+}
+.jobs-filter-bar input[type="checkbox"] { margin: 0; accent-color: var(--accent); }
 .jobs-list-content {
   flex: 1; overflow-y: auto; padding: 0;
 }
@@ -102,8 +107,7 @@
   font-size: 11px; color: var(--text-ghost); font-variant-numeric: tabular-nums;
 }
 .job-list-item-detail {
-  font-size: 12px; color: var(--text-muted); white-space: nowrap;
-  overflow: hidden; text-overflow: ellipsis;
+  font-size: 12px; color: var(--text-muted); overflow-wrap: anywhere;
 }
 .job-list-item-progress {
   margin-top: 5px; height: 6px; background: var(--bg-tertiary); border-radius: 3px;

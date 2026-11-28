@@ -19,6 +19,11 @@ export async function loadRetainedStorage(allowRecent = false) {
     data.caches.forEach(function(cache) {
       var item = document.createElement('details');
       item.className = 'storage-retained-item';
+      item.id = 'storage-retained-' + encodeURIComponent(cache.name);
+      if (cache.count && cache.has_other_files === false && !cache.truncated && !cache.errors.length) {
+        item.dataset.listedBytes = String(cache.size);
+        item.dataset.listedRoot = cache.path;
+      }
       var title = document.createElement('summary');
       title.textContent = cache.name + ' · ' + storageFormatBytes(cache.size) + ' · ' + cache.count.toLocaleString() + ' files';
       if (cache.errors.length) title.textContent += ' · usage incomplete';
@@ -62,37 +67,7 @@ export async function loadRetainedStorage(allowRecent = false) {
       }
       panel.appendChild(item);
     });
-    var history = data.grouping_history;
-    var historyDetails = document.createElement('details');
-    historyDetails.className = 'storage-retained-item';
-    var historyTitle = document.createElement('summary');
-    historyTitle.textContent = 'Grouping undo snapshots · ' + storageFormatBytes(history.bytes) +
-      ' · ' + history.count.toLocaleString() + ' snapshots';
-    historyDetails.appendChild(historyTitle);
-    var historyNote = document.createElement('p');
-    historyNote.textContent = 'These snapshot bytes are part of the catalog database. ' + storageFormatBytes(history.redo_bytes) +
-      ' awaits redo and is protected from automatic pruning. Clearing removes grouping undo and redo; current grouping and ordinary photo edits remain.';
-    historyDetails.appendChild(historyNote);
-    var historyClear = document.createElement('button');
-    historyClear.className = 'btn-secondary';
-    historyClear.textContent = 'Clear grouping undo and redo snapshots';
-    historyClear.disabled = !history.count;
-    historyClear.addEventListener('click', function() {
-      clearRetainedStorage('grouping-history', 'Grouping undo snapshots', historyClear);
-    });
-    historyDetails.appendChild(historyClear);
-    history.entries.forEach(function(entry) {
-      var line = document.createElement('p');
-      line.textContent = entry.workspace + ' · ' + entry.description + ' · ' + storageFormatBytes(entry.bytes) +
-        (entry.undone ? ' · awaiting redo' : '');
-      historyDetails.appendChild(line);
-    });
-    if (history.truncated) {
-      var more = document.createElement('p');
-      more.textContent = 'Showing the newest ' + history.entries.length + ' snapshots; totals include all workspaces.';
-      historyDetails.appendChild(more);
-    }
-    panel.appendChild(historyDetails);
+    panel.appendChild(renderGroupingHistory(data.grouping_history));
     // Preserve unsaved policy inputs during a refresh.
     if (!/** @type {HTMLInputElement} */ (document.getElementById('retainedCacheLimit')).dataset.loaded) {
       /** @type {HTMLInputElement} */ (document.getElementById('retainedCacheLimit')).value = String(data.policy.retained_cache_max_mb);
@@ -103,6 +78,40 @@ export async function loadRetainedStorage(allowRecent = false) {
   } catch(e) {
     panel.textContent = 'Could not measure retained storage. Refresh to try again.';
   }
+}
+
+/** @param {RetainedStorageResponse['grouping_history']} history @returns {HTMLElement} */
+function renderGroupingHistory(history) {
+  var historyDetails = document.createElement('details');
+  historyDetails.className = 'storage-retained-item';
+  var historyTitle = document.createElement('summary');
+  historyTitle.textContent = 'Grouping undo snapshots · ' + storageFormatBytes(history.bytes) +
+    ' · ' + history.count.toLocaleString() + ' snapshots';
+  historyDetails.appendChild(historyTitle);
+  var historyNote = document.createElement('p');
+  historyNote.textContent = 'These snapshot bytes are part of the catalog database. ' + storageFormatBytes(history.redo_bytes) +
+    ' awaits redo and is protected from automatic pruning. Clearing removes grouping undo and redo; current grouping and ordinary photo edits remain.';
+  historyDetails.appendChild(historyNote);
+  var historyClear = document.createElement('button');
+  historyClear.className = 'btn-secondary';
+  historyClear.textContent = 'Clear grouping undo and redo snapshots';
+  historyClear.disabled = !history.count;
+  historyClear.addEventListener('click', function() {
+    clearRetainedStorage('grouping-history', 'Grouping undo snapshots', historyClear);
+  });
+  historyDetails.appendChild(historyClear);
+  history.entries.forEach(function(entry) {
+    var line = document.createElement('p');
+    line.textContent = entry.workspace + ' · ' + entry.description + ' · ' + storageFormatBytes(entry.bytes) +
+      (entry.undone ? ' · awaiting redo' : '');
+    historyDetails.appendChild(line);
+  });
+  if (history.truncated) {
+    var more = document.createElement('p');
+    more.textContent = 'Showing the newest ' + history.entries.length + ' snapshots; totals include all workspaces.';
+    historyDetails.appendChild(more);
+  }
+  return historyDetails;
 }
 
 /** @param {string} type @param {string} name @param {HTMLButtonElement} button */
