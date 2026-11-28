@@ -778,6 +778,7 @@ SCOPED_READERS = [
     ("get_coverage_stats", ()),
     ("get_folder_coverage_stats", ()),
     ("get_dashboard_stats", ()),
+    ("get_dashboard_headline", ()),
     ("count_real_detections_in_scope", ()),
     ("count_primary_detections_in_scope", ()),
     ("count_classify_pending_pairs", (MODEL, FP)),
@@ -858,7 +859,8 @@ QUERY_COUNTS = [
     # (method, args, kwargs, statements the reader itself issues)
     ("get_coverage_stats", (), {}, 3),
     ("get_folder_coverage_stats", (), {}, 3),
-    ("get_dashboard_stats", (), {}, 15),
+    ("get_dashboard_headline", (), {}, 2),
+    ("get_dashboard_stats", (), {}, 13),
     ("count_real_detections_in_scope", (), {"min_conf": 0.2}, 1),
     ("count_classify_stale", (MODEL, FP), {"min_conf": 0.2}, 1),
     ("count_full_image_classify_pending_pairs", (MODEL, FP), {}, 1),
@@ -915,6 +917,7 @@ STATS_METHODS = [
     "count_eye_keypoint_stale",
     "count_eye_keypoint_attemptable",
     "get_dashboard_stats",
+    "get_dashboard_headline",
 ]
 
 

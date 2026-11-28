@@ -6,11 +6,25 @@ import { renderClassification, renderDetection, renderFlags, renderHours, render
 import { dashboardScopeIsActive, processScopeBlockedReason, scopedUrl } from './scope.js';
 import { state } from './state.js';
 
+let statsRequest = 0;
+
 export async function loadStats() {
+  const request = ++statsRequest;
+  let fullRendered = false;
+  // The full response also carries the overview and can recover a failed
+  // headline request. Never replace its counts with a late headline.
+  const headline = scopedUrl('/api/stats', {section: 'headline'});
+  safeFetch(headline, {}, {toast: false}).then(function(data) {
+    if (request === statsRequest && !fullRendered && data) {
+      renderOverview(/** @type {DashboardStats} */ (data));
+    }
+  }).catch(function() { /* Full stats supplies the same counts. */ });
   try {
     var data = /** @type {DashboardStats} */ (await safeFetch(scopedUrl('/api/stats'), {}, { toast: false }));
+    if (request !== statsRequest) return;
     state.dashboardStats = data;
     renderOverview(data);
+    fullRendered = true;
     renderAttention(data.attention || {});
     renderSpecies(data.top_keywords || []);
     renderMonths(data.photos_by_month || []);
@@ -22,6 +36,7 @@ export async function loadStats() {
     renderHours(data.photos_by_hour || []);
     renderTrendSummary(data.photos_by_month || []);
   } catch(e) {
+    if (request !== statsRequest) return;
     /** @type {HTMLElement} */ (document.getElementById('speciesChart')).textContent = 'Failed to load statistics.';
   }
 }

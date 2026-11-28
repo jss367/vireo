@@ -145,6 +145,18 @@ def get_folder_coverage_stats(
     )
 
 
+def get_dashboard_headline(
+    db: Database, folder_id: int | None = None, collection_id: int | None = None,
+    date_from: str | None = None, date_to: str | None = None,
+) -> JsonDict:
+    """Return the overview cards without computing charts or processing gaps."""
+    ws = db.require_workspace_id()
+    scope_sql, scope_params = dashboard_scope_clause(
+        db, folder_id, collection_id, date_from, date_to,
+    )
+    return db.stats.get_dashboard_headline(ws, scope_sql, scope_params)
+
+
 def get_dashboard_stats(
     db: Database, folder_id: int | None = None, collection_id: int | None = None,
     date_from: str | None = None, date_to: str | None = None,
