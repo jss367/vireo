@@ -438,6 +438,8 @@ def test_filter_change_ignores_older_recompute_response(live_server, page):
       el.value = String(Number(el.value) + 1);
       return Number(el.value) / 100;
     }""")
+    expect(page.locator("#missCfgNoSubject")).to_be_hidden()
+    page.locator("#missesTuning > summary").click()
     page.locator("#missRecomputeBtn").click()
     page.wait_for_function("window.releaseHeldRecompute != null")
 
@@ -515,6 +517,7 @@ def test_recompute_uses_filters_that_rendered_visible_cards(live_server, page):
     page.evaluate("VireoFilter.removeField('rating')")
     page.wait_for_function("window.releaseHeldFilterLoad != null")
 
+    page.locator("#missesTuning > summary").click()
     page.locator("#missRecomputeBtn").click()
     expect(page.locator("#missTuningStatus")).to_have_text(
         "Recomputed visible photos; refreshing filters"
@@ -557,6 +560,7 @@ def test_initial_recompute_uses_url_filters_before_grid_loads(live_server, page)
     page.goto(f"{url}/misses?rating_min=4")
     page.wait_for_function("window.releaseInitialMissesLoad != null")
     expect(page.locator("#missRecomputeBtn")).to_be_enabled()
+    page.locator("#missesTuning > summary").click()
     page.locator("#missRecomputeBtn").click()
     page.wait_for_function("window.initialRecomputeBody != null")
     assert page.evaluate("""() => {
