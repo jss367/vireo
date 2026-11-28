@@ -222,6 +222,9 @@ function commitSettingsChanges(scope,values,formValues = values) {
 /** @param {string} scope @param {SettingsSnapshot|null} baseline @param {SettingsSnapshot} prior */
 function setSettingsBaseline(scope,baseline,prior = {}) {
   settingsBaseline[scope] = baseline;
+  if (scope === 'config') {
+    document.getElementById('resetPipeline')?.toggleAttribute('disabled', !baseline);
+  }
   if (baseline && settingsFailures[scope]?.length) {
     const loaded = scope === 'config' ? {...baseline,..._readSecretFields()} : baseline;
     const replaced = (settingsFailures[scope] || []).filter(key =>

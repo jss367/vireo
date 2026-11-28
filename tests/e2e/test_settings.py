@@ -1066,7 +1066,9 @@ def test_global_load_can_recover_while_workspace_remains_editable(live_server, p
     page.route("**/api/config", lambda route: route.fulfill(status=503, json={"error": "offline"}))
     page.goto(url + "/settings?category=identification")
     retry = page.get_by_role("button", name="Reload global settings")
+    reset_pipeline = page.locator("#resetPipeline")
     expect(retry).to_be_visible()
+    expect(reset_pipeline).to_be_disabled()
     assert page.locator("#cfgThreshold").evaluate("el => !!el.closest('[inert]')")
     page.locator("#wsOverride_classification_threshold").check()
     expect(page.locator("#settingsSaveStatus")).to_contain_text("Saved")
@@ -1079,10 +1081,12 @@ def test_global_load_can_recover_while_workspace_remains_editable(live_server, p
         retry.click()
     page.evaluate("renderSettingsIssues()")
     expect(retry).to_be_disabled()
+    expect(reset_pipeline).to_be_disabled()
     assert len(held) == 1
     held[0].continue_()
     page.unroute("**/api/config")
     expect(retry).to_have_count(0)
+    expect(reset_pipeline).to_be_enabled()
     page.select_option("#cfgKeywordCase", "title")
     expect(page.locator("#settingsSaveStatus")).to_contain_text("Saved")
     assert page.request.get(url + "/api/config").json()["keyword_case"] == "title"
