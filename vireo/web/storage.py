@@ -211,11 +211,11 @@ def create_storage_blueprint(get_db: GetDb, json_error: JsonError, db_path: str,
             db, cfg.load()
         )
         variants = db.masks_features.variants_summary()
-        stale = db.masks_features.find_stale(detector_confidence=min_detector_conf)
+        stale_count = db.masks_features.count_stale(detector_confidence=min_detector_conf)
         return {
             "variants": variants,
             "total_bytes": sum(v["bytes"] for v in variants),
-            "stale_count": len(stale),
+            "stale_count": stale_count,
             # Masks a schema migration stopped trusting and kept, per
             # migration and reason, until Process proves or replaces them.
             "set_aside": db.masks_features.count_set_aside(),
@@ -237,40 +237,29 @@ def create_storage_blueprint(get_db: GetDb, json_error: JsonError, db_path: str,
         """Comprehensive storage info for the storage management panel."""
         from classifier import CACHE_DIR as EMB_CACHE_DIR
         from models import DEFAULT_MODELS_DIR
+        from services.storage_paths import auxiliary_paths as owned_auxiliary_paths
+        from services.storage_paths import cache_directory_usage, directory_bytes
         from storage_breakdown import group_auxiliary_storage
 
-        def _dir_stats(path: str) -> JsonDict:
-            count = 0
-            total = 0
-            if os.path.isdir(path):
-                for f in os.listdir(path):
-                    fp = os.path.join(path, f)
-                    if os.path.isfile(fp):
-                        count += 1
-                        total += os.path.getsize(fp)
-            return {"count": count, "size": total, "path": path}
+        tree_sizes: dict[str, int] = {}
 
-        from services.storage_paths import (
-            auxiliary_paths as owned_auxiliary_paths,
-        )
-        from services.storage_paths import (
-            directory_bytes as _dir_size_recursive,
-        )
+        def cache_stats(path: str, *, include_paired: bool = False) -> JsonDict:
+            count, size, tree_size = cache_directory_usage(path, include_paired)
+            tree_sizes[os.path.abspath(path)] = tree_size
+            return {"count": count, "size": size, "path": path}
 
         db_size = os.path.getsize(db_path) if os.path.exists(db_path) else 0
-        thumb = _dir_stats(config["THUMB_CACHE_DIR"])
+        thumb = cache_stats(config["THUMB_CACHE_DIR"])
         preview_dir = os.path.join(
             media_root(config["THUMB_CACHE_DIR"]), "previews"
         )
-        preview = _dir_stats(preview_dir)
-        paired = _dir_stats(os.path.join(preview_dir, "paired"))
-        preview["count"] += paired["count"]
-        preview["size"] += paired["size"]
+        preview = cache_stats(preview_dir, include_paired=True)
         working = working_copy_stats(
             media_root(config["THUMB_CACHE_DIR"])
         )
-        emb = _dir_stats(EMB_CACHE_DIR)
-        models_size = _dir_size_recursive(DEFAULT_MODELS_DIR)
+        emb = cache_stats(EMB_CACHE_DIR)
+        models_size = directory_bytes(DEFAULT_MODELS_DIR)
+        tree_sizes[os.path.abspath(DEFAULT_MODELS_DIR)] = models_size
         db = get_db()
         offline_size = db.caches.offline_original_total_bytes()
         offline_count = db.caches.offline_original_cached_count()
@@ -323,10 +312,10 @@ def create_storage_blueprint(get_db: GetDb, json_error: JsonError, db_path: str,
                 continue
             measured_paths.append(path)
             try:
-                size = (
-                    os.path.getsize(path) if os.path.isfile(path)
-                    else _dir_size_recursive(path)
-                )
+                if os.path.isfile(path):
+                    size = os.path.getsize(path)
+                else:
+                    size = directory_bytes(path, measured=tree_sizes)
             except OSError:
                 continue
             accounted = sum(

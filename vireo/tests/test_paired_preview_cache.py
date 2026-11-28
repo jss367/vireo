@@ -173,3 +173,54 @@ def test_limited_storage_listing_shares_space_between_preview_families(
     assert result['truncated'] == (ordinary_count + paired_count > limit)
     assert any(name.startswith('paired/') for name in names) == bool(paired_count)
     assert any(not name.startswith('paired/') for name in names) == bool(ordinary_count)
+
+
+def test_storage_scans_preview_directories_once(app_and_db, monkeypatch):
+    app, db = app_and_db
+    thumbs = Path(app.config["THUMB_CACHE_DIR"])
+    _, ordinary, paired = seed(db, thumbs.parent, size=10)
+    nested = paired.parent / "nested"
+    nested.mkdir()
+    (nested / "untracked").write_bytes(b"other")
+    scans = {path: 0 for path in (thumbs, ordinary.parent, paired.parent, nested)}
+    scandir = os.scandir
+
+    def track(path):
+        if isinstance(path, (str, os.PathLike)) and Path(path) in scans:
+            scans[Path(path)] += 1
+        return scandir(path)
+
+    monkeypatch.setattr(os, "scandir", track)
+    report = app.test_client().get("/api/storage").get_json()
+    assert report["previews"]["size"] == 20
+    assert all(count == 1 for count in scans.values()), scans
+
+
+@pytest.mark.parametrize("linked_paired", [False, True])
+def test_storage_preview_inventory_symlinks(tmp_path, linked_paired):
+    from services.storage_paths import cache_directory_usage, directory_bytes
+
+    previews = tmp_path / "previews"
+    previews.mkdir()
+    paired = previews / "paired"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    target = outside / "frame"
+    target.write_bytes(b"123")
+    try:
+        (previews / "link").symlink_to(target)
+        (previews / "missing").symlink_to(outside / "gone")
+        (previews / "loop").symlink_to(previews, target_is_directory=True)
+        if linked_paired:
+            paired.symlink_to(outside, target_is_directory=True)
+        else:
+            paired.mkdir()
+            (paired / "frame").write_bytes(b"123")
+    except OSError:
+        pytest.skip("Requires filesystem symlink support")
+    nested = paired / "nested"
+    nested.mkdir()
+    (nested / "aux").write_bytes(b"auxiliary")
+    assert cache_directory_usage(str(previews), include_paired=True) == (
+        2, 6, directory_bytes(str(previews)),
+    )

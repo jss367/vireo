@@ -601,6 +601,7 @@ def test_find_stale_masks(db):
     _det(db, c, detector_model="full-image", conf=1.0, box=BOX)
 
     stale = db.masks_features.find_stale()
+    assert db.masks_features.count_stale() == len(stale)
     keys = {(s["photo_id"], s["variant"]) for s in stale}
     assert keys == {(a, "secondary"), (c, "orphan")}
     assert set(stale[0]) == {
@@ -611,6 +612,7 @@ def test_find_stale_masks(db):
     keys = {(s["photo_id"], s["variant"])
             for s in db.masks_features.find_stale(detector_confidence=0.5)}
     assert keys == {(a, "secondary"), (b, "weak"), (c, "orphan")}
+    assert db.masks_features.count_stale(detector_confidence=0.5) == len(keys)
 
 
 def test_delete_stale_masks_skips_active_and_forwards_confidence(db, monkeypatch):
@@ -711,7 +713,7 @@ def test_mask_variant_coverage_empty(db):
     assert db.masks_features.variant_coverage() == []
 
 
-def test_mask_variants_summary_counts_bytes_across_catalog(db, monkeypatch):
+def test_mask_variants_summary_counts_bytes_across_catalog(db):
     fid = _folder(db)
     a, b = _photo(db, "a.jpg", fid), _photo(db, "b.jpg", fid)
     foreign = _other_workspace_photo(db)
@@ -726,11 +728,8 @@ def test_mask_variants_summary_counts_bytes_across_catalog(db, monkeypatch):
         {"variant": "small", "count": 1, "active_count": 1, "bytes": 10},
     ]
 
-    def boom(path):
-        raise OSError("gone")
-
-    monkeypatch.setattr(os.path, "getsize", boom)
-    assert [s["bytes"] for s in db.masks_features.variants_summary()] == [0, 0]
+    os.unlink(fa)
+    assert [s["bytes"] for s in db.masks_features.variants_summary()] == [0, 10]
 
 
 def test_mask_variants_summary_empty(db):

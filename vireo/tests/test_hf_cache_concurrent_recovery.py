@@ -93,7 +93,8 @@ def storage_inventory_routes(fs, service_ns):
             service_ns["_fs"] = old_fs
             module.directory_bytes = old_size
 
-    storage_paths = S(auxiliary_paths=lambda *_a: [], directory_bytes=directory_bytes, location_id=forbidden)
+    storage_paths = S(cache_directory_usage=lambda *_a: (0, 0, 0),
+                      auxiliary_paths=lambda *_a: [], directory_bytes=directory_bytes, location_id=forbidden)
     modules = {"classifier": S(CACHE_DIR="/invented/embeddings"),
                "models": S(DEFAULT_MODELS_DIR="/invented/models"),
                "storage_breakdown": S(group_auxiliary_storage=lambda *_a: []),

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 import sys
 from typing import TYPE_CHECKING, Any
 
@@ -114,17 +115,67 @@ def auxiliary_paths(db_path: str, thumb_dir: str, config: Mapping[str, Any], db:
     return paths
 
 
-def directory_bytes(path: str) -> int:
+def directory_bytes(path: str, *, measured: Mapping[str, int] | None = None) -> int:
     """Logical file bytes without following nested symlinks or duplicate blobs."""
+    if measured and path in measured:
+        return measured[path]
     total = 0
     for root, dirs, files in os.walk(path):
-        dirs[:] = [name for name in dirs if not os.path.islink(os.path.join(root, name))]
+        remaining = []
+        for name in dirs:
+            child = os.path.join(root, name)
+            if os.path.islink(child):
+                continue
+            if measured and child in measured:
+                total += measured[child]
+            else:
+                remaining.append(name)
+        dirs[:] = remaining
         for name in files:
             try:
                 total += os.lstat(os.path.join(root, name)).st_size
             except OSError:
                 continue
     return total
+
+
+def cache_directory_usage(path: str, include_paired: bool = False) -> tuple[int, int, int]:
+    """Return named file count, named bytes, and recursive auxiliary inventory bytes.
+
+    Named caches follow file links and include direct files in previews/paired.
+    The recursive inventory counts the link itself and skips directory links.
+    """
+    count = named_bytes = tree_bytes = 0
+    directories = [(path, True, True)]
+    while directories:
+        directory, named, owned = directories.pop()
+        owned = owned and not os.path.islink(directory)
+        if not named and not owned:
+            continue
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_dir():
+                            paired = include_paired and directory == path and entry.name == "paired"
+                            descend = owned and not entry.is_symlink()
+                            if paired or descend:
+                                directories.append((entry.path, paired, descend))
+                            continue
+                        info = entry.stat(follow_symlinks=False)
+                        if owned:
+                            tree_bytes += info.st_size
+                        if named:
+                            if entry.is_symlink():
+                                info = entry.stat()
+                            if stat.S_ISREG(info.st_mode):
+                                count += 1
+                                named_bytes += info.st_size
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return count, named_bytes, tree_bytes
 
 
 def location_id(path: str) -> str:
