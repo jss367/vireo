@@ -206,6 +206,7 @@ def roots(config: _Config) -> dict[str, str]:
 
 def files(
     root: str, family: str, *, onerror: Callable[[OSError], object] | None = None,
+    on_excluded: Callable[[], None] | None = None,
 ) -> Iterator[tuple[str, os.stat_result]]:
     """Yield exact generated payload files without following symlink trees."""
     if os.path.islink(root):
@@ -218,9 +219,14 @@ def files(
             onerror(exc)
 
     for directory, dirs, names in os.walk(root, onerror=walk_error):
-        dirs[:] = [name for name in dirs if not os.path.islink(os.path.join(directory, name))]
+        traversable = [name for name in dirs if not os.path.islink(os.path.join(directory, name))]
+        if on_excluded and len(traversable) != len(dirs):
+            on_excluded()
+        dirs[:] = traversable
         for name in names:
             if not pattern.fullmatch(name):
+                if on_excluded:
+                    on_excluded()
                 continue
             path = os.path.join(directory, name)
             try:
@@ -233,6 +239,8 @@ def files(
                 continue
             if stat.S_ISREG(info.st_mode):
                 yield path, info
+            elif on_excluded:
+                on_excluded()
 
 
 def summary(config: _Config, *, limit: int = 100) -> list[JsonDict]:
@@ -241,7 +249,14 @@ def summary(config: _Config, *, limit: int = 100) -> list[JsonDict]:
         count = size = 0
         entries = []
         errors = []
-        for path, info in files(root, family, onerror=lambda exc, errors=errors: errors.append(str(exc))):
+        has_other_files = False
+
+        def mark_excluded() -> None:
+            nonlocal has_other_files
+            has_other_files = True
+
+        for path, info in files(root, family, onerror=lambda exc, errors=errors: errors.append(str(exc)),
+                                on_excluded=mark_excluded):
             count += 1
             size += info.st_size
             if len(entries) < limit:
@@ -250,7 +265,7 @@ def summary(config: _Config, *, limit: int = 100) -> list[JsonDict]:
         result.append({"type": family, "name": FAMILIES[family][0], "path": root,
                        "count": count, "size": size, "files": entries,
                        "clearable": family not in PRESERVED_FAMILIES,
-                       "truncated": count > len(entries), "errors": errors})
+                       "has_other_files": has_other_files, "truncated": count > len(entries), "errors": errors})
     return result
 
 

@@ -122,7 +122,9 @@ export function renderStorageBreakdown(auxiliaryCategories) {
     ? '<p class="storage-legend">Files and folders below are sorted by size within each category. Sizes exclude data already counted in the main cache categories.</p>'
     : '';
   auxiliaryCategories.forEach(function(c) {
-    breakdownHtml += '<details id="storage-breakdown-' + storageEscapeHtml(encodeURIComponent(c.name)) + '"><summary>' + storageEscapeHtml(c.name) +
+    var root = c.entries.length === 1 ? c.entries[0]?.path : '';
+    breakdownHtml += '<details id="storage-breakdown-' + storageEscapeHtml(encodeURIComponent(c.name)) +
+      '" data-category-root="' + storageEscapeAttr(root) + '" data-category-bytes="' + c.size + '"><summary>' + storageEscapeHtml(c.name) +
       ' · ' + storageFormatBytes(c.size) + ' · View files and folders</summary>';
     c.entries.forEach(function(entry) {
       breakdownHtml += '<div class="storage-breakdown-row"><strong>' +

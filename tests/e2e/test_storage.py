@@ -42,6 +42,24 @@ def test_storage_shows_named_categories_and_escaped_file_paths(live_server, page
     expect(details.locator("img")).to_have_count(0)
 
 
+@pytest.mark.parametrize(("include_render", "notes"), [(False, "notes"), (True, "notes"), (True, "")])
+def test_storage_review_opens_breakdown_for_unlisted_files(live_server, page, include_render, notes):
+    originals = Path(live_server["app"].config["THUMB_CACHE_DIR"]).parent / "originals"
+    originals.mkdir(exist_ok=True)
+    (originals / "notes.txt").write_text(notes)
+    if include_render:
+        (originals / "1.display.jpg").write_bytes(b"render")
+
+    page.goto(f"{live_server['url']}/storage")
+    retained = page.locator("#retainedStorageItems details").filter(has_text="Full-resolution renders")
+    expect(retained.locator("summary")).to_be_visible()
+    card = page.locator("#storageGrid .stat-card").filter(has_text="Full-resolution renders")
+    card.get_by_role("button", name="Review before removing").click()
+    breakdown = page.locator("#storageBreakdown details").filter(has_text="Full-resolution renders")
+    expect(breakdown.locator("summary")).to_be_focused()
+    expect(breakdown.locator("code").filter(has_text=str(originals))).to_be_visible()
+
+
 def test_storage_revisit_reuses_measurements_until_refresh(live_server, page):
     root = Path(live_server["app"].config["THUMB_CACHE_DIR"]).parent
     renders = root / "originals"

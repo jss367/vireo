@@ -114,9 +114,14 @@ function bindStorageRenderedMarkup() {
   });
   delegateStorageClick('storageGrid', '[data-storage-review]', function(button) {
     var category = encodeURIComponent(button.dataset.storageReview || '');
-    var details = document.getElementById('storage-retained-' + category) ||
-      document.getElementById('storage-breakdown-' + category);
-    if (!(details instanceof HTMLDetailsElement)) return;
+    var breakdown = document.getElementById('storage-breakdown-' + category);
+    if (!(breakdown instanceof HTMLDetailsElement)) return;
+    var retained = document.getElementById('storage-retained-' + category);
+    var details = breakdown;
+    if (retained instanceof HTMLDetailsElement && retained.dataset.listedRoot === breakdown.dataset.categoryRoot &&
+        retained.dataset.listedBytes === breakdown.dataset.categoryBytes) {
+      details = retained;
+    }
     details.open = true;
     var summary = details.querySelector('summary');
     if (summary) {
