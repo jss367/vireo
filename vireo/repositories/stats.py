@@ -683,7 +683,8 @@ class StatsRepository:
         return f"""(
             (NOT EXISTS (SELECT 1 FROM mask_rescue_floors r WHERE r.photo_id = {alias}.photo_id)
              AND {ordinary})
-            OR ({alias}.detector_model = 'megadetector-v6' AND {alias}.category = 'animal'
+            OR ({alias}.detector_model IN ('megadetector-v6', 'reviewer-selected')
+                AND {alias}.category = 'animal'
                 AND {alias}.subject_verdict IS NULL
                 AND EXISTS (SELECT 1 FROM mask_rescue_floors r
                             WHERE r.photo_id = {alias}.photo_id

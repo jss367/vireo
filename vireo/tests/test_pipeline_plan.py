@@ -4764,6 +4764,30 @@ def test_rescued_mask_counts_keep_variant_detector_and_large_scope_gates(tmp_pat
     ) == {'eligible': 0, 'pending': 0}
 
 
+def test_rescued_mask_counts_follow_reviewer_region(tmp_path, monkeypatch):
+    db, ids, _ = _mask_rescue_sequence(tmp_path, monkeypatch, 0.05)
+    pid = ids[1]
+    db.masks_features.upsert_mask(pid, 'sam2-small', '/m/rescued.png',
+                                 detector_model='megadetector-v6', prompt=(0.1, 0.1, 0.5, 0.5),
+                                 quality=MaskQuality(subject_detail=1.0, subject_detail_px=1.0),)
+    subject_masks.set_active_mask_variant(db, pid, 'sam2-small', weak_rescue_min_conf=0.001)
+    db.commit()
+    floors = {pid: 0.001}
+    assert stage_counts.count_extract_stale(db, 'sam2-small', [pid], rescue_floors=floors) == 0
+    # The extraction stage prompts on the reviewer's region of a rescued
+    # photo, so a mask of the faint detector box is stale.
+    region = {'x': 0.55, 'y': 0.55, 'w': 0.3, 'h': 0.3}
+    db.detections.insert_reviewer_region(pid, 990001, region, 'reviewer-runtime', None)
+    db.commit()
+    assert stage_counts.count_extract_stale(db, 'sam2-small', [pid], rescue_floors=floors) == 1
+    db.masks_features.upsert_mask(pid, 'sam2-small', '/m/reviewer.png',
+                                 detector_model='reviewer-selected', prompt=(0.55, 0.55, 0.3, 0.3),
+                                 quality=MaskQuality(subject_detail=1.0, subject_detail_px=1.0),)
+    subject_masks.set_active_mask_variant(db, pid, 'sam2-small', weak_rescue_min_conf=0.001)
+    db.commit()
+    assert stage_counts.count_extract_stale(db, 'sam2-small', [pid], rescue_floors=floors) == 0
+
+
 # -- subject detail backfill: cached masks the stage keeps but must measure --
 
 
