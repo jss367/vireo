@@ -10,6 +10,7 @@ binds by name, so a patch of it reaches this check too.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import config as cfg
@@ -19,12 +20,13 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from db import Database
+    from repositories.browse_summary_cache import BrowseSummaryCache
     from services.service_types import JsonDict
 
 
 def get_browse_summary(
     db: Database, folder_id: int | None = None, collection_id: int | None = None,
-    rules: Any = None,
+    rules: Any = None, *, cache: BrowseSummaryCache | None = None,
 ) -> JsonDict:
     """Return summary stats for the browse panel, scoped to active workspace and filters.
 
@@ -36,20 +38,21 @@ def get_browse_summary(
     def detector_confidence() -> float:
         return config_value(db.get_effective_config(cfg.load()), "detector_confidence")
 
-    # Joined: the TEMP id table and every aggregate share one snapshot, and
-    # a caller's open transaction is neither committed nor ended. With none
-    # open, a deferred BEGIN (no lock until the first read) puts the TEMP
-    # table's creation inside the transaction too, so a superseded search's
-    # interrupt, which makes SQLite roll the transaction back itself, takes
-    # the table with it.
-    with db.transaction(join=True):
-        db.hold_read_snapshot()
-        return db.photos.get_browse_summary(
-            folder_id=folder_id,
-            collection_id=collection_id,
-            rules=rules,
-            detector_confidence=detector_confidence,
-        )
+    def compute(floor: float | None = None) -> JsonDict:
+        with db.transaction(join=True):
+            db.hold_read_snapshot()
+            return db.photos.get_browse_summary(
+                folder_id=folder_id, collection_id=collection_id, rules=rules,
+                detector_confidence=detector_confidence if floor is None else lambda: floor,
+            )
+
+    # Rule trees can depend on the clock or external visual-search state.
+    # A caller's open transaction can also contain private, uncommitted edits.
+    if (cache is None or rules is not None or collection_id is not None
+            or db.in_transaction or db._db_path == ":memory:"):
+        return compute()
+    floor = detector_confidence()
+    return cache.read(Path(db._db_path), (db.require_workspace_id(), folder_id, floor), lambda: compute(floor))
 
 
 def rules_resolvable(db: Database, rules: Any) -> bool:

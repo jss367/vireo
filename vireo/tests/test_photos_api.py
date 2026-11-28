@@ -13974,6 +13974,54 @@ def test_api_browse_summary_reports_analysis_coverage(app_and_db):
     }
 
 
+def test_browse_summary_reuses_unchanged_folder_after_detail(app_and_db, monkeypatch):
+    from repositories.photos import PhotoRepository
+
+    app, db = app_and_db
+    calls = []
+    aggregate = PhotoRepository._browse_summary_aggregates
+
+    def counted(repo, *args):
+        calls.append(repo.workspace_id)
+        return aggregate(repo, *args)
+
+    monkeypatch.setattr(PhotoRepository, "_browse_summary_aggregates", counted)
+    client = app.test_client()
+    photo = db.photos.list_page()[0]
+    url = f'/api/browse/summary?folder_id={photo["folder_id"]}'
+    original = client.get(url).get_json()
+    assert client.get(f'/api/photos/{photo["id"]}').status_code == 200
+    assert client.get(url).get_json() == original
+    assert len(calls) == 1
+
+    _seed_browse_summary_analysis(db)
+    client.get(url)
+    assert len(calls) == 2
+
+
+def test_browse_summary_drops_cache_fill_when_catalog_changes(app_and_db, monkeypatch):
+    from repositories.photos import PhotoRepository
+
+    app, writer = app_and_db
+    client = app.test_client()
+    aggregate = PhotoRepository._browse_summary_aggregates
+    calls = []
+
+    def commit_during_first_read(repo, *args):
+        result = aggregate(repo, *args)
+        calls.append(repo.workspace_id)
+        if len(calls) == 1:
+            _seed_browse_summary_analysis(writer)
+        return result
+
+    monkeypatch.setattr(PhotoRepository, "_browse_summary_aggregates", commit_during_first_read)
+    url = "/api/browse/summary"
+    assert client.get(url).get_json()["analysis"]["with_quality"] == 0
+    assert client.get(url).get_json()["analysis"]["with_quality"] == 2
+    assert client.get(url).get_json()["analysis"]["with_quality"] == 2
+    assert len(calls) == 2
+
+
 def test_api_browse_summary_analysis_respects_folder_scope(app_and_db):
     app, db = app_and_db
     _seed_browse_summary_analysis(db)

@@ -24,6 +24,7 @@ from config import config_value
 from filter_fields import SUGGEST_FIELDS, fields_for_api
 from flask import Blueprint, current_app, jsonify, request
 from photo_payload import prepare_browse_photo_dicts
+from repositories.browse_summary_cache import BrowseSummaryCache
 from services import browse_queries, missing_originals, workspace_config
 from services.prediction_ambiguity import ambiguous_prediction_ids
 from services.visual_scope import collection_rules_state, inject_active_visual_model
@@ -420,6 +421,7 @@ def create_browse_blueprint(
     lock, and the selection panel's split must match it.
     """
     blueprint = Blueprint("browse", __name__)
+    summary_cache = BrowseSummaryCache()
 
     # -- Browse grid --
 
@@ -551,7 +553,7 @@ def create_browse_blueprint(
             summary = browse_queries.get_browse_summary(
                 db, folder_id=folder_id,
                 collection_id=collection_id,
-                rules=rules,
+                rules=rules, cache=summary_cache if visual is None else None,
             )
         except ValueError as e:
             return json_error(str(e), 400)

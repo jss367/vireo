@@ -1371,6 +1371,29 @@ def test_load_keywords_renders_older_success_after_newer_failure(
     ).to_have_count(1, timeout=5000)
 
 
+def test_folder_count_is_visible_before_summary_analysis(live_server, page):
+    page.goto(f"{live_server['url']}/browse")
+    expect(page.locator("#summaryClassified")).to_have_text("5 classified")
+    held = []
+    page.route("**/api/browse/summary?folder_id=**", lambda route: held.append(route))
+    folder = live_server["data"]["folders"][0]
+    page.locator(f'#folderTree [data-folder-id="{folder}"]').click()
+    expect(page.locator("#summaryPhotoCount")).to_have_text("3")
+    expect(page.locator("#summaryClassified")).to_have_text("Loading…")
+    assert held
+    for route in held:
+        route.fulfill(status=500, body="fail")
+    expect(page.locator("#summaryClassified")).to_have_text("Summary unavailable")
+    held.clear()
+    with page.expect_request("**/api/browse/summary?folder_id=**"):
+        page.evaluate("pageModules.detail.closeDetail()")
+    expect(page.locator("#summaryClassified")).to_have_text("Loading…")
+    expect(page.locator("#summaryPhotoCount")).to_have_text("3")
+    for route in held:
+        route.continue_()
+    expect(page.locator("#summaryClassified")).to_have_text("3 classified")
+
+
 def test_load_summary_renders_older_success_after_newer_failure(
     live_server, page
 ):

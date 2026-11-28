@@ -451,6 +451,28 @@ function buildSummaryParams() {
   return params;
 }
 
+/** @type {string | null} */
+var displayedSummaryScope = null;
+
+function prepareSummaryScope(/** @type {string} */ key) {
+  if (key === displayedSummaryScope) return;
+  displayedSummaryScope = key;
+  for (var id of ['summaryPhotoCount', 'summaryFilterNote', 'summaryUnclassified', 'summaryAnalysis']) {
+    /** @type {HTMLElement} */ (document.getElementById(id)).textContent = '';
+  }
+  /** @type {HTMLElement} */ (document.getElementById('summaryClassified')).textContent = 'Loading…';
+  renderSummarySpecies([]);
+}
+
+// The current grid response already counts individual photos, including
+// frames inside stacks. The summary describes available photos only.
+export function showGridSummaryCount(/** @type {BrowseAvailability} */ data) {
+  prepareSummaryScope(buildSummaryParams().toString());
+  var count = data.available_total ?? data.underlying_total ?? data.total;
+  if (count == null || (data.available_total == null && state.showOfflineCollectionPhotos)) return;
+  /** @type {HTMLElement} */ (document.getElementById('summaryPhotoCount')).textContent = count.toLocaleString();
+}
+
 function reconcileSummaryLoadRenders() {
   var gen = state.summaryLoadGen;
   while (gen > state.summaryRenderDecisionGen) {
@@ -469,9 +491,23 @@ function reconcileSummaryLoadRenders() {
   }
 }
 
-export async function loadSummary() {
+// Closing detail and reloading the grid can both request the new scope
+// during one filter change. Later edits still start a fresh read.
+var queuedSummary = /** @type {Promise<BrowseSummary | null> | null} */ (null);
+export function loadSummary() {
+  if (!queuedSummary) queuedSummary = Promise.resolve().then(function() {
+    queuedSummary = null;
+    return fetchSummary();
+  });
+  return queuedSummary;
+}
+
+async function fetchSummary() {
   var gen = ++state.summaryLoadGen;
   var params = buildSummaryParams();
+  prepareSummaryScope(params.toString());
+  var classified = document.getElementById('summaryClassified');
+  if (classified?.textContent === 'Summary unavailable') classified.textContent = 'Loading…';
   state.summaryLoadStates[gen] = {
     status: 'pending',
     key: params.toString()
@@ -493,6 +529,9 @@ export async function loadSummary() {
     if (failedState) {
       failedState.status = 'failure';
       reconcileSummaryLoadRenders();
+      if (gen === state.summaryLoadGen && classified?.textContent === 'Loading…') {
+        classified.textContent = 'Summary unavailable';
+      }
     }
     return null;
   }

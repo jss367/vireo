@@ -6,7 +6,7 @@
   "repositories/model_runs.py": {"codex": 6, "pr_ref": 5, "used_to": 2},
   "repositories/photo_keywords.py": {"moved_verbatim": 1},
   "repositories/photo_labels.py": {"used_to": 1},
-  "repositories/photos.py": {"used_to": 2},
+  "repositories/photos.py": {"used_to": 1},
   "repositories/predictions.py": {"review_id": 2, "used_to": 3},
   "repositories/species_curation.py": {"moved_verbatim": 1},
   "repositories/workspaces.py": {"used_to": 1}

@@ -1040,7 +1040,7 @@ class PhotoRepository:
         and folder breakdown.
 
         ``detector_confidence()`` returns the workspace's detector floor; it
-        is called after the two counts, where the façade used to read it.
+        is called when the filtered photo set is ready.
         """
         ws = self.workspace_id
 
@@ -1056,15 +1056,6 @@ class PhotoRepository:
         params = join_params + where_params
 
         where = "WHERE " + " AND ".join(conditions)
-
-        # Total (unfiltered) count
-        total = self.conn.execute(
-            """SELECT COUNT(*) FROM photos p
-               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-               JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
-               WHERE wf.workspace_id = ?""",
-            (ws,),
-        ).fetchone()[0]
 
         # Every aggregate below describes the same filtered set, and a
         # metadata search is by far the costliest part of computing it, so
@@ -1086,6 +1077,8 @@ class PhotoRepository:
             summary = self._browse_summary_aggregates(ws, detector_confidence)
         finally:
             self.conn.execute("DROP TABLE IF EXISTS temp._browse_summary_ids")
+        unfiltered = folder_id is None and collection_id is None and rules is None
+        total = summary["filtered_total"] if unfiltered else self.count()
         return {"total": total, **summary}
 
     def _browse_summary_aggregates(self, ws, detector_confidence):
@@ -1099,10 +1092,12 @@ class PhotoRepository:
         # ids and the detector_confidence read-time threshold.
         min_conf = detector_confidence()
         classified = self.conn.execute(
-            """SELECT COUNT(DISTINCT s.id) FROM _browse_summary_ids s
-                JOIN detections det ON det.photo_id = s.id
-                JOIN predictions pred ON pred.detection_id = det.id
-                WHERE det.detector_confidence >= ? AND det.subject_verdict IS NULL""",
+            """SELECT COUNT(*) FROM _browse_summary_ids s
+               WHERE EXISTS (
+                   SELECT 1 FROM detections det
+                   WHERE det.photo_id = s.id AND det.detector_confidence >= ?
+                     AND det.subject_verdict IS NULL
+                     AND EXISTS (SELECT 1 FROM predictions pred WHERE pred.detection_id = det.id))""",
             (min_conf,),
         ).fetchone()[0]
 
