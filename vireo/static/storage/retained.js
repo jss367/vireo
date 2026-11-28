@@ -19,6 +19,7 @@ export async function loadRetainedStorage(allowRecent = false) {
     data.caches.forEach(function(cache) {
       var item = document.createElement('details');
       item.className = 'storage-retained-item';
+      item.id = 'storage-retained-' + encodeURIComponent(cache.name);
       var title = document.createElement('summary');
       title.textContent = cache.name + ' · ' + storageFormatBytes(cache.size) + ' · ' + cache.count.toLocaleString() + ' files';
       if (cache.errors.length) title.textContent += ' · usage incomplete';

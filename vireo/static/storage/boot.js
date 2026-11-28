@@ -112,6 +112,18 @@ function bindStorageRenderedMarkup() {
   delegateStorageClick('storageLocations', '[data-storage-location]', function(button) {
     openStorageFolder(button.dataset.storageLocation || '');
   });
+  delegateStorageClick('storageGrid', '[data-storage-review]', function(button) {
+    var category = encodeURIComponent(button.dataset.storageReview || '');
+    var details = document.getElementById('storage-retained-' + category) ||
+      document.getElementById('storage-breakdown-' + category);
+    if (!(details instanceof HTMLDetailsElement)) return;
+    details.open = true;
+    var summary = details.querySelector('summary');
+    if (summary) {
+      summary.focus({preventScroll: true});
+      summary.scrollIntoView({block: 'center'});
+    }
+  });
   delegateStorageClick('storageGrid', '[data-storage-manage]', function(button) {
     var target = button.dataset.storageManage || '';
     if (target === 'hf-cache') openHfCacheModal();

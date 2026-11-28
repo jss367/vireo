@@ -26,8 +26,13 @@ export function renderStorageCards(categories) {
       '<div class="stat-number">' + storageFormatBytes(c.size) + '</div>' +
       '<div class="stat-label">' + storageEscapeHtml(c.name) +
         (c.count != null ? ' (' + c.count.toLocaleString() + ')' : '') +
-      '</div>' +
-      '<span class="stat-kind ' + c.kind + '">' + c.kindLabel + '</span>';
+      '</div>';
+    if (c.review) {
+      html += '<button type="button" class="btn-manage" data-storage-review="' +
+        storageEscapeHtml(c.name) + '">' + c.kindLabel + '</button>';
+    } else {
+      html += '<span class="stat-kind ' + c.kind + '">' + c.kindLabel + '</span>';
+    }
     if (c.note) {
       html += '<div class="stat-note">' + storageEscapeHtml(c.note) + '</div>';
     }

@@ -111,7 +111,7 @@ export function storageCategories(s) {
     {name: 'Offline Originals', size: s.offline_originals.size, count: s.offline_originals.count, release: true, type: null, kind: 'keep', kindLabel: 'Release when done'},
   ];
   (s.other.categories || []).forEach(function(c) {
-    categories.push({name: c.name, size: c.size, kind: 'keep', kindLabel: 'Review before removing'});
+    categories.push({name: c.name, size: c.size, review: true, kind: 'keep', kindLabel: 'Review before removing'});
   });
   return categories;
 }
@@ -122,7 +122,7 @@ export function renderStorageBreakdown(auxiliaryCategories) {
     ? '<p class="storage-legend">Files and folders below are sorted by size within each category. Sizes exclude data already counted in the main cache categories.</p>'
     : '';
   auxiliaryCategories.forEach(function(c) {
-    breakdownHtml += '<details><summary>' + storageEscapeHtml(c.name) +
+    breakdownHtml += '<details id="storage-breakdown-' + storageEscapeHtml(encodeURIComponent(c.name)) + '"><summary>' + storageEscapeHtml(c.name) +
       ' · ' + storageFormatBytes(c.size) + ' · View files and folders</summary>';
     c.entries.forEach(function(entry) {
       breakdownHtml += '<div class="storage-breakdown-row"><strong>' +
