@@ -1,8 +1,8 @@
-interface StorageOverviewCategory {name:string;size:number;type?:string|null;release?:boolean;settings?:boolean;hfCache?:boolean;note?:string|null;count?:number;kind:string;kindLabel:string}
+interface StorageOverviewCategory {name:string;size:number;type?:string|null;release?:boolean;settings?:boolean;hfCache?:boolean;note?:string|null;count?:number;workingCopyLimit?:boolean;review?:boolean;kind:string;kindLabel:string}
 interface HfCacheEntry {retained_reason?:string|null;removable?:boolean;retained_size?:number;name:string;key:string;size:number;file_count:number;installed:boolean;install_path?:string}
 interface HfCacheInventory {retained_size?:number;entries:HfCacheEntry[];unused_size:number;installed_size?:number;failed?:Array<{path:string;error:string}>;freed?:number}
 interface RetainedStoragePolicy {retained_cache_max_mb:number;retained_cache_max_age_days:number;grouping_history_max_mb:number}
-interface RetainedStorageResponse {maintenance?:{status:string;finished_at?:string;started_at:string;summary?:string};caches:Array<{name:string;size:number;count:number;errors:string[];path:string;type:string;clearable:boolean;files:Array<{name:string;size:number}>;truncated?:boolean}>;grouping_history:{bytes:number;count:number;redo_bytes:number;entries:Array<{workspace:string;description:string;bytes:number;undone:boolean}>;truncated?:boolean};policy:RetainedStoragePolicy}
+interface RetainedStorageResponse {maintenance?:{status:string;finished_at?:string;started_at:string;summary?:string};caches:Array<{name:string;size:number;count:number;errors:string[];path:string;type:string;clearable:boolean;has_other_files:boolean;files:Array<{name:string;size:number}>;truncated?:boolean}>;grouping_history:{bytes:number;count:number;redo_bytes:number;entries:Array<{workspace:string;description:string;bytes:number;undone:boolean}>;truncated?:boolean};policy:RetainedStoragePolicy}
 
 // /api/storage
 interface StorageVolume {name?:string;free?:number|null;capacity?:number|null}

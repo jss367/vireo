@@ -33,10 +33,31 @@ def test_storage_shows_named_categories_and_escaped_file_paths(live_server, page
     expect(page.locator("#storageGrid")).to_contain_text("Full-resolution renders")
     expect(page.locator("#storageGrid")).not_to_contain_text("Other Vireo Data")
     details = page.locator("#storageBreakdown details").filter(has_text="Catalog backups")
-    details.locator("summary").click()
+    card = page.locator("#storageGrid .stat-card").filter(has_text="Catalog backups")
+    card.get_by_role("button", name="Review before removing").click()
+    expect(details.locator("summary")).to_be_focused()
+    expect(details.locator("summary")).to_be_in_viewport()
     expect(details.locator("code").filter(has_text=backup.name)).to_be_visible()
     expect(details.locator(".storage-breakdown-row").filter(has_text=backup.name)).to_contain_text("6 KB")
     expect(details.locator("img")).to_have_count(0)
+
+
+@pytest.mark.parametrize(("include_render", "notes"), [(False, "notes"), (True, "notes"), (True, "")])
+def test_storage_review_opens_breakdown_for_unlisted_files(live_server, page, include_render, notes):
+    originals = Path(live_server["app"].config["THUMB_CACHE_DIR"]).parent / "originals"
+    originals.mkdir(exist_ok=True)
+    (originals / "notes.txt").write_text(notes)
+    if include_render:
+        (originals / "1.display.jpg").write_bytes(b"render")
+
+    page.goto(f"{live_server['url']}/storage")
+    retained = page.locator("#retainedStorageItems details").filter(has_text="Full-resolution renders")
+    expect(retained.locator("summary")).to_be_visible()
+    card = page.locator("#storageGrid .stat-card").filter(has_text="Full-resolution renders")
+    card.get_by_role("button", name="Review before removing").click()
+    breakdown = page.locator("#storageBreakdown details").filter(has_text="Full-resolution renders")
+    expect(breakdown.locator("summary")).to_be_focused()
+    expect(breakdown.locator("code").filter(has_text=str(originals))).to_be_visible()
 
 
 def test_storage_revisit_reuses_measurements_until_refresh(live_server, page):
@@ -96,6 +117,28 @@ def test_existing_model_cache_cleanup_confirms_and_keeps_weights(live_server, pa
         page.screenshot(path=screenshot)
 
 
+def test_storage_card_shortcuts(live_server, page, tmp_path):
+    mask = tmp_path / "mask.png"
+    mask.write_bytes(b"mask")
+    db = live_server["db"]
+    db.masks_features.upsert_mask(
+        live_server["data"]["photos"][0], "sam2-small", str(mask),
+        "megadetector-v6", (0.1, 0.1, 0.8, 0.8),
+    )
+    db.commit()
+    page.goto(f"{live_server['url']}/storage")
+
+    page.get_by_role("button", name="Adjust storage limit").click()
+    limit = page.get_by_role("spinbutton", name="Working-copy storage limit in GB")
+    expect(limit).to_be_focused()
+    expect(limit).to_be_in_viewport()
+    expect(page.locator("#applyWorkingCopyLimitBtn")).to_be_disabled()
+
+    page.get_by_role("button", name="Review masks").click()
+    expect(page.locator("#masksModal")).to_be_visible()
+    expect(page.locator("#masksModalRows")).to_contain_text("sam2-small")
+
+
 def test_quota_apply_aborts_when_pending_storage_autosave_fails(
     live_server, page,
 ):
@@ -142,7 +185,10 @@ def test_retained_storage_lists_files_and_confirms_cleanup_in_page(live_server, 
     page.goto(f"{live_server['url']}/storage")
     details = page.locator("#retainedStorageItems details").filter(has_text="Full-resolution renders")
     expect(details).to_contain_text("6 KB")
-    details.locator("summary").click()
+    card = page.locator("#storageGrid .stat-card").filter(has_text="Full-resolution renders")
+    card.get_by_role("button", name="Review before removing").click()
+    expect(details.locator("summary")).to_be_focused()
+    expect(details.locator("summary")).to_be_in_viewport()
     expect(details).to_contain_text("1.display.jpg")
     details.get_by_role("button", name="Clear full-resolution renders").click()
     expect(page.locator("#retainedActionModal")).to_be_visible()
