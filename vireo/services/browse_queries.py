@@ -20,13 +20,13 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from db import Database
-    from repositories.browse_summary_cache import BrowseSummaryCache
+    from repositories.catalog_read_cache import CatalogReadCache
     from services.service_types import JsonDict
 
 
 def get_browse_summary(
     db: Database, folder_id: int | None = None, collection_id: int | None = None,
-    rules: Any = None, *, cache: BrowseSummaryCache | None = None,
+    rules: Any = None, *, cache: CatalogReadCache | None = None,
 ) -> JsonDict:
     """Return summary stats for the browse panel, scoped to active workspace and filters.
 

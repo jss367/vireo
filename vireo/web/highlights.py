@@ -13,9 +13,11 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import TYPE_CHECKING
 
+import settings_source
 from flask import Blueprint, jsonify, request
 from highlights_payload import (
     HighlightsQuery,
@@ -26,8 +28,11 @@ from highlights_payload import (
     collect_highlight_buckets,
     filter_highlight_curation_state,
     filter_highlight_sections,
+    highlight_card_page,
     normalize_highlight_confirmation_filter,
+    ranked_highlight_cards,
     species_canonicalizer,
+    workspace_card_payload,
 )
 from keyword_normalization import keyword_match_key, normalize_keyword_display
 from photo_payload import attach_edit_recipes
@@ -46,6 +51,7 @@ if TYPE_CHECKING:
     from db import Database
     from flask import Response
     from flask.typing import ResponseReturnValue
+    from repositories.catalog_read_cache import CatalogReadCache
     from services.service_types import ErrorResponse, JsonDict, JsonError
     from web.web_types import GetDb
 
@@ -606,7 +612,9 @@ class _HighlightWrite:
     reason: str | None
 
 
-def create_highlights_blueprint(get_db: GetDb, json_error: JsonError, visual_scope: VisualScope) -> Blueprint:
+def create_highlights_blueprint(
+    get_db: GetDb, json_error: JsonError, visual_scope: VisualScope, rankings: CatalogReadCache | None = None,
+) -> Blueprint:
     """Build the highlights / photo-preferences blueprint.
 
     The payload builder and highlight-bucket helpers come from
@@ -968,6 +976,28 @@ def create_highlights_blueprint(get_db: GetDb, json_error: JsonError, visual_sco
             photos = [{"id": p["id"], "label": p["filename"]} for p in unidentified[:8]]
         return jsonify(photos=photos)
 
+    def workspace_cards(db: Database, query: HighlightsQuery) -> JsonDict:
+        # Both endpoints address the same ranking. Page size, species search
+        # and the exact bucket requested are projections of that ranking.
+        query = replace(query, limit_per_bucket=20, species=TextMatch())
+
+        def compute() -> JsonDict:
+            with db.transaction(join=True):
+                db.hold_read_snapshot()
+                return ranked_highlight_cards(db, query)
+
+        if rankings is None or db.in_transaction or db._db_path == ":memory:":
+            return compute()
+        # Workspace overrides are in SQLite. Global settings (including
+        # other workspaces' inherited detector floor) are outside it.
+        key = (db.require_workspace_id(), query, settings_source.get("keyword_case"),
+               settings_source.get("detector_confidence"))
+        return rankings.read(Path(db._db_path), key, compute)
+
+    def wants_workspace_cards(query: HighlightsQuery) -> bool:
+        return (request.args.get("view") == "cards" and query.scope == "workspace"
+                and query.collection_id is None and query.rules is None)
+
     @blueprint.route("/api/highlights")
     def api_highlights() -> ResponseReturnValue:
         db = get_db()
@@ -975,7 +1005,10 @@ def create_highlights_blueprint(get_db: GetDb, json_error: JsonError, visual_sco
         if not isinstance(query, HighlightsQuery):
             return query
         try:
-            payload = build_highlights_payload(db, query)
+            if wants_workspace_cards(query):
+                payload = workspace_card_payload(db, query, workspace_cards(db, query))
+            else:
+                payload = build_highlights_payload(db, query)
         except ValueError as exc:
             return json_error(str(exc), 400)
         if request_bool_arg("include_collections"):
@@ -1121,7 +1154,6 @@ def create_highlights_blueprint(get_db: GetDb, json_error: JsonError, visual_sco
         query = highlights_query(db)
         if not isinstance(query, HighlightsQuery):
             return query
-        folder_id = query.resolved_folder(db.folders.with_quality_data())
         confirmation_filter = normalize_highlight_confirmation_filter(query.confirmation_filter)
         species = query.species.text.strip()
         offset = max(0, request.args.get("offset", 0, type=int))
@@ -1129,6 +1161,20 @@ def create_highlights_blueprint(get_db: GetDb, json_error: JsonError, visual_sco
         if not species:
             return json_error("species required")
 
+        if wants_workspace_cards(query):
+            ranked = workspace_cards(db, query)
+            if species == "__unidentified__":
+                section = ranked["unidentified"]
+            else:
+                section = next((b for b in ranked["buckets"] if b["species"] == species), None)
+                if section is None:
+                    return json_error("species not found", 404)
+            page = highlight_card_page(section, offset, limit)
+            attach_edit_recipes(db, page["photos"])
+            return jsonify({**page, "species": section.get("species", "Unidentified"),
+                            "best_decision": section.get("best_decision")})
+
+        folder_id = query.resolved_folder(db.folders.with_quality_data())
         try:
             candidates = query.candidates(db, folder_id)
         except ValueError as exc:

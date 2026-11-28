@@ -68,7 +68,7 @@ from repositories.prediction_review import (
 from repositories.species_choices import SpeciesChoiceRepository
 from repositories.subject_order import chosen_subject_sql, subject_rank_sql
 from settings_source import config_value
-from species_memberships import photo_species_memberships, subject_evidence_order, subject_from_row
+from species_memberships import photo_species_memberships, subject_from_row
 from species_preference import Preferences
 from species_presence import crop_geometry
 
@@ -429,10 +429,15 @@ class SpeciesCurationRepository:
         scope_sql, scope_params = self._highlight_scope(
             folder_id, photo_id, min_quality, rules, collection_id, preview_limit,
         )
-        rows = [
-            dict(row) for row in
-            self._highlight_candidate_rows(scope_sql, scope_params)
-        ]
+        cursor = self._highlight_candidate_rows(scope_sql, scope_params)
+        columns = [column[0] for column in cursor.description]
+        rows = [dict(zip(columns, row, strict=True)) for row in cursor]
+        if not rows:
+            return []
+        # Resolve visibility, folder descendants and collection rules once.
+        # One JSON parameter also covers scopes beyond SQLite's bind limit.
+        scope_sql = "SELECT value AS id FROM json_each(?)"
+        scope_params = (json.dumps([row["id"] for row in rows]),)
         species_names = self._highlight_species_names(scope_sql, scope_params)
         subjects = self._highlight_subject_predictions(
             self.workspace_id, scope_sql, scope_params,
@@ -545,7 +550,7 @@ class SpeciesCurationRepository:
                ) kw ON kw.photo_id = p.id
                ORDER BY p.quality_score DESC""",
             scope_params,
-        ).fetchall()
+        )
 
     def _highlight_species_names(self, scope_sql, scope_params):
         """``{photo_id: [name, ...]}``: each scoped photo's species-rank
@@ -637,8 +642,9 @@ class SpeciesCurationRepository:
                WHERE sub.rn = 1
                ORDER BY sub.photo_id, subject_rank""",
             (*scope_params, self._detector_floor(), ws),
-        ).fetchall()
-        for row in sorted(rows, key=subject_evidence_order):
+        )
+        # subject_rank is unique within each photo and leads the evidence key.
+        for row in rows:
             subjects.setdefault(row["photo_id"], []).append(subject_from_row(row))
         return subjects
 

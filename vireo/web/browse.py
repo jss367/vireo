@@ -43,7 +43,7 @@ if TYPE_CHECKING:
 
     from db import Database
     from flask.typing import ResponseReturnValue
-    from repositories.browse_summary_cache import BrowseSummaryCache
+    from repositories.catalog_read_cache import CatalogReadCache
     from services.scan_work import ConfigLoader
     from services.service_types import JsonDict, JsonError
     from services.visual_scope import VisualScope
@@ -408,7 +408,7 @@ def create_browse_blueprint(
     json_error: JsonError,
     *,
     visual_scope: VisualScope,
-    summary_cache: BrowseSummaryCache,
+    summary_cache: CatalogReadCache,
 ) -> Blueprint:
     """Build the browse, filter-bar and selection blueprint.
 

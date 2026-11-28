@@ -471,3 +471,44 @@ def test_a_chosen_highlight_leads_even_where_the_species_is_only_in_frame(app_an
     plover = buckets["Black-bellied Plover"]
     assert [p["id"] for p in plover["photos"]] == [flock, portrait]
     assert plover["best_decision"]["kind"] == "highlight"
+
+
+def test_workspace_card_pages_share_rank_and_invalidate_after_edit(app_and_db, monkeypatch):
+    import config
+    import web.highlights as routes
+
+    app, db = app_and_db
+    client = app.test_client()
+    fid = _folder(db)
+    pid, _, _ = _teal_photo_with_wigeon_subject(db, fid)
+    calls = []
+    rank = routes.ranked_highlight_cards
+
+    def count_rank(*args):
+        calls.append(1)
+        return rank(*args)
+
+    monkeypatch.setattr(routes, "ranked_highlight_cards", count_rank)
+    url = "/api/highlights?scope=workspace&view=cards"
+    data = client.get(url).get_json()
+    full = client.get("/api/highlights?scope=workspace").get_json()
+    for bucket, expected in zip(data["buckets"], full["buckets"], strict=True):
+        card = dict(zip(data["card_fields"], bucket["card_rows"][0], strict=True))
+        assert card == {field: expected["photos"][0][field] for field in card}
+        page = client.get("/api/highlights/bucket", query_string={
+            "view": "cards", "scope": "workspace", "species": bucket["species"],
+        }).get_json()
+        assert page["photos"] == [card]
+    found = client.get(url + "&species=wigeon").get_json()
+    assert [b["species"] for b in found["buckets"]] == ["American Wigeon"]
+    assert len(calls) == 1
+
+    # The global detector floor lives outside SQLite. Raising it removes
+    # the predicted wigeon membership and keeps the teal keyword.
+    config.set("detector_confidence", 0.99)
+    assert [b["species"] for b in client.get(url).get_json()["buckets"]] == ["Green-winged Teal"]
+    assert len(calls) == 2
+    db.conn.execute("UPDATE photos SET flag='rejected' WHERE id=?", (pid,))
+    db.commit()
+    assert client.get(url).get_json()["buckets"] == []
+    assert len(calls) == 3
