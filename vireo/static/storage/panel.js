@@ -104,7 +104,7 @@ export function storageCategories(s) {
     {name: 'Database', size: s.database.size, type: null, kind: 'keep', kindLabel: 'Keep'},
     {name: 'Thumbnails', size: s.thumbnails.size, count: s.thumbnails.count, type: 'thumbnails', kind: 'safe', kindLabel: 'Safe to clear'},
     {name: 'Previews', size: s.previews.size, count: s.previews.count, type: 'previews', kind: 'safe', kindLabel: 'Safe to clear'},
-    {name: 'Working Copies', size: s.working_copies.size, count: s.working_copies.count, type: null, kind: 'managed', kindLabel: 'Quota managed'},
+    {name: 'Working Copies', size: s.working_copies.size, count: s.working_copies.count, workingCopyLimit: true, type: null, kind: 'managed', kindLabel: 'Quota managed'},
     {name: 'Label Embeddings', size: s.embeddings.size, count: s.embeddings.count, type: 'embeddings', kind: 'safe', kindLabel: 'Safe to clear'},
     {name: 'Models', size: s.models.size, type: null, kind: 'download', kindLabel: 'Download again', settings: true},
     {name: 'Hugging Face Cache', size: s.hf_cache.size, type: null, kind: 'download', kindLabel: 'Download again', hfCache: true, note: hfCacheCardNote(s.hf_cache)},

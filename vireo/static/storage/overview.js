@@ -20,7 +20,7 @@ export function renderStorageCards(categories) {
 
   var html = '';
   sorted.forEach(function(c) {
-    if (c.size === 0 && !c.type && !(c.release && c.count)) return;
+    if (c.size === 0 && !c.type && !c.workingCopyLimit && !(c.release && c.count)) return;
     if (c.type) state.storageSummary[c.type] = {count: c.count || 0, size: c.size || 0};
     html += '<div class="stat-card">' +
       '<div class="stat-number">' + storageFormatBytes(c.size) + '</div>' +
@@ -38,6 +38,8 @@ export function renderStorageCards(categories) {
     }
     if (c.type) {
       html += '<button class="btn-manage" data-storage-manage="' + c.type + '">Manage</button>';
+    } else if (c.workingCopyLimit) {
+      html += '<button type="button" class="btn-manage" data-storage-manage="working-copy-limit">Adjust storage limit</button>';
     } else if (c.release) {
       html += VireoReleaseOriginals.storageButton();
     } else if (c.hfCache) {

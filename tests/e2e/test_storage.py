@@ -99,6 +99,28 @@ def test_existing_model_cache_cleanup_confirms_and_keeps_weights(live_server, pa
         page.screenshot(path=screenshot)
 
 
+def test_storage_card_shortcuts(live_server, page, tmp_path):
+    mask = tmp_path / "mask.png"
+    mask.write_bytes(b"mask")
+    db = live_server["db"]
+    db.masks_features.upsert_mask(
+        live_server["data"]["photos"][0], "sam2-small", str(mask),
+        "megadetector-v6", (0.1, 0.1, 0.8, 0.8),
+    )
+    db.commit()
+    page.goto(f"{live_server['url']}/storage")
+
+    page.get_by_role("button", name="Adjust storage limit").click()
+    limit = page.get_by_role("spinbutton", name="Working-copy storage limit in GB")
+    expect(limit).to_be_focused()
+    expect(limit).to_be_in_viewport()
+    expect(page.locator("#applyWorkingCopyLimitBtn")).to_be_disabled()
+
+    page.get_by_role("button", name="Review masks").click()
+    expect(page.locator("#masksModal")).to_be_visible()
+    expect(page.locator("#masksModalRows")).to_contain_text("sam2-small")
+
+
 def test_quota_apply_aborts_when_pending_storage_autosave_fails(
     live_server, page,
 ):

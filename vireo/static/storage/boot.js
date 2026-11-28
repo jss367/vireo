@@ -126,6 +126,12 @@ function bindStorageRenderedMarkup() {
   });
   delegateStorageClick('storageGrid', '[data-storage-manage]', function(button) {
     var target = button.dataset.storageManage || '';
+    if (target === 'working-copy-limit') {
+      var limit = storageEl('cfgWorkingCopyCacheMaxGb');
+      limit.focus({preventScroll: true});
+      limit.scrollIntoView({block: 'center'});
+      return;
+    }
     if (target === 'hf-cache') openHfCacheModal();
     else if (target === 'settings') window.location.href = '/settings?category=identification#manage-models';
     else openStorageModal(target);
