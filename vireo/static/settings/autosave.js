@@ -191,6 +191,8 @@ function settingsChanges(scope,values) {
 
 /** @param {string} scope @param {SettingsSnapshot} values */
 function recordSettingsFailure(scope,values) {
+  // A lost POST response can hide a committed change from an in-flight Advanced read.
+  if (Object.keys(values).length) ALL_SETTINGS_CACHE.curatedRevision++;
   settingsFailures[scope] = Array.from(new Set([...(settingsFailures[scope] || []), ...Object.keys(values)]));
   delete settingsDiscarded[scope];
   renderSettingsIssues();

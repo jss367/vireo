@@ -1195,7 +1195,8 @@ def test_reverting_after_lost_save_response_restores_server_value(live_server, p
     assert page.request.get(url + "/api/config").json()["photos_per_page"] == int(original)
 
 
-def test_advanced_load_after_curated_save_uses_current_values(live_server, page):
+@pytest.mark.parametrize("lose_response", [False, True], ids=["acknowledged", "response-lost"])
+def test_advanced_load_after_curated_save_uses_current_values(live_server, page, lose_response):
     url = live_server["url"]
     # Hold the original values snapshot after the server has produced it.
     held = []
@@ -1211,10 +1212,15 @@ def test_advanced_load_after_curated_save_uses_current_values(live_server, page)
     status = _wait_for_settings_idle(page)
     field = page.locator("#cfgPhotosPerPage")
     assert held
+    if lose_response:
+        def commit_then_abort(route):
+            assert route.fetch().ok
+            route.abort()
+        page.route("**/api/config", commit_then_abort, times=1)
     new_value = "80" if field.input_value() != "80" else "90"
     field.fill(new_value)
     field.blur()
-    expect(status).to_have_attribute("data-state", "saved")
+    expect(status).to_have_attribute("data-state", "error" if lose_response else "saved")
     route, stale_response = held[0]
     route.fulfill(response=stale_response)
     page.locator('[data-category-link="advanced"]').click()
