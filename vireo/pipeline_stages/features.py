@@ -642,16 +642,13 @@ class _MaskPass:
         # same MDv6/animal constraints that classify_stage and
         # load_photo_features apply, so mask extraction picks up the
         # same bracketed frame those two stages already opted in to.
+        # A reviewer's region stays a candidate: the lowered floor is for
+        # the detector's boxes, and the reviewer's choice still leads.
         rescue_floor = self.rescue_floor_by_photo.get(p["id"])
         if rescue_floor is not None:
-            return [
-                d for d in detection_store.get_detections(
-                    thread_db, p["id"],
-                    min_conf=rescue_floor,
-                    detector_model="megadetector-v6",
-                )
-                if d["category"] == "animal"
-            ]
+            return detection_store.get_rescue_detections(
+                thread_db, p["id"], rescue_floor, "megadetector-v6",
+            )
         return [
             d for d in detection_store.get_detections(
                 thread_db, p["id"], min_conf=self.detector_confidence,

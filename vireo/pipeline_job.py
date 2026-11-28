@@ -487,21 +487,17 @@ def _preflight_mask_detections(
 ):
     """Return the detections the mask loop would consider for ``photo_id``."""
     # Mirror ``extract_masks_stage``'s per-photo detection lookup: a
-    # rescued photo takes its rescue floor with the MDv6/animal filter,
+    # rescued photo takes its rescue floor with the MDv6/animal filter
+    # (reviewer regions stay candidates),
     # everyone else takes the strict floor with the full-image filter.
     # Applying only the lower floor to every photo would count unrelated
     # sub-threshold detections as at-risk, inflating outages for photos
     # the loop would never open.
     rescue_floor = rescue_floors.get(photo_id)
     if rescue_floor is not None:
-        dets = [
-            d for d in detection_store.get_detections(
-                thread_db, photo_id,
-                min_conf=rescue_floor,
-                detector_model="megadetector-v6",
-            )
-            if d["category"] == "animal"
-        ]
+        dets = detection_store.get_rescue_detections(
+            thread_db, photo_id, rescue_floor, "megadetector-v6",
+        )
     else:
         dets = [
             d for d in detection_store.get_detections(
