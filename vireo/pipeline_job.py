@@ -1499,8 +1499,13 @@ def _update_stages(runner, job_id, stages):
     of order."""
     with _progress_lock:
         current, total = _weighted_progress(stages)
+        stage_id = _current_stage_id(stages)
         runner.push_event(job_id, "progress", {
             "phase": _current_phase(stages),
+            # Name the stage behind `phase`. Progress payloads merge, so
+            # without this the previous emit's stage_id would linger and the
+            # UI would pair the new phase label with another stage's counts.
+            "stage_id": stage_id,
             "current": current,
             "total": total,
             "stages": {k: dict(v) for k, v in stages.items()},
@@ -1513,14 +1518,21 @@ def _update_stages(runner, job_id, stages):
         })
 
 
-def _current_phase(stages):
-    """Determine the primary phase label from stage statuses."""
+def _current_stage_id(stages):
+    """The running stage whose label is the primary phase, or None."""
     for name in ["misses", "regroup", "eye_keypoints", "extract_masks", "classify", "detect",
                  "model_loader", "previews", "thumbnails", "scan", "ingest"]:
-        info = stages.get(name, {})
-        if info.get("status") == "running":
-            return info.get("label", name)
-    return "Pipeline"
+        if stages.get(name, {}).get("status") == "running":
+            return name
+    return None
+
+
+def _current_phase(stages):
+    """Determine the primary phase label from stage statuses."""
+    name = _current_stage_id(stages)
+    if name is None:
+        return "Pipeline"
+    return stages[name].get("label", name)
 
 
 def _collapse_scan_roots(paths):

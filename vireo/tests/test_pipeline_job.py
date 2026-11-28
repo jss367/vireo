@@ -8881,6 +8881,30 @@ def test_update_stages_emits_weighted_current_total():
     assert data["current"] == 6
 
 
+def test_update_stages_names_the_stage_of_its_phase():
+    """Progress payloads merge, so a transition event must replace the
+    stage_id of the previous emit; otherwise 'Loading models' would be
+    shown beside the still-running scan's counts."""
+    from pipeline_job import _update_stages
+
+    stages = _empty_stages()
+    stages["scan"]["status"] = "running"
+    stages["model_loader"]["status"] = "running"
+
+    runner = FakeRunner()
+    _update_stages(runner, "job-x", stages)
+    _, _, data = runner.events[-1]
+    assert data["phase"] == stages["model_loader"].get("label", "model_loader")
+    assert data["stage_id"] == "model_loader"
+
+    stages["scan"]["status"] = "completed"
+    stages["model_loader"]["status"] = "completed"
+    _update_stages(runner, "job-x", stages)
+    _, _, data = runner.events[-1]
+    assert data["phase"] == "Pipeline"
+    assert data["stage_id"] is None
+
+
 def test_progress_event_defaults_phase_triple_to_none():
     """Every progress payload must carry an explicit phase_current /
     phase_total / phase_label triple. JobRunner.push_event merges progress
