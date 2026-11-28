@@ -194,6 +194,20 @@ def test_settings_text_search_ignores_hidden_update_section(live_server, page):
     expect(page.locator("#settingsResults")).to_contain_text("No matches")
 
 
+def test_desktop_update_banner_links_to_available_release(live_server, page):
+    page.goto(live_server["url"] + "/settings")
+    page.evaluate("""async () => {
+        window.__TAURI_INTERNALS__ = {invoke: async () => ({available: true, version: '1.2.3'})};
+        try {
+            await startupUpdateCheck();
+        } finally {
+            delete window.__TAURI_INTERNALS__;
+        }
+    }""")
+    link = page.locator("#updateBanner").get_by_role("link", name="View release")
+    expect(link).to_have_attribute("href", "https://github.com/jss367/vireo/releases/latest")
+
+
 def _wait_for_settings_idle(page):
     """Let the initial config load (and any migration autosave) settle.
 
@@ -379,6 +393,7 @@ def test_settings_cleared_override_is_not_reported_as_saved(live_server, page):
     value = page.locator("#wsVal_grouping_window_seconds")
     expect(value).to_have_value("10")
 
+    assert page.request.post(f"{url}/api/workspaces/active/config", data={"grouping_window_seconds": 20}).ok
     # Hold the resync GET so we can observe that "Saved" waits for it.
     held = []
 
@@ -390,7 +405,7 @@ def test_settings_cleared_override_is_not_reported_as_saved(live_server, page):
 
     page.route("**/api/workspaces/active/config", _hold_get)
     value.fill("")
-    value.dispatch_event("change")
+    value.blur()
     expect(status).to_have_attribute("data-state", "saving")
     # The POST has completed but the resync GET is held: still not "Saved".
     for _ in range(40):
@@ -404,8 +419,11 @@ def test_settings_cleared_override_is_not_reported_as_saved(live_server, page):
         route.continue_()
     page.unroute("**/api/workspaces/active/config", _hold_get)
     expect(status).to_have_attribute("data-state", "saved", timeout=10_000)
-    # The field shows the value actually in effect, not the blank entry.
-    expect(value).to_have_value("10")
+    # The restored server value becomes the baseline for the next edit.
+    expect(value).to_have_value("20")
+    with page.expect_response(lambda r: r.url.endswith("/api/workspaces/active/config") and r.request.method == "POST"):
+        value.fill("10")
+        value.blur()
     overrides = page.request.get(f"{url}/api/workspaces/active/config").json()
     assert overrides["grouping_window_seconds"] == 10
 
@@ -1006,6 +1024,9 @@ def test_category_search_navigation_and_workspace_link(live_server, page):
     _wait_for_settings_idle(page)
     expect(page.locator("#cfgBrowseThumbDefault")).to_be_in_viewport()
     search = page.get_by_role("searchbox", name="Search settings")
+    search.fill("Storage & Maintenance")
+    search.press("Enter")
+    expect(page.get_by_role("heading", name="Storage & Maintenance")).to_be_focused()
     search.fill("thumbnail")
     result = page.locator("#settingsResults button").filter(has_text="Default browse thumbnail")
     expect(result).to_have_count(1)
@@ -1052,7 +1073,15 @@ def test_global_load_can_recover_while_workspace_remains_editable(live_server, p
     retry.click()
     expect(retry).to_be_enabled()
     page.unroute("**/api/config")
-    retry.click()
+    held = []
+    page.route("**/api/config", lambda route: held.append(route))
+    with page.expect_request(lambda request: request.url.endswith("/api/config")):
+        retry.click()
+    page.evaluate("renderSettingsIssues()")
+    expect(retry).to_be_disabled()
+    assert len(held) == 1
+    held[0].continue_()
+    page.unroute("**/api/config")
     expect(retry).to_have_count(0)
     page.select_option("#cfgKeywordCase", "title")
     expect(page.locator("#settingsSaveStatus")).to_contain_text("Saved")
@@ -1137,3 +1166,26 @@ def test_curated_credential_updates_advanced_value_and_reset(live_server, page):
         expect(advanced.locator('input[type="password"]')).to_have_value(value)
         expect(advanced.get_by_role("button", name="Reset", include_hidden=True)).to_have_count(int(bool(value)))
         page.locator('[data-category-link="integrations"]').click()
+
+
+def test_reverting_after_lost_save_response_restores_server_value(live_server, page):
+    url = live_server["url"]
+    page.goto(url + "/settings")
+    _wait_for_settings_idle(page)
+    field = page.locator("#cfgPhotosPerPage")
+    original = field.input_value()
+
+    def lose_response(route):
+        assert route.fetch().ok
+        route.abort()
+
+    page.route("**/api/config", lose_response)
+    field.fill("80" if original != "80" else "90")
+    field.blur()
+    expect(page.locator("#settingsSaveIssues")).to_contain_text("could not be saved")
+    page.unroute("**/api/config", lose_response)
+    with page.expect_response(lambda r: r.url.endswith("/api/config") and r.request.method == "POST"):
+        field.fill(original)
+        field.blur()
+    expect(page.locator("#settingsSaveIssues")).to_be_empty()
+    assert page.request.get(url + "/api/config").json()["photos_per_page"] == int(original)

@@ -186,20 +186,22 @@ function settingsChanges(scope,values) {
   const baseline = settingsBaseline[scope];
   if (!baseline) throw new Error('Settings have not loaded.');
   return Object.fromEntries(Object.entries(values).filter(([key,value]) =>
-    JSON.stringify(value) !== JSON.stringify(baseline[key])));
+    settingsFailures[scope]?.includes(key) || JSON.stringify(value) !== JSON.stringify(baseline[key])));
 }
 
 /** @param {string} scope @param {SettingsSnapshot} values */
 function recordSettingsFailure(scope,values) {
-  settingsFailures[scope] = Object.keys(values);
+  settingsFailures[scope] = Array.from(new Set([...(settingsFailures[scope] || []), ...Object.keys(values)]));
   delete settingsDiscarded[scope];
   renderSettingsIssues();
 }
 
-/** @param {string} scope @param {SettingsSnapshot} values */
-function commitSettingsChanges(scope,values) {
-  Object.assign(settingsBaseline[scope] || {},values);
-  delete settingsFailures[scope];
+/** @param {string} scope @param {SettingsSnapshot} values @param {SettingsSnapshot} [formValues] */
+function commitSettingsChanges(scope,values,formValues = values) {
+  Object.assign(settingsBaseline[scope] || {},formValues);
+  const remaining = settingsFailures[scope]?.filter(key => !Object.hasOwn(values,key));
+  if (remaining?.length) settingsFailures[scope] = remaining;
+  else delete settingsFailures[scope];
   delete settingsDiscarded[scope];
   const layers = ALL_SETTINGS_CACHE.values;
   if (layers) {
@@ -238,17 +240,29 @@ function setSettingsBaseline(scope,baseline,prior = {}) {
   renderSettingsIssues();
 }
 
+const reloadingSettingsScopes = new Set();
+
 /** @param {string} scope */
 function settingsReloadButton(scope) {
   const button = document.createElement('button');
   button.type = 'button';
   button.className = 'btn-sm';
   button.textContent = scope === 'config' ? 'Reload global settings' : 'Reload workspace settings';
+  button.dataset.reloadScope = scope;
+  button.disabled = reloadingSettingsScopes.has(scope);
   button.onclick = async () => {
-    button.disabled = true;
-    const ok = await (scope === 'config' ? loadConfig() : loadWsOverrides());
-    if (ok) button.remove();
-    else button.disabled = false;
+    if (reloadingSettingsScopes.has(scope)) return;
+    reloadingSettingsScopes.add(scope);
+    const buttons = () => document.querySelectorAll(/** @type {'button'} */ ('button[data-reload-scope="'+scope+'"]'));
+    buttons().forEach(item => { item.disabled = true; });
+    try {
+      if (await (scope === 'config' ? loadConfig() : loadWsOverrides())) {
+        buttons().forEach(item => item.remove());
+      }
+    } finally {
+      reloadingSettingsScopes.delete(scope);
+      buttons().forEach(item => { item.disabled = false; });
+    }
   };
   return button;
 }

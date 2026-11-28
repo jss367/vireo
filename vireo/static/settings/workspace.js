@@ -163,6 +163,10 @@ async function _postWsOverrides(gen) {
       // here would post the server's old value over the user's newer one.
       if (_saveStatus.pending.workspace === undefined) {
         invalidKeys.forEach(function(key) { _applyWsOverrideField(key, current); });
+        const normalized = readWorkspaceForm([]);
+        const restored = Object.fromEntries(invalidKeys.map(key => [key,current[key] ?? null]));
+        const displayed = Object.fromEntries(invalidKeys.map(key => [key,normalized[key]]));
+        commitSettingsChanges('workspace', restored, displayed);
         if (typeof showToast === 'function') {
           showToast(
             'Blank or invalid override for ' + invalidKeys.join(', ') +

@@ -30,6 +30,7 @@ async function main() {
     safeFetch: async (url, opts) => { posts.push(JSON.parse(opts.body)); return {ok: true}; },
     _saveStatusMark() {},
     settingsBaseline: {config: {}},
+    settingsFailures: {},
     flattenSettings: values => values,
     settingsPayload: values => ({...values}),
     settingsChanges: (_scope, values) => ({...values}),

@@ -274,7 +274,7 @@ function _editedSecrets() {
   var current = _readSecretFields();
   /** @type {Record<string,string>} */ var edited = {};
   Object.keys(current).forEach(function(key) {
-    if (current[key] !== _savedSecrets[key]) edited[key] = current[key] || '';
+    if (settingsFailures.config?.includes(key) || current[key] !== _savedSecrets[key]) edited[key] = current[key] || '';
   });
   return edited;
 }
