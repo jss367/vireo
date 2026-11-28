@@ -354,7 +354,10 @@ def _classify_plan(
             return plan.name_label_read_error(plan.some_models_blocked_result()), frozenset()
         result = plan.nothing_pending_result() if plan.pending_total == 0 else plan.will_classify_result()
 
-    if photo_ids is not None and params.source_paths is None and result["state"] != "blocked":
+    if result["state"] == "blocked":
+        return result, frozenset()
+
+    if photo_ids is not None and params.source_paths is None:
         # The Process ETA includes the detector pre-pass even if all previously
         # discovered targets already have classifications.
         missing = set(plan.scope_ids)

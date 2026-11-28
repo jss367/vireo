@@ -1926,20 +1926,13 @@ def test_classify_plan_blocked_when_every_selected_label_is_ambiguous(
     assert plan["stages"]["Classify"]["state"] == "blocked"
 
 
-def test_classify_plan_mixed_blocked_with_no_detections_emits_blocked(
-    tmp_path, monkeypatch,
-):
-    """Mixed scope, no detections cached yet: one label-free model can run,
-    another model is blocked on missing labels. The unblocked_count==0 guard
-    doesn't fire (one model is runnable), but classify_job iterates every
-    selected model and the blocked one will fail at _load_labels once
-    MegaDetector creates detections. The planner must emit "blocked" (gates
-    Start), not "will-run" — otherwise Start stays enabled, the user
-    launches, and the pipeline records the same missing-labels classify
-    failure this PR is meant to prevent.
-    """
+@pytest.mark.parametrize("redetect", [False, True], ids=["empty", "all-targets-stale"])
+def test_classify_plan_mixed_blocked_with_no_current_targets(tmp_path, monkeypatch, redetect):
+    """A mixed selection keeps its missing-label reason even when detection is stale."""
     from pipeline_plan import compute_plan
-    db, _ = _make_db(tmp_path)
+    db, folder_id = _make_db(tmp_path)
+    if redetect:
+        _classified_photo_detected_without_focus_area(db, folder_id, tmp_path, monkeypatch)
 
     import labels as labels_mod
     import models as models_mod
@@ -1961,10 +1954,8 @@ def test_classify_plan_mixed_blocked_with_no_detections_emits_blocked(
         db, _params(model_ids=["m1", "m2"]), str(tmp_path / "test.db"),
     )
     classify = plan["stages"]["Classify"]
-    assert classify["state"] == "blocked", (
-        "mixed scope with no detections + one blocked model must emit "
-        "'blocked', not slip through the total_dets==0 'will-run' branch"
-    )
+    assert classify["state"] == "blocked"
+    assert "need labels: BioCLIP ViT-B-16" in classify["summary"]
     assert classify["detail"]["blocked_models"] == ["BioCLIP ViT-B-16"]
     assert classify["detail"]["pending"] == 0
     assert classify["detail"]["eligible"] == 0
