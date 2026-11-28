@@ -64,6 +64,11 @@ class CatalogReadCache:
             # read-only connection cannot be opened during catalog recovery.
             return None
 
+    def revision(self, path: Path) -> tuple[int, int, int] | None:
+        """Catalog commit token for other per-app readers using this observer."""
+        with self._lock:
+            return self._available_revision(path)
+
     def read(self, path: Path, key: Hashable, compute: Callable[[], JsonDict]) -> JsonDict:
         with self._lock:
             revision = self._available_revision(path)

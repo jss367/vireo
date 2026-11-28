@@ -42,7 +42,7 @@ def _results():
 
 def _open(page, live_server, results=None, requests=None, cards=None):
     results = results or _results()
-    page.route('**/api/pipeline/page-init*', lambda route: route.fulfill(json={'results': results}))
+    page.route('**/api/pipeline/cull-results', lambda route: route.fulfill(json={'results': results}))
 
     def recompute(route):
         body = route.request.post_data_json
@@ -355,7 +355,7 @@ def test_failed_scoped_analysis_requires_a_successful_retry_before_apply(live_se
 
 
 def test_collection_and_date_filters_analyze_only_their_intersection(live_server, page):
-    page.route('**/api/collections', lambda route: route.fulfill(json=[{'id': 123, 'name': 'Heron outing'}]))
+    page.route('**/api/dashboard/options', lambda route: route.fulfill(json={'collections': [{'id': 123, 'name': 'Heron outing'}]}))
     requests = []
     _open(page, live_server, requests=requests)
     results = _results()
@@ -381,7 +381,7 @@ def test_collection_and_date_filters_analyze_only_their_intersection(live_server
 
 
 def test_date_can_be_chosen_before_the_first_analysis(live_server, page):
-    page.route('**/api/pipeline/page-init*', lambda route: route.fulfill(json={'results': None}))
+    page.route('**/api/pipeline/cull-results', lambda route: route.fulfill(json={'results': None}))
     requests = []
     results = _results()
 

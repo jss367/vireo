@@ -3009,7 +3009,7 @@ def test_cull_history_preserves_analysis_scope_and_unrelated_suggestions(live_se
     if not scoped:
         # The unscoped read returns the same analysis, with live fields attached.
         snapshot = page.evaluate('pipelineResults')
-        page.route('**/api/pipeline/page-init*', lambda route: route.fulfill(json={'results': snapshot}))
+        page.route('**/api/pipeline/cull-results', lambda route: route.fulfill(json={'results': snapshot}))
     page.evaluate('''({id, action}) => safeFetch('/api/photos/' + id + '/' + action, {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({[action]: action === 'rating' ? 1 : 'rejected'})

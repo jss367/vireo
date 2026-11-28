@@ -135,6 +135,7 @@ GET          /api/photos/extensions
 GET          /api/photos/ids
 GET          /api/photos/missing
 GET          /api/photos/search
+GET          /api/pipeline/cull-results
 GET          /api/pipeline/extract-readiness
 GET          /api/pipeline/legacy-detections
 GET          /api/pipeline/page-init

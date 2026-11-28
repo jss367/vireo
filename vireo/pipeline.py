@@ -200,7 +200,7 @@ def find_mask_rescue_floors(db, photos, effective_cfg):
 
 def load_photo_features(db, collection_id=None, config=None,
                         labels_fingerprint=None, photo_ids=None, *,
-                        effective_config=None):
+                        effective_config=None, mask_isfile=os.path.isfile):
     """Load all pipeline-relevant features for workspace photos from the database.
 
     Returns a list of photo dicts ready for the pipeline stages, with:
@@ -235,7 +235,7 @@ def load_photo_features(db, collection_id=None, config=None,
     if scoped_photo_ids is not None and not scoped_photo_ids:
         return []
 
-    load = _FeatureLoad(db, ws_id, config, labels_fingerprint)
+    load = _FeatureLoad(db, ws_id, config, labels_fingerprint, mask_isfile)
     load.load_rows(scoped_photo_ids)
     load.resolve_thresholds(effective_config)
     load.find_weak_runs()
@@ -309,7 +309,8 @@ class _FeatureLoad:
     phases must run in the order ``load_photo_features`` calls them.
     """
 
-    def __init__(self, db, ws_id, config, labels_fingerprint):
+    def __init__(self, db, ws_id, config, labels_fingerprint, mask_isfile=os.path.isfile):
+        self.mask_isfile = mask_isfile
         self.db = db
         self.ws_id = ws_id
         self.config = config
@@ -621,7 +622,7 @@ class _FeatureLoad:
                 and evidence.get("mask_model") == model
                 and all(evidence.get("prompt_" + key) == primary[key] for key in "xywh")
                 and (not expected_variant or evidence.get("active_mask_variant") == expected_variant)
-                and os.path.isfile(row["mask_path"])
+                and self.mask_isfile(row["mask_path"])
             )
             segmentation = {"status": "complete", "current": current}
         # No-subject verdicts need no segmentation; the readiness policy keeps
@@ -1761,12 +1762,18 @@ def normalize_cached_species(data, resolver):
     data["species_names_refreshed"] = True
 
 
-def load_results(cache_dir, workspace_id, db=None):
+def load_results(cache_dir, workspace_id, db=None, *, prune_missing=False, persist_refresh=True,
+                 effective_config=None, mask_isfile=os.path.isfile):
     """Load pipeline results from a JSON cache file.
 
     Args:
         cache_dir: directory containing the database
         workspace_id: active workspace ID
+        prune_missing: reconcile the snapshot against current workspace membership
+        persist_refresh: save routine rescoring for subsequent raw readers.
+            Cull projects it in memory. Queued repairs always persist.
+        effective_config: settings already resolved by the caller for this read
+        mask_isfile: allow a response cache to track mask availability checks
 
     Returns:
         dict or None if no cache exists
@@ -1781,11 +1788,13 @@ def load_results(cache_dir, workspace_id, db=None):
         # confirmation that lands while current evidence is being loaded.
         with acquire_workspace_regroup(workspace_id):
             data = load_results_raw(cache_dir, workspace_id)
-            refresh_pending(db, data, cache_dir)
-            if data is not None:
-                previous = json.dumps(data, sort_keys=True)
-                refresh_saved_suggestions(db, data)
-                if json.dumps(data, sort_keys=True) != previous:
+            if prune_missing and data is not None and prune_missing_photos(cache_dir, workspace_id, db, data=data):
+                data = load_results_raw(cache_dir, workspace_id)
+            consumed = refresh_pending(db, data, cache_dir, effective_config, full_review=True)
+            if data is not None and not consumed:
+                previous = json.dumps(data, sort_keys=True) if persist_refresh else None
+                refresh_saved_suggestions(db, data, effective_config=effective_config, mask_isfile=mask_isfile)
+                if persist_refresh and json.dumps(data, sort_keys=True) != previous:
                     save_results_raw(data, cache_dir, workspace_id)
     else:
         data = load_results_raw(cache_dir, workspace_id)
@@ -1800,7 +1809,7 @@ def load_results(cache_dir, workspace_id, db=None):
     return data
 
 
-def prune_missing_photos(cache_dir, workspace_id, db):
+def prune_missing_photos(cache_dir, workspace_id, db, *, data=None):
     """Self-heal pass: drop cached photo IDs no longer visible in the workspace.
 
     The pipeline review page renders a card per cached photo and requests
@@ -1826,8 +1835,8 @@ def prune_missing_photos(cache_dir, workspace_id, db):
 
     Returns True if the cache was rewritten, False otherwise.
     """
-    path = _results_cache_path(cache_dir, workspace_id)
-    data = _load_results_json(path)
+    if data is None:
+        data = load_results_raw(cache_dir, workspace_id)
     if data is None:
         return False
     cached_ids = [p.get("id") for p in data.get("photos", []) if p.get("id") is not None]
@@ -1885,11 +1894,10 @@ def prune_results(cache_dir, workspace_id, deleted_ids):
         if "bursts" in enc:
             kept_bursts = []
             for burst in enc["bursts"]:
-                burst["photo_ids"] = [
-                    pid for pid in burst.get("photo_ids", []) if pid not in deleted
-                ]
-                if burst["photo_ids"]:
-                    kept_bursts.append(burst)
+                ids = burst.get("photo_ids", []) if isinstance(burst, dict) else burst
+                surviving = [pid for pid in ids if pid not in deleted]
+                if surviving:
+                    kept_bursts.append({**burst, "photo_ids": surviving} if isinstance(burst, dict) else surviving)
             enc["bursts"] = kept_bursts
             enc["burst_count"] = len(kept_bursts)
         if not enc["photo_ids"]:

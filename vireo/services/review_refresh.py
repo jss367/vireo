@@ -64,11 +64,11 @@ def _clear_consumed(results_dir: str, workspace_id: int, consumed: Mapping[str, 
 
 
 def refresh_pending(db: Database, data: JsonDict | None, results_dir: str,
-                    effective: JsonDict | None = None) -> list[int]:
+                    effective: JsonDict | None = None, *, full_review: bool = False) -> list[int]:
     """Caller holds the regroup lock; clear only generations saved successfully."""
     import config as cfg
     from pipeline import save_results_raw
-    from services.saved_review import refresh_selected_suggestions
+    from services.saved_review import refresh_saved_suggestions, refresh_selected_suggestions
 
     workspace_id = db.require_workspace_id()
     pending = pending_refresh(results_dir, workspace_id)
@@ -77,7 +77,12 @@ def refresh_pending(db: Database, data: JsonDict | None, results_dir: str,
     photo_ids = [int(pid) for pid in pending]
     if data is not None:
         effective = effective if effective is not None else db.get_effective_config(cfg.load())
-        refresh_selected_suggestions(db, data, photo_ids, effective)
+        if full_review and data.get("review_mode") != "species":
+            # A reader already needs every cohort. Publish that refresh once
+            # under the same pending generations as a selected retry.
+            refresh_saved_suggestions(db, data, effective_config=effective)
+        else:
+            refresh_selected_suggestions(db, data, photo_ids, effective)
         save_results_raw(data, results_dir, workspace_id)
     _clear_consumed(results_dir, workspace_id, pending)
     return photo_ids

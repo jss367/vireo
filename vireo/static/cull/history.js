@@ -61,10 +61,10 @@ async function cullAfterHistoryChange(result) {
         delete cullAppliedDecisions[pid];
       });
     } else {
-      var data = /** @type {{results?: CullSourceResults} | null} */ (await safeFetch('/api/pipeline/page-init?include=results', {}, {toast: false}));
+      var data = /** @type {{results?: CullSourceResults} | null} */ (await safeFetch('/api/pipeline/cull-results', {}, {toast: false}));
       results = data && data.results;
     }
-    // page-init may return no results; both callees treat that as empty.
+    // A workspace may have no saved analysis; both callees treat that as empty.
     syncCullSourceFlags(/** @type {CullSourceResults} */ (results));
     setPipelineResults(/** @type {CullSourceResults} */ (results),
       result.undone ? 'Undone: ' + result.undone : 'Redone: ' + result.redone, hasCullFilters());

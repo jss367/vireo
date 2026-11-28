@@ -62,9 +62,8 @@ document.addEventListener('keydown', function(e) {
 });
 
 document.addEventListener('DOMContentLoaded', async function() {
-  await loadPipelineSliderDefaults();
-  await loadCollections();
-  await loadCullingResults();
+  var defaultsReady = loadPipelineSliderDefaults();
+  await Promise.all([loadCollections(), loadCullingResults(defaultsReady)]);
   await loadCullOrphans();
 });
 document.addEventListener('DOMContentLoaded', function() { initializeCullFavorites(); });

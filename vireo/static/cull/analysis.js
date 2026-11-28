@@ -73,11 +73,18 @@ async function runCulling() {
   return recomputeCulling('/api/pipeline/regroup-live', 'Analysis complete!', !cullSourceResults);
 }
 
-async function loadCullingResults() {
+/** @param {Promise<void>} defaultsReady */
+async function loadCullingResults(defaultsReady) {
   try {
-    var data = await safeFetch('/api/pipeline/page-init?include=results', {}, { toast: false });
+    var seq = cullAnalysisSeq;
+    var data = await safeFetch('/api/pipeline/cull-results', {}, { toast: false });
+    // A scoped recompute reads the sliders, including workspace defaults.
+    await defaultsReady;
+    if (seq !== cullAnalysisSeq && (pipelineResults || cullAnalysisPending || cullSourceResults)) return;
+    if (selectedCollectionId != null) return runCulling();
     if (data && data.results) {
       setPipelineResults(data.results);
+      if (hasCullFilters()) onCullScopeChange();
     } else {
       /** @type {HTMLElement} */ (document.getElementById('cullContent')).innerHTML =
         '<div style="text-align:center;padding:40px;color:var(--text-dim);">No pipeline results. Run Analyze for Culling after extracting pipeline features.</div>';

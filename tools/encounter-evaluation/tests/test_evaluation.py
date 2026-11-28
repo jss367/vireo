@@ -689,6 +689,7 @@ def test_capture_date_selects_whole_sessions_without_changing_splits(library, tm
 
 
 def test_feature_reader_pipeline_repository_preserves_read_only_label_boundary():
+    from photo_visibility_schema import create_photo_visibility_schema
     from repositories.pipeline_features import PIPELINE_PHOTO_COLS
 
     columns = [part.strip().removeprefix("p.") for part in PIPELINE_PHOTO_COLS.split(",")]
@@ -698,12 +699,15 @@ def test_feature_reader_pipeline_repository_preserves_read_only_label_boundary()
         conn.execute("CREATE TABLE photos (" + ",".join(
             "id INTEGER PRIMARY KEY" if column == "id" else column for column in columns
         ) + ")")
+        conn.execute("CREATE TABLE workspace_folders(workspace_id INTEGER, folder_id INTEGER, is_root INTEGER)")
+        create_photo_visibility_schema(conn)
         conn.executescript("""
-            CREATE TABLE photo_workspace_visibility(photo_id INTEGER, workspace_id INTEGER);
             CREATE TABLE keywords(id INTEGER, name TEXT);
             CREATE TABLE photo_keywords(photo_id INTEGER, keyword_id INTEGER);
-            INSERT INTO photos(id, filename) VALUES(1, 'invented.jpg'), (2, 'other.jpg');
-            INSERT INTO photo_workspace_visibility VALUES(1, 1), (2, 2);
+            INSERT INTO photos(id, folder_id, filename) VALUES
+                (1, 10, 'invented.jpg'), (2, 20, 'other.jpg'), (3, 20, 'shared.jpg');
+            INSERT INTO workspace_folders VALUES(1, 10, 1), (2, 20, 1);
+            INSERT INTO workspace_photos(workspace_id, photo_id) VALUES(1, 3);
             INSERT INTO keywords VALUES(1, 'held-out label');
             INSERT INTO photo_keywords VALUES(1, 1);
         """)
@@ -726,11 +730,11 @@ def test_feature_reader_pipeline_repository_preserves_read_only_label_boundary()
         features = reader.pipeline_features
         assert features is not reader.pipeline_features
         assert features.conn is conn
-        features.stage_scope_photo_ids([1, 1, 2])
-        assert [row["id"] for row in features.feature_rows(1, scoped=True)] == [1]
+        features.stage_scope_photo_ids([1, 1, 2, 3])
+        assert [row["id"] for row in features.feature_rows(1, scoped=True)] == [1, 3]
         features.stage_scope_photo_ids([2])
         assert features.feature_rows(1, scoped=True) == []
-        assert [row["id"] for row in features.feature_rows(1, scoped=False)] == [1]
+        assert [row["id"] for row in features.feature_rows(1, scoped=False)] == [1, 3]
         assert reader.get_species_keywords_for_photos([1], include_identities=True) == {}
         assert not reads.intersection({"keywords", "photo_keywords"})
         assert conn.in_transaction  # TEMP staging did not commit the read snapshot.

@@ -4,18 +4,18 @@
 
 async function loadCollections() {
   try {
-    var collections = /** @type {{id: number, name: string, count_error?: unknown, has_visual?: boolean}[]} */ (
-      await safeFetch('/api/collections', {}, { toast: false }));
+    var options = /** @type {{collections: {id: number, name: string, degraded: boolean, has_visual: boolean}[]}} */ (
+      await safeFetch('/api/dashboard/options', {}, { toast: false }));
     var sel = /** @type {HTMLSelectElement} */ (document.getElementById('cullCollection'));
-    collections.forEach(function(c) {
+    options.collections.forEach(function(c) {
       var opt = document.createElement('option');
       opt.value = String(c.id);
       opt.textContent = c.name;
-      // count_error means /api/collections couldn't resolve this collection's
+      // degraded means the picker couldn't resolve this collection's
       // rules — scoping the cull to it would just 400 the downstream /photos
       // fetch. Show it disabled so the state is visible instead of offering
       // a source that can't run.
-      if (c.count_error) {
+      if (c.degraded) {
         opt.disabled = true;
         opt.textContent = c.name + ' (unavailable — edit rules to fix)';
         opt.title = "This collection's rules could not be resolved. Edit it in Browse to make it usable.";

@@ -15619,8 +15619,8 @@ def test_collection_pickers_disable_degraded_collections(app_and_db):
     client = app.test_client()
     for route in ("/cull", "/id-conflicts", "/pipeline/review", "/browse"):
         html = _page_with_scripts(client, route)
-        assert "count_error" in html, (
-            f"{route} does not check count_error on its collection picker"
+        assert ("c.degraded" if route == "/cull" else "count_error") in html, (
+            f"{route} does not check for broken rules on its collection picker"
         )
         assert "unavailable" in html, (
             f"{route} does not label degraded collections as unavailable"
