@@ -29,6 +29,7 @@ from flask import (
     Flask,
 )
 from jobs import JobRunner, LogBroadcaster
+from repositories.browse_summary_cache import BrowseSummaryCache
 from schema import ensure_schema
 from services import scan_work, startup_tasks
 from services.folder_moves import FolderMoves
@@ -825,6 +826,7 @@ def _start_app_runtime(app, db_path):
     app._log_broadcaster = LogBroadcaster(buffer_size=500)
     app._log_broadcaster.install()
 
+    app._browse_summary_cache = BrowseSummaryCache()
     app._cleanup_app_resources = _start_catalog_backups(app, db_path, startup)
     app._start_thumbnail_recheck = startup.start_thumbnail_recheck
     app._kickoff_preview_cache_maintenance = startup.kickoff_preview_cache_maintenance
@@ -866,6 +868,7 @@ def _start_catalog_backups(app, db_path, startup):
         app._catalog_backups.schedule()
 
     def cleanup_app_resources(job_timeout=10.0):
+        app._browse_summary_cache.close()
         app._catalog_backups.stop()
         return startup.cleanup_app_resources(job_timeout=job_timeout)
 
@@ -1173,7 +1176,9 @@ def _register_browse_blueprints(app, w):
         )
     )
     app.register_blueprint(
-        create_browse_blueprint(_get_db, json_error, visual_scope=w.visual_scope)
+        create_browse_blueprint(
+            _get_db, json_error, visual_scope=w.visual_scope, summary_cache=app._browse_summary_cache,
+        )
     )
     app.register_blueprint(
         create_predictions_blueprint(
