@@ -97,6 +97,11 @@ def test_species_queue_compares_account_and_sends_selected_candidate(live_server
     expect(page.locator("article")).to_contain_text("chosen.jpg")
     page.get_by_role("button", name="Next").click()
     expect(page.locator("article")).to_contain_text("alternate.jpg")
+    page.locator(".preview img").click(button="right")
+    with page.expect_popup() as browse:
+        page.get_by_role("menuitem", name="Open in Browse Mode").click()
+    expect(browse.value).to_have_url(f"{live_server['url']}/browse?photo_id=2")
+    browse.value.close()
     page.get_by_role("button", name="Send to iNaturalist").click()
     expect(page.locator("#inatTaxon0")).to_have_value("Haemorhous mexicanus")
     page.locator("#inatSubmitBtn").click()

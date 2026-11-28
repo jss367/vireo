@@ -1,4 +1,4 @@
-import {safeFetch, thumbnail} from './shared.js';
+import {safeFetch, showPhotoMenu, thumbnail} from './shared.js';
 
 /** @param {string} label @param {() => void} action */
 export function button(label, action) {
@@ -51,6 +51,7 @@ export function contactSheet(photos, more, hasMore, send, error) {
       image.loading = 'lazy';
       image.alt = '';
       image.src = thumbnail(photo);
+      image.addEventListener('contextmenu', event => showPhotoMenu(event, photo));
       label.append(check, image, caption(photo));
       return label;
     }));
