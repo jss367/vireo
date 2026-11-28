@@ -283,8 +283,8 @@ def test_location_review_is_a_navigable_collection_page(live_server, page):
         "San Diego Field Notes (1 available)"
     )
     expect(
-        page.locator('.nav-tab[data-nav-id="location_review"]')
-    ).to_have_class("nav-tab is-ephemeral active")
+        page.locator('.nav-tab.is-ephemeral.active[data-nav-id="location_review"]')
+    ).to_have_count(1)
 
     page.locator("#locationReviewCollection").select_option(str(collection_id))
     page.wait_for_url(f"**/locations/review?collection_id={collection_id}")
