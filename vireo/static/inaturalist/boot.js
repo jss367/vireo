@@ -1,5 +1,5 @@
 import {button, caption, contactSheet, matchControls} from './review.js';
-import {openExternalLink, openLightbox, safeFetch, submitToInat, thumbnail} from './shared.js';
+import {openExternalLink, openLightbox, safeFetch, showPhotoMenu, submitToInat, thumbnail} from './shared.js';
 
 /** @typedef {{login: string, taxon_ids: number[], refreshed_at: string}} Observer */
 /** @typedef {{species: string, scientific_name: string, common_name: string, inat_id: number,
@@ -77,6 +77,7 @@ function candidate(entry, login) {
   preview.className = 'preview';
   preview.setAttribute('aria-label', 'Preview ' + entry.species);
   preview.append(image);
+  preview.addEventListener('contextmenu', event => showPhotoMenu(event, photos[index] || entry.best));
   const info = document.createElement('div');
   info.className = 'info';
   const heading = document.createElement('h2');

@@ -15,3 +15,11 @@ export function submitToInat(id, comparison) {
 export function openLightbox(id, filename, photos) {
   window.openLightbox(id, filename, photos);
 }
+
+/** @param {MouseEvent} event @param {CandidatePhoto} photo */
+export function showPhotoMenu(event, photo) {
+  event.preventDefault();
+  window.openContextMenu(event, [
+    {label: 'Open in Browse Mode', onClick: () => window.openInBrowse(photo.id)},
+  ]);
+}

@@ -1,5 +1,7 @@
 interface CandidatePhoto {id: number; filename: string; timestamp?: string; location_name?: string}
 interface Window {
+  openContextMenu(event: MouseEvent, items: {label: string; onClick: () => void}[]): void;
+  openInBrowse(photoId: number): void;
   photoThumbnailUrl(photo: CandidatePhoto): string;
   openLightbox(id: number, filename: string, photos: CandidatePhoto[]): void;
   openExternalLink(event: MouseEvent, url: string): void;
