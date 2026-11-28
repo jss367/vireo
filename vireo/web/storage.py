@@ -14,6 +14,8 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
+import time
 from collections.abc import Callable, Iterable, Iterator
 from typing import TYPE_CHECKING
 
@@ -33,6 +35,24 @@ if TYPE_CHECKING:
     from web.web_types import AppConfig, GetDb, GetRunner
 
 log = logging.getLogger(__name__)
+
+
+class _RecentMeasurement[T]:
+    """Share a completed filesystem scan across page visits to this app."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._result: tuple[T, float] | None = None
+        self._expires = 0.0
+
+    def read(self, measure: Callable[[], T], *, allow_recent: bool) -> tuple[T, float]:
+        with self._lock:
+            if allow_recent and self._result is not None and time.monotonic() < self._expires:
+                return self._result
+            self._result = None
+            self._result = measure(), time.time()
+            self._expires = time.monotonic() + 300
+            return self._result
 
 
 def _assemble_storage_locations(
@@ -84,6 +104,9 @@ def create_storage_blueprint(get_db: GetDb, json_error: JsonError, db_path: str,
     blueprint = Blueprint("storage", __name__)
     background_job = make_background_job(get_runner, get_db, db_path, Database)
 
+    overview: _RecentMeasurement[JsonDict] = _RecentMeasurement()
+    retained_files: _RecentMeasurement[list[JsonDict]] = _RecentMeasurement()
+
     def _retained_config() -> JsonDict:
         import config as cfg
         return {**cfg.load(), "THUMB_CACHE_DIR": config["THUMB_CACHE_DIR"],
@@ -129,8 +152,9 @@ def create_storage_blueprint(get_db: GetDb, json_error: JsonError, db_path: str,
     def api_storage_retained() -> ResponseReturnValue:
         from services.retained_cache import summary
         settings = _retained_config()
+        caches, _ = retained_files.read(lambda: summary(settings), allow_recent=_allow_recent_measurement())
         return jsonify({
-            "caches": summary(settings),
+            "caches": caches,
             "grouping_history": get_db().storage.grouping_history(),
             "maintenance": get_db().storage.latest_maintenance(),
             "policy": {key: settings[key] for key in (
@@ -198,8 +222,18 @@ def create_storage_blueprint(get_db: GetDb, json_error: JsonError, db_path: str,
             "path": os.path.join(os.path.dirname(db_path), "masks"),
         }
 
+    def _allow_recent_measurement() -> bool:
+        return request.headers.get("X-Vireo-Storage-Visit") == "1"
+
     @blueprint.route("/api/storage")
     def api_storage() -> ResponseReturnValue:
+        from working_copy_cache import working_copy_quota_bytes
+
+        report, measured_at = overview.read(measure_storage, allow_recent=_allow_recent_measurement())
+        working = {**report["working_copies"], "quota_bytes": working_copy_quota_bytes()}
+        return jsonify({**report, "working_copies": working, "measured_at": measured_at})
+
+    def measure_storage() -> JsonDict:
         """Comprehensive storage info for the storage management panel."""
         from classifier import CACHE_DIR as EMB_CACHE_DIR
         from models import DEFAULT_MODELS_DIR
@@ -371,36 +405,34 @@ def create_storage_blueprint(get_db: GetDb, json_error: JsonError, db_path: str,
                 volumes_by_mount[mount]["location_ids"] = []
             volumes_by_mount[mount]["location_ids"].append(location["id"])
 
-        return jsonify(
-            {
-                "total": total,
-                "reclaimable": reclaimable,
-                "storage_root": storage_root,
-                "locations": locations,
-                "volumes": list(volumes_by_mount.values()),
-                "database": {"size": db_size, "path": db_path},
-                "thumbnails": thumb,
-                "previews": preview,
-                "working_copies": working,
-                "other": {
-                    "size": other_size, "path": storage_root,
-                    "categories": other_categories,
-                },
-                "embeddings": emb,
-                "models": {"size": models_size, "path": DEFAULT_MODELS_DIR},
-                "hf_cache": {
-                    "size": hf_size, "path": hf_cache, "models": hf_models,
-                    **{key: hf_inventory.get(key, 0) for key in
-                       ("unused_size", "installed_size", "retained_size")},
-                },
-                "offline_originals": {
-                    "count": offline_count,
-                    "size": offline_size,
-                    "path": os.path.join(media_root(config["THUMB_CACHE_DIR"]), "offline"),
-                },
-                "masks": {"size": masks_size, **masks},
-            }
-        )
+        return {
+            "total": total,
+            "reclaimable": reclaimable,
+            "storage_root": storage_root,
+            "locations": locations,
+            "volumes": list(volumes_by_mount.values()),
+            "database": {"size": db_size, "path": db_path},
+            "thumbnails": thumb,
+            "previews": preview,
+            "working_copies": working,
+            "other": {
+                "size": other_size, "path": storage_root,
+                "categories": other_categories,
+            },
+            "embeddings": emb,
+            "models": {"size": models_size, "path": DEFAULT_MODELS_DIR},
+            "hf_cache": {
+                "size": hf_size, "path": hf_cache, "models": hf_models,
+                **{key: hf_inventory.get(key, 0) for key in
+                   ("unused_size", "installed_size", "retained_size")},
+            },
+            "offline_originals": {
+                "count": offline_count,
+                "size": offline_size,
+                "path": os.path.join(media_root(config["THUMB_CACHE_DIR"]), "offline"),
+            },
+            "masks": {"size": masks_size, **masks},
+        }
 
     @blueprint.route("/api/storage/masks")
     def api_storage_masks() -> ResponseReturnValue:

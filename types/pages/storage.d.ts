@@ -14,6 +14,7 @@ interface StorageMaskVariant {variant:string;count?:number;bytes?:number;active_
 interface StorageSetAsideMasks {set_aside_by:number;set_aside_reason:string;masks:number;active:number}
 interface StorageMasks {variants?:StorageMaskVariant[];total_bytes?:number;stale_count?:number;set_aside?:StorageSetAsideMasks[]}
 interface StorageReport {
+  measured_at?:number;
   total:number;reclaimable:number;volumes?:StorageVolume[];locations?:StorageLocation[];
   working_copies:StorageWorkingCopies;database:{size:number};thumbnails:StorageCount;previews:StorageCount;
   embeddings:StorageCount;models:{size:number};hf_cache:HfCacheInventory&{size:number};offline_originals:StorageCount;

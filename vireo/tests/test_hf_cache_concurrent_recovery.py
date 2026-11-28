@@ -112,7 +112,7 @@ def storage_inventory_routes(fs, service_ns):
           "_storage_masks_data": lambda _db: {"total_bytes": 0, "path": "/invented/catalog/masks"},
           "shutil": S(disk_usage=lambda _p: S(free=100, total=200)), "sys": S(platform="invented")}
     selected(Path("web/storage.py"),
-             {"_assemble_storage_locations", "api_storage", "api_storage_hf_cache"}, ns)
+             {"_assemble_storage_locations", "measure_storage", "api_storage_hf_cache"}, ns)
     return ns
 
 
@@ -194,7 +194,7 @@ class ReconciledSafetyTests(unittest.TestCase):
                     fs.add("/invented/external", "dir")
                 routes = storage_inventory_routes(fs, ns)
                 modal = routes["api_storage_hf_cache"]()
-                overview = routes["api_storage"]()["hf_cache"]
+                overview = routes["measure_storage"]()["hf_cache"]
                 self.assertEqual(modal["size"], 53)  # Fake blob + symlink bytes, both repositories.
                 self.assertEqual(overview["size"], modal["size"])
                 self.assertEqual(overview["models"], modal["entries"])
@@ -227,7 +227,7 @@ class ReconciledSafetyTests(unittest.TestCase):
                         fs.add("/invented/external", "dir")
                     routes = storage_inventory_routes(fs, ns)
                     modal = routes["api_storage_hf_cache"]()
-                    self.assertEqual(routes["api_storage"]()["hf_cache"]["size"], 33)
+                    self.assertEqual(routes["measure_storage"]()["hf_cache"]["size"], 33)
                     self.assertEqual(len(modal["entries"]), 1)  # Same repo is counted once.
                     row = modal["entries"][0]
                     self.assertTrue(row["removable"])

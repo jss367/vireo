@@ -39,6 +39,29 @@ def test_storage_shows_named_categories_and_escaped_file_paths(live_server, page
     expect(details.locator("img")).to_have_count(0)
 
 
+def test_storage_revisit_reuses_measurements_until_refresh(live_server, page):
+    root = Path(live_server["app"].config["THUMB_CACHE_DIR"]).parent
+    renders = root / "originals"
+    renders.mkdir(exist_ok=True)
+    (renders / "1.display.jpg").write_bytes(b"x" * 1024)
+    url = live_server["url"]
+    page.goto(f"{url}/storage")
+    breakdown = page.locator("#storageBreakdown details").filter(has_text="Full-resolution renders")
+    retained = page.locator("#retainedStorageItems details").filter(has_text="Full-resolution renders")
+    expect(breakdown.locator("summary")).to_contain_text("1 KB")
+    expect(retained.locator("summary")).to_contain_text("1 KB")
+
+    page.goto(f"{url}/settings")
+    (renders / "2.display.jpg").write_bytes(b"x" * 2048)
+    page.goto(f"{url}/storage")
+    expect(breakdown.locator("summary")).to_contain_text("1 KB")
+    expect(retained.locator("summary")).to_contain_text("1 KB")
+
+    page.locator("#refreshStorageBtn").click()
+    expect(breakdown.locator("summary")).to_contain_text("3 KB")
+    expect(retained.locator("summary")).to_contain_text("3 KB")
+
+
 def test_existing_model_cache_cleanup_confirms_and_keeps_weights(live_server, page, tmp_path, monkeypatch):
     import models
 

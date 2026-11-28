@@ -131,5 +131,5 @@ function bindStorageRenderedMarkup() {
 
 bindStorageMarkup();
 bindStorageRenderedMarkup();
-document.addEventListener('DOMContentLoaded', function() { refreshStoragePage(); });
+document.addEventListener('DOMContentLoaded', function() { refreshStoragePage(true); });
 document.addEventListener('DOMContentLoaded', function() { loadStorageConfig(); });
