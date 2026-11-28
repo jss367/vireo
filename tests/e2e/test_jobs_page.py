@@ -22,7 +22,7 @@ def test_system_history_is_opt_in_but_direct_links_open_it(live_server, page):
     page.route("**/api/jobs", lambda route: route.fulfill(json={"active": []}))
     page.route("**/api/jobs/history?*", lambda route: route.fulfill(
         json=[] if "origin=user" in route.request.url else [job]))
-    with page.expect_response("**/api/jobs/history?limit=100&origin=user"):
+    with page.expect_response("**/api/jobs/history?limit=100&origin=user*"):
         page.goto(f"{live_server['url']}/jobs")
     row = page.locator('.job-list-item[data-job-id="maintenance"]')
     expect(page.locator("#filterOrigin")).to_have_value("user")
@@ -31,6 +31,40 @@ def test_system_history_is_opt_in_but_direct_links_open_it(live_server, page):
     expect(row).to_be_visible()
     page.goto(f"{live_server['url']}/jobs?job=maintenance")
     expect(row).to_have_class(re.compile(r"\bselected\b"))
+
+
+def test_active_jobs_follow_origin_filter(live_server, page):
+    root = dict(_move_folder_job(live_server, {}), id="manual", origin="user")
+    child = dict(root, id="follow-up", parent_job_id=root["id"], status="queued")
+    system = dict(root, id="automatic", origin="system")
+    page.route("**/api/jobs", lambda route: route.fulfill(json={"active": [root, child, system]}))
+    page.route("**/api/jobs/history?*", lambda route: route.fulfill(json=[]))
+    page.goto(f"{live_server['url']}/jobs")
+    origin = page.locator("#filterOrigin")
+    rows = page.locator('[data-job-source="active"]')
+    cards = page.locator("#jobDetailPane .job-card")
+    badge = page.locator("#runningBadge")
+    expect(origin).to_have_value("user")
+    expect(rows).to_have_count(2)
+    expect(rows.filter(has=page.locator(".job-origin-chip", has_text="Vireo"))).to_have_count(0)
+    expect(page.locator('[data-job-id="follow-up"]')).to_be_visible()
+    expect(cards).to_have_count(2)
+    expect(badge).to_have_text("2")
+
+    origin.select_option("")
+    expect(rows).to_have_count(3)
+    expect(cards).to_have_count(3)
+    expect(badge).to_have_text("3")
+
+    page.goto(f"{live_server['url']}/jobs?job=automatic")
+    expect(page.locator('[data-job-id="automatic"]')).to_have_class(re.compile(r"\bselected\b"))
+    origin.select_option("user")
+    expect(cards).to_have_count(2)
+    origin.select_option("system")
+    expect(rows).to_have_count(1)
+    expect(page.locator('[data-job-id="automatic"]')).to_be_visible()
+    expect(cards).to_have_count(1)
+    expect(badge).to_have_text("1")
 
 
 @pytest.mark.parametrize("result", [
@@ -921,6 +955,7 @@ def test_routine_maintenance_history_toggle(live_server, page):
     )
     db.conn.commit()
     page.goto(f"{live_server['url']}/jobs")
+    page.locator("#filterOrigin").select_option("system")
     routine = page.locator('[data-job-id="routine-check"]')
     changed = page.locator('[data-job-id="cache-changed"]')
     toggle = page.get_by_label("Include routine maintenance in history")

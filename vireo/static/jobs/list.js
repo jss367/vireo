@@ -36,9 +36,16 @@ export function includeRoutineHistory() {
   return jobsElement('includeRoutine', HTMLInputElement).checked;
 }
 
-// Refetch history for the new "Started by" choice, then re-render.
+// Active jobs are already loaded for every origin.
 export function applyOriginFilter() {
-  applyFilters();
+  state.pendingLinkedJobId = null;
+  var selected = findJob(state.selectedJobId, [state.activeJobs, state.historyJobs]);
+  if (selected && !matchesOriginFilter(selected, selectedOriginFilter())) {
+    showOverview(state.selectedSource || 'active');
+  }
+  updateList();
+  updateRunningBadge();
+  renderMainPane();
   fetchHistory();
 }
 
@@ -71,12 +78,7 @@ export function updateList() {
   var container = jobsElement('jobListContent', HTMLElement);
   var html = '';
 
-  // Active = running OR queued. Queued pipelines waiting behind a busy
-  // slot are findable + cancellable here; without this, opening /jobs
-  // after queuing from another tab would show the queued run nowhere.
-  var running = state.activeJobs.filter(function(j) {
-    return isLiveStatus(j.status);
-  });
+  var running = filteredActiveJobs();
   html += '<div class="jobs-list-divider clickable' + (state.currentView === 'active' ? ' selected' : '') + '" data-view="active">Active' +
     (running.length > 0 ? ' (' + running.length + ')' : '') + '</div>';
   html += renderOperations(running, 'active');
@@ -161,13 +163,25 @@ export function renderListItem(j, source, options) {
   return html;
 }
 
+export function filteredActiveJobs() {
+  var origin = selectedOriginFilter();
+  return state.activeJobs.filter(job => isLiveStatus(job.status) && matchesOriginFilter(job, origin));
+}
+
 export function updateRunningBadge() {
-  var running = state.activeJobs.filter(function(j) {
-    return isLiveStatus(j.status);
-  });
+  var running = filteredActiveJobs();
   var badge = jobsElement('runningBadge', HTMLElement);
   if (running.length > 0) { badge.textContent = String(running.length); badge.style.display = ''; }
   else { badge.style.display = 'none'; }
+}
+
+/** @param {string} view */
+function showOverview(view) {
+  state.pendingLinkedJobId = null;
+  state.currentView = view;
+  state.selectedJobId = null;
+  state.selectedSource = null;
+  if (state.sseSource) { state.sseSource.close(); state.sseSource = null; }
 }
 
 // Event delegation for job list clicks
@@ -176,12 +190,7 @@ export function bindJobListClicks() {
     if (!(e.target instanceof Element)) return;
     var viewItem = e.target.closest('[data-view]');
     if (viewItem) {
-      // The user chose a view; any pending ?job=X link is superseded.
-      state.pendingLinkedJobId = null;
-      state.currentView = viewItem.getAttribute('data-view') || 'active';
-      state.selectedJobId = null;
-      state.selectedSource = null;
-      if (state.sseSource) { state.sseSource.close(); state.sseSource = null; }
+      showOverview(viewItem.getAttribute('data-view') || 'active');
       renderMainPane();
       updateList();
       return;
