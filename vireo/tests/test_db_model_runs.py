@@ -873,6 +873,63 @@ def test_cache_hits_db_full_image_anchor_requires_consistent_detector_run(db):
     ) == {consistent, empty_run}
 
 
+def test_cache_hits_with_large_runtime_map(db):
+    db.conn.setlimit(sqlite3.SQLITE_LIMIT_EXPR_DEPTH, 1000)
+    fid = _folder(db)
+    runtimes = {f"det-{i}": f"cls-{i}" for i in range(1200)}
+    runtimes["permissive"] = None
+    fresh = {}
+    expected = set()
+    for det_rt, cls_rt, hit in [
+        ("det-1199", "cls-1199", True),
+        ("det-0", "cls-1199", False),
+        ("permissive", "any-runtime", True),
+        ("unknown", "any-runtime", False),
+    ]:
+        pid = _photo(db, f"{det_rt}.jpg", fid)
+        det = _det(db, pid, runtime_fingerprint=det_rt)
+        _usable(db, det, runtime_fingerprint=cls_rt)
+        fresh[pid] = [{"id": det, "confidence": 0.9}]
+        if hit:
+            expected.add(pid)
+
+    assert classify_preflight.get_classifier_run_cache_hits(
+        db, list(fresh), MODEL, "fp-a",
+        fresh_detections_by_photo=fresh,
+        fresh_processed_photo_ids=fresh,
+        expected_classifier_runtime_by_detector_runtime=runtimes,
+    ) == expected
+
+
+def test_cache_hits_with_missing_detector_runtime(db):
+    fid = _folder(db)
+    fresh = {}
+    for runtime in ("missing", "null"):
+        pid = _photo(db, f"{runtime}.jpg", fid)
+        det = _det(db, pid, runtime_fingerprint=runtime)
+        _usable(db, det, runtime_fingerprint="cls")
+        fresh[pid] = [{"id": det, "confidence": 0.9}]
+    missing, literal_null = fresh
+
+    # Model a nullable legacy runtime while keeping the current schema intact.
+    db.conn.execute(
+        "CREATE TEMP VIEW detections AS SELECT id, "
+        "NULLIF(runtime_fingerprint, 'missing') AS runtime_fingerprint "
+        "FROM main.detections"
+    )
+    for runtimes, expected in [
+        ({None: None}, {missing}),
+        ({None: "cls"}, {missing}),
+        ({None: "stale", "null": "cls"}, {literal_null}),
+    ]:
+        assert classify_preflight.get_classifier_run_cache_hits(
+            db, list(fresh), MODEL, "fp-a",
+            fresh_detections_by_photo=fresh,
+            fresh_processed_photo_ids=fresh,
+            expected_classifier_runtime_by_detector_runtime=runtimes,
+        ) == expected
+
+
 def test_cache_hits_runtime_map_applies_to_every_branch(db):
     fid = _folder(db)
     normal = _photo(db, "normal.jpg", fid)
