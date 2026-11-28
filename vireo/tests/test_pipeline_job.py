@@ -8905,6 +8905,56 @@ def test_update_stages_names_the_stage_of_its_phase():
     assert data["stage_id"] is None
 
 
+def test_a_runs_notes_reach_the_live_job_view():
+    """A benign skip is recorded in the job's errors and in its notes, and both
+    lists are the job's own, so a poll of a running job can leave the notes
+    out of its error count instead of showing a healthy run as failing."""
+    from job_runner.views import snapshot_job
+    from pipeline_job import PipelineRun, _stamp_job_start
+
+    job = {"id": "job-x", "errors": []}
+    _stamp_job_start(job, None)
+    run = PipelineRun(
+        job=job, runner=None, db_path="", workspace_id=1, params=None,
+        abort=threading.Event(), stages={}, result={}, errors=job["errors"],
+        notes=job["notes"], collection_id=None, database_factory=None,
+        emit_progress=None, update_stages=None, control=None,
+    )
+    run.note("[extract_masks] Skipped: no detections qualify")
+    run.errors.append("[detect] Fatal: model failed to load")
+
+    view = snapshot_job(job)
+    assert view["notes"] == ["[extract_masks] Skipped: no detections qualify"]
+    assert view["errors"] == view["notes"] + ["[detect] Fatal: model failed to load"]
+    assert view["notes"] is not job["notes"]
+
+
+def test_update_stages_labels_the_stage_it_names_when_another_starts(monkeypatch):
+    """Stage threads set their status without the progress lock, so a stage
+    can start while a transition event is being built. The event chooses its
+    stage once; choosing again for the label could pair the thumbnails label
+    with the scan's stage_id, and the UI would show scan counts beside it."""
+    import pipeline_job
+    from pipeline_job import _update_stages
+
+    stages = _empty_stages()
+    stages["scan"]["status"] = "running"
+    stages["scan"]["label"] = "Checking metadata"
+    stages["thumbnails"]["label"] = "Generating thumbnails"
+    choices = iter(["scan"])
+
+    def choose_stage(_stages):
+        # Every choice after the first sees the thumbnails stage running.
+        return next(choices, "thumbnails")
+
+    monkeypatch.setattr(pipeline_job, "_current_stage_id", choose_stage)
+    runner = FakeRunner()
+    _update_stages(runner, "job-x", stages)
+    _, _, data = runner.events[-1]
+    assert data["stage_id"] == "scan"
+    assert data["phase"] == "Checking metadata"
+
+
 def test_progress_event_defaults_phase_triple_to_none():
     """Every progress payload must carry an explicit phase_current /
     phase_total / phase_label triple. JobRunner.push_event merges progress
