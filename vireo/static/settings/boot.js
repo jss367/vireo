@@ -1,8 +1,10 @@
 // The native menu's Verify Models command (vireo-page-hooks.js).
-Vireo.registerPageHooks({verifyAllModels() {
-  goToSettings('identification','manage-models');
-  return verifyAllModels();
-}});
+Vireo.registerPageHooks({
+  verifyAllModels: () => {
+    goToSettings('identification', 'manage-models');
+    return verifyAllModels();
+  },
+});
 
 setSettingsBaseline('config',null);
 setSettingsBaseline('workspace',null);

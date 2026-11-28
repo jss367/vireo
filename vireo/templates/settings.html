@@ -97,14 +97,6 @@
 
 {% include '_navbar.html' %}
 
-{% set categories = [
-  ('browsing', 'Browsing & Appearance'),
-  ('identification', 'Identification & Models'),
-  ('processing', 'Processing & Culling'),
-  ('integrations', 'Integrations'),
-  ('storage', 'Storage & Maintenance'),
-  ('advanced', 'Advanced')
-] %}
 <main class="content settings-shell">
   <header class="settings-heading">
     <h1>Settings</h1>
@@ -117,10 +109,22 @@
   </header>
   <div class="settings-layout">
     <nav class="settings-categories" aria-label="Settings categories">
-      {% for key, title in categories %}<a href="?category={{ key }}" data-category-link="{{ key }}">{{ title }}</a>{% endfor %}
+      <a href="?category=browsing" data-category-link="browsing">Browsing &amp; Appearance</a>
+      <a href="?category=identification" data-category-link="identification">Identification &amp; Models</a>
+      <a href="?category=processing" data-category-link="processing">Processing &amp; Culling</a>
+      <a href="?category=integrations" data-category-link="integrations">Integrations</a>
+      <a href="?category=storage" data-category-link="storage">Storage &amp; Maintenance</a>
+      <a href="?category=advanced" data-category-link="advanced">Advanced</a>
     </nav>
     <label class="settings-mobile">Category
-      <select id="settingsCategoryPicker" aria-label="Category">{% for key, title in categories %}<option value="{{ key }}">{{ title }}</option>{% endfor %}</select>
+      <select id="settingsCategoryPicker" aria-label="Category">
+        <option value="browsing">Browsing &amp; Appearance</option>
+        <option value="identification">Identification &amp; Models</option>
+        <option value="processing">Processing &amp; Culling</option>
+        <option value="integrations">Integrations</option>
+        <option value="storage">Storage &amp; Maintenance</option>
+        <option value="advanced">Advanced</option>
+      </select>
     </label>
     <div class="settings-panes">
   <section data-settings-category="browsing">
