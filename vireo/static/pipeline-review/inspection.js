@@ -99,7 +99,7 @@ function openInspect(photoId) {
   if (enc) {
     var speciesName = enc.confirmed_species || (enc.species ? (enc.species[0] || 'Unknown') : 'Unknown');
     var filmstripIds = photoIdsInReviewScope(enc.photo_ids || []);
-    html += '<div class="context-label">Encounter: ' + escapeHtml(speciesName) + ' (' + enc.photo_count + ' photos, ' + (enc.burst_count||0) + ' bursts)</div>';
+    html += '<div class="context-label">Encounter: ' + escapeHtml(speciesName) + ' (' + enc.photo_count + (enc.photo_count === 1 ? ' photo, ' : ' photos, ') + (enc.burst_count || 0) + (enc.burst_count === 1 ? ' burst' : ' bursts') + ')</div>';
     html += '<div class="context-filmstrip">';
     filmstripIds.forEach(function(pid) {
       var isCurrent = pid === photoId ? ' current' : '';

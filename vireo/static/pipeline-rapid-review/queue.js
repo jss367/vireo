@@ -74,7 +74,7 @@ function renderQueueControls() {
   var queue = QUEUE_FILTERS[rapid.queue.filter] || QUEUE_FILTERS.all;
   var count = rapid.sessions.length;
   var total = rapid.allSessions.length;
-  var text = queue.label + ': ' + count + ' of ' + total + ' bursts';
+  var text = queue.label + ': ' + count + ' of ' + total + (total === 1 ? ' burst' : ' bursts');
   if (rapid.sessionIndex >= 0 && count) {
     text += ' - ' + (rapid.sessionIndex + 1) + ' of ' + count;
   }

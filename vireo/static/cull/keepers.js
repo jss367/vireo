@@ -157,7 +157,7 @@ function cullDetailLine(photoId) {
   var cq = source && source.comparable_quality;
   if (!cq || typeof cq.detail !== 'number') return null;
   return {
-    text: 'Detail ' + Math.round(cq.detail).toLocaleString() + ' · quality ' + Math.round(cq.score * 100) + '% across encounters',
+    text: 'Subject detail ' + Math.round(cq.detail).toLocaleString() + ' (higher means sharper edges) · quality ' + Math.round(cq.score * 100) + '% across encounters',
     title: cq.measurement_name + '. The quality combines that detail with the subject\'s exposure, framing and size; ' +
       'unlike the encounter rank it means the same for every photo, so it can be compared across outings.',
   };

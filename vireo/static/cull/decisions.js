@@ -116,15 +116,20 @@ function resolveCullDecision(photo) {
   return {action: 'review', source: 'auto', suggested: suggested};
 }
 
+/** @param {number} count @param {string} noun */
+function cullCount(count, noun) {
+  return count + ' ' + noun + (count === 1 ? '' : 's');
+}
+
 /** @param {CullEncounter} enc @param {number} idx @param {number} count */
 function encounterLabel(enc, idx, count) {
-  var label = 'Encounter ' + (idx + 1) + ' (' + count + ' photos)';
+  var label = 'Encounter ' + (idx + 1) + ' (' + cullCount(count, 'photo') + ')';
   if (enc.time_range && enc.time_range[0]) {
     var day = enc.time_range[0].substring(0, 10);
     var start = window.VireoTime.captureTime(enc.time_range[0]);
     var end = enc.time_range[1] ? window.VireoTime.captureTime(enc.time_range[1]) : '';
-    label = day + ' · Encounter ' + (idx + 1) + ' - ' + start + (end ? ' to ' + end : '') + ' (' + count + ' photos)';
+    label = day + ' · Encounter ' + (idx + 1) + ' - ' + start + (end ? ' to ' + end : '') + ' (' + cullCount(count, 'photo') + ')';
   }
-  if (enc.burst_count) label += ' / ' + enc.burst_count + ' bursts';
+  if (enc.burst_count) label += ' / ' + cullCount(enc.burst_count, 'burst');
   return label;
 }

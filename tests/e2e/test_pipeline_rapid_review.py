@@ -476,7 +476,7 @@ def test_rapid_review_needs_species_includes_mixed_burst(live_server, page):
 
     _goto_rapid_review(page, live_server)
 
-    expect(page.locator("#queueCount")).to_contain_text("Needs species: 1 of 1 bursts")
+    expect(page.locator("#queueCount")).to_contain_text(re.compile(r"Needs species: 1 of 1 burst\b"))
     expect(page.locator(".reason-chip", has_text="No species")).to_be_visible()
     expect(page.locator(".reason-chip", has_text="Already tagged")).to_be_visible()
 
@@ -502,11 +502,11 @@ def test_rapid_review_needs_species_ignores_rejected_untagged_photos(live_server
 
     _goto_rapid_review(page, live_server)
 
-    expect(page.locator("#queueCount")).to_contain_text("Needs species: 0 of 1 bursts")
+    expect(page.locator("#queueCount")).to_contain_text(re.compile(r"Needs species: 0 of 1 burst\b"))
     expect(page.locator("#burstSubtitle")).to_have_text("0 matching bursts")
 
     page.locator("#includeRejectedToggle").check()
-    expect(page.locator("#queueCount")).to_contain_text("Needs species: 1 of 1 bursts")
+    expect(page.locator("#queueCount")).to_contain_text(re.compile(r"Needs species: 1 of 1 burst\b"))
     expect(page.locator("#filename")).to_have_text("tagged.jpg")
 
 
