@@ -138,7 +138,7 @@ function settingsMatches(query) {
     if (key.toLowerCase() === query) return [{title:spec.label,terms:key,target,category:'advanced'}];
     if (!keys.has(key)) add(target,spec.label,key+' '+spec.desc);
   }
-  for (const el of Array.from(document.querySelectorAll(/** @type {'div'} */ ('[data-find-name],.section-title,.section button[id],#themePicker,#scanRootsContent > div > span')))) {
+  for (const el of Array.from(document.querySelectorAll(/** @type {'div'} */ ('section[data-settings-category] > h2,[data-find-name],.section-title,.section button[id],#themePicker,#scanRootsContent > div > span')))) {
     if (el.closest('#allSettingsSection') || el.matches('.tauri-only') && !isTauri()) continue;
     const title = el.dataset.findName || (el.id === 'themePicker' ? 'Theme' : el.textContent?.trim());
     add(el,title || '',el.id==='catalogBackupNowBtn' ? 'backup' : el.dataset.searchTerms || '');
