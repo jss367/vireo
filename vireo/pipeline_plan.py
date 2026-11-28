@@ -609,7 +609,7 @@ class _ClassifyPlan:
     def _count_redetection(self):
         """Find the detected photos the detect stage will run on again.
 
-        ``redetect_count`` photos have a run the stage does not reuse.
+        ``redetect_count`` photos have prior detector output the stage cannot reuse.
         ``redetect_unconfirmed`` more have one it reuses only if the detector
         that made it is the one this run installs: with no detector installed
         the stage downloads one as soon as any photo needs detecting, and
@@ -626,7 +626,9 @@ class _ClassifyPlan:
         model_runs = self.db.model_runs
         scope = set(self.db.photos.filter_out_wildlife_excluded(self.scope_ids))
         runtimes = model_runs.detector_run_runtimes("megadetector-v6", scope)
-        self.redetect_ids = runtimes.keys() - self.current_detector_photo_ids
+        missing_runs = self.db.detections.photo_ids_with_detections(scope - runtimes.keys(), "megadetector-v6")
+        self.has_missing_runs = bool(missing_runs)
+        self.redetect_ids = (runtimes.keys() - self.current_detector_photo_ids) | missing_runs
         self.redetect_count = len(self.redetect_ids)
         needs_detector = self.new_count > 0 or bool(scope - self.current_detector_photo_ids)
         if self.detector_runtime is not None or not needs_detector:
@@ -666,7 +668,10 @@ class _ClassifyPlan:
         if not most:
             return result
         photos = f"{'up to ' if self.redetect_unconfirmed else ''}{most} photo{_plural(most)}"
-        reason = _redetect_reason(most)
+        reason = (
+            "the catalog lacks a reusable detector record for earlier detections"
+            if self.has_missing_runs else _redetect_reason(most)
+        )
         if self.redetect_unconfirmed:
             reason += (
                 ". MegaDetector is not installed, and the version this run "

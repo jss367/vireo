@@ -40,6 +40,7 @@ def _add_photo_with_detection(db, folder_id, filename, conf=0.9,
           "confidence": conf, "category": "animal"}],
         detector_model=detector_model,
     )
+    db.model_runs.record_detector_run(photo_id, detector_model, len(det_ids))
     db.commit()
     return photo_id, det_ids[0]
 
@@ -1213,6 +1214,21 @@ def test_plan_names_photos_classify_will_detect_again(tmp_path, monkeypatch):
     assert (extract["detail"]["pending"], extract["detail"]["eligible"]) == (1, 1)
 
 
+def test_plan_redetects_cached_boxes_without_a_detector_run(tmp_path, monkeypatch):
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    pid, _ = _classified_photo_detected_without_focus_area(db, folder_id, tmp_path, monkeypatch)
+    db.conn.execute("DELETE FROM detector_runs WHERE photo_id = ?", (pid,))
+    db.commit()
+
+    stages = compute_plan(db, _redetection_params(), str(tmp_path / "test.db"))["stages"]
+    for stage in ("Classify", "Extract"):
+        assert stages[stage]["state"] == "will-run"
+        assert stages[stage]["detail"]["redetect"] == 1
+        assert stages[stage]["detail"]["pending"] == stages[stage]["detail"]["eligible"] == 1
+    assert "lacks a reusable detector record" in stages["Classify"]["summary"]
+
+
 def test_plan_keeps_done_work_beside_photos_detected_again(tmp_path, monkeypatch):
     from cache_identity import catalog_detector_input
     from pipeline_plan import compute_plan
@@ -1441,6 +1457,7 @@ def test_classify_plan_counts_all_eligible_detections(tmp_path, monkeypatch, mod
         ],
         detector_model="megadetector-v6",
     )
+    db.model_runs.record_detector_run(photo_id, "megadetector-v6", len(det_ids))
     db.commit()
 
     import labels as labels_mod
@@ -1508,6 +1525,7 @@ def test_classify_plan_reclassify_bypasses_cache(tmp_path, monkeypatch, raw_subj
     pid, did = _add_photo_with_detection(db, folder_id, "a.jpg")
 
     other_pid, _ = _add_photo_with_detection(db, folder_id, "b.jpg")
+    db.model_runs.record_detector_run(other_pid, "megadetector-v6", 1, runtime_fingerprint="older")
     monkeypatch.setattr("computation_cache.megadetector_runtime_fingerprint", lambda: "current")
     db.model_runs.record_detector_run(pid, "megadetector-v6", 1, runtime_fingerprint="current")
 
