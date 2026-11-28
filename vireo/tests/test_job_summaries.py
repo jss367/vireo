@@ -533,11 +533,18 @@ def test_completed_pipeline_history_summarizes_work_after_skipped_scan():
     steps = [{"summary": "Skipped (using collection)"}]
     job = {"type": "pipeline", "status": "completed"}
     assert build_summary({**job, "steps": steps}) == "Processing complete"
-    steps.append({"summary": "16 photos classified"})
+    steps.extend([
+        {"id": "thumbnails", "summary": "0 thumbnails generated, 16 already up to date"},
+        {"id": "previews", "summary": "16 previews cached"},
+        {"id": "classify:bird-model", "summary": "16 photos classified"},
+        {"id": "regroup", "summary": "3 encounters grouped"},
+    ])
     expected = "Processing complete · 16 photos classified"
     assert build_summary({**job, "steps": steps}) == expected
     stored = {"summary": "Skipped (using collection), 16 photos classified", "tree": steps}
     assert attach_result_text({**job, **stored})["summary"] == expected
+    without_classification = [step for step in steps if step.get("id") != "classify:bird-model"]
+    assert build_summary({**job, "steps": without_classification}) == "Processing complete · 3 encounters grouped"
 
 
 def test_non_dict_results():

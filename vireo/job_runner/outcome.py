@@ -112,10 +112,20 @@ def _pipeline_row_summary(job, result, steps):
             return f"Could not create subject masks for {failed:,} of {total:,} {noun}"
         return reason
     if job.get("status") == "completed":
+        # Prefer species classification. Runs without classification use
+        # their last reported outcome (e.g. grouping or archiving).
+        outcome = None
         for step in steps:
-            summary = step.get("summary") if isinstance(step, dict) else None
-            if isinstance(summary, str) and summary and not summary.startswith("Skipped"):
-                return f"Processing complete · {summary}"
+            if not isinstance(step, dict):
+                continue
+            summary = step.get("summary")
+            if not isinstance(summary, str) or not summary or summary.startswith("Skipped"):
+                continue
+            outcome = summary
+            if str(step.get("id")).partition(":")[0] == "classify":
+                break
+        if outcome:
+            return f"Processing complete · {outcome}"
         if steps or (job.get("summary") or "").startswith("Skipped"):
             return "Processing complete"
     return None
