@@ -462,7 +462,7 @@ def test_quick_upload_uses_real_link_when_tauri_bridge_is_missing(live_server, p
 
 
 def test_delegated_handler_covers_unannotated_external_links(live_server, page):
-    page.goto(f"{live_server['url']}/settings")
+    page.goto(f"{live_server['url']}/settings?category=integrations")
     original_url = page.url
     _mock_tauri(page)
 
