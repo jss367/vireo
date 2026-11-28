@@ -40,7 +40,7 @@ function harness() {
         return tmp;
       }},
     HTMLElement: class {}, HTMLInputElement: class {}, window: {},
-    escapeHtml: escape, escapeAttr: escape, filterAllSettings() {},
+    escapeHtml: escape, escapeAttr: escape, renderOverrideLinks() {},
     fetch: async (url, options) => {
       if (url === '/api/settings/values') {
         if (control.valuesError) throw control.valuesError;

@@ -29,6 +29,12 @@ async function main() {
     window: {vireoSetNumberedNavigationMode() {}},
     safeFetch: async (url, opts) => { posts.push(JSON.parse(opts.body)); return {ok: true}; },
     _saveStatusMark() {},
+    settingsBaseline: {config: {}},
+    settingsFailures: {},
+    flattenSettings: values => values,
+    settingsPayload: values => ({...values}),
+    settingsChanges: (_scope, values) => ({...values}),
+    commitSettingsChanges() {}, recordSettingsFailure() {},
     collectExternalEditors: () => [],
     collectRemoteTargets: () => [],
     getSelectedCardFields: () => [],
@@ -38,7 +44,7 @@ async function main() {
   vm.runInContext(fs.readFileSync('vireo/static/vireo-time.js', 'utf8'), ctx);
   vm.runInContext(varDecl('_SECRET_FIELDS') + varDecl('_savedSecrets'), ctx);
   for (const name of ['_readSecretFields', '_editedSecrets', '_rememberSavedSecrets',
-    'readDisplayConfig', 'applyDisplayConfig', '_postConfigSnapshot']) {
+    'readDisplayConfig', 'applyDisplayConfig', 'readConfigForm', 'readPipelineControls', '_postConfigSnapshot']) {
     vm.runInContext(fn(name), ctx);
   }
 

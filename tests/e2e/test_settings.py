@@ -44,7 +44,8 @@ def test_models_card_names_a_failed_common_name_repair(live_server, page, state)
     page.route("**/api/models", lambda route: route.fulfill(
         json={"models": [model], "active_id": model["id"]},
     ))
-    page.goto(live_server["url"] + "/settings")
+    page.goto(live_server["url"] + "/settings?category=identification#manage-models")
+    expect(page.locator("#speciesModelStatus").get_by_role("button", name="Repair")).to_be_visible()
     card = page.locator("#modelsContent")
     expect(card).to_contain_text(
         "Vireo's last attempt to fetch label_descriptions.json failed: could "
@@ -55,7 +56,7 @@ def test_models_card_names_a_failed_common_name_repair(live_server, page, state)
 
 def test_eye_keypoint_threshold_uses_raw_score_units(live_server, page):
     url = live_server["url"]
-    page.goto(url + "/settings")
+    page.goto(url + "/settings?category=processing")
     _wait_for_settings_idle(page)
     page.locator(".collapsible-header").filter(has_text="Pipeline Tuning").click()
     field = page.locator("#cfgEyeDetectionConfGate")
@@ -111,7 +112,7 @@ def test_time_format_saves_and_applies_to_photo_cards(live_server, page):
 def test_settings_links_to_storage_page(live_server, page):
     """Settings makes the dedicated storage page discoverable."""
     url = live_server["url"]
-    page.goto(f"{url}/settings", timeout=5000)
+    page.goto(f"{url}/settings?category=storage", timeout=5000)
 
     storage_link = page.get_by_role("link", name="Open Storage")
     expect(storage_link).to_be_visible()
@@ -121,7 +122,7 @@ def test_settings_links_to_storage_page(live_server, page):
 def test_settings_system_info_renders(live_server, page):
     """Settings page loads and displays system info section with real data."""
     url = live_server["url"]
-    page.goto(f"{url}/settings", timeout=5000)
+    page.goto(f"{url}/settings?category=advanced", timeout=5000)
 
     # The system info section should be visible
     system_section = page.locator(".section-title", has_text="System")
@@ -158,7 +159,7 @@ def test_settings_windows_support_status(live_server, page, tier, long_paths, ex
         route.fulfill(response=response, json=info)
 
     page.route("**/api/system/info", system_info)
-    page.goto(f"{live_server['url']}/settings")
+    page.goto(f"{live_server['url']}/settings?category=advanced")
     expect(page.locator("#windowsSupportRow")).to_be_visible()
     expect(page.locator("#windowsSupportStatus")).to_have_text(expected)
 
@@ -175,10 +176,11 @@ def test_settings_cmd_f_opens_page_text_search(live_server, page):
     expect(find_panel).to_be_visible()
     expect(find_input).to_be_focused()
 
-    find_input.fill("api")
-    expect(page.locator(".settings-find-mark").first).to_be_visible()
-    expect(page.locator(".settings-find-mark.active")).to_have_count(1)
-    expect(page.locator("#settingsFindStatus")).to_contain_text("of")
+    find_input.fill("top_k_predictions")
+    page.locator("#settingsResults button").first.click()
+    expect(page.locator("#setting-top_k_predictions")).to_be_visible()
+    page.go_back()
+    expect(page.locator("#cfgPhotosPerPage")).to_be_visible()
 
 
 def test_settings_text_search_ignores_hidden_update_section(live_server, page):
@@ -189,8 +191,21 @@ def test_settings_text_search_ignores_hidden_update_section(live_server, page):
     page.keyboard.press("Control+F")
     page.locator("#settingsFindInput").fill("Check for Updates")
 
-    expect(page.locator(".settings-find-mark")).to_have_count(0)
-    expect(page.locator("#settingsFindStatus")).to_have_text("0 results")
+    expect(page.locator("#settingsResults")).to_contain_text("No matches")
+
+
+def test_desktop_update_banner_links_to_available_release(live_server, page):
+    page.goto(live_server["url"] + "/settings")
+    page.evaluate("""async () => {
+        window.__TAURI_INTERNALS__ = {invoke: async () => ({available: true, version: '1.2.3'})};
+        try {
+            await startupUpdateCheck();
+        } finally {
+            delete window.__TAURI_INTERNALS__;
+        }
+    }""")
+    link = page.locator("#updateBanner").get_by_role("link", name="View release")
+    expect(link).to_have_attribute("href", "https://github.com/jss367/vireo/releases/latest")
 
 
 def _wait_for_settings_idle(page):
@@ -206,7 +221,6 @@ def _wait_for_settings_idle(page):
     pass immediately on a slow server.
     """
     status = page.locator("#settingsSaveStatus")
-    expect(page.locator("#cfgKeywordCase")).to_be_visible()
     expect(page.locator("body")).to_have_attribute(
         "data-settings-ready", "true", timeout=10_000
     )
@@ -228,7 +242,7 @@ def test_remote_target_folder_browse_saves_and_cancel_preserves(live_server, pag
          "local_archive_root": str(tmp_path)},
     ]
     page.request.post(live_server["url"] + "/api/config", data={"remote_targets": targets})
-    page.goto(live_server["url"] + "/settings")
+    page.goto(live_server["url"] + "/settings?category=storage")
     _wait_for_settings_idle(page)
     for label, folder in (("Local mount path", mount),
                           ("Local archive root (chained moves)", archive)):
@@ -252,7 +266,7 @@ def test_remote_target_folder_browse_saves_and_cancel_preserves(live_server, pag
 
 
 def test_remote_target_native_picker_cancel_and_selection(live_server, page):
-    page.goto(live_server["url"] + "/settings")
+    page.goto(live_server["url"] + "/settings?category=storage")
     _wait_for_settings_idle(page)
     page.evaluate("""() => {
       _remoteTargetsState = [{id: 'nas', host: 'nas', user: 'me', remote_path: '/photos',
@@ -278,7 +292,7 @@ def test_remote_target_rsync_hint_copies_install_command(live_server, page):
         "ok": False, "message": "Install GNU rsync with Homebrew: brew install rsync.",
         "rsync_install_commands": ["brew install rsync"],
     }))
-    page.goto(live_server["url"] + "/settings")
+    page.goto(live_server["url"] + "/settings?category=storage")
     _wait_for_settings_idle(page)
     page.evaluate("""() => {
       _remoteTargetsState = [{id: 'nas', host: 'nas', user: 'me', remote_path: '/photos'}];
@@ -298,7 +312,7 @@ def test_remote_target_rsync_hint_copies_install_command(live_server, page):
 def test_settings_autosave_shows_saved_confirmation(live_server, page):
     """Changing a curated field reports Saving… and then a persistent Saved ✓ time."""
     url = live_server["url"]
-    page.goto(f"{url}/settings", timeout=5000)
+    page.goto(f"{url}/settings?category=identification", timeout=5000)
     status = _wait_for_settings_idle(page)
 
     with page.expect_request(
@@ -323,7 +337,7 @@ def test_settings_autosave_shows_saved_confirmation(live_server, page):
 def test_settings_autosave_failure_is_visible(live_server, page):
     """A rejected save is reported in the pill instead of looking like success."""
     url = live_server["url"]
-    page.goto(f"{url}/settings", timeout=5000)
+    page.goto(f"{url}/settings?category=identification", timeout=5000)
     status = _wait_for_settings_idle(page)
 
     def _fail_post(route, request):
@@ -350,7 +364,7 @@ def test_settings_autosave_failure_is_visible(live_server, page):
 def test_settings_workspace_override_autosave_shows_saved(live_server, page):
     """The workspace-overrides form reports through the same pill."""
     url = live_server["url"]
-    page.goto(f"{url}/settings", timeout=5000)
+    page.goto(f"{url}/settings?category=identification", timeout=5000)
     status = _wait_for_settings_idle(page)
 
     checkbox = page.locator("#wsOverride_classification_threshold")
@@ -370,7 +384,7 @@ def test_settings_workspace_override_autosave_shows_saved(live_server, page):
 def test_settings_cleared_override_is_not_reported_as_saved(live_server, page):
     """A blank override is dropped from the save; the pill must not claim it saved."""
     url = live_server["url"]
-    page.goto(f"{url}/settings", timeout=5000)
+    page.goto(f"{url}/settings?category=identification", timeout=5000)
     status = _wait_for_settings_idle(page)
 
     checkbox = page.locator("#wsOverride_grouping_window_seconds")
@@ -379,6 +393,7 @@ def test_settings_cleared_override_is_not_reported_as_saved(live_server, page):
     value = page.locator("#wsVal_grouping_window_seconds")
     expect(value).to_have_value("10")
 
+    assert page.request.post(f"{url}/api/workspaces/active/config", data={"grouping_window_seconds": 20}).ok
     # Hold the resync GET so we can observe that "Saved" waits for it.
     held = []
 
@@ -389,13 +404,9 @@ def test_settings_cleared_override_is_not_reported_as_saved(live_server, page):
             route.continue_()
 
     page.route("**/api/workspaces/active/config", _hold_get)
-    with page.expect_response(
-        lambda r: r.url.endswith("/api/workspaces/active/config")
-        and r.request.method == "POST"
-    ):
-        value.fill("")
-        value.dispatch_event("change")
-        expect(status).to_have_attribute("data-state", "saving")
+    value.fill("")
+    value.blur()
+    expect(status).to_have_attribute("data-state", "saving")
     # The POST has completed but the resync GET is held: still not "Saved".
     for _ in range(40):
         if held:
@@ -408,8 +419,11 @@ def test_settings_cleared_override_is_not_reported_as_saved(live_server, page):
         route.continue_()
     page.unroute("**/api/workspaces/active/config", _hold_get)
     expect(status).to_have_attribute("data-state", "saved", timeout=10_000)
-    # The field shows the value actually in effect, not the blank entry.
-    expect(value).to_have_value("10")
+    # The restored server value becomes the baseline for the next edit.
+    expect(value).to_have_value("20")
+    with page.expect_response(lambda r: r.url.endswith("/api/workspaces/active/config") and r.request.method == "POST"):
+        value.fill("10")
+        value.blur()
     overrides = page.request.get(f"{url}/api/workspaces/active/config").json()
     assert overrides["grouping_window_seconds"] == 10
 
@@ -417,7 +431,7 @@ def test_settings_cleared_override_is_not_reported_as_saved(live_server, page):
 def test_settings_saves_for_same_path_are_serialized(live_server, page):
     """A second edit waits for the in-flight POST so snapshots reach the server in order."""
     url = live_server["url"]
-    page.goto(f"{url}/settings", timeout=5000)
+    page.goto(f"{url}/settings?category=identification", timeout=5000)
     status = _wait_for_settings_idle(page)
 
     held = []
@@ -462,7 +476,7 @@ def test_settings_saves_for_same_path_are_serialized(live_server, page):
 def test_settings_import_drops_queued_autosave(live_server, page):
     """A save queued behind an in-flight POST must not overwrite an import."""
     url = live_server["url"]
-    page.goto(f"{url}/settings", timeout=5000)
+    page.goto(f"{url}/settings?category=identification", timeout=5000)
     status = _wait_for_settings_idle(page)
     answer_dialogs(page)
 
@@ -525,7 +539,7 @@ def test_settings_import_drops_queued_autosave(live_server, page):
 def test_settings_failed_import_requeues_dropped_autosave(live_server, page):
     """If the import is rejected, the edit dropped for it is saved after all."""
     url = live_server["url"]
-    page.goto(f"{url}/settings", timeout=5000)
+    page.goto(f"{url}/settings?category=identification", timeout=5000)
     status = _wait_for_settings_idle(page)
     answer_dialogs(page)
 
@@ -583,7 +597,7 @@ def test_settings_import_preserves_queued_workspace_override_save(live_server, p
     showing the newer value while the server retained the older one.
     """
     url = live_server["url"]
-    page.goto(f"{url}/settings", timeout=5000)
+    page.goto(f"{url}/settings?category=identification", timeout=5000)
     _wait_for_settings_idle(page)
     answer_dialogs(page)
 
@@ -669,7 +683,7 @@ def test_settings_import_preserves_queued_workspace_override_save(live_server, p
 def test_settings_edit_during_import_suspension_is_saved_on_failure(live_server, page):
     """An edit made while autosave is suspended for the import must not be lost."""
     url = live_server["url"]
-    page.goto(f"{url}/settings", timeout=5000)
+    page.goto(f"{url}/settings?category=identification", timeout=5000)
     status = _wait_for_settings_idle(page)
     answer_dialogs(page)
 
@@ -726,7 +740,7 @@ def test_settings_edit_during_import_suspension_is_saved_on_failure(live_server,
 def test_settings_successful_import_clears_prior_save_error(live_server, page):
     """A prior autosave error must not linger on the pill after a successful import."""
     url = live_server["url"]
-    page.goto(f"{url}/settings", timeout=5000)
+    page.goto(f"{url}/settings?category=identification", timeout=5000)
     status = _wait_for_settings_idle(page)
     answer_dialogs(page)
 
@@ -766,7 +780,7 @@ def test_settings_successful_import_clears_prior_save_error(live_server, page):
 def test_settings_override_edit_during_resync_survives(live_server, page):
     """An override edit made while the post-invalid resync GET is in flight is not overwritten."""
     url = live_server["url"]
-    page.goto(f"{url}/settings", timeout=5000)
+    page.goto(f"{url}/settings?category=identification", timeout=5000)
     status = _wait_for_settings_idle(page)
 
     # Enable the grouping override so blanking it triggers the resync branch.
@@ -789,13 +803,9 @@ def test_settings_override_edit_during_resync_survives(live_server, page):
             route.continue_()
 
     page.route("**/api/workspaces/active/config", _hold_get)
-    with page.expect_response(
-        lambda r: r.url.endswith("/api/workspaces/active/config")
-        and r.request.method == "POST"
-    ):
-        value.fill("")
-        value.dispatch_event("change")
-        expect(status).to_have_attribute("data-state", "saving")
+    value.fill("")
+    value.dispatch_event("change")
+    expect(status).to_have_attribute("data-state", "saving")
 
     for _ in range(40):
         if held:
@@ -835,7 +845,7 @@ def test_settings_import_reloads_page_when_config_refetch_fails(live_server, pag
     imported config on disk.
     """
     url = live_server["url"]
-    page.goto(f"{url}/settings", timeout=5000)
+    page.goto(f"{url}/settings?category=identification", timeout=5000)
     _wait_for_settings_idle(page)
     answer_dialogs(page)
 
@@ -909,7 +919,7 @@ def test_all_settings_text_field_saves_on_commit_not_per_keystroke(live_server, 
     next keystrokes went nowhere.
     """
     url = live_server["url"]
-    page.goto(f"{url}/settings", timeout=5000)
+    page.goto(f"{url}/settings?category=advanced", timeout=5000)
     _wait_for_settings_idle(page)
 
     patches = []
@@ -979,7 +989,7 @@ def test_failed_location_keyword_cleanup_is_shown_after_save(
     )
     assert turn_on.ok
 
-    page.goto(f"{url}/settings", timeout=5000)
+    page.goto(f"{url}/settings?category=advanced", timeout=5000)
     _wait_for_settings_idle(page)
     if scope == "workspace":
         page.locator('.scope-tab[data-scope="workspace"]').click()
@@ -1006,3 +1016,214 @@ def test_failed_location_keyword_cleanup_is_shown_after_save(
 
     values = page.request.get(f"{url}/api/settings/values").json()
     assert values["effective"][key] is False
+
+
+def test_category_search_navigation_and_workspace_link(live_server, page):
+    url = live_server["url"]
+    page.goto(url + "/settings")
+    _wait_for_settings_idle(page)
+    expect(page.locator("#cfgBrowseThumbDefault")).to_be_in_viewport()
+    search = page.get_by_role("searchbox", name="Search settings")
+    search.fill("Storage & Maintenance")
+    search.press("Enter")
+    expect(page.get_by_role("heading", name="Storage & Maintenance")).to_be_focused()
+    search.fill("thumbnail")
+    result = page.locator("#settingsResults button").filter(has_text="Default browse thumbnail")
+    expect(result).to_have_count(1)
+    result.click()
+    expect(page.locator("#cfgBrowseThumbDefault")).to_be_focused()
+
+    search.fill("Top-K predictions")
+    page.locator("#settingsResults button").first.click()
+    expect(page.locator("#cfgTopK")).to_be_focused()
+    row = page.locator(".setting-row").filter(has=page.locator("#cfgTopK"))
+    row.get_by_role("link", name=re.compile("Override for this workspace")).click()
+    expect(page.locator('.scope-tab[data-scope="workspace"]')).to_have_class(re.compile("active"))
+    expect(page.locator("#setting-top_k_predictions")).to_be_in_viewport()
+    page.go_back()
+    expect(page.locator("#cfgTopK")).to_be_visible()
+    page.set_viewport_size({"width": 640, "height": 800})
+    page.get_by_label("Category", exact=True).select_option("browsing")
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+
+
+def test_curated_save_preserves_stored_precision(live_server, page):
+    url = live_server["url"]
+    assert page.request.post(url + "/api/config", data={"detector_confidence": 0.405}).ok
+    page.goto(url + "/settings")
+    _wait_for_settings_idle(page)
+    field = page.locator("#cfgPhotosPerPage")
+    with page.expect_request(lambda r: r.url.endswith("/api/config") and r.method == "POST") as sent:
+        field.fill("80")
+        field.blur()
+    expect(page.locator("#settingsSaveStatus")).to_contain_text("Saved")
+    assert sent.value.post_data_json == {"photos_per_page": 80}
+    assert page.request.get(url + "/api/config").json()["detector_confidence"] == 0.405
+
+
+def test_global_load_can_recover_while_workspace_remains_editable(live_server, page):
+    url = live_server["url"]
+    page.route("**/api/config", lambda route: route.fulfill(status=503, json={"error": "offline"}))
+    page.goto(url + "/settings?category=identification")
+    retry = page.get_by_role("button", name="Reload global settings")
+    reset_pipeline = page.locator("#resetPipeline")
+    expect(retry).to_be_visible()
+    expect(reset_pipeline).to_be_disabled()
+    assert page.locator("#cfgThreshold").evaluate("el => !!el.closest('[inert]')")
+    page.locator("#wsOverride_classification_threshold").check()
+    expect(page.locator("#settingsSaveStatus")).to_contain_text("Saved")
+    retry.click()
+    expect(retry).to_be_enabled()
+    page.unroute("**/api/config")
+    held = []
+    page.route("**/api/config", lambda route: held.append(route))
+    with page.expect_request(lambda request: request.url.endswith("/api/config")):
+        retry.click()
+    page.evaluate("renderSettingsIssues()")
+    expect(retry).to_be_disabled()
+    expect(reset_pipeline).to_be_disabled()
+    assert len(held) == 1
+    held[0].continue_()
+    page.unroute("**/api/config")
+    expect(retry).to_have_count(0)
+    expect(reset_pipeline).to_be_enabled()
+    page.select_option("#cfgKeywordCase", "title")
+    expect(page.locator("#settingsSaveStatus")).to_contain_text("Saved")
+    assert page.request.get(url + "/api/config").json()["keyword_case"] == "title"
+
+
+def test_retry_only_saves_its_scope(live_server, page):
+    url = live_server["url"]
+    page.goto(url + "/settings?category=identification")
+    _wait_for_settings_idle(page)
+
+    def fail_writes(route):
+        if route.request.method == "POST":
+            route.fulfill(status=503, json={"error": "temporarily offline"})
+        else:
+            route.continue_()
+
+    for endpoint in ["**/api/config", "**/api/workspaces/active/config"]:
+        page.route(endpoint, fail_writes)
+    page.select_option("#cfgKeywordCase", "title")
+    page.locator("#wsOverride_classification_threshold").check()
+    issues = page.locator("#settingsSaveIssues")
+    global_retry = issues.get_by_role("button", name="Retry Global changes")
+    ws_retry = issues.get_by_role("button", name=re.compile("Retry (?!Global)"))
+    expect(global_retry).to_be_visible()
+    expect(ws_retry).to_be_visible()
+    page.unroute("**/api/config", fail_writes)
+    global_retry.click()
+    expect(global_retry).to_have_count(0)
+    expect(ws_retry).to_be_enabled()
+    assert page.request.get(url + "/api/config").json()["keyword_case"] == "title"
+    assert "classification_threshold" not in page.request.get(url + "/api/workspaces/active/config").json()
+    page.unroute("**/api/workspaces/active/config", fail_writes)
+    ws_retry.click()
+    expect(ws_retry).to_have_count(0)
+    assert "classification_threshold" in page.request.get(url + "/api/workspaces/active/config").json()
+
+
+def test_settings_search_covers_schema_and_curated_controls(live_server, page):
+    page.goto(live_server["url"] + "/settings")
+    page.wait_for_selector("#allSettingsCategories [data-key]", state="attached")
+    _wait_for_settings_idle(page)
+    problems = page.evaluate("""() => {
+        const errors = [];
+        for (const key of Object.keys(ALL_SETTINGS_CACHE.schema)) {
+            const hits = settingsMatches(key);
+            if (hits.length !== 1 || hits[0].target.dataset.key !== key) errors.push(key);
+        }
+        const claimed = new Set();
+        for (const control of document.querySelectorAll('.setting-row input[id^="cfg"], .setting-row select[id^="cfg"]')) {
+            const cardFields = control.closest('#cfgCardFieldsContainer');
+            if (cardFields) {
+                const label = control.closest('label').querySelector('span').textContent.trim();
+                const hits = settingsMatches(label.toLowerCase()).filter(hit => hit.target === cardFields);
+                if (hits.length !== 1 || cardFields.dataset.settingKeys !== 'browse_card_fields') errors.push(label);
+                continue;
+            }
+            const rowLabel = control.closest('.setting-row').querySelector('.setting-label');
+            const label = control.title || (rowLabel.querySelector('label') || rowLabel.firstChild).textContent.trim();
+            const hits = settingsMatches(label.toLowerCase()).filter(hit => hit.target === control);
+            if (hits.length !== 1 || !control.dataset.settingKeys) errors.push(control.id);
+            for (const key of (control.dataset.settingKeys || '').split(' ')) {
+                if (claimed.has(key)) errors.push('Duplicate: ' + key);
+                claimed.add(key);
+            }
+        }
+        return errors;
+    }""")
+    assert problems == [], problems
+
+
+def test_curated_credential_updates_advanced_value_and_reset(live_server, page):
+    page.goto(live_server["url"] + "/settings?category=integrations")
+    _wait_for_settings_idle(page)
+    credential = page.locator("#cfgHfToken")
+    advanced = page.locator("#setting-hf_token")
+    for value in ("hf_test_settings_sync", ""):
+        with page.expect_response(lambda r: r.url.endswith("/api/config") and r.request.method == "POST"):
+            credential.fill(value)
+            credential.blur()
+        page.locator('[data-category-link="advanced"]').click()
+        expect(advanced.locator('input[type="password"]')).to_have_value(value)
+        expect(advanced.get_by_role("button", name="Reset", include_hidden=True)).to_have_count(int(bool(value)))
+        page.locator('[data-category-link="integrations"]').click()
+
+
+def test_reverting_after_lost_save_response_restores_server_value(live_server, page):
+    url = live_server["url"]
+    page.goto(url + "/settings")
+    _wait_for_settings_idle(page)
+    field = page.locator("#cfgPhotosPerPage")
+    original = field.input_value()
+
+    def lose_response(route):
+        assert route.fetch().ok
+        route.abort()
+
+    page.route("**/api/config", lose_response)
+    field.fill("80" if original != "80" else "90")
+    field.blur()
+    expect(page.locator("#settingsSaveIssues")).to_contain_text("could not be saved")
+    page.unroute("**/api/config", lose_response)
+    with page.expect_response(lambda r: r.url.endswith("/api/config") and r.request.method == "POST"):
+        field.fill(original)
+        field.blur()
+    expect(page.locator("#settingsSaveIssues")).to_be_empty()
+    assert page.request.get(url + "/api/config").json()["photos_per_page"] == int(original)
+
+
+@pytest.mark.parametrize("lose_response", [False, True], ids=["acknowledged", "response-lost"])
+def test_advanced_load_after_curated_save_uses_current_values(live_server, page, lose_response):
+    url = live_server["url"]
+    # Hold the original values snapshot after the server has produced it.
+    held = []
+
+    def hold_first_read(route):
+        if held:
+            route.continue_()
+        else:
+            held.append((route, route.fetch()))
+
+    page.route("**/api/settings/values", hold_first_read)
+    page.goto(url + "/settings")
+    status = _wait_for_settings_idle(page)
+    field = page.locator("#cfgPhotosPerPage")
+    assert held
+    if lose_response:
+        def commit_then_abort(route):
+            assert route.fetch().ok
+            route.abort()
+        page.route("**/api/config", commit_then_abort, times=1)
+    new_value = "80" if field.input_value() != "80" else "90"
+    field.fill(new_value)
+    field.blur()
+    expect(status).to_have_attribute("data-state", "error" if lose_response else "saved")
+    route, stale_response = held[0]
+    route.fulfill(response=stale_response)
+    page.locator('[data-category-link="advanced"]').click()
+    row = page.locator("#setting-photos_per_page")
+    expect(row.locator('input[type="number"]')).to_have_value(new_value)
+    expect(row.get_by_role("button", name="Reset", include_hidden=True)).to_have_count(1)

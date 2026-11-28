@@ -155,6 +155,8 @@ def test_clearing_a_label_shows_the_text_that_will_be_stored(live_server, page):
     """An empty label is replaced on save, so Settings must not stay blank."""
     status = _open_settings(page, live_server)
     row_input = page.locator('[data-shortcut-row="missing_species"] input')
+    row_input.fill("Custom label")
+    _saved(page, status, row_input.blur)
     row_input.fill("")
     _saved(page, status, lambda: page.locator("#cfgShortcutLabel").click())
     expect(row_input).to_have_value("Missing species")

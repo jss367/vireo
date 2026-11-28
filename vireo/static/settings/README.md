@@ -7,8 +7,8 @@ state for its responsibility alongside the functions that use it.
 
 | File | Responsibility |
 | --- | --- |
-| `page.js` | Page search, collapsible sections, and theme selection |
-| `autosave.js` | Initial-load readiness, save generations, serialized writes, and save status |
+| `page.js` | Category routing, cross-category search, workspace override links, and theme selection |
+| `autosave.js` | Per-scope load state, changed-field baselines, serialized writes, failure links, and retries |
 | `workspace.js` | Workspace overrides and their debounced saves |
 | `external-editors.js` | External-editor list and form serialization |
 | `quick-filters.js` | Filter-shortcut editing, validation, and serialization |

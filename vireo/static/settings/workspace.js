@@ -4,14 +4,20 @@ async function loadWsOverrides() {
   try {
     var ws = await safeFetch('/api/workspaces/active', {}, { toast: false });
     if (ws && ws.name) {
+      settingsWorkspaceName = ws.name;
       document.querySelectorAll(/** @type {'div'} */ ('.ws-override-name')).forEach(function(el) { el.textContent = String(ws.name); });
     }
     var overrides = await safeFetch('/api/workspaces/active/config', {}, { toast: false });
+    const prior = settingsFailures.workspace ? readWorkspaceForm([]) : {};
     ['classification_threshold', 'grouping_window_seconds', 'similarity_threshold', 'detector_confidence'].forEach(function(key) {
       _applyWsOverrideField(key, overrides);
     });
     _wsOverridesLoaded = true;
+    renderOverrideLinks();
+    setSettingsBaseline('workspace', readWorkspaceForm([]), prior);
   } catch(e) {
+    _wsOverridesLoaded = false;
+    setSettingsBaseline('workspace', null);
     _markSettingsInitialLoad('ws');
     return false;
   }
@@ -85,12 +91,9 @@ function saveWsConfig() {
   }, 500);
 }
 
-/** @param {number} gen */ async function _postWsOverrides(gen) {
-    // Runs only once any earlier override POST has settled; reads the form
-    // now so the snapshot reflects every edit made while waiting.
+/** @param {string[]} invalidKeys */
+function readWorkspaceForm(invalidKeys) {
     /** @type {Record<string,number|null>} */ var overrides = {};
-    var needsResync = false;
-    /** @type {string[]} */ var invalidKeys = [];
     ['classification_threshold', 'grouping_window_seconds', 'similarity_threshold', 'detector_confidence'].forEach(function(key) {
       var checkbox = /** @type {HTMLInputElement} */ (document.getElementById('wsOverride_' + key));
       var input = /** @type {HTMLInputElement} */ (document.getElementById('wsVal_' + key));
@@ -104,7 +107,6 @@ function saveWsConfig() {
           // that no longer exists. Omit the key instead (the backend
           // preserves omitted keys) and resync the input from the server
           // afterwards so it shows the value that is actually in effect.
-          needsResync = true;
           invalidKeys.push(key);
           return;
         }
@@ -119,18 +121,28 @@ function saveWsConfig() {
         overrides[key] = null;
       }
     });
+    return overrides;
+}
+
+/** @param {number} gen */
+async function _postWsOverrides(gen) {
+    if (!settingsBaseline.workspace) throw new Error('Reload workspace settings before saving.');
+    /** @type {string[]} */ const invalidKeys = [];
+    const overrides = settingsChanges('workspace', readWorkspaceForm(invalidKeys));
     _saveStatusMark('workspace', 'inflight', gen);
     try {
-      await safeFetch('/api/workspaces/active/config', {
+      if (Object.keys(overrides).length) await safeFetch('/api/workspaces/active/config', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(overrides)
       });
     } catch(e) {
+      recordSettingsFailure('workspace', overrides);
       _saveStatusMark('workspace', 'error', gen);
       return;
     }
-    if (needsResync) {
+    commitSettingsChanges('workspace', overrides);
+    if (invalidKeys.length) {
       // An omitted (blank/invalid) field was NOT saved. Don't claim
       // "Saved" until the form shows what is actually in effect: restore
       // the field from the server first, and tell the user their entry
@@ -141,6 +153,7 @@ function saveWsConfig() {
       try {
         current = await safeFetch('/api/workspaces/active/config', {}, { toast: false });
       } catch (e) {
+        recordSettingsFailure('workspace', Object.fromEntries(invalidKeys.map(key => [key,null])));
         _saveStatusMark('workspace', 'error', gen);
         return;
       }
@@ -150,6 +163,10 @@ function saveWsConfig() {
       // here would post the server's old value over the user's newer one.
       if (_saveStatus.pending.workspace === undefined) {
         invalidKeys.forEach(function(key) { _applyWsOverrideField(key, current); });
+        const normalized = readWorkspaceForm([]);
+        const restored = Object.fromEntries(invalidKeys.map(key => [key,current[key] ?? null]));
+        const displayed = Object.fromEntries(invalidKeys.map(key => [key,normalized[key]]));
+        commitSettingsChanges('workspace', restored, displayed);
         if (typeof showToast === 'function') {
           showToast(
             'Blank or invalid override for ' + invalidKeys.join(', ') +

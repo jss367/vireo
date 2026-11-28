@@ -25,7 +25,7 @@ async function loadLabels() {
       html += '<input type="checkbox" class="label-active-cb" value="' + escapeAttr(l.labels_file) + '"' +
               (isActive ? ' checked' : '') + ' onchange="updateActiveLabels()" style="accent-color:var(--accent);">';
       html += '<div>';
-      html += '<span style="font-size:13px;color:var(--text-primary);font-weight:600;">' + escapeHtml(l.name) + '</span>';
+      html += '<span data-find-name="' + escapeAttr(l.name) + '" style="font-size:13px;color:var(--text-primary);font-weight:600;">' + escapeHtml(l.name) + '</span>';
       // The count a run receives, not the count on disk: they differ when
       // names are shared between species, and the warning below says so.
       var usable = (l.usable_count !== undefined && l.usable_count !== null)
