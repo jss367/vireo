@@ -1734,14 +1734,22 @@ function bpCountText(job, info) {
 /**
  * How many errors a live job has recorded so far: the per-step counts the
  * Jobs page shows when the job has steps, else its error list.
+ *
+ * A running step reports its count only when it finishes, while failures it
+ * hits along the way (a scan's unreadable sidecars, refused folders) land in
+ * the error list at once, so a stepped job never shows fewer errors than its
+ * list holds. The larger of the two is used rather than their sum, since a
+ * finished step's count and the list can name the same failures.
  * @param {NavJob} job
  */
 function bpErrorCount(job) {
   var steps = job.steps || [];
-  if (steps.length === 0) return (job.errors || []).length;
-  return steps.reduce(function(sum, step) {
+  var listed = (job.errors || []).length;
+  if (steps.length === 0) return listed;
+  var stepped = steps.reduce(function(sum, step) {
     return sum + Math.max(Number(step.error_count) || 0, step.error ? 1 : 0);
   }, 0);
+  return Math.max(stepped, listed);
 }
 
 /** @param {NavJob} job */

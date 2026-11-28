@@ -9068,6 +9068,51 @@ def test_update_stages_clears_stale_rate_in_merged_job_progress():
     assert transition_prog["rate_unit"] is None
 
 
+def test_update_stages_clears_stale_sub_phase_in_merged_job_progress():
+    """A stage transition pushed through _update_stages must clear the
+    outgoing stage's sub-phase triple, or the UI pairs the new phase label
+    with the previous stage's sub-phase counts."""
+    import queue as _queue
+    import sys as _sys
+
+    _sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
+    from jobs import JobRunner
+    from pipeline_job import _emit_progress, _update_stages
+    from wait import wait_for_job_via_runner
+
+    runner = JobRunner()
+    seen_progress = _queue.Queue()
+
+    def work(job):
+        stages = _empty_stages()
+        stages["scan"]["status"] = "running"
+        _emit_progress(
+            runner, job["id"], stages, "scan", "Scanning photos",
+            phase_current=5, phase_total=20,
+            phase_label="Extracting metadata",
+        )
+        seen_progress.put(dict(job["progress"]))
+
+        stages["scan"]["status"] = "completed"
+        stages["model_loader"]["status"] = "running"
+        _update_stages(runner, job["id"], stages)
+        seen_progress.put(dict(job["progress"]))
+
+        return {"ok": True}
+
+    job_id = runner.start("scan", work)
+    wait_for_job_via_runner(runner, job_id)
+
+    scan_prog = seen_progress.get_nowait()
+    assert scan_prog["phase_label"] == "Extracting metadata"
+
+    transition_prog = seen_progress.get_nowait()
+    assert transition_prog["stage_id"] == "model_loader"
+    assert transition_prog["phase_current"] is None
+    assert transition_prog["phase_total"] is None
+    assert transition_prog["phase_label"] is None
+
+
 def test_emit_progress_clears_stale_phase_in_merged_job_progress():
     """End-to-end: JobRunner.push_event merges into job['progress']; after a
     scan sub-phase emission followed by a plain status emission, the merged

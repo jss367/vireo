@@ -109,6 +109,17 @@ test('errors count every step, and one error is singular', () => {
   assert.match(statusLine(job).textContent, / · 1 error · /);
 });
 
+test('a running step\'s errors count before the step reports them', () => {
+  const job = processRun();
+  job.steps[0].status = 'running';
+  job.steps[1].error_count = 0;
+  job.errors = ['[scan] a.xmp: unreadable', '[scan] PERMISSION_DENIED: /Volumes/card'];
+  assert.match(statusLine(job).textContent, / · 2 errors · /);
+  // Once the step's count names the same failures they are not counted twice.
+  job.steps[0].error_count = 1;
+  assert.match(statusLine(job).textContent, / · 2 errors · /);
+});
+
 test('a job without steps counts its error list', () => {
   const job = {
     id: 't1', type: 'thumbnails', status: 'running',

@@ -1509,6 +1509,12 @@ def _update_stages(runner, job_id, stages):
             "current": current,
             "total": total,
             "stages": {k: dict(v) for k, v in stages.items()},
+            # Clear any stale sub-phase (e.g. scan's "Extracting metadata"
+            # counts) for the same merge reason: otherwise the UI pairs the
+            # new phase label with the outgoing stage's sub-phase counts.
+            "phase_current": None,
+            "phase_total": None,
+            "phase_label": None,
             # Clear any stale rate the previous emit_progress left in the
             # merged job["progress"]. This path is used at stage
             # transitions, where the outgoing phase's throughput no longer
