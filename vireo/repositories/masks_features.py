@@ -369,8 +369,9 @@ class MasksFeaturesRepository:
         if weak_rescue_min_conf is not None:
             # Only the pipeline's validated contextual rescue may lower the
             # floor. Bulk activation has no such context and rejects by default.
+            # A reviewer's region stays a candidate, as in extraction.
             min_conf = weak_rescue_min_conf
-            detector_filter = "AND detector_model='megadetector-v6' "
+            detector_filter = "AND detector_model IN ('megadetector-v6', 'reviewer-selected') "
         row = self.conn.execute(
             f"SELECT pm.*, d.detector_model AS primary_model, "
             f"d.box_x AS primary_x, d.box_y AS primary_y, "

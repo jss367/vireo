@@ -21,10 +21,15 @@ _BURST_REFRESH = ThreadPoolExecutor(max_workers=1, thread_name_prefix="burst-sub
 
 
 def retained(db, photo_id, min_conf=None, *, detector_model=None):
-    detections = (dict(d) for d in detection_store.get_detections(
-        db, photo_id, min_conf=min_conf, detector_model=detector_model))
+    """A photo's animal regions under its floor, the primary subject first.
+
+    ``detector_model`` narrows the detector's boxes to one model (weak rescue
+    lowers the floor for that model only); a reviewer's region stays retained.
+    """
+    detections = (dict(d) for d in detection_store.get_detections(db, photo_id, min_conf=min_conf))
     return [d for d in detections
-            if d.get("category", "animal") == "animal" and d.get("detector_model") != "full-image"]
+            if d.get("category", "animal") == "animal" and d.get("detector_model") != "full-image"
+            and (detector_model is None or d.get("detector_model") in (detector_model, REVIEWER_MODEL))]
 
 
 def suggested_crop(detection, padding=0.15):

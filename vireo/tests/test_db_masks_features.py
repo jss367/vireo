@@ -336,6 +336,17 @@ def test_set_active_mask_variant_weak_rescue_lowers_floor_for_megadetector(db):
     assert _row(db, pid)["active_mask_variant"] == "sam2-small"
 
 
+def test_set_active_mask_variant_weak_rescue_keeps_reviewer_region(db):
+    pid = _photo(db, "a.jpg")
+    _det(db, pid, conf=0.1)
+    reviewer_box = (0.5, 0.5, 0.3, 0.3)
+    _det(db, pid, detector_model="reviewer-selected", conf=1, box=reviewer_box)
+    _mask(db, pid, detector_model="reviewer-selected", box=reviewer_box)
+    subject_masks.set_active_mask_variant(db, pid, "sam2-small", weak_rescue_min_conf=0.05)
+    db.commit()
+    assert _row(db, pid)["active_mask_variant"] == "sam2-small"
+
+
 def test_set_active_mask_variant_weak_rescue_only_considers_megadetector(db):
     pid = _photo(db, "a.jpg")
     _det(db, pid, detector_model="yolo", conf=0.9)

@@ -94,7 +94,7 @@ class AuditRepository:
                         AND d.category='animal' AND d.detector_model!='full-image'
                         AND d.subject_verdict IS NULL
                         AND d.detector_confidence >= COALESCE(policy.min_conf, ?)
-                        AND (policy.detector_model IS NULL OR d.detector_model=policy.detector_model)
+                        AND (policy.detector_model IS NULL OR d.detector_model IN (policy.detector_model, 'reviewer-selected'))
                         ORDER BY {primary_order_sql("d")} LIMIT 1) AS detection_id
                 FROM photo_workspace_visibility v JOIN photos p ON p.id=v.photo_id
                 LEFT JOIN photo_subject_state policy ON policy.photo_id=p.id

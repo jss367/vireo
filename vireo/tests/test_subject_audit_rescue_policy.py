@@ -61,3 +61,36 @@ def test_subject_audit_recorded_policy_does_not_hide_stale_provenance(db, change
     db.commit()
     rows = db.audit.subject_findings(.2)
     assert [(row['id'], row['stale_mask'], row['stale_score']) for row in rows] == [(pid, 1, 1)]
+
+
+def test_reviewer_region_stays_the_subject_of_a_weak_rescued_photo(db):
+    """Weak rescue lowers the floor for the detector's boxes; it must not
+    replace the region a reviewer chose with the faint detector box."""
+    from services import detection_store
+    from subjects import select_reviewer_box
+
+    pid, det = _photo(db)
+    region = select_reviewer_box(db, pid, dict(x=.5, y=.5, w=.2, h=.2))
+    sync_primary(db, pid, min_conf=.05, detector_model='megadetector-v6')
+    db.commit()
+
+    assert [d['id'] for d in retained(db, pid, .05, detector_model='megadetector-v6')] == [region, det]
+    assert [d['id'] for d in detection_store.get_rescue_detections(db, pid, .05, 'megadetector-v6')] == [region, det]
+    state = db.subjects.primary_state(pid)
+    assert (state['detection_id'], state['min_conf'], state['detector_model']) == (region, .05, 'megadetector-v6')
+    # The audit judges the photo by the same region.
+    assert [(row['id'], row['detection_id']) for row in db.audit.subject_findings(.2)] == [(pid, region)]
+
+
+def test_rescue_detections_leave_out_other_detectors_and_whole_frame_rows(db):
+    from services import detection_store
+
+    pid, det = _photo(db)
+    db.detections.save(pid, [dict(
+        box=dict(x=.6, y=.6, w=.3, h=.3), confidence=.99, category='animal',
+    )], detector_model='other-detector')
+    db.detections.save(pid, [dict(
+        box=dict(x=0, y=0, w=1, h=1), confidence=.99, category='animal',
+    )], detector_model='full-image')
+    db.commit()
+    assert [d['id'] for d in detection_store.get_rescue_detections(db, pid, .05, 'megadetector-v6')] == [det]

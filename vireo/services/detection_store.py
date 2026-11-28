@@ -98,6 +98,22 @@ def get_detections(
     return db.detections.get(photo_id, floor, detector_model, include_rejected=include_rejected)
 
 
+def get_rescue_detections(
+    db: Database, photo_id: int, rescue_floor: float, detector_model: str,
+) -> list[sqlite3.Row]:
+    """Animal regions of a weak-rescued photo, the primary subject first.
+
+    Weak rescue lowers the confidence floor for one detector's boxes. A region
+    a reviewer drew is not a weak detector box: it is retained under every
+    policy, so a photo whose detector found only a faint box is still analyzed
+    on the region the reviewer chose.
+    """
+    return [
+        d for d in get_detections(db, photo_id, min_conf=rescue_floor)
+        if d["category"] == "animal" and d["detector_model"] in (detector_model, "reviewer-selected")
+    ]
+
+
 def with_reviewer_regions(
     db: Database, photo_id: int, detections: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
