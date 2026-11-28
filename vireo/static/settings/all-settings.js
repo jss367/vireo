@@ -1,6 +1,6 @@
 // --- All settings (schema-rendered, editable) ------------------------------
 
-/** @type {{schema:Record<string,SettingsSpec>|null;categories:string[]|null;values:SettingsValues|null}} */ var ALL_SETTINGS_CACHE = { schema: null, categories: null, values: null };
+/** @type {{schema:Record<string,SettingsSpec>|null;categories:string[]|null;values:SettingsValues|null;curatedRevision:number}} */ var ALL_SETTINGS_CACHE = { schema: null, categories: null, values: null, curatedRevision: 0 };
 // Keyed by `<key>|<scope>` so a quick edit to the same key in a different
 // scope tab can't clear the pending write of the first scope's edit.
 /** @type {Record<string,ReturnType<typeof setTimeout>|null>} */ var ALL_SETTINGS_DEBOUNCE = {};
@@ -25,18 +25,17 @@ var ALL_SETTINGS_SCOPE = 'global';  // 'global' | 'workspace'
 async function loadAllSettings() {
   var container = /** @type {HTMLElement} */ (document.getElementById('allSettingsCategories'));
   try {
+    const revision = ALL_SETTINGS_CACHE.curatedRevision;
     var [schemaRes, valuesRes] = await Promise.all([
       fetch('/api/settings/schema'),
       fetch('/api/settings/values'),
     ]);
     if (!schemaRes.ok || !valuesRes.ok) throw new Error('HTTP error');
     var schemaData = await schemaRes.json();
-    var values = await valuesRes.json();
     ALL_SETTINGS_CACHE.schema = schemaData.schema;
     ALL_SETTINGS_CACHE.categories = schemaData.categories;
-    ALL_SETTINGS_CACHE.values = values;
+    if (!await refreshAllSettingsValues(valuesRes, revision)) throw new Error('Could not load settings values');
     renderAllSettings(container);
-    renderOverrideLinks();
     if (location.hash.startsWith('#setting-')) applySettingsAddress();
 
   } catch (err) {
@@ -45,11 +44,21 @@ async function loadAllSettings() {
   }
 }
 
-async function refreshAllSettingsValues() {
-  var r = await fetch('/api/settings/values');
-  if (!r.ok) return;
-  ALL_SETTINGS_CACHE.values = await r.json();
-  renderOverrideLinks();
+/** @param {Response} [response] @param {number} [revision] */
+async function refreshAllSettingsValues(response, revision = ALL_SETTINGS_CACHE.curatedRevision) {
+  // A curated save can finish while the values or their schema are in flight.
+  for (;;) {
+    const result = response || await fetch('/api/settings/values');
+    if (!result.ok) return false;
+    const values = await result.json();
+    if (revision === ALL_SETTINGS_CACHE.curatedRevision) {
+      ALL_SETTINGS_CACHE.values = values;
+      renderOverrideLinks();
+      return true;
+    }
+    revision = ALL_SETTINGS_CACHE.curatedRevision;
+    response = undefined;
+  }
 }
 
 /** @param {HTMLElement} container */ function renderAllSettings(container) {

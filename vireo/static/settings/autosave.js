@@ -203,6 +203,7 @@ function commitSettingsChanges(scope,values,formValues = values) {
   if (remaining?.length) settingsFailures[scope] = remaining;
   else delete settingsFailures[scope];
   delete settingsDiscarded[scope];
+  if (Object.keys(values).length) ALL_SETTINGS_CACHE.curatedRevision++;
   const layers = ALL_SETTINGS_CACHE.values;
   if (layers) {
     const layer = scope === 'workspace' ? layers.workspace : layers.global;

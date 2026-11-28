@@ -1193,3 +1193,31 @@ def test_reverting_after_lost_save_response_restores_server_value(live_server, p
         field.blur()
     expect(page.locator("#settingsSaveIssues")).to_be_empty()
     assert page.request.get(url + "/api/config").json()["photos_per_page"] == int(original)
+
+
+def test_advanced_load_after_curated_save_uses_current_values(live_server, page):
+    url = live_server["url"]
+    # Hold the original values snapshot after the server has produced it.
+    held = []
+
+    def hold_first_read(route):
+        if held:
+            route.continue_()
+        else:
+            held.append((route, route.fetch()))
+
+    page.route("**/api/settings/values", hold_first_read)
+    page.goto(url + "/settings")
+    status = _wait_for_settings_idle(page)
+    field = page.locator("#cfgPhotosPerPage")
+    assert held
+    new_value = "80" if field.input_value() != "80" else "90"
+    field.fill(new_value)
+    field.blur()
+    expect(status).to_have_attribute("data-state", "saved")
+    route, stale_response = held[0]
+    route.fulfill(response=stale_response)
+    page.locator('[data-category-link="advanced"]').click()
+    row = page.locator("#setting-photos_per_page")
+    expect(row.locator('input[type="number"]')).to_have_value(new_value)
+    expect(row.get_by_role("button", name="Reset", include_hidden=True)).to_have_count(1)
