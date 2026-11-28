@@ -59,12 +59,12 @@ AI models are downloaded automatically on first use.
 [the Windows support guide](docs/WINDOWS_SUPPORT.md) for optional integrations,
 storage coverage, and troubleshooting.
 
-## Backing up and moving to a new Mac
+## Backup and restore
 
-Vireo's catalog and settings live in a data folder apart from your photos, and
-Vireo does not back them up for you. The [backup and restore guide](docs/backup-and-restore.md)
-explains where the catalog lives, what the `vireo.db.pre-v<N>.bak` files are,
-how to restore, and how to move Vireo to a new Mac.
+Vireo backs up the catalog daily. Keep a separate backup of your photos,
+sidecars, and Vireo data folder in case the drive fails. The
+[backup and restore guide](docs/backup-and-restore.md) covers restoring a
+catalog backup or upgrade snapshot and moving Vireo to a new Mac or Windows PC.
 
 ## Catalog compatibility
 
