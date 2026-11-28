@@ -1740,14 +1740,27 @@ function bpCountText(job, info) {
  * the error list at once, so a stepped job never shows fewer errors than its
  * list holds. The larger of the two is used rather than their sum, since a
  * finished step's count and the list can name the same failures.
+ *
+ * A Process run's `notes` are entries of its error list that explain a benign
+ * skip (no detections to mask, an optional download that failed); they do not
+ * fail the run, so they are not counted, nor is a step error that repeats one.
  * @param {NavJob} job
  */
 function bpErrorCount(job) {
   var steps = job.steps || [];
-  var listed = (job.errors || []).length;
+  var notes = job.notes || [];
+  var isNote = function(/** @type {string} */ text) {
+    return notes.some(function(note) {
+      return note === text || note.slice(-(text.length + 2)) === '] ' + text;
+    });
+  };
+  var listed = (job.errors || []).filter(function(error) {
+    return notes.indexOf(error) === -1;
+  }).length;
   if (steps.length === 0) return listed;
   var stepped = steps.reduce(function(sum, step) {
-    return sum + Math.max(Number(step.error_count) || 0, step.error ? 1 : 0);
+    var stepError = step.error && !isNote(step.error) ? 1 : 0;
+    return sum + Math.max(Number(step.error_count) || 0, stepError);
   }, 0);
   return Math.max(stepped, listed);
 }

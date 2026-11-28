@@ -26,6 +26,10 @@ def new_job_dict(job_id, job_type, *, config, workspace_id,
         "progress": {"current": 0, "total": 0, "current_file": ""},
         "result": None,
         "errors": [],
+        # Entries of ``errors`` that explain a benign skip, not a failure
+        # (a Process run's ``PipelineRun.note``); the status bar leaves
+        # them out of its error count.
+        "notes": [],
         "config": config or {},
         "workspace_id": workspace_id,
         "steps": [],
@@ -80,6 +84,7 @@ def synthesize_queued_view(job_id, ctx):
         "progress": {"current": 0, "total": 0, "current_file": ""},
         "result": None,
         "errors": [],
+        "notes": [],
         "config": dict(ctx["config"]),
         "workspace_id": ctx["workspace_id"],
         "steps": [],
@@ -118,6 +123,7 @@ def snapshot_job(job):
     snap["progress"] = dict(job.get("progress") or {})
     snap["steps"] = [dict(s) for s in (job.get("steps") or [])]
     snap["errors"] = list(job.get("errors") or [])
+    snap["notes"] = list(job.get("notes") or [])
     # Freeze the top-level ``result`` mapping too. Some workers mutate
     # ``job["result"]`` in place (e.g. the release-local-originals loop
     # bumps ``failed`` / ``errors_total`` without holding ``_lock``), so

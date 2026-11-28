@@ -106,6 +106,8 @@ interface NavJob {
   created_at?: string;
   progress?: NavProgress | null;
   errors?: string[];
+  /** Entries of `errors` that explain a benign skip rather than a failure. */
+  notes?: string[];
   steps?: NavJobStep[];
   result?: Record<string,unknown> | null;
   config?: Record<string,unknown>;

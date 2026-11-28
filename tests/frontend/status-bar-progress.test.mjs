@@ -120,6 +120,23 @@ test('a running step\'s errors count before the step reports them', () => {
   assert.match(statusLine(job).textContent, / · 2 errors · /);
 });
 
+test('a Process run\'s notes are not counted as errors', () => {
+  const job = processRun();
+  job.steps[1].error_count = 0;
+  job.steps.push(step('classify:inat21', 'completed', 900, 900, {error: 'iNat21 has no common names'}));
+  job.errors = [
+    '[extract_masks] no detections qualify',
+    '[common_names] iNat21 has no common names',
+  ];
+  job.notes = [...job.errors];
+  const summary = statusLine(job);
+  assert.equal(summary.spans().length, 0);
+  assert.doesNotMatch(summary.textContent, /error/);
+  // A real failure alongside the notes is still counted.
+  job.errors.push('[scan] PERMISSION_DENIED: /Volumes/card');
+  assert.match(statusLine(job).textContent, / · 1 error · /);
+});
+
 test('a job without steps counts its error list', () => {
   const job = {
     id: 't1', type: 'thumbnails', status: 'running',

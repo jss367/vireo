@@ -2489,6 +2489,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             job=job, runner=runner, db_path=db_path,
             workspace_id=workspace_id, params=params, abort=control.abort,
             stages=stages, result=result, errors=errors,
+            # Shared like ``errors`` so live job views can tell notes apart.
+            notes=job.setdefault("notes", []),
             collection_id=collection_id, database_factory=Database,
             emit_progress=_emit_progress, update_stages=_update_stages,
             control=control.pipeline_control(), effective_vireo_dir=effective_vireo_dir,
